@@ -6,3 +6,7 @@ edition = "2021"
 [dependencies]
 datatypes = { path = "../datatypes" }
 serde_json = "1.0"
+arrow = { version = "56.2", default-features = false }
+datafusion = "50"
+datafusion-common = "50"
+datafusion-expr = "50"

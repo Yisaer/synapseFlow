@@ -16,9 +16,8 @@ pub enum UnaryFunc {
 }
 
 impl UnaryFunc {
-    /// Evaluate a unary function
-    pub fn eval(&self, values: &[Value], expr: &crate::expr::scalar::ScalarExpr) -> Result<Value, EvalError> {
-        let arg = expr.eval(values)?;
+    /// Evaluate a unary function with a pre-evaluated argument
+    pub fn eval_unary(&self, arg: Value) -> Result<Value, EvalError> {
         match self {
             Self::Not => {
                 if let Value::Bool(bool) = arg {
@@ -136,16 +135,8 @@ impl BinaryFunc {
         }
     }
 
-    /// Evaluate a binary function
-    pub fn eval(
-        &self,
-        values: &[Value],
-        expr1: &crate::expr::scalar::ScalarExpr,
-        expr2: &crate::expr::scalar::ScalarExpr,
-    ) -> Result<Value, EvalError> {
-        let left = expr1.eval(values)?;
-        let right = expr2.eval(values)?;
-        
+    /// Evaluate a binary function with pre-evaluated arguments
+    pub fn eval_binary(&self, left: Value, right: Value) -> Result<Value, EvalError> {
         match self {
             Self::Eq => Ok(Value::Bool(left == right)),
             Self::NotEq => Ok(Value::Bool(left != right)),
@@ -339,6 +330,14 @@ pub enum EvalError {
         index: usize,
         length: usize,
     },
+    /// Feature not implemented
+    NotImplemented {
+        feature: String,
+    },
+    /// DataFusion error
+    DataFusionError {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for EvalError {
@@ -353,6 +352,12 @@ impl std::fmt::Display for EvalError {
             EvalError::DivisionByZero => write!(f, "Division by zero"),
             EvalError::IndexOutOfBounds { index, length } => {
                 write!(f, "Index {} out of bounds for length {}", index, length)
+            }
+            EvalError::NotImplemented { feature } => {
+                write!(f, "Feature not implemented: {}", feature)
+            }
+            EvalError::DataFusionError { message } => {
+                write!(f, "DataFusion error: {}", message)
             }
         }
     }

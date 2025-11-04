@@ -1,6 +1,8 @@
 use datatypes::{ConcreteDatatype, Value};
 
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
+use crate::expr::evaluator::DataFusionEvaluator;
+use crate::tuple::Tuple;
 
 /// A scalar expression, which can be evaluated to a value.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,33 +22,62 @@ pub enum ScalarExpr {
         expr1: Box<ScalarExpr>,
         expr2: Box<ScalarExpr>,
     },
+    /// A call to a DataFusion scalar function
+    CallDf {
+        /// The name of the DataFusion function (e.g., "concat", "upper", "lower")
+        function_name: String,
+        /// The arguments to the function
+        args: Vec<ScalarExpr>,
+    },
 }
 
 impl ScalarExpr {
-    /// Evaluate this expression with the given row values.
+
+    /// Evaluate this expression using DataFusion evaluator when needed.
+    /// This method can handle all expression types including CallDf.
     ///
     /// # Arguments
     ///
-    /// * `values` - A slice of values representing the row, where each value corresponds
-    ///   to a column at the same index.
+    /// * `evaluator` - The DataFusion evaluator for handling CallDf expressions
+    /// * `tuple` - The tuple containing the row data
     ///
     /// # Returns
     ///
     /// Returns the evaluated value, or an error if evaluation fails.
-    pub fn eval(&self, values: &[Value]) -> Result<Value, EvalError> {
+    pub fn eval(&self, evaluator: &DataFusionEvaluator, tuple: &Tuple) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column(index) => {
-                values
+                tuple.row()
                     .get(*index)
                     .cloned()
                     .ok_or(EvalError::IndexOutOfBounds {
                         index: *index,
-                        length: values.len(),
+                        length: tuple.row().len(),
                     })
             }
             ScalarExpr::Literal(val, _) => Ok(val.clone()),
-            ScalarExpr::CallUnary { func, expr } => func.eval(values, expr),
-            ScalarExpr::CallBinary { func, expr1, expr2 } => func.eval(values, expr1, expr2),
+            ScalarExpr::CallUnary { func, expr } => {
+                // Recursively evaluate the argument expression
+                let arg = expr.eval(evaluator, tuple)?;
+                // Apply the unary function to the evaluated argument
+                func.eval_unary(arg)
+            }
+            ScalarExpr::CallBinary { func, expr1, expr2 } => {
+                // Recursively evaluate both argument expressions
+                let left = expr1.eval(evaluator, tuple)?;
+                let right = expr2.eval(evaluator, tuple)?;
+                // Apply the binary function to the evaluated arguments
+                func.eval_binary(left, right)
+            }
+            ScalarExpr::CallDf { .. } => {
+                // Use DataFusion evaluator for CallDf expressions
+                match evaluator.evaluate_expr(self, tuple) {
+                    Ok(value) => Ok(value),
+                    Err(df_error) => Err(EvalError::DataFusionError { 
+                        message: df_error.to_string() 
+                    }),
+                }
+            }
         }
     }
 
@@ -74,6 +105,14 @@ impl ScalarExpr {
             func,
             expr1: Box::new(self),
             expr2: Box::new(other),
+        }
+    }
+
+    /// Create a DataFusion function call expression
+    pub fn call_df(function_name: impl Into<String>, args: Vec<ScalarExpr>) -> Self {
+        ScalarExpr::CallDf {
+            function_name: function_name.into(),
+            args,
         }
     }
 
