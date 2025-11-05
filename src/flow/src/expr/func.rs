@@ -1,4 +1,4 @@
-use datatypes::{ConcreteDatatype, Value};
+use datatypes::{ConcreteDatatype, DataType, Value, Int64Type, Float64Type, StringType};
 
 /// Unary function that takes one argument
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -122,17 +122,72 @@ pub enum BinaryFunc {
 }
 
 impl BinaryFunc {
-    /// Compare two values
+    /// Try to cast a value to Int64
+    fn try_cast_to_int64(value: &Value) -> Option<i64> {
+        let int64_type = Int64Type;
+        int64_type.try_cast(value.clone()).and_then(|v| match v {
+            Value::Int64(i) => Some(i),
+            _ => None,
+        })
+    }
+
+    /// Try to cast a value to Float64
+    fn try_cast_to_float64(value: &Value) -> Option<f64> {
+        let float64_type = Float64Type;
+        float64_type.try_cast(value.clone()).and_then(|v| match v {
+            Value::Float64(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    /// Try to cast a value to String
+    fn try_cast_to_string(value: &Value) -> Option<String> {
+        let string_type = StringType;
+        string_type.try_cast(value.clone()).and_then(|v| match v {
+            Value::String(s) => Some(s),
+            _ => None,
+        })
+    }
+
+    /// Compare two values by trying to cast them to comparable types
     fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+        // If types match, compare directly
         match (left, right) {
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
             (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-            (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-            (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-            _ => None,
+            // If types don't match, try to cast to a common type
+            _ => {
+                None
+            }
         }
+    }
+
+    /// Try to cast both values to a numeric type for arithmetic operations
+    /// Returns (left, right) as either (Int64, Int64) or (Float64, Float64)
+    fn try_cast_to_numeric(left: Value, right: Value) -> Result<(Value, Value), EvalError> {
+        // If types match, return directly
+        match (&left, &right) {
+            (Value::Int64(_), Value::Int64(_)) => return Ok((left, right)),
+            (Value::Float64(_), Value::Float64(_)) => return Ok((left, right)),
+            _ => {}
+        }
+        
+        // Try Float64
+        if let (Some(left_f), Some(right_f)) = (
+            Self::try_cast_to_float64(&left),
+            Self::try_cast_to_float64(&right),
+        ) {
+            return Ok((Value::Float64(left_f), Value::Float64(right_f)));
+        }
+
+        let left_debug = format!("{:?}", &left);
+        let right_debug = format!("{:?}", &right);
+        Err(EvalError::TypeMismatch {
+            expected: "Int64 or Float64".to_string(),
+            actual: format!("{} and {}", left_debug, right_debug),
+        })
     }
 
     /// Evaluate a binary function with pre-evaluated arguments
@@ -141,137 +196,149 @@ impl BinaryFunc {
             Self::Eq => Ok(Value::Bool(left == right)),
             Self::NotEq => Ok(Value::Bool(left != right)),
             Self::Lt => {
-                Self::compare_values(&left, &right)
-                    .map(|ord| Value::Bool(ord == std::cmp::Ordering::Less))
-                    .ok_or_else(|| {
-                        let left_debug = format!("{:?}", &left);
-                        let right_debug = format!("{:?}", &right);
-                        EvalError::TypeMismatch {
-                            expected: "Comparable types (Int64, Float64, String, Bool)".to_string(),
-                            actual: format!("{} and {}", left_debug, right_debug),
-                        }
-                    })
+                Ok(Value::Bool(
+                    Self::compare_values(&left, &right)
+                        .map(|ord| ord == std::cmp::Ordering::Less)
+                        .unwrap_or(false)
+                ))
             }
             Self::Lte => {
-                Self::compare_values(&left, &right)
-                    .map(|ord| Value::Bool(ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal))
-                    .ok_or_else(|| {
-                        let left_debug = format!("{:?}", &left);
-                        let right_debug = format!("{:?}", &right);
-                        EvalError::TypeMismatch {
-                            expected: "Comparable types (Int64, Float64, String, Bool)".to_string(),
-                            actual: format!("{} and {}", left_debug, right_debug),
-                        }
-                    })
+                Ok(Value::Bool(
+                    Self::compare_values(&left, &right)
+                        .map(|ord| ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal)
+                        .unwrap_or(false)
+                ))
             }
             Self::Gt => {
-                Self::compare_values(&left, &right)
-                    .map(|ord| Value::Bool(ord == std::cmp::Ordering::Greater))
-                    .ok_or_else(|| {
-                        let left_debug = format!("{:?}", &left);
-                        let right_debug = format!("{:?}", &right);
-                        EvalError::TypeMismatch {
-                            expected: "Comparable types (Int64, Float64, String, Bool)".to_string(),
-                            actual: format!("{} and {}", left_debug, right_debug),
-                        }
-                    })
+                Ok(Value::Bool(
+                    Self::compare_values(&left, &right)
+                        .map(|ord| ord == std::cmp::Ordering::Greater)
+                        .unwrap_or(false)
+                ))
             }
             Self::Gte => {
-                Self::compare_values(&left, &right)
-                    .map(|ord| Value::Bool(ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal))
-                    .ok_or_else(|| {
-                        let left_debug = format!("{:?}", &left);
-                        let right_debug = format!("{:?}", &right);
-                        EvalError::TypeMismatch {
-                            expected: "Comparable types (Int64, Float64, String, Bool)".to_string(),
-                            actual: format!("{} and {}", left_debug, right_debug),
-                        }
-                    })
+                Ok(Value::Bool(
+                    Self::compare_values(&left, &right)
+                        .map(|ord| ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal)
+                        .unwrap_or(false)
+                ))
             }
             Self::Add => {
+                // If types match, handle directly
+                match (&left, &right) {
+                    (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a + b)),
+                    (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a + b)),
+                    (Value::String(left_str), Value::String(right_str)) => {
+                        return Ok(Value::String(format!("{}{}", left_str, right_str)));
+                    }
+                    _ => {}
+                }
+
+                // If types don't match, try numeric addition first
+                if let Ok((left_num, right_num)) = Self::try_cast_to_numeric(left.clone(), right.clone()) {
+                    match (left_num, right_num) {
+                        (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a + b)),
+                        (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a + b)),
+                        _ => unreachable!(),
+                    }
+                }
+                // If both fail, return error
                 let left_debug = format!("{:?}", &left);
                 let right_debug = format!("{:?}", &right);
-                match (left, right) {
-                    (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a + b)),
-                    (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a + b)),
-                    (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 + b)),
-                    (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a + b as f64)),
-                    _ => Err(EvalError::TypeMismatch {
-                        expected: "Int64 or Float64".to_string(),
-                        actual: format!("{} and {}", left_debug, right_debug),
-                    }),
-                }
+                Err(EvalError::TypeMismatch {
+                    expected: "Int64, Float64, or String".to_string(),
+                    actual: format!("{} and {}", left_debug, right_debug),
+                })
             }
             Self::Sub => {
-                let left_debug = format!("{:?}", &left);
-                let right_debug = format!("{:?}", &right);
-                match (left, right) {
+                // If types match, handle directly
+                match (&left, &right) {
+                    (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a - b)),
+                    (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a - b)),
+                    _ => {}
+                }
+
+                // If types don't match, try numeric conversion
+                let (left_num, right_num) = Self::try_cast_to_numeric(left, right)?;
+                match (left_num, right_num) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a - b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
-                    (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 - b)),
-                    (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a - b as f64)),
-                    _ => Err(EvalError::TypeMismatch {
-                        expected: "Int64 or Float64".to_string(),
-                        actual: format!("{} and {}", left_debug, right_debug),
-                    }),
+                    _ => unreachable!(),
                 }
             }
             Self::Mul => {
-                let left_debug = format!("{:?}", &left);
-                let right_debug = format!("{:?}", &right);
-                match (left, right) {
+                // If types match, handle directly
+                match (&left, &right) {
+                    (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a * b)),
+                    (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a * b)),
+                    _ => {}
+                }
+
+                // If types don't match, try numeric conversion
+                let (left_num, right_num) = Self::try_cast_to_numeric(left, right)?;
+                match (left_num, right_num) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a * b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
-                    (Value::Int64(a), Value::Float64(b)) => Ok(Value::Float64(a as f64 * b)),
-                    (Value::Float64(a), Value::Int64(b)) => Ok(Value::Float64(a * b as f64)),
-                    _ => Err(EvalError::TypeMismatch {
-                        expected: "Int64 or Float64".to_string(),
-                        actual: format!("{} and {}", left_debug, right_debug),
-                    }),
+                    _ => unreachable!(),
                 }
             }
             Self::Div => {
-                let left_debug = format!("{:?}", &left);
-                let right_debug = format!("{:?}", &right);
-                match (left, right) {
+                // If types match, handle directly
+                match (&left, &right) {
                     (Value::Int64(a), Value::Int64(b)) => {
-                        if b == 0 {
-                            Err(EvalError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float64(a as f64 / b as f64))
+                        if *b == 0 {
+                            return Err(EvalError::DivisionByZero);
                         }
+                        return Ok(Value::Float64(*a as f64 / *b as f64));
                     }
                     (Value::Float64(a), Value::Float64(b)) => {
-                        if b == 0.0 {
-                            Err(EvalError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float64(a / b))
+                        if *b == 0.0 {
+                            return Err(EvalError::DivisionByZero);
                         }
+                        return Ok(Value::Float64(a / b));
                     }
-                    (Value::Int64(a), Value::Float64(b)) => {
-                        if b == 0.0 {
-                            Err(EvalError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float64(a as f64 / b))
-                        }
-                    }
-                    (Value::Float64(a), Value::Int64(b)) => {
-                        if b == 0 {
-                            Err(EvalError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float64(a / b as f64))
-                        }
-                    }
-                    _ => Err(EvalError::TypeMismatch {
+                    _ => {}
+                }
+
+                // If types don't match, convert to Float64 for precise results
+                let left_f = Self::try_cast_to_float64(&left)
+                    .ok_or_else(|| EvalError::TypeMismatch {
                         expected: "Int64 or Float64".to_string(),
-                        actual: format!("{} and {}", left_debug, right_debug),
-                    }),
+                        actual: format!("{:?}", left),
+                    })?;
+                let right_f = Self::try_cast_to_float64(&right)
+                    .ok_or_else(|| EvalError::TypeMismatch {
+                        expected: "Int64 or Float64".to_string(),
+                        actual: format!("{:?}", right),
+                    })?;
+
+                if right_f == 0.0 {
+                    Err(EvalError::DivisionByZero)
+                } else {
+                    Ok(Value::Float64(left_f / right_f))
                 }
             }
             Self::Mod => {
-                let left_debug = format!("{:?}", &left);
-                let right_debug = format!("{:?}", &right);
-                match (left, right) {
+                // If types match, handle directly
+                match (&left, &right) {
+                    (Value::Int64(a), Value::Int64(b)) => {
+                        if *b == 0 {
+                            return Err(EvalError::DivisionByZero);
+                        }
+                        return Ok(Value::Int64(a % b));
+                    }
+                    (Value::Float64(a), Value::Float64(b)) => {
+                        if *b == 0.0 {
+                            return Err(EvalError::DivisionByZero);
+                        }
+                        return Ok(Value::Float64(a % b));
+                    }
+                    _ => {}
+                }
+
+                // If types don't match, try numeric conversion
+                let (left_num, right_num) = Self::try_cast_to_numeric(left, right)?;
+                match (left_num, right_num) {
                     (Value::Int64(a), Value::Int64(b)) => {
                         if b == 0 {
                             Err(EvalError::DivisionByZero)
@@ -286,24 +353,7 @@ impl BinaryFunc {
                             Ok(Value::Float64(a % b))
                         }
                     }
-                    (Value::Int64(a), Value::Float64(b)) => {
-                        if b == 0.0 {
-                            Err(EvalError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float64(a as f64 % b))
-                        }
-                    }
-                    (Value::Float64(a), Value::Int64(b)) => {
-                        if b == 0 {
-                            Err(EvalError::DivisionByZero)
-                        } else {
-                            Ok(Value::Float64(a % b as f64))
-                        }
-                    }
-                    _ => Err(EvalError::TypeMismatch {
-                        expected: "Int64 or Float64".to_string(),
-                        actual: format!("{} and {}", left_debug, right_debug),
-                    }),
+                    _ => unreachable!(),
                 }
             }
         }
