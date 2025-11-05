@@ -287,3 +287,91 @@ fn test_call_df_with_unified_eval() {
     let expected = Value::String("JohnDoe".to_string());
     assert_eq!(result.unwrap(), expected);
 }
+
+#[test]
+fn test_abs_plus_abs_with_addition() {
+    // Test abs(a+b) + abs(c+d) to cover both scalar eval and DataFusionEvaluator
+    // This test uses ScalarExpr::eval as the entry point, which can handle both:
+    // 1. Binary operations (CallBinary) - handled by scalar eval
+    // 2. DataFusion functions (CallDf) - delegated to DataFusionEvaluator
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+
+    // Create (id + age) expression: (1 + 25) = 26
+    let id_col = ScalarExpr::column(0); // id column = 1
+    let age_col = ScalarExpr::column(3); // age column = 25
+    let id_plus_age = ScalarExpr::CallBinary {
+        func: BinaryFunc::Add,
+        expr1: Box::new(id_col),
+        expr2: Box::new(age_col),
+    };
+
+    // Create abs(id + age) expression: abs(26) = 26
+    let abs_id_plus_age = ScalarExpr::CallDf {
+        function_name: "abs".to_string(),
+        args: vec![id_plus_age],
+    };
+
+    // Create (score + score) expression: (95.5 + 95.5) = 191.0
+    let score_col = ScalarExpr::column(4); // score column = 95.5
+    let score_plus_score = ScalarExpr::CallBinary {
+        func: BinaryFunc::Add,
+        expr1: Box::new(score_col.clone()),
+        expr2: Box::new(score_col),
+    };
+
+    // Create abs(score + score) expression: abs(191.0) = 191.0
+    let abs_score_plus_score = ScalarExpr::CallDf {
+        function_name: "abs".to_string(),
+        args: vec![score_plus_score],
+    };
+
+    // Create final expression: abs(id + age) + abs(score + score) = 26 + 191.0 = 217.0
+    let final_expr = ScalarExpr::CallBinary {
+        func: BinaryFunc::Add,
+        expr1: Box::new(abs_id_plus_age),
+        expr2: Box::new(abs_score_plus_score),
+    };
+
+    // Test with ScalarExpr::eval - this is the main entry point that should work
+    let result = final_expr.eval(&evaluator, &tuple);
+    assert!(result.is_ok(), "ScalarExpr::eval should handle mixed scalar and DataFusion operations");
+    
+    // The result should be 26 + 191.0 = 217
+    // Note: The actual type depends on the type promotion rules in the system
+    let result_value = result.unwrap();
+    match result_value {
+        Value::Int64(217) | Value::Float64(217.0) => {
+            println!("Success: ScalarExpr::eval returned {:?}", result_value);
+        },
+        _ => panic!("Expected Int64(217) or Float64(217.0), got {:?}", result_value),
+    }
+
+    // Also test that the individual DataFusion parts work by recreating them
+    let abs_id_plus_age_test = ScalarExpr::CallDf {
+        function_name: "abs".to_string(),
+        args: vec![ScalarExpr::CallBinary {
+            func: BinaryFunc::Add,
+            expr1: Box::new(ScalarExpr::column(0)), // id column = 1
+            expr2: Box::new(ScalarExpr::column(3)), // age column = 25
+        }],
+    };
+    let abs1_result = abs_id_plus_age_test.eval(&evaluator, &tuple);
+    assert!(abs1_result.is_ok(), "First abs() should work");
+    // Verify the result: abs(1 + 25) = abs(26) = 26
+    assert_eq!(abs1_result.unwrap(), Value::Int64(26));
+    
+    let score_col_test = ScalarExpr::column(4); // score column = 95.5
+    let abs_score_plus_score_test = ScalarExpr::CallDf {
+        function_name: "abs".to_string(),
+        args: vec![ScalarExpr::CallBinary {
+            func: BinaryFunc::Add,
+            expr1: Box::new(score_col_test.clone()),
+            expr2: Box::new(score_col_test),
+        }],
+    };
+    let abs2_result = abs_score_plus_score_test.eval(&evaluator, &tuple);
+    assert!(abs2_result.is_ok(), "Second abs() should work");
+    // Verify the result: abs(95.5 + 95.5) = abs(191.0) = 191.0
+    assert_eq!(abs2_result.unwrap(), Value::Float64(191.0));
+}
