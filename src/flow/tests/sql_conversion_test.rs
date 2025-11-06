@@ -2,13 +2,17 @@ use flow::sql_conversion::extract_select_expressions;
 use flow::expr::{ScalarExpr, BinaryFunc, DataFusionEvaluator};
 use flow::tuple::Tuple;
 use flow::row::Row;
-use datatypes::{Value, ConcreteDatatype, Int64Type, Schema};
+use datatypes::{Value, ConcreteDatatype, Int64Type, Schema, ColumnSchema};
 
 #[test]
 fn test_basic_expression_conversion() {
     // Test simple addition: a + b
     let sql = "SELECT a + b";
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     
     assert_eq!(expressions.len(), 1);
     
@@ -17,7 +21,7 @@ fn test_basic_expression_conversion() {
             assert_eq!(*func, BinaryFunc::Add);
             // Both operands should be column references
             assert!(matches!(expr1.as_ref(), ScalarExpr::Column(0)));
-            assert!(matches!(expr2.as_ref(), ScalarExpr::Column(0)));
+            assert!(matches!(expr2.as_ref(), ScalarExpr::Column(1)));
         }
         _ => panic!("Expected binary operation"),
     }
@@ -34,7 +38,8 @@ fn test_literal_expressions() {
     ];
     
     for (sql, description) in test_cases {
-        let expressions = extract_select_expressions(sql).unwrap();
+        let schema = Schema::new(vec![]);  // 字面量不需要schema
+        let expressions = extract_select_expressions(sql, &schema).unwrap();
         assert_eq!(expressions.len(), 1, "Failed for: {}", description);
         assert!(matches!(expressions[0], ScalarExpr::Literal(_, _)), 
                 "Expected literal for: {}", description);
@@ -45,7 +50,12 @@ fn test_literal_expressions() {
 fn test_complex_expression() {
     // Test complex expression: (a + b) * c
     let sql = "SELECT (a + b) * c";
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     
     assert_eq!(expressions.len(), 1);
     
@@ -69,7 +79,11 @@ fn test_complex_expression() {
 fn test_function_call() {
     // Test function call: CONCAT(a, b)
     let sql = "SELECT CONCAT(a, b)";
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     
     assert_eq!(expressions.len(), 1);
     
@@ -79,7 +93,7 @@ fn test_function_call() {
             assert_eq!(args.len(), 2);
             // Both arguments should be column references
             assert!(matches!(args[0], ScalarExpr::Column(0)));
-            assert!(matches!(args[1], ScalarExpr::Column(0)));
+            assert!(matches!(args[1], ScalarExpr::Column(1)));
         }
         _ => panic!("Expected function call"),
     }
@@ -111,7 +125,11 @@ fn test_expression_evaluation() {
 fn test_multiple_expressions() {
     // Test multiple expressions in one SELECT
     let sql = "SELECT a + b, a * b, 42";
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     
     assert_eq!(expressions.len(), 3);
     
@@ -129,12 +147,14 @@ fn test_multiple_expressions() {
 fn test_error_handling() {
     // Test invalid SQL
     let sql = "INVALID SQL";
-    let result = extract_select_expressions(sql);
+    let schema = Schema::new(vec![]);
+    let result = extract_select_expressions(sql, &schema);
     assert!(result.is_err());
     
     // Test unsupported expression (for now)
     let sql = "SELECT * FROM table"; // Wildcard not supported
-    let result = extract_select_expressions(sql);
+    let schema = Schema::new(vec![]);
+    let result = extract_select_expressions(sql, &schema);
     assert!(result.is_err());
 }
 
@@ -142,7 +162,13 @@ fn test_error_handling() {
 fn test_nested_expressions() {
     // Test deeply nested expressions
     let sql = "SELECT ((a + b) * c) - d";
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("d".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     
     assert_eq!(expressions.len(), 1);
     

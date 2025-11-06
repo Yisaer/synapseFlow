@@ -4,7 +4,7 @@ use flow::sql_conversion::extract_select_expressions;
 use flow::expr::{DataFusionEvaluator, ScalarExpr, BinaryFunc};
 use flow::tuple::Tuple;
 use flow::row::Row;
-use datatypes::{Value, ConcreteDatatype, Int64Type, Float64Type, StringType, Schema};
+use datatypes::{Value, ConcreteDatatype, Int64Type, Float64Type, StringType, Schema, ColumnSchema};
 
 /// Test the complete workflow: SQL → ScalarExpr → Evaluation
 #[test]
@@ -15,7 +15,12 @@ fn test_complete_workflow() {
     let sql = "SELECT a + b, 42, 'hello'";
     println!("Input SQL: {}", sql);
     
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     assert_eq!(expressions.len(), 3);
     println!("✓ Parsed and converted {} expressions", expressions.len());
     
@@ -84,7 +89,12 @@ fn test_various_expression_types() {
     for (sql, description) in test_cases {
         println!("\nTesting {}: {}", description, sql);
         
-        let expressions = extract_select_expressions(sql);
+        let schema = Schema::new(vec![
+            ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+            ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+            ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ]);
+        let expressions = extract_select_expressions(sql, &schema);
         assert!(expressions.is_ok(), "Failed to parse {}: {}", description, sql);
         
         let exprs = expressions.unwrap();
@@ -180,7 +190,12 @@ fn test_complex_nested_expressions() {
     println!("\n=== Complex Nested Expressions Test ===");
     
     let sql = "SELECT (a + b) * c, a + (b * c)";
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     
     assert_eq!(expressions.len(), 2);
     println!("✓ Parsed 2 complex expressions");
@@ -225,13 +240,13 @@ fn test_error_handling() {
     
     // Test invalid SQL
     let invalid_sql = "INVALID SQL EXPRESSION";
-    let result = extract_select_expressions(invalid_sql);
+    let result = extract_select_expressions(invalid_sql, &Schema::new(vec![]));
     assert!(result.is_err());
     println!("✓ Invalid SQL properly rejected: {:?}", result.err().unwrap());
     
     // Test unsupported expression (wildcard)
     let unsupported_sql = "SELECT * FROM table";
-    let result = extract_select_expressions(unsupported_sql);
+    let result = extract_select_expressions(unsupported_sql, &Schema::new(vec![]));
     assert!(result.is_err());
     println!("✓ Unsupported expression properly rejected");
 }
@@ -247,7 +262,11 @@ fn test_demo_workflow() {
     println!("1. Input SQL: {}", sql);
     
     // Step 2: Parse and convert
-    let expressions = extract_select_expressions(sql).unwrap();
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let expressions = extract_select_expressions(sql, &schema).unwrap();
     println!("2. Converted to ScalarExpr: {:?}", expressions[0]);
     
     // Step 3: Create evaluation context
