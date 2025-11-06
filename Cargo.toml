@@ -2,6 +2,7 @@
 members = [
     "src/flow",
     "src/datatypes",
+    "src/parser",
 ]
 resolver = "2"
 
@@ -11,6 +12,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+parser = { path = "src/parser" }
+flow = { path = "src/flow" }
+datatypes = { path = "src/datatypes" }
+sqlparser = { version = "0.40", features = ["serde", "visitor"] }
 
 [[bin]]
 name = "rs-flow-demo"

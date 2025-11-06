@@ -1,0 +1,9 @@
+[package]
+name = "simple-test"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+sqlparser = { version = "0.40", features = ["serde", "visitor"] }

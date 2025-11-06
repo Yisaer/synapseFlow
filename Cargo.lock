@@ -667,7 +667,7 @@ dependencies = [
  "parquet",
  "rand",
  "regex",
- "sqlparser",
+ "sqlparser 0.58.0",
  "tempfile",
  "tokio",
  "url",
@@ -745,7 +745,7 @@ dependencies = [
  "parquet",
  "paste",
  "recursive",
- "sqlparser",
+ "sqlparser 0.58.0",
  "tokio",
  "web-time",
 ]
@@ -926,7 +926,7 @@ dependencies = [
  "paste",
  "recursive",
  "serde_json",
- "sqlparser",
+ "sqlparser 0.58.0",
 ]
 
 [[package]]
@@ -1261,7 +1261,7 @@ dependencies = [
  "log",
  "recursive",
  "regex",
- "sqlparser",
+ "sqlparser 0.58.0",
 ]
 
 [[package]]
@@ -1361,6 +1361,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "serde_json",
+ "sqlparser 0.40.0",
 ]
 
 [[package]]
@@ -2097,6 +2098,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "parser"
+version = "0.1.0"
+dependencies = [
+ "sqlparser 0.40.0",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2312,6 +2320,12 @@ dependencies = [
 [[package]]
 name = "rs-flow-demo"
 version = "0.1.0"
+dependencies = [
+ "datatypes",
+ "flow",
+ "parser",
+ "sqlparser 0.40.0",
+]
 
 [[package]]
 name = "rustc_version"
@@ -2472,13 +2486,35 @@ checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "sqlparser"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c80afe31cdb649e56c0d9bb5503be9166600d68a852c38dd445636d126858e5"
+dependencies = [
+ "log",
+ "serde",
+ "sqlparser_derive 0.2.2",
+]
+
+[[package]]
+name = "sqlparser"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec4b661c54b1e4b603b37873a18c59920e4c51ea8ea2cf527d925424dbd4437c"
 dependencies = [
  "log",
  "recursive",
- "sqlparser_derive",
+ "sqlparser_derive 0.3.0",
+]
+
+[[package]]
+name = "sqlparser_derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b2e185515564f15375f593fb966b5718bc624ba77fe49fa4616ad619690554"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
