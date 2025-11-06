@@ -44,6 +44,7 @@ impl sqlparser::dialect::Dialect for StreamDialect {
 }
 
 /// Process a parsed statement to handle tumblingwindow functions
+#[allow(clippy::collapsible_if)]
 pub fn process_tumblingwindow_in_statement(statement: &mut Statement) -> Result<(), ParserError> {
     if let Statement::Query(query) = statement {
         if let SetExpr::Select(select) = &mut *query.body {

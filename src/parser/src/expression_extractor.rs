@@ -12,7 +12,7 @@ pub fn extract_expressions_from_sql(sql: &str) -> Result<Vec<String>, String> {
     let mut extractor = ExpressionExtractor::new();
     
     for statement in &statements {
-        statement.visit(&mut extractor);
+        let _ = statement.visit(&mut extractor);
     }
     
     Ok(extractor.expressions)
@@ -29,7 +29,7 @@ pub fn extract_select_expressions_simple(sql: &str) -> Result<Vec<String>, Strin
     }
     
     let mut extractor = SelectExpressionExtractor::new();
-    statements[0].visit(&mut extractor);
+    let _ = statements[0].visit(&mut extractor);
     
     Ok(extractor.expressions)
 }
@@ -95,7 +95,7 @@ pub fn analyze_sql_expressions(sql: &str) -> Result<ExpressionAnalysis, String> 
     
     for statement in &statements {
         let mut analyzer = ExpressionAnalyzer::new(&mut analysis);
-        statement.visit(&mut analyzer);
+        let _ = statement.visit(&mut analyzer);
     }
     
     Ok(analysis)
