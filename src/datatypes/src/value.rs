@@ -23,6 +23,21 @@ impl ListValue {
     pub fn datatype(&self) -> &ConcreteDatatype {
         &self.datatype
     }
+
+    /// Get element at the given index
+    pub fn get(&self, index: usize) -> Option<&Value> {
+        self.items.get(index)
+    }
+
+    /// Get the length of the list
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Check if the list is empty
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 /// Struct value containing items and field definitions
@@ -43,6 +58,15 @@ impl StructValue {
 
     pub fn fields(&self) -> &StructType {
         &self.fields
+    }
+
+    /// Get field value by field name
+    pub fn get_field(&self, field_name: &str) -> Option<&Value> {
+        self.fields
+            .fields()
+            .iter()
+            .position(|field| field.name() == field_name)
+            .and_then(|index| self.items.get(index))
     }
 }
 

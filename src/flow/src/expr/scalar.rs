@@ -54,6 +54,20 @@ pub enum ScalarExpr {
         expr1: Box<ScalarExpr>,
         expr2: Box<ScalarExpr>,
     },
+    /// A field access expression (e.g., a.b where a is a struct)
+    FieldAccess {
+        /// The expression that evaluates to a struct value
+        expr: Box<ScalarExpr>,
+        /// The name of the field to access
+        field_name: String,
+    },
+    /// A list indexing expression (e.g., a[0] where a is a list)
+    ListIndex {
+        /// The expression that evaluates to a list value
+        expr: Box<ScalarExpr>,
+        /// The index expression (can be any scalar expression)
+        index_expr: Box<ScalarExpr>,
+    },
     /// A call to a DataFusion scalar function
     CallDf {
         /// The name of the DataFusion function (e.g., "concat", "upper", "lower")
@@ -107,6 +121,58 @@ impl ScalarExpr {
                 let right = expr2.eval(evaluator, tuple)?;
                 // Apply the binary function to the evaluated arguments
                 func.eval_binary(left, right)
+            }
+            ScalarExpr::FieldAccess { expr, field_name } => {
+                // Evaluate the struct expression
+                let struct_value = expr.eval(evaluator, tuple)?;
+                // Check if the result is a struct
+                if let Value::Struct(struct_val) = struct_value {
+                    // Get the field value by name
+                    struct_val
+                        .get_field(field_name)
+                        .cloned()
+                        .ok_or_else(|| EvalError::FieldNotFound {
+                            field_name: field_name.clone(),
+                            struct_type: format!("{:?}", struct_val.fields()),
+                        })
+                } else {
+                    Err(EvalError::TypeMismatch {
+                        expected: "Struct".to_string(),
+                        actual: format!("{:?}", struct_value),
+                    })
+                }
+            }
+            ScalarExpr::ListIndex { expr, index_expr } => {
+                // Evaluate the list expression
+                let list_value = expr.eval(evaluator, tuple)?;
+                // Evaluate the index expression
+                let index_value = index_expr.eval(evaluator, tuple)?;
+                
+                // Check if the list expression evaluates to a List
+                if let Value::List(list_val) = list_value {
+                    // Check if the index is an integer
+                    if let Value::Int64(index) = index_value {
+                        // Check if index is within bounds
+                        if index >= 0 && (index as usize) < list_val.len() {
+                            Ok(list_val.get(index as usize).unwrap().clone())
+                        } else {
+                            Err(EvalError::ListIndexOutOfBounds {
+                                index: index as usize,
+                                list_length: list_val.len(),
+                            })
+                        }
+                    } else {
+                        Err(EvalError::InvalidIndexType {
+                            expected: "Int64".to_string(),
+                            actual: format!("{:?}", index_value),
+                        })
+                    }
+                } else {
+                    Err(EvalError::TypeMismatch {
+                        expected: "List".to_string(),
+                        actual: format!("{:?}", list_value),
+                    })
+                }
             }
             ScalarExpr::CallDf { .. } => {
                 // Use DataFusion evaluator for CallDf expressions
@@ -174,6 +240,22 @@ impl ScalarExpr {
         }
     }
 
+    /// Create a field access expression (e.g., a.b where a is a struct)
+    pub fn field_access(expr: ScalarExpr, field_name: impl Into<String>) -> Self {
+        ScalarExpr::FieldAccess {
+            expr: Box::new(expr),
+            field_name: field_name.into(),
+        }
+    }
+
+    /// Create a list indexing expression (e.g., a[0] where a is a list)
+    pub fn list_index(expr: ScalarExpr, index_expr: ScalarExpr) -> Self {
+        ScalarExpr::ListIndex {
+            expr: Box::new(expr),
+            index_expr: Box::new(index_expr),
+        }
+    }
+
     /// Check if this expression is a column reference
     pub fn is_column(&self) -> bool {
         matches!(self, ScalarExpr::Column(_))
@@ -212,6 +294,12 @@ impl std::fmt::Debug for ScalarExpr {
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
                 write!(f, "CallBinary({:?}, {:?}, {:?})", func, expr1, expr2)
             }
+            ScalarExpr::FieldAccess { expr, field_name } => {
+                write!(f, "FieldAccess({:?}, {})", expr, field_name)
+            }
+            ScalarExpr::ListIndex { expr, index_expr } => {
+                write!(f, "ListIndex({:?}, {:?})", expr, index_expr)
+            }
             ScalarExpr::CallDf { function_name, args } => {
                 write!(f, "CallDf({}, {:?})", function_name, args)
             }
@@ -234,6 +322,12 @@ impl PartialEq for ScalarExpr {
                 ScalarExpr::CallBinary { func: fa, expr1: e1a, expr2: e2a },
                 ScalarExpr::CallBinary { func: fb, expr1: e1b, expr2: e2b },
             ) => fa == fb && e1a == e1b && e2a == e2b,
+            (ScalarExpr::FieldAccess { expr: ea, field_name: na }, ScalarExpr::FieldAccess { expr: eb, field_name: nb }) => {
+                ea == eb && na == nb
+            }
+            (ScalarExpr::ListIndex { expr: ea, index_expr: ia }, ScalarExpr::ListIndex { expr: eb, index_expr: ib }) => {
+                ea == eb && ia == ib
+            }
             (ScalarExpr::CallDf { function_name: na, args: aa }, ScalarExpr::CallDf { function_name: nb, args: ab }) => {
                 na == nb && aa == ab
             }

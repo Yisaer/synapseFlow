@@ -707,6 +707,21 @@ pub enum EvalError {
         index: usize,
         length: usize,
     },
+    /// Field not found error
+    FieldNotFound {
+        field_name: String,
+        struct_type: String,
+    },
+    /// Invalid index type (for list indexing)
+    InvalidIndexType {
+        expected: String,
+        actual: String,
+    },
+    /// List index out of bounds
+    ListIndexOutOfBounds {
+        index: usize,
+        list_length: usize,
+    },
     /// Feature not implemented
     NotImplemented {
         feature: String,
@@ -729,6 +744,15 @@ impl std::fmt::Display for EvalError {
             EvalError::DivisionByZero => write!(f, "Division by zero"),
             EvalError::IndexOutOfBounds { index, length } => {
                 write!(f, "Index {} out of bounds for length {}", index, length)
+            }
+            EvalError::FieldNotFound { field_name, struct_type } => {
+                write!(f, "Field '{}' not found in struct type {}", field_name, struct_type)
+            }
+            EvalError::InvalidIndexType { expected, actual } => {
+                write!(f, "Invalid index type: expected {}, got {}", expected, actual)
+            }
+            EvalError::ListIndexOutOfBounds { index, list_length } => {
+                write!(f, "List index {} out of bounds for length {}", index, list_length)
             }
             EvalError::NotImplemented { feature } => {
                 write!(f, "Feature not implemented: {}", feature)

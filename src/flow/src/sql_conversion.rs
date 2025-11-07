@@ -24,6 +24,8 @@ impl std::fmt::Display for ConversionError {
     }
 }
 
+impl std::error::Error for ConversionError {}
+
 /// Convert SQL Value to ScalarExpr literal
 fn convert_sql_value_to_scalar(value: &SqlValue) -> Result<ScalarExpr, ConversionError> {
     match value {
@@ -82,8 +84,6 @@ fn convert_unary_op(op: &UnaryOperator) -> Result<UnaryFunc, ConversionError> {
         _ => Err(ConversionError::UnsupportedOperator(format!("{:?}", op))),
     }
 }
-
-impl std::error::Error for ConversionError {}
 
 /// Convert sqlparser Expression to flow ScalarExpr with schema support
 pub fn convert_expr_to_scalar(
@@ -151,6 +151,16 @@ pub fn convert_expr_to_scalar(
             convert_case_expression_with_schema(operand, conditions, results, else_result, schema)
         }
         
+        // Struct field access like a->b
+        Expr::JsonAccess { left, operator, right } => {
+            convert_json_access_with_schema(left, operator, right, schema)
+        }
+        
+        // List indexing like a[0]
+        Expr::MapAccess { column, keys } => {
+            convert_map_access_with_schema(column, keys, schema)
+        }
+        
         _ => Err(ConversionError::UnsupportedExpression(format!("{:?}", expr))),
     }
 }
@@ -184,7 +194,7 @@ fn convert_compound_identifier_to_column(idents: &[Ident], schema: &Schema) -> R
             if let Some(index) = schema.column_schemas().iter().position(|col| col.name == *column_name) {
                 Ok(ScalarExpr::column(index))
             } else {
-                Err(ConversionError::ColumnNotFound(format!("{}.{}", table_name, column_name)))
+                Err(ConversionError::ColumnNotFound(format!("{}. {}", table_name, column_name)))
             }
         }
         3 => {
@@ -197,7 +207,7 @@ fn convert_compound_identifier_to_column(idents: &[Ident], schema: &Schema) -> R
             if let Some(index) = schema.column_schemas().iter().position(|col| col.name == *column_name) {
                 Ok(ScalarExpr::column(index))
             } else {
-                Err(ConversionError::ColumnNotFound(format!("{}.{}.{}", _db_name, table_name, column_name)))
+                Err(ConversionError::ColumnNotFound(format!("{}.{}", _db_name, table_name)))
             }
         }
         _ => {
@@ -207,6 +217,62 @@ fn convert_compound_identifier_to_column(idents: &[Ident], schema: &Schema) -> R
             ))
         }
     }
+}
+
+/// Convert JsonAccess (struct field access like a->b) to ScalarExpr
+fn convert_json_access_with_schema(
+    left: &Expr,
+    operator: &sqlparser::ast::JsonOperator,
+    right: &Expr,
+    schema: &Schema,
+) -> Result<ScalarExpr, ConversionError> {
+    // Only support Arrow operator for now
+    match operator {
+        sqlparser::ast::JsonOperator::Arrow => {
+            // Convert the struct container (left side)
+            let struct_expr = convert_expr_to_scalar(left, schema)?;
+            
+            // Convert the field name (right side) - should be an identifier
+            let field_name = match right {
+                Expr::Identifier(ident) => ident.value.clone(),
+                _ => return Err(ConversionError::UnsupportedExpression(
+                    "Struct field access right side must be an identifier".to_string()
+                )),
+            };
+            
+            // Use the proper FieldAccess variant instead of CallDf
+            Ok(ScalarExpr::field_access(struct_expr, field_name))
+        }
+        _ => Err(ConversionError::UnsupportedOperator(format!("{:?}", operator))),
+    }
+}
+
+/// Convert MapAccess (list indexing like a[0]) to ScalarExpr
+fn convert_map_access_with_schema(
+    column: &Expr,
+    keys: &[Expr],
+    schema: &Schema,
+) -> Result<ScalarExpr, ConversionError> {
+    if keys.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(
+            "MapAccess requires at least one key".to_string()
+        ));
+    }
+    
+    if keys.len() > 1 {
+        return Err(ConversionError::UnsupportedExpression(
+            "Multiple keys in MapAccess not yet supported".to_string()
+        ));
+    }
+    
+    // Convert the container (column)
+    let container_expr = convert_expr_to_scalar(column, schema)?;
+    
+    // Convert the key (index) - should be a literal value
+    let key_expr = convert_expr_to_scalar(&keys[0], schema)?;
+    
+    // Use the proper ListIndex variant instead of CallDf
+    Ok(ScalarExpr::list_index(container_expr, key_expr))
 }
 
 /// Convert function call with schema context
@@ -420,6 +486,7 @@ pub fn extract_select_expressions(
         )),
     }
 }
+
 /// Convert SelectStmt to ScalarExpr with aliases
 pub fn convert_select_stmt_to_scalar(
     select_stmt: &parser::SelectStmt, 
@@ -440,13 +507,9 @@ pub struct StreamSqlConverter {
 }
 
 impl StreamSqlConverter {
-    /// Create a new StreamSqlConverter
     pub fn new() -> Self {
         Self {}
     }
-    
-    /// 将 SelectStmt 转换为 ScalarExpr（带别名）
-    /// 核心功能：接收 parser 的 SelectStmt，返回 (ScalarExpr, 别名) 列表
     pub fn convert_select_stmt(
         &self, 
         select_stmt: &parser::SelectStmt, 
@@ -455,9 +518,7 @@ impl StreamSqlConverter {
         // 核心转换：SelectStmt → ScalarExpr
         convert_select_stmt_to_scalar(select_stmt, schema)
     }
-    
-    /// 将 SelectStmt 转换为 ScalarExpr（不带别名）
-    /// 核心功能：接收 parser 的 SelectStmt，返回 ScalarExpr 列表
+
     pub fn convert_select_stmt_to_scalar(
         &self,
         select_stmt: &parser::SelectStmt, 
@@ -494,7 +555,8 @@ pub fn convert_expr_to_scalar_with_schema(
     convert_expr_to_scalar(expr, schema)
 }
 
- 
+/// 便捷函数：SQL字符串 → SelectStmt → ScalarExpr（不带别名）
+/// 完整流程：先解析SQL得到SelectStmt，然后转换为ScalarExpr
 pub fn parse_sql_to_scalar_expr(
     sql: &str,
     schema: &Schema

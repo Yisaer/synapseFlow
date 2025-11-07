@@ -1,3 +1,6 @@
+//! Extract all expressions from SQL statements
+//! This module provides functionality to extract and analyze SQL expressions
+
 use sqlparser::ast::{Expr, Visit, Visitor};
 use sqlparser::parser::Parser;
 
@@ -138,6 +141,8 @@ impl Visitor for ExpressionAnalyzer<'_> {
             Expr::Function(func) => {
                 self.analysis.functions.push(func.name.to_string());
             }
+            // Note: Removed flow-specific expression types (JsonAccess, MapAccess)
+            // Parser module should only focus on basic SQL parsing analysis
             _ => {}
         }
         
