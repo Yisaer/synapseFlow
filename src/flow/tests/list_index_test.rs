@@ -27,7 +27,7 @@ fn test_list_index_simple() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -69,7 +69,7 @@ fn test_list_index_middle() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -111,7 +111,7 @@ fn test_list_index_last() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -152,7 +152,7 @@ fn test_list_index_string_list() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -194,7 +194,7 @@ fn test_list_index_out_of_bounds() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -238,7 +238,7 @@ fn test_list_index_negative_index() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -269,7 +269,7 @@ fn test_list_index_negative_index() {
 fn test_list_index_not_list() {
     // Create schema for the tuple with Int32 value
     let schema = Schema::new(vec![
-        ColumnSchema::new("int_col".to_string(), ConcreteDatatype::Int32(Int32Type)),
+        ColumnSchema::new("int_col".to_string(), "test_table".to_string(), ConcreteDatatype::Int32(Int32Type)),
     ]);
 
     // Create a tuple with an Int32 value
@@ -313,7 +313,7 @@ fn test_list_index_invalid_index_type() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
     ]);
 
     // Create a tuple with the list value
@@ -359,8 +359,8 @@ fn test_list_index_dynamic_index() {
 
     // Create schema for the tuple with both list and index
     let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), ConcreteDatatype::List(list_type)),
-        ColumnSchema::new("index_col".to_string(), ConcreteDatatype::Int64(datatypes::Int64Type)),
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+        ColumnSchema::new("index_col".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(datatypes::Int64Type)),
     ]);
 
     // Create a tuple with the list value and index value

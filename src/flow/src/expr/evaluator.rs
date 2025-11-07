@@ -277,11 +277,11 @@ mod tests {
 
     fn create_test_tuple() -> Tuple {
         let schema = datatypes::Schema::new(vec![
-            ColumnSchema::new("id".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("name".to_string(), ConcreteDatatype::String(StringType)),
-            ColumnSchema::new("age".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("score".to_string(), ConcreteDatatype::Float64(Float64Type)),
-            ColumnSchema::new("active".to_string(), ConcreteDatatype::Bool(BooleanType)),
+            ColumnSchema::new("id".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
+            ColumnSchema::new("name".to_string(), "test_table".to_string(), ConcreteDatatype::String(StringType)),
+            ColumnSchema::new("age".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
+            ColumnSchema::new("score".to_string(), "test_table".to_string(), ConcreteDatatype::Float64(Float64Type)),
+            ColumnSchema::new("active".to_string(), "test_table".to_string(), ConcreteDatatype::Bool(BooleanType)),
         ]);
 
         let values = vec![

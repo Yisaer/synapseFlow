@@ -17,8 +17,8 @@ fn test_core_conversion_flow() {
     
     // 1. Create test schema
     let schema = Schema::new(vec![
-        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
-        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("a".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
     ]);
     
     // 2. Use parser module to parse SQL and get SelectStmt
@@ -109,8 +109,8 @@ fn test_mixed_struct_and_list_access() {
     
     // 1. Create test schema with struct and list columns
     let schema = Schema::new(vec![
-        ColumnSchema::new("a".to_string(), ConcreteDatatype::String(StringType)), // struct field
-        ColumnSchema::new("c".to_string(), ConcreteDatatype::String(StringType)), // list field  
+        ColumnSchema::new("a".to_string(), "test_table".to_string(), ConcreteDatatype::String(StringType)), // struct field
+        ColumnSchema::new("c".to_string(), "test_table".to_string(), ConcreteDatatype::String(StringType)), // list field  
     ]);
     
     // 2. Use parser module to parse SQL with mixed access patterns

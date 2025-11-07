@@ -178,42 +178,34 @@ fn convert_identifier_to_column(ident: &Ident, schema: &Schema) -> Result<Scalar
 }
 
 /// Convert CompoundIdentifier to Column reference using schema
+/// Only handles cases 1 and 2 as specified:
+/// - Case 1: simple identifier (already handled by convert_identifier_to_column)
+/// - Case 2: table.column format where we use both source_name and column_name
 fn convert_compound_identifier_to_column(idents: &[Ident], schema: &Schema) -> Result<ScalarExpr, ConversionError> {
     match idents.len() {
         1 => {
-            // 只有一个部分，退化为简单标识符
+            // Simple identifier case - delegate to existing function
             convert_identifier_to_column(&idents[0], schema)
         }
         2 => {
-            // table.column 格式
-            let table_name = &idents[0].value;
+            // table.column format - use both source_name and column_name
+            let source_name = &idents[0].value;
             let column_name = &idents[1].value;
             
-            // 为了简单起见，我们只检查列名是否存在
-            // 在实际应用中，你可能还需要验证表名
-            if let Some(index) = schema.column_schemas().iter().position(|col| col.name == *column_name) {
+            // Search for column by both source_name and column_name
+            if let Some(index) = schema.column_schemas().iter().position(|col| {
+                col.name == *column_name && col.belongs_to(source_name)
+            }) {
                 Ok(ScalarExpr::column(index))
             } else {
-                Err(ConversionError::ColumnNotFound(format!("{}. {}", table_name, column_name)))
-            }
-        }
-        3 => {
-            // db.table.column 格式
-            let _db_name = &idents[0].value;
-            let table_name = &idents[1].value;
-            let column_name = &idents[2].value;
-            
-            // 简化处理：只检查列名
-            if let Some(index) = schema.column_schemas().iter().position(|col| col.name == *column_name) {
-                Ok(ScalarExpr::column(index))
-            } else {
-                Err(ConversionError::ColumnNotFound(format!("{}.{}", _db_name, table_name)))
+                Err(ConversionError::ColumnNotFound(format!("{}.{} (source: {}, column: {})", 
+                    source_name, column_name, source_name, column_name)))
             }
         }
         _ => {
-            // 更复杂的限定符，暂时不支持
+            // Only support 1 and 2 part identifiers as specified
             Err(ConversionError::InvalidColumnReference(
-                idents.iter().map(|i| i.value.as_str()).collect::<Vec<_>>().join(".")
+                format!("Unsupported compound identifier with {} parts. Only 1 or 2 parts are supported.", idents.len())
             ))
         }
     }

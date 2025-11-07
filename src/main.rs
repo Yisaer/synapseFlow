@@ -41,8 +41,8 @@ fn demonstrate_complete_workflow() {
     
     // Step 3: Convert to ScalarExpr using flow crate
     let schema = Schema::new(vec![
-        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
-        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type))
+        ColumnSchema::new("a".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type))
     ]);
     
     match extract_select_expressions(sql, &schema) {
@@ -91,8 +91,8 @@ fn demonstrate_evaluation() {
     let evaluator = DataFusionEvaluator::new();
     let row = Row::from(vec![Value::Int64(5), Value::Int64(3)]);
     let schema = Schema::new(vec![
-        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
-        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("a".to_string(), "test_table".to_string(),ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), "test_table".to_string(),ConcreteDatatype::Int64(Int64Type)),
     ]);
     let tuple = Tuple::new(schema, row);
     
@@ -122,9 +122,9 @@ fn test_expression_varieties() {
     ];
     
     let schema = Schema::new(vec![
-        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
-        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
-        ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type))
+        ColumnSchema::new("a".to_string(),"test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), "test_table".to_string(),ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("c".to_string(), "test_table".to_string(),ConcreteDatatype::Int64(Int64Type))
     ]);
     
     for (sql, description) in test_cases {

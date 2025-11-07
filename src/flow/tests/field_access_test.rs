@@ -30,7 +30,7 @@ fn test_field_access_simple() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("struct_col".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
+        ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
     // Create a tuple with the struct value
@@ -74,7 +74,7 @@ fn test_field_access_string_field() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("struct_col".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
+        ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
     // Create a tuple with the struct value
@@ -130,7 +130,7 @@ fn test_field_access_nested() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("outer_struct".to_string(), ConcreteDatatype::Struct(outer_struct_type)),
+        ColumnSchema::new("outer_struct".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(outer_struct_type)),
     ]);
 
     // Create a tuple with the outer struct value
@@ -171,7 +171,7 @@ fn test_field_access_field_not_found() {
 
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("struct_col".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
+        ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
     // Create a tuple with the struct value
@@ -201,7 +201,7 @@ fn test_field_access_field_not_found() {
 fn test_field_access_not_struct() {
     // Create schema for the tuple
     let schema = Schema::new(vec![
-        ColumnSchema::new("int_col".to_string(), ConcreteDatatype::Int32(Int32Type)),
+        ColumnSchema::new("int_col".to_string(), "test_table".to_string(), ConcreteDatatype::Int32(Int32Type)),
     ]);
 
     // Create a tuple with an Int32 value
