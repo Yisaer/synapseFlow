@@ -1,8 +1,7 @@
 use datatypes::{ConcreteDatatype, Value};
 
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
-use crate::expr::evaluator::DataFusionEvaluator;
-use crate::tuple::Tuple;
+use crate::expr::datafusion_func::DataFusionEvaluator;
 use crate::model::row::Row;
 use std::sync::Arc;
 
@@ -101,10 +100,10 @@ impl ScalarExpr {
     /// # Returns
     ///
     /// Returns the evaluated value, or an error if evaluation fails.
-    pub fn eval(&self, evaluator: &DataFusionEvaluator, tuple: &Tuple) -> Result<Value, EvalError> {
+    pub fn eval(&self, evaluator: &DataFusionEvaluator, row: &dyn Row) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column { source_name, column_name } => {
-                tuple.get_by_source_column(source_name, column_name)
+                row.get_by_source_column(source_name, column_name)
                     .cloned()
                     .ok_or_else(|| EvalError::ColumnNotFound {
                         source: source_name.clone(),
@@ -114,20 +113,20 @@ impl ScalarExpr {
             ScalarExpr::Literal(val, _) => Ok(val.clone()),
             ScalarExpr::CallUnary { func, expr } => {
                 // Recursively evaluate the argument expression
-                let arg = expr.eval(evaluator, tuple)?;
+                let arg = expr.eval(evaluator, row)?;
                 // Apply the unary function to the evaluated argument
                 func.eval_unary(arg)
             }
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
                 // Recursively evaluate both argument expressions
-                let left = expr1.eval(evaluator, tuple)?;
-                let right = expr2.eval(evaluator, tuple)?;
+                let left = expr1.eval(evaluator, row)?;
+                let right = expr2.eval(evaluator, row)?;
                 // Apply the binary function to the evaluated arguments
                 func.eval_binary(left, right)
             }
             ScalarExpr::FieldAccess { expr, field_name } => {
                 // Evaluate the struct expression
-                let struct_value = expr.eval(evaluator, tuple)?;
+                let struct_value = expr.eval(evaluator, row)?;
                 // Check if the result is a struct
                 if let Value::Struct(struct_val) = struct_value {
                     // Get the field value by name
@@ -147,9 +146,9 @@ impl ScalarExpr {
             }
             ScalarExpr::ListIndex { expr, index_expr } => {
                 // Evaluate the list expression
-                let list_value = expr.eval(evaluator, tuple)?;
+                let list_value = expr.eval(evaluator, row)?;
                 // Evaluate the index expression
-                let index_value = index_expr.eval(evaluator, tuple)?;
+                let index_value = index_expr.eval(evaluator, row)?;
                 
                 // Check if the list expression evaluates to a List
                 if let Value::List(list_val) = list_value {
@@ -179,7 +178,7 @@ impl ScalarExpr {
             }
             ScalarExpr::CallDf { .. } => {
                 // Use DataFusion evaluator for CallDf expressions
-                match evaluator.evaluate_expr(self, tuple) {
+                match evaluator.evaluate_expr(self, row) {
                     Ok(value) => Ok(value),
                     Err(df_error) => Err(EvalError::DataFusionError { 
                         message: df_error.to_string() 
@@ -190,7 +189,7 @@ impl ScalarExpr {
                 // Recursively evaluate all argument expressions
                 let mut arg_values = Vec::new();
                 for arg in args {
-                    arg_values.push(arg.eval(evaluator, tuple)?);
+                    arg_values.push(arg.eval(evaluator, row)?);
                 }
                 // Validate arguments before evaluation
                 CustomFunc::validate(func.as_ref(), &arg_values)?;

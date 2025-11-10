@@ -67,7 +67,7 @@ ScalarExpr::call_df(function_name: String, args: Vec<ScalarExpr>)
 #### 计算方法
 
 ```rust
-pub fn eval(&self, evaluator: &DataFusionEvaluator, tuple: &Tuple) -> Result<Value, EvalError>
+pub fn eval(&self, evaluator: &DataFusionEvaluator, row: &dyn Row) -> Result<Value, EvalError>
 ```
 
 ### BinaryFunc
@@ -109,7 +109,7 @@ pub enum UnaryFunc {
 ```rust
 impl DataFusionEvaluator {
     pub fn new() -> Self
-    pub fn evaluate_expr(&self, expr: &ScalarExpr, tuple: &Tuple) -> Result<Value, DataFusionError>
+    pub fn evaluate_expr(&self, expr: &ScalarExpr, row: &dyn Row) -> Result<Value, DataFusionError>
 }
 ```
 

@@ -1,11 +1,12 @@
 use datatypes::Value;
+use std::any::Any;
 
 /// Row trait defines the interface for row-like data access
 /// 
 /// This trait provides methods to access values by different indexing strategies:
 /// - Name-based access  
 /// - Source+column name access
-pub trait Row: Send + Sync {
+pub trait Row: Send + Sync + Any {
     /// Get value by column name
     fn get_by_name(&self, name: &str) -> Option<&Value>;
     

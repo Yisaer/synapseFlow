@@ -80,7 +80,7 @@ pub fn convert_expr_to_scalar(expr: &sqlparser::ast::Expr) -> Result<ScalarExpr,
 ```rust
 // 在 expr 模块中
 impl ScalarExpr {
-    pub fn eval(&self, evaluator: &DataFusionEvaluator, tuple: &Tuple) -> Result<Value, EvalError>
+    pub fn eval(&self, evaluator: &DataFusionEvaluator, row: &dyn Row) -> Result<Value, EvalError>
     pub fn call_binary(self, other: Self, func: BinaryFunc) -> Self
     pub fn call_unary(self, func: UnaryFunc) -> Self
 }
