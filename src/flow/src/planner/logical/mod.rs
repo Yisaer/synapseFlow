@@ -22,9 +22,7 @@ impl BaseLogicalPlan {
 pub mod datasource;
 pub mod project;
 pub mod filter;
-pub mod sink;
 
 pub use datasource::DataSource;
 pub use project::Project;
 pub use filter::Filter;
-pub use sink::Sink;

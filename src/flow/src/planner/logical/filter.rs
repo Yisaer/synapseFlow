@@ -1,15 +1,15 @@
 use std::sync::Arc;
 use crate::planner::logical::{LogicalPlan, BaseLogicalPlan};
-use crate::expr::ScalarExpr;
+use sqlparser::ast::Expr;
 
 #[derive(Debug, Clone)]
 pub struct Filter {
     pub base: BaseLogicalPlan,
-    pub predicate: ScalarExpr,
+    pub predicate: Expr,
 }
 
 impl Filter {
-    pub fn new(predicate: ScalarExpr, children: Vec<Arc<dyn LogicalPlan>>,index:i64) -> Self {
+    pub fn new(predicate: Expr, children: Vec<Arc<dyn LogicalPlan>>,index:i64) -> Self {
         let base = BaseLogicalPlan::new(children,index);
         Self { base, predicate }
     }

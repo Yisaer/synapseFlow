@@ -3,15 +3,21 @@ use crate::planner::logical::{LogicalPlan, BaseLogicalPlan};
 use crate::expr::ScalarExpr;
 
 #[derive(Debug, Clone)]
+pub struct ProjectField {
+    pub field_name: String,
+    pub expr: ScalarExpr,
+}
+
+#[derive(Debug, Clone)]
 pub struct Project {
     pub base: BaseLogicalPlan,
-    pub expressions: Vec<ScalarExpr>,
+    pub fields: Vec<ProjectField>,
 }
 
 impl Project {
-    pub fn new(expressions: Vec<ScalarExpr>, children: Vec<Arc<dyn LogicalPlan>>,index: i64) -> Self {
-        let base = BaseLogicalPlan::new(children,index);
-        Self { base, expressions }
+    pub fn new(fields: Vec<ProjectField>, children: Vec<Arc<dyn LogicalPlan>>, index: i64) -> Self {
+        let base = BaseLogicalPlan::new(children, index);
+        Self { base, fields }
     }
 }
 
