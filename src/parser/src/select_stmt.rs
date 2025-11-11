@@ -1,6 +1,15 @@
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
+/// Represents information about a data source (table)
+#[derive(Debug, Clone)]
+pub struct SourceInfo {
+    /// The name of the source (table name)
+    pub name: String,
+    /// Optional alias for the source
+    pub alias: Option<String>,
+}
+
 /// Represents a SELECT statement with its fields, optional WHERE and HAVING clauses, and aggregate mappings
 #[derive(Debug, Clone)]
 pub struct SelectStmt {
@@ -12,6 +21,8 @@ pub struct SelectStmt {
     pub having: Option<Expr>,
     /// Aggregate function mappings: column name -> original aggregate expression
     pub aggregate_mappings: HashMap<String, Expr>,
+    /// Information about the data sources (tables) accessed
+    pub source_infos: Vec<SourceInfo>,
 }
 
 /// Represents a single select field/expression
@@ -31,6 +42,7 @@ impl SelectStmt {
             where_condition: None,
             having: None,
             aggregate_mappings: HashMap::new(),
+            source_infos: Vec::new(),
         }
     }
 
@@ -41,6 +53,7 @@ impl SelectStmt {
             where_condition: None,
             having: None,
             aggregate_mappings: HashMap::new(),
+            source_infos: Vec::new(),
         }
     }
 
@@ -51,6 +64,7 @@ impl SelectStmt {
             where_condition,
             having,
             aggregate_mappings: HashMap::new(),
+            source_infos: Vec::new(),
         }
     }
 }

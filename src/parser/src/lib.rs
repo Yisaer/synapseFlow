@@ -5,6 +5,7 @@ pub mod parser;
 pub mod select_stmt;
 pub mod aggregate_transformer;
 pub mod aggregate_visitor;
+pub mod table_visitor;
 
 pub use dialect::StreamDialect;
 pub use expression_extractor::{
@@ -20,3 +21,4 @@ pub use aggregate_visitor::{
     extract_aggregates_with_visitor,
     AggregateVisitor
 };
+pub use table_visitor::TableInfoVisitor;

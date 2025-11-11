@@ -1,5 +1,6 @@
 pub mod expr;
 pub mod model;
+pub mod planner;
 
 pub use expr::{
     create_df_function_call, BinaryFunc, ConcatFunc, ConversionError,
@@ -10,3 +11,4 @@ pub use expr::{
 pub use expr::sql_conversion;
 pub use model::{Collection, RecordBatch};
 pub use datatypes::Schema;
+pub use planner::logical::{LogicalPlan, BaseLogicalPlan, DataSource, Project, Filter};

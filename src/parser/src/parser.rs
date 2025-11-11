@@ -1,9 +1,11 @@
 use sqlparser::ast::{Query, Select, SelectItem, SetExpr, Statement};
 use sqlparser::parser::Parser;
+use sqlparser::ast::Visit;
 
 use crate::dialect::StreamDialect;
 use crate::select_stmt::{SelectStmt, SelectField};
 use crate::aggregate_transformer::transform_aggregate_functions;
+use crate::table_visitor::TableInfoVisitor;
 
 /// SQL Parser based on StreamDialect
 pub struct StreamSqlParser {
@@ -89,8 +91,16 @@ impl StreamSqlParser {
         // Extract WHERE and HAVING clauses if present
         let where_condition = select.selection.clone();
         let having = select.having.clone();
+        
+        // Use visitor pattern to extract table (source) information
+        let mut table_visitor = TableInfoVisitor::new();
+        let _ = select.visit(&mut table_visitor);
+        let source_infos = table_visitor.get_sources();
 
-        Ok(SelectStmt::with_fields_and_conditions(select_fields, where_condition, having))
+        let mut select_stmt = SelectStmt::with_fields_and_conditions(select_fields, where_condition, having);
+        select_stmt.source_infos = source_infos;
+        
+        Ok(select_stmt)
     }
 }
 
@@ -237,5 +247,64 @@ mod demo_tests {
         }
         
         println!("\n✅ StreamDialect Parser Demo Complete!");
+    }
+}
+#[cfg(test)]
+mod source_info_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_select_with_single_table() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a, b FROM users");
+        
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.source_infos.len(), 1);
+        
+        let source = &select_stmt.source_infos[0];
+        assert_eq!(source.name, "users");
+        assert_eq!(source.alias, None);
+    }
+    
+    #[test]
+    fn test_parse_select_with_table_alias() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a, b FROM users AS u");
+        
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.source_infos.len(), 1);
+        
+        let source = &select_stmt.source_infos[0];
+        assert_eq!(source.name, "users");
+        assert_eq!(source.alias, Some("u".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_select_with_multiple_tables() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a, b FROM users AS u, orders AS o");
+        
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.source_infos.len(), 2);
+        
+        assert_eq!(select_stmt.source_infos[0].name, "users");
+        assert_eq!(select_stmt.source_infos[0].alias, Some("u".to_string()));
+        assert_eq!(select_stmt.source_infos[1].name, "orders");
+        assert_eq!(select_stmt.source_infos[1].alias, Some("o".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_select_with_where_clause() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a, b FROM users WHERE a > 10");
+        
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.source_infos.len(), 1);
+        assert_eq!(select_stmt.source_infos[0].name, "users");
+        assert!(select_stmt.where_condition.is_some());
     }
 }
