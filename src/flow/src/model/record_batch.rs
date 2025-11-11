@@ -99,7 +99,7 @@ impl RecordBatch {
         // Create columns
         let columns = schema.column_schemas()
             .iter()
-            .zip(columns_data.into_iter())
+            .zip(columns_data)
             .map(|(col_schema, data)| Column::new(col_schema.name.clone(), col_schema.data_type.clone(), data))
             .collect();
             

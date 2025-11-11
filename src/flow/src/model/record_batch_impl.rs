@@ -3,7 +3,7 @@ use super::RecordBatch;
 
 impl Collection for RecordBatch {
     fn schema(&self) -> &datatypes::Schema {
-        &self.schema()
+        self.schema()
     }
     
     fn num_rows(&self) -> usize {

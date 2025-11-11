@@ -91,7 +91,7 @@ impl DataFusionEvaluator {
         let mut df_args = Vec::new();
         for row_idx in 0..num_rows {
             let mut row_args = Vec::new();
-            for (_arg_idx, arg_column) in arg_columns.iter().enumerate() {
+            for arg_column in arg_columns.iter() {
                 if let Some(value) = arg_column.get(row_idx) {
                     let scalar_value = value_to_scalar_value(value)?;
                     row_args.push(lit(scalar_value));
@@ -107,12 +107,9 @@ impl DataFusionEvaluator {
         // In the future, we could create a single DataFusion expression that works on the entire batch
         let mut results = Vec::with_capacity(num_rows);
         
-        for row_idx in 0..num_rows {
+        for (row_idx, row_args) in df_args.iter().enumerate().take(num_rows) {
             // Create a single-row RecordBatch for this evaluation
             let single_row_batch = self.create_single_row_batch(&record_batch, row_idx)?;
-            
-            // Use the argument literals for this row
-            let row_args = &df_args[row_idx];
             
             // Create the DataFusion function call
             let df_expr = crate::expr::datafusion_func::adapter::create_df_function_call(

@@ -109,7 +109,7 @@ impl ScalarExpr {
                 }
                 
                 left_vals.into_iter()
-                    .zip(right_vals.into_iter())
+                    .zip(right_vals)
                     .map(|(left, right)| func.eval_binary(left, right))
                     .collect()
             }
@@ -145,7 +145,7 @@ impl ScalarExpr {
                 }
                 
                 list_vals.into_iter()
-                    .zip(index_vals.into_iter())
+                    .zip(index_vals)
                     .map(|(list_val, index_val)| {
                         if let Value::List(list_val) = list_val {
                             if let Value::Int64(index) = index_val {

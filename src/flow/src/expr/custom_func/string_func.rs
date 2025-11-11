@@ -37,7 +37,7 @@ impl CustomFunc for ConcatFunc {
         // Check that both argument vectors contain String values (validate first element for efficiency)
         if num_rows > 0 {
             for (i, arg_vec) in args.iter().enumerate() {
-                if let Some(first_val) = arg_vec.get(0) {
+                if let Some(first_val) = arg_vec.first() {
                     if !matches!(first_val, Value::String(_)) {
                         return Err(EvalError::TypeMismatch {
                             expected: "String vector".to_string(),

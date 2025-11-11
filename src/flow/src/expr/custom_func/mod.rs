@@ -12,7 +12,7 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     /// # Arguments
     ///
     /// * `args` - A vector of argument vectors, where each inner vector contains values for all rows
-    ///            args[i][j] represents the i-th argument's j-th row value
+    ///   args[i][j] represents the i-th argument's j-th row value
     ///
     /// # Returns
     ///
@@ -25,7 +25,7 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     /// # Arguments
     ///
     /// * `args` - A vector of argument vectors, where each inner vector contains values for all rows
-    ///            args[i][j] represents the i-th argument's j-th row value
+    ///   args[i][j] represents the i-th argument's j-th row value
     ///
     /// # Returns
     ///

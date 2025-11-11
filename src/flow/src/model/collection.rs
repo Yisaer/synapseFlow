@@ -1,6 +1,9 @@
 use std::any::Any;
 use datatypes::{Schema, Value};
 
+/// Type alias for filter predicate function
+pub type FilterPredicate = Box<dyn Fn(&dyn crate::model::Row) -> bool + Send + Sync>;
+
 /// Collection trait defines the interface for multi-row data structures
 /// 
 /// This trait provides methods to access and manipulate collections of data,
@@ -44,7 +47,7 @@ pub trait Collection: Send + Sync + Any {
     fn take(&self, indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError>;
     
     /// Filter rows based on a predicate function (boxed version for dyn compatibility)
-    fn filter_boxed(&self, predicate: Box<dyn Fn(&dyn crate::model::Row) -> bool + Send + Sync>) -> Result<Box<dyn Collection>, CollectionError>;
+    fn filter_boxed(&self, predicate: FilterPredicate) -> Result<Box<dyn Collection>, CollectionError>; 
     
     /// Get all columns as a slice
     fn columns(&self) -> &[Column];
