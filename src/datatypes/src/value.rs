@@ -111,4 +111,25 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+    
+    /// Get the datatype of this value
+    pub fn datatype(&self) -> ConcreteDatatype {
+        match self {
+            Value::Null => ConcreteDatatype::Null,
+            Value::Float32(_) => ConcreteDatatype::Float32(crate::types::Float32Type),
+            Value::Float64(_) => ConcreteDatatype::Float64(crate::types::Float64Type),
+            Value::Int8(_) => ConcreteDatatype::Int8(crate::types::Int8Type),
+            Value::Int16(_) => ConcreteDatatype::Int16(crate::types::Int16Type),
+            Value::Int32(_) => ConcreteDatatype::Int32(crate::types::Int32Type),
+            Value::Int64(_) => ConcreteDatatype::Int64(crate::types::Int64Type),
+            Value::Uint8(_) => ConcreteDatatype::Uint8(crate::types::Uint8Type),
+            Value::Uint16(_) => ConcreteDatatype::Uint16(crate::types::Uint16Type),
+            Value::Uint32(_) => ConcreteDatatype::Uint32(crate::types::Uint32Type),
+            Value::Uint64(_) => ConcreteDatatype::Uint64(crate::types::Uint64Type),
+            Value::String(_) => ConcreteDatatype::String(crate::types::StringType),
+            Value::Bool(_) => ConcreteDatatype::Bool(crate::types::BooleanType),
+            Value::Struct(s) => ConcreteDatatype::Struct(s.fields().clone()),
+            Value::List(l) => ConcreteDatatype::List(crate::types::ListType::new(Arc::new(l.datatype().clone()))),
+        }
+    }
 }

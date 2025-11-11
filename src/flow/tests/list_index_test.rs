@@ -3,7 +3,7 @@ use datatypes::value::ListValue;
 use datatypes::types::ListType;
 use flow::expr::scalar::ScalarExpr;
 use flow::expr::evaluator::DataFusionEvaluator;
-use flow::model::Tuple;
+use flow::model::{RecordBatch, Column};
 use std::sync::Arc;
 
 /// Tests basic list index access functionality
@@ -26,12 +26,16 @@ fn test_list_index_simple() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression: test_table.list_col[0]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -41,11 +45,12 @@ fn test_list_index_simple() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the list index expression
-    let result = list_index_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the list index expression using vectorized evaluation
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::Int32(10));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(10));
 }
 
 /// Tests list middle element index access functionality
@@ -68,12 +73,16 @@ fn test_list_index_middle() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression: test_table.list_col[1]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -83,11 +92,12 @@ fn test_list_index_middle() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the list index expression
-    let result = list_index_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the list index expression using vectorized evaluation
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::Int32(20));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(20));
 }
 
 /// Tests list last element index access functionality
@@ -110,12 +120,16 @@ fn test_list_index_last() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression: test_table.list_col[2]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -125,11 +139,12 @@ fn test_list_index_last() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the list index expression
-    let result = list_index_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the list index expression using vectorized evaluation
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::Int32(30));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(30));
 }
 
 /// Tests string list index access functionality
@@ -151,12 +166,16 @@ fn test_list_index_string_list() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression: test_table.list_col[1]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -166,11 +185,12 @@ fn test_list_index_string_list() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the list index expression
-    let result = list_index_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the list index expression using vectorized evaluation
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::String("world".to_string()));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::String("world".to_string()));
 }
 
 /// Tests list out-of-bounds index access error handling
@@ -193,12 +213,16 @@ fn test_list_index_out_of_bounds() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression: test_table.list_col[3] (out of bounds)
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -209,11 +233,11 @@ fn test_list_index_out_of_bounds() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the list index expression - should fail
-    let result = list_index_expr.eval(&evaluator, &tuple);
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
     
     // Verify error
-    assert!(result.is_err());
-    let error = result.unwrap_err();
+    assert!(results.is_err());
+    let error = results.unwrap_err();
     assert!(matches!(error, flow::expr::func::EvalError::ListIndexOutOfBounds { .. }));
 }
 
@@ -237,12 +261,16 @@ fn test_list_index_negative_index() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression: test_table.list_col[-1] (negative index)
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -253,11 +281,11 @@ fn test_list_index_negative_index() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the list index expression - should fail
-    let result = list_index_expr.eval(&evaluator, &tuple);
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
     
     // Verify error
-    assert!(result.is_err());
-    let error = result.unwrap_err();
+    assert!(results.is_err());
+    let error = results.unwrap_err();
     assert!(matches!(error, flow::expr::func::EvalError::ListIndexOutOfBounds { .. }));
 }
 
@@ -268,12 +296,16 @@ fn test_list_index_negative_index() {
 #[test]
 fn test_list_index_not_list() {
     // Create schema for the tuple with Int32 value
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("int_col".to_string(), "test_table".to_string(), ConcreteDatatype::Int32(Int32Type)),
     ]);
 
-    // Create a tuple with an Int32 value
-    let tuple = Tuple::from_values(schema, vec![Value::Int32(42)]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "int_col".to_string(), "test_table".to_string(),
+        vec![Value::Int32(42)]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression on non-list value: test_table.int_col[0]
     let column_expr = ScalarExpr::column("test_table", "int_col");
@@ -284,11 +316,11 @@ fn test_list_index_not_list() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the list index expression - should fail
-    let result = list_index_expr.eval(&evaluator, &tuple);
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
     
     // Verify error
-    assert!(result.is_err());
-    let error = result.unwrap_err();
+    assert!(results.is_err());
+    let error = results.unwrap_err();
     assert!(matches!(error, flow::expr::func::EvalError::TypeMismatch { .. }));
 }
 
@@ -312,12 +344,16 @@ fn test_list_index_invalid_index_type() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create list index expression with non-integer index: test_table.list_col["hello"]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -328,11 +364,11 @@ fn test_list_index_invalid_index_type() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the list index expression - should fail
-    let result = list_index_expr.eval(&evaluator, &tuple);
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
     
     // Verify error
-    assert!(result.is_err());
-    let error = result.unwrap_err();
+    assert!(results.is_err());
+    let error = results.unwrap_err();
     assert!(matches!(error, flow::expr::func::EvalError::InvalidIndexType { .. }));
 }
 
@@ -358,13 +394,21 @@ fn test_list_index_dynamic_index() {
     ));
 
     // Create schema for the tuple with both list and index
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
         ColumnSchema::new("index_col".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(datatypes::Int64Type)),
     ]);
 
-    // Create a tuple with the list value and index value
-    let tuple = Tuple::from_values(schema, vec![list_value, Value::Int64(3)]);
+    // Create a single-row collection for vectorized testing with both list and index columns
+    let list_column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let index_column = Column::new(
+        "index_col".to_string(), "test_table".to_string(),
+        vec![Value::Int64(3)]
+    );
+    let collection = RecordBatch::new( vec![list_column, index_column]).unwrap();
 
     // Create list index expression: test_table.list_col[test_table.index_col] where index_col = 3
     let list_expr = ScalarExpr::column("test_table", "list_col");
@@ -374,9 +418,10 @@ fn test_list_index_dynamic_index() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the list index expression
-    let result = list_index_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the list index expression using vectorized evaluation
+    let results = list_index_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result (index 3 should be 40)
-    assert_eq!(result, Value::Int32(40));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(40));
 }

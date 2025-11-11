@@ -86,10 +86,11 @@ impl StreamSqlParser {
             }
         }
 
-        // Extract HAVING clause if present
+        // Extract WHERE and HAVING clauses if present
+        let where_condition = select.selection.clone();
         let having = select.having.clone();
 
-        Ok(SelectStmt::with_fields_and_having(select_fields, having))
+        Ok(SelectStmt::with_fields_and_conditions(select_fields, where_condition, having))
     }
 }
 

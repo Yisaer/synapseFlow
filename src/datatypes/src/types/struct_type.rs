@@ -87,6 +87,7 @@ impl DataType for StructType {
 
 fn get_type_name(dt: &ConcreteDatatype) -> String {
     match dt {
+        ConcreteDatatype::Null => "Null",
         ConcreteDatatype::Float32(_) => "Float32",
         ConcreteDatatype::Float64(_) => "Float64",
         ConcreteDatatype::Int8(_) => "Int8",
@@ -107,6 +108,7 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
 
 fn get_default_value(dt: &ConcreteDatatype) -> Value {
     match dt {
+        ConcreteDatatype::Null => Value::Null,
         ConcreteDatatype::Int8(_) => Value::Int8(0),
         ConcreteDatatype::Int16(_) => Value::Int16(0),
         ConcreteDatatype::Int32(_) => Value::Int32(0),

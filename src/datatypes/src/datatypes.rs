@@ -17,6 +17,8 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
 /// Concrete data type definition
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConcreteDatatype {
+    /// Null type
+    Null,
     /// 32-bit floating point number
     Float32(Float32Type),
     /// 64-bit floating point number

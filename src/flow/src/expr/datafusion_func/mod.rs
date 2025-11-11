@@ -11,7 +11,6 @@ pub use adapter::{
     concrete_datatype_to_arrow_type, 
     scalar_value_to_value, 
     value_to_scalar_value,
-    tuple_to_record_batch,
     flow_schema_to_arrow_schema,
     create_df_function_call,
     AdapterError

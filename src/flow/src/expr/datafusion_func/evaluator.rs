@@ -1,23 +1,16 @@
 //! DataFusion-based expression evaluator for flow tuples
 
-use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 use datafusion::execution::context::SessionContext;
 use datafusion_common::{DataFusionError, Result as DataFusionResult, ScalarValue, ToDFSchema};
-use datafusion_expr::{Expr, execution_props::ExecutionProps, lit};
+use datafusion_expr::{lit, Expr, ColumnarValue};
 use datatypes::{Value, ListValue, ConcreteDatatype};
-use std::any::Any;
-use std::sync::Arc;
 
-use crate::expr::datafusion_func::adapter::*;
-use crate::expr::scalar::ScalarExpr;
-use crate::model::Row;
-use crate::tuple::Tuple;
+use crate::model::Collection;
 
 /// DataFusion-based expression evaluator
 pub struct DataFusionEvaluator {
     session_ctx: SessionContext,
-    #[allow(dead_code)]
-    execution_props: ExecutionProps,
 }
 
 impl DataFusionEvaluator {
@@ -25,116 +18,72 @@ impl DataFusionEvaluator {
     pub fn new() -> Self {
         Self {
             session_ctx: SessionContext::new(),
-            execution_props: ExecutionProps::new(),
         }
     }
 
-    /// Evaluate a ScalarExpr against a Tuple using DataFusion
-    /// This method should only handle CallDf expressions, as per greptimedb design
-    pub fn evaluate_expr(&self, expr: &ScalarExpr, row: &dyn Row) -> DataFusionResult<Value> {
-        match expr {
-            ScalarExpr::CallDf { function_name, args } => {
-                // Only handle CallDf expressions - this is the main purpose of DataFusionEvaluator
-                self.evaluate_df_function(function_name, args, row)
-            }
-            _ => {
-                // For non-CallDf expressions, we should not handle them here
-                // This should ideally be an error, but for compatibility we'll delegate to regular eval
-                // In a strict greptimedb design, this would return an error
-                Err(DataFusionError::Plan(format!(
-                    "DataFusionEvaluator should only handle CallDf expressions, got {:?}", 
-                    std::mem::discriminant(expr)
-                )))
-            }
+    /// Evaluate a DataFusion function by name with vectorized input (true vectorized evaluation)
+    /// 
+    /// # Arguments
+    /// 
+    /// * `function_name` - Name of the DataFusion function to call
+    /// * `args` - Vector of argument vectors, where args[i][j] is the i-th argument's j-th row value
+    /// * `collection` - The collection providing context (row count, etc.)
+    pub fn evaluate_df_function_vectorized(&self, function_name: &str, args: &[Vec<Value>], collection: &dyn Collection) -> DataFusionResult<Vec<Value>> {
+        if args.is_empty() {
+            return Ok(vec![]);
         }
-    }
-
-    /// Evaluate a DataFusion function by name
-    pub fn evaluate_df_function(&self, function_name: &str, args: &[ScalarExpr], row: &dyn Row) -> DataFusionResult<Value> {
-        // First, evaluate all arguments using regular ScalarExpr::eval to get their values
-        let mut arg_values = Vec::new();
-        for arg in args {
-            // Use regular ScalarExpr evaluation for arguments
-            match arg.eval(self, row) {
-                Ok(value) => arg_values.push(value),
-                Err(eval_error) => return Err(DataFusionError::Execution(format!("Failed to evaluate argument: {}", eval_error))),
+        
+        let num_rows = collection.num_rows();
+        if num_rows == 0 {
+            return Ok(vec![]);
+        }
+        
+        // Validate all argument vectors have the same length
+        for (i, arg_vec) in args.iter().enumerate() {
+            if arg_vec.len() != num_rows {
+                return Err(DataFusionError::Execution(format!(
+                    "Argument {} has {} values, expected {} (all arguments must have the same length)",
+                    i, arg_vec.len(), num_rows
+                )));
             }
         }
         
-        // Convert row to RecordBatch - for now we assume it's a Tuple
-        let record_batch = if let Some(tuple) = (row as &dyn Any).downcast_ref::<Tuple>() {
-            tuple_to_record_batch(tuple)?
-        } else {
-            return Err(DataFusionError::NotImplemented(
-                "evaluate_df_function currently only supports Tuple rows".to_string()
-            ));
-        };
+        // Convert arguments to DataFusion format and evaluate row by row
+        // TODO: This could be optimized to process the entire batch at once
+        let mut results = Vec::with_capacity(num_rows);
         
-        // Convert the evaluated argument values to DataFusion literals
-        let df_args: DataFusionResult<Vec<Expr>> = arg_values
-            .iter()
-            .map(|value| {
+        for row_idx in 0..num_rows {
+            // Build arguments for this row
+            let mut row_args = Vec::new();
+            for arg_vec in args {
+                let value = &arg_vec[row_idx];
                 let scalar_value = value_to_scalar_value(value)?;
-                Ok(lit(scalar_value))
-            })
-            .collect();
-        let df_args = df_args?;
-        
-        // Create the DataFusion function call
-        let df_expr = crate::expr::datafusion_func::adapter::create_df_function_call(function_name.to_string(), df_args)?;
-        
-        // Create a physical expression and evaluate
-        let df_schema = record_batch.schema();
-        let df_schema_ref = df_schema.to_dfschema_ref()?;
-        let physical_expr = self.session_ctx.create_physical_expr(df_expr, &df_schema_ref)?;
-        
-        // Evaluate the expression
-        let result = physical_expr.evaluate(&record_batch)?;
-        
-        // Convert the result back to flow Value
-        self.convert_columnar_value_to_flow_value(result)
-    }
-
-    /// Evaluate multiple expressions against a row
-    pub fn evaluate_exprs(&self, exprs: &[ScalarExpr], row: &dyn Row) -> DataFusionResult<Vec<Value>> {
-        exprs.iter()
-            .map(|expr| self.evaluate_expr(expr, row))
-            .collect()
-    }
-
-    /// Evaluate a DataFusion expression directly against a row
-    pub fn evaluate_df_expr(&self, expr: Expr, row: &dyn Row) -> DataFusionResult<Value> {
-        // For now, we need to convert the row to a RecordBatch for DataFusion evaluation
-        // This requires specific knowledge of the row implementation
-        // In the future, we could add a method to Row trait to convert to RecordBatch
-        
-        // Try to downcast to Tuple for now
-        use std::any::Any;
-        if let Some(tuple) = (row as &dyn Any).downcast_ref::<Tuple>() {
-            // Convert tuple to RecordBatch
-            let record_batch = tuple_to_record_batch(tuple)?;
+                row_args.push(lit(scalar_value));
+            }
             
-            // Create a physical expression from the logical expression
-            let df_schema = record_batch.schema();
+            // Create the function call
+            let df_expr = create_df_function_call(function_name.to_string(), row_args)?;
+            
+            // Create a minimal single-row collection for evaluation
+            let single_row_collection = self.create_single_row_collection()?;
+            
+            // Evaluate using DataFusion
+            let df_schema = single_row_collection.schema();
             let df_schema_ref = df_schema.to_dfschema_ref()?;
-            let physical_expr = self.session_ctx.create_physical_expr(expr, &df_schema_ref)?;
+            let physical_expr = self.session_ctx.create_physical_expr(df_expr, &df_schema_ref)?;
             
-            // Evaluate the expression
-            let result = physical_expr.evaluate(&record_batch)?;
-            
-            // Convert the result back to flow Value
-            self.convert_columnar_value_to_flow_value(result)
-        } else {
-            Err(DataFusionError::NotImplemented(
-                "evaluate_df_expr currently only supports Tuple rows. Consider adding a to_record_batch() method to Row trait".to_string()
-            ))
+            let result = physical_expr.evaluate(&single_row_collection)?;
+            let value = self.convert_columnar_value_to_flow_value(result)?;
+            results.push(value);
         }
+        
+        Ok(results)
     }
 
     /// Convert DataFusion ColumnarValue to flow Value
-    fn convert_columnar_value_to_flow_value(&self, result: datafusion_expr::ColumnarValue) -> DataFusionResult<Value> {
+    fn convert_columnar_value_to_flow_value(&self, result: ColumnarValue) -> DataFusionResult<Value> {
         match result {
-            datafusion_expr::ColumnarValue::Array(array) => {
+            ColumnarValue::Array(array) => {
                 match array.len() {
                     0 => {
                         // Empty array should return Null
@@ -151,50 +100,15 @@ impl DataFusionEvaluator {
                             values.push(self.array_element_to_value(&array, i)?);
                         }
                         
-                        // Determine the datatype from the first element, or use a default
-                        let datatype = if let Some(first_value) = values.first() {
-                            Arc::new(Self::concrete_datatype_from_value(first_value))
-                        } else {
-                            // For empty arrays, we could try to infer from Arrow type, but for now use Int64 as default
-                            Arc::new(ConcreteDatatype::Int64(::datatypes::Int64Type))
-                        };
+                        // Determine the datatype from the Arrow array type
+                        let datatype = Arc::new(arrow_type_to_concrete_datatype(array.data_type())?);
                         
                         Ok(Value::List(ListValue::new(values, datatype)))
                     }
                 }
             }
-            datafusion_expr::ColumnarValue::Scalar(scalar) => {
+            ColumnarValue::Scalar(scalar) => {
                 scalar_value_to_value(&scalar)
-            }
-        }
-    }
-    
-    /// Infer ConcreteDatatype from a Value
-    fn concrete_datatype_from_value(value: &Value) -> ConcreteDatatype {
-        match value {
-            Value::Int8(_) => ConcreteDatatype::Int8(::datatypes::Int8Type),
-            Value::Int16(_) => ConcreteDatatype::Int16(::datatypes::Int16Type),
-            Value::Int32(_) => ConcreteDatatype::Int32(::datatypes::Int32Type),
-            Value::Int64(_) => ConcreteDatatype::Int64(::datatypes::Int64Type),
-            Value::Uint8(_) => ConcreteDatatype::Uint8(::datatypes::Uint8Type),
-            Value::Uint16(_) => ConcreteDatatype::Uint16(::datatypes::Uint16Type),
-            Value::Uint32(_) => ConcreteDatatype::Uint32(::datatypes::Uint32Type),
-            Value::Uint64(_) => ConcreteDatatype::Uint64(::datatypes::Uint64Type),
-            Value::Float32(_) => ConcreteDatatype::Float32(::datatypes::Float32Type),
-            Value::Float64(_) => ConcreteDatatype::Float64(::datatypes::Float64Type),
-            Value::String(_) => ConcreteDatatype::String(::datatypes::StringType),
-            Value::Bool(_) => ConcreteDatatype::Bool(::datatypes::BooleanType),
-            Value::Null => {
-                // For null values, default to Int64
-                ConcreteDatatype::Int64(::datatypes::Int64Type)
-            }
-            Value::Struct(_) => {
-                // For struct, we would need more context, default to empty struct
-                ConcreteDatatype::Struct(::datatypes::StructType::new(Arc::new(vec![])))
-            }
-            Value::List(list_val) => {
-                // For list, use the existing datatype
-                list_val.datatype().clone()
             }
         }
     }
@@ -256,14 +170,22 @@ impl DataFusionEvaluator {
         };
         scalar_value_to_value(&scalar_value)
     }
-
-    /// Create a RecordBatch from multiple tuples for batch evaluation
-    pub fn tuples_to_record_batch(_tuples: &[Tuple]) -> DataFusionResult<RecordBatch> {
-        // For now, this is not implemented with the new Tuple design
-        Err(DataFusionError::NotImplemented(
-            "Batch evaluation not yet implemented for the new Tuple design".to_string()
-        ))
+    
+    /// Create a minimal single-row collection for DataFusion evaluation
+    fn create_single_row_collection(&self) -> DataFusionResult<arrow::record_batch::RecordBatch> {
+        // Create a minimal RecordBatch with a single dummy column
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("dummy", arrow::datatypes::DataType::Int64, true)
+        ]);
+        
+        let int_array = arrow::array::Int64Array::from(vec![Some(0i64)]);
+        
+        arrow::record_batch::RecordBatch::try_new(
+            std::sync::Arc::new(schema),
+            vec![std::sync::Arc::new(int_array)]
+        ).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
+
 }
 
 impl Default for DataFusionEvaluator {
@@ -275,60 +197,210 @@ impl Default for DataFusionEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datatypes::{ColumnSchema, Int64Type, StringType, Float64Type, BooleanType, ConcreteDatatype};
-
-    fn create_test_tuple() -> Tuple {
-        let schema = datatypes::Schema::new(vec![
-            ColumnSchema::new("id".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("name".to_string(), "test_table".to_string(), ConcreteDatatype::String(StringType)),
-            ColumnSchema::new("age".to_string(), "test_table".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("score".to_string(), "test_table".to_string(), ConcreteDatatype::Float64(Float64Type)),
-            ColumnSchema::new("active".to_string(), "test_table".to_string(), ConcreteDatatype::Bool(BooleanType)),
-        ]);
-
-        let values = vec![
-            Value::Int64(1),
-            Value::String("Alice".to_string()),
-            Value::Int64(25),
-            Value::Float64(98.5),
-            Value::Bool(true),
-        ];
-
-        Tuple::from_values(schema, values)
-    }
+    use crate::model::{Column, RecordBatch};
+    use datatypes::Value;
 
     #[test]
-    fn test_basic_evaluation() {
-        // Note: DataFusionEvaluator should only handle CallDf expressions
-        // Basic column references and literals should be handled by ScalarExpr::eval directly
+    fn test_concat_function_vectorized() {
         let evaluator = DataFusionEvaluator::new();
-        let tuple = create_test_tuple();
-
-        // Test column reference using direct eval (with DataFusionEvaluator)
-        let col_expr = ScalarExpr::column("test_table", "id");
-        let result = col_expr.eval(&evaluator, &tuple).unwrap();
-        assert_eq!(result, Value::Int64(1));
-
-        // Test literal using direct eval (with DataFusionEvaluator)
-        let lit_expr = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
-        let result = lit_expr.eval(&evaluator, &tuple).unwrap();
-        assert_eq!(result, Value::Int64(42));
-    }
-
-    #[test]
-    fn test_concat_function() {
-        let evaluator = DataFusionEvaluator::new();
-        let tuple = create_test_tuple();
-
-        // Test concat function via CallDf
-        let name_col = ScalarExpr::column("test_table", "name"); // name column
-        let lit_expr = ScalarExpr::literal(Value::String(" Smith".to_string()), ConcreteDatatype::String(StringType));
-        let concat_expr = ScalarExpr::CallDf {
-            function_name: "concat".to_string(),
-            args: vec![name_col, lit_expr],
-        };
         
-        let result = evaluator.evaluate_expr(&concat_expr, &tuple).unwrap();
-        assert_eq!(result, Value::String("Alice Smith".to_string()));
+        // Create test data: ["Hello", "World"] and [" ", " "]
+        let col1 = Column::new(
+            "col1".to_string(),
+            "test".to_string(),
+            vec![
+                Value::String("Hello".to_string()),
+                Value::String("World".to_string())
+            ]
+        );
+        let col2 = Column::new(
+            "col2".to_string(),
+            "test".to_string(),
+            vec![
+                Value::String(" ".to_string()),
+                Value::String(" ".to_string())
+            ]
+        );
+        
+        let collection = RecordBatch::new(vec![col1, col2]).unwrap();
+        
+        // Build arguments: two string columns
+        let arg1_values = vec![
+            Value::String("Hello".to_string()),
+            Value::String("World".to_string())
+        ];
+        let arg2_values = vec![
+            Value::String(" ".to_string()),
+            Value::String(" ".to_string())
+        ];
+        let arg3_values = vec![
+            Value::String("!".to_string()),
+            Value::String("!".to_string())
+        ];
+        
+        let args = vec![arg1_values, arg2_values, arg3_values];
+        
+        // Evaluate concat function
+        let results = evaluator.evaluate_df_function_vectorized("concat", &args, &collection).unwrap();
+        
+        // Verify results
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], Value::String("Hello !".to_string()));
+        assert_eq!(results[1], Value::String("World !".to_string()));
+    }
+    
+    #[test]
+    fn test_upper_function_vectorized() {
+        let evaluator = DataFusionEvaluator::new();
+        
+        // Create test data
+        let col = Column::new(
+            "col".to_string(),
+            "test".to_string(),
+            vec![
+                Value::String("hello".to_string()),
+                Value::String("world".to_string())
+            ]
+        );
+        
+        let collection = RecordBatch::new(vec![col]).unwrap();
+        
+        // Build arguments
+        let args = vec![
+            vec![
+                Value::String("hello".to_string()),
+                Value::String("world".to_string())
+            ]
+        ];
+        
+        // Evaluate upper function
+        let results = evaluator.evaluate_df_function_vectorized("upper", &args, &collection).unwrap();
+        
+        // Verify results
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], Value::String("HELLO".to_string()));
+        assert_eq!(results[1], Value::String("WORLD".to_string()));
+    }
+}
+
+/// Convert flow Value to DataFusion ScalarValue
+fn value_to_scalar_value(value: &Value) -> DataFusionResult<ScalarValue> {
+    match value {
+        Value::Null => Err(DataFusionError::NotImplemented(
+            "Null value conversion to ScalarValue requires type information".to_string()
+        )),
+        Value::Int8(v) => Ok(ScalarValue::Int8(Some(*v))),
+        Value::Int16(v) => Ok(ScalarValue::Int16(Some(*v))),
+        Value::Int32(v) => Ok(ScalarValue::Int32(Some(*v))),
+        Value::Int64(v) => Ok(ScalarValue::Int64(Some(*v))),
+        Value::Float32(v) => Ok(ScalarValue::Float32(Some(*v))),
+        Value::Float64(v) => Ok(ScalarValue::Float64(Some(*v))),
+        Value::Uint8(v) => Ok(ScalarValue::UInt8(Some(*v))),
+        Value::Uint16(v) => Ok(ScalarValue::UInt16(Some(*v))),
+        Value::Uint32(v) => Ok(ScalarValue::UInt32(Some(*v))),
+        Value::Uint64(v) => Ok(ScalarValue::UInt64(Some(*v))),
+        Value::String(v) => Ok(ScalarValue::Utf8(Some(v.clone()))),
+        Value::Bool(v) => Ok(ScalarValue::Boolean(Some(*v))),
+        Value::Struct(_) => Err(DataFusionError::NotImplemented(
+            "Struct value conversion not implemented".to_string()
+        )),
+        Value::List(_) => Err(DataFusionError::NotImplemented(
+            "List value conversion not implemented".to_string()
+        )),
+    }
+}
+
+/// Convert DataFusion ScalarValue to flow Value
+fn scalar_value_to_value(scalar: &ScalarValue) -> DataFusionResult<Value> {
+    match scalar {
+        ScalarValue::Int8(None) | ScalarValue::Int16(None) | ScalarValue::Int32(None) | ScalarValue::Int64(None) |
+        ScalarValue::Float32(None) | ScalarValue::Float64(None) | ScalarValue::UInt8(None) | ScalarValue::UInt16(None) |
+        ScalarValue::UInt32(None) | ScalarValue::UInt64(None) | ScalarValue::Utf8(None) | ScalarValue::Boolean(None) => {
+            Ok(Value::Null)
+        },
+        ScalarValue::Int8(Some(v)) => Ok(Value::Int8(*v)),
+        ScalarValue::Int16(Some(v)) => Ok(Value::Int16(*v)),
+        ScalarValue::Int32(Some(v)) => Ok(Value::Int32(*v)),
+        ScalarValue::Int64(Some(v)) => Ok(Value::Int64(*v)),
+        ScalarValue::Float32(Some(v)) => Ok(Value::Float32(*v)),
+        ScalarValue::Float64(Some(v)) => Ok(Value::Float64(*v)),
+        ScalarValue::UInt8(Some(v)) => Ok(Value::Uint8(*v)),
+        ScalarValue::UInt16(Some(v)) => Ok(Value::Uint16(*v)),
+        ScalarValue::UInt32(Some(v)) => Ok(Value::Uint32(*v)),
+        ScalarValue::UInt64(Some(v)) => Ok(Value::Uint64(*v)),
+        ScalarValue::Utf8(Some(v)) => Ok(Value::String(v.clone())),
+        ScalarValue::Boolean(Some(v)) => Ok(Value::Bool(*v)),
+        _ => Err(DataFusionError::NotImplemented(format!("Unsupported ScalarValue type: {:?}", scalar))),
+    }
+}
+
+/// Create a DataFusion function call by name
+fn create_df_function_call(function_name: String, args: Vec<Expr>) -> DataFusionResult<Expr> {
+    match function_name.as_str() {
+        "concat" => {
+            // Use DataFusion's built-in concat function
+            Ok(datafusion::functions::string::concat().call(args))
+        }
+        "upper" => {
+            // Use DataFusion's upper function
+            Ok(datafusion::functions::string::upper().call(args))
+        }
+        "lower" => {
+            // Use DataFusion's lower function
+            Ok(datafusion::functions::string::lower().call(args))
+        }
+        "trim" => {
+            // Use DataFusion's btrim function (trim is not available in this version)
+            Ok(datafusion::functions::string::btrim().call(args))
+        }
+        "length" => {
+            // Use DataFusion's character_length function from unicode module
+            Ok(datafusion::functions::unicode::character_length().call(args))
+        }
+        "substr" | "substring" => {
+            // Use DataFusion's substr function from unicode module
+            Ok(datafusion::functions::unicode::substr().call(args))
+        }
+        "round" => {
+            // Use DataFusion's round function
+            Ok(datafusion::functions::math::round().call(args))
+        }
+        "abs" => {
+            // Use DataFusion's abs function
+            Ok(datafusion::functions::math::abs().call(args))
+        }
+        "sqrt" => {
+            // Use DataFusion's sqrt function
+            Ok(datafusion::functions::math::sqrt().call(args))
+        }
+        _ => {
+            // For unknown functions, try to create a scalar function call
+            // This allows for extensibility - users can register custom functions
+            Err(DataFusionError::Plan(format!(
+                "Unknown function: {}. Supported functions: concat, upper, lower, trim, length, substr, round, abs, sqrt",
+                function_name
+            )))
+        }
+    }
+}
+
+/// Convert Arrow DataType to ConcreteDatatype
+fn arrow_type_to_concrete_datatype(arrow_type: &arrow::datatypes::DataType) -> DataFusionResult<ConcreteDatatype> {
+    match arrow_type {
+        arrow::datatypes::DataType::Int8 => Ok(ConcreteDatatype::Int8(::datatypes::Int8Type)),
+        arrow::datatypes::DataType::Int16 => Ok(ConcreteDatatype::Int16(::datatypes::Int16Type)),
+        arrow::datatypes::DataType::Int32 => Ok(ConcreteDatatype::Int32(::datatypes::Int32Type)),
+        arrow::datatypes::DataType::Int64 => Ok(ConcreteDatatype::Int64(::datatypes::Int64Type)),
+        arrow::datatypes::DataType::UInt8 => Ok(ConcreteDatatype::Uint8(::datatypes::Uint8Type)),
+        arrow::datatypes::DataType::UInt16 => Ok(ConcreteDatatype::Uint16(::datatypes::Uint16Type)),
+        arrow::datatypes::DataType::UInt32 => Ok(ConcreteDatatype::Uint32(::datatypes::Uint32Type)),
+        arrow::datatypes::DataType::UInt64 => Ok(ConcreteDatatype::Uint64(::datatypes::Uint64Type)),
+        arrow::datatypes::DataType::Float32 => Ok(ConcreteDatatype::Float32(::datatypes::Float32Type)),
+        arrow::datatypes::DataType::Float64 => Ok(ConcreteDatatype::Float64(::datatypes::Float64Type)),
+        arrow::datatypes::DataType::Utf8 => Ok(ConcreteDatatype::String(::datatypes::StringType)),
+        arrow::datatypes::DataType::Boolean => Ok(ConcreteDatatype::Bool(::datatypes::BooleanType)),
+        _ => Err(DataFusionError::NotImplemented(
+            format!("Arrow type {:?} conversion to ConcreteDatatype not implemented", arrow_type)
+        )),
     }
 }

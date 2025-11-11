@@ -1,11 +1,13 @@
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
-/// Represents a SELECT statement with its fields, optional HAVING clause, and aggregate mappings
+/// Represents a SELECT statement with its fields, optional WHERE and HAVING clauses, and aggregate mappings
 #[derive(Debug, Clone)]
 pub struct SelectStmt {
     /// The select fields/expressions
     pub select_fields: Vec<SelectField>,
+    /// Optional WHERE clause expression
+    pub where_condition: Option<Expr>,
     /// Optional HAVING clause expression
     pub having: Option<Expr>,
     /// Aggregate function mappings: column name -> original aggregate expression
@@ -22,28 +24,31 @@ pub struct SelectField {
 }
 
 impl SelectStmt {
-    /// Create a new SelectStmt with empty fields and no HAVING clause
+    /// Create a new SelectStmt with empty fields and no WHERE/HAVING clauses
     pub fn new() -> Self {
         Self {
             select_fields: Vec::new(),
+            where_condition: None,
             having: None,
             aggregate_mappings: HashMap::new(),
         }
     }
 
-    /// Create a new SelectStmt with given fields and no HAVING clause
+    /// Create a new SelectStmt with given fields and no WHERE/HAVING clauses
     pub fn with_fields(select_fields: Vec<SelectField>) -> Self {
         Self { 
             select_fields, 
+            where_condition: None,
             having: None,
             aggregate_mappings: HashMap::new(),
         }
     }
 
-    /// Create a new SelectStmt with given fields and HAVING clause
-    pub fn with_fields_and_having(select_fields: Vec<SelectField>, having: Option<Expr>) -> Self {
+    /// Create a new SelectStmt with given fields and WHERE/HAVING clauses
+    pub fn with_fields_and_conditions(select_fields: Vec<SelectField>, where_condition: Option<Expr>, having: Option<Expr>) -> Self {
         Self { 
             select_fields, 
+            where_condition,
             having,
             aggregate_mappings: HashMap::new(),
         }

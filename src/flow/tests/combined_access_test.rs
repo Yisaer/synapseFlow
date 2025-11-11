@@ -3,7 +3,7 @@ use datatypes::types::{StructField, StructType, ListType};
 use datatypes::value::{StructValue, ListValue};
 use flow::expr::scalar::ScalarExpr;
 use flow::expr::evaluator::DataFusionEvaluator;
-use flow::model::Tuple;
+use flow::model::{RecordBatch, Column};
 use std::sync::Arc;
 
 /// Tests combined struct field access followed by list index access
@@ -16,7 +16,7 @@ fn test_struct_field_then_list_index() {
     // Create struct type: struct { numbers: List<Int32>, name: String }
     let list_type = ListType::new(Arc::new(ConcreteDatatype::Int32(Int32Type)));
     let fields = Arc::new(vec![
-        StructField::new("numbers".to_string(), ConcreteDatatype::List(list_type), false),
+        StructField::new("numbers".to_string(), ConcreteDatatype::List(list_type.clone()), false),
         StructField::new("name".to_string(), ConcreteDatatype::String(StringType), false),
     ]);
     let struct_type = StructType::new(fields);
@@ -41,12 +41,16 @@ fn test_struct_field_then_list_index() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
-    // Create a tuple with the struct value
-    let tuple = Tuple::from_values(schema, vec![struct_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "struct_col".to_string(), "test_table".to_string(),
+        vec![struct_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create combined access expression: column(0).numbers[1]
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -57,11 +61,12 @@ fn test_struct_field_then_list_index() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the combined expression
-    let result = combined_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the combined expression using vectorized evaluation
+    let results = combined_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result (numbers[1] should be 200)
-    assert_eq!(result, Value::Int32(200));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(200));
 }
 
 /// Tests combined list index access followed by struct field access
@@ -113,12 +118,16 @@ fn test_list_index_then_struct_field() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_col".to_string(), "test_table".to_string(), ConcreteDatatype::List(list_type.clone())),
     ]);
 
-    // Create a tuple with the list value
-    let tuple = Tuple::from_values(schema, vec![list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_col".to_string(), "test_table".to_string(),
+        vec![list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create combined access expression: column(0)[1].y
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -129,11 +138,12 @@ fn test_list_index_then_struct_field() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the combined expression
-    let result = combined_expr.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the combined expression using vectorized evaluation
+    let results = combined_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result (list[1].y should be "second")
-    assert_eq!(result, Value::String("second".to_string()));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::String("second".to_string()));
 }
 
 /// Tests combined access functionality in complex nested structures
@@ -192,12 +202,16 @@ fn test_complex_nested_access() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("complex_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(outer_struct_type.clone())),
     ]);
 
-    // Create a tuple with the complex value
-    let tuple = Tuple::from_values(schema, vec![outer_struct_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "complex_col".to_string(), "test_table".to_string(),
+        vec![outer_struct_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create complex access expression: column(0).data[2].value
     let column_expr = ScalarExpr::column("test_table", "complex_col");
@@ -209,11 +223,12 @@ fn test_complex_nested_access() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the complex expression
-    let result = final_field_access.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the complex expression using vectorized evaluation
+    let results = final_field_access.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result (data[2].value should be 300)
-    assert_eq!(result, Value::Int32(300));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(300));
 }
 
 /// Tests multi-level index access functionality for nested lists (list of lists)
@@ -252,12 +267,16 @@ fn test_list_of_lists() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("list_of_lists".to_string(), "test_table".to_string(), ConcreteDatatype::List(outer_list_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("list_of_lists".to_string(), "test_table".to_string(), ConcreteDatatype::List(outer_list_type.clone())),
     ]);
 
-    // Create a tuple with the list of lists
-    let tuple = Tuple::from_values(schema, vec![outer_list_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "list_of_lists".to_string(), "test_table".to_string(),
+        vec![outer_list_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create nested list index expression: column(0)[1][2]
     let column_expr = ScalarExpr::column("test_table", "list_of_lists");
@@ -269,9 +288,10 @@ fn test_list_of_lists() {
     // Create evaluator
     let evaluator = DataFusionEvaluator::new();
 
-    // Evaluate the nested expression
-    let result = final_list_index.eval(&evaluator, &tuple).unwrap();
+    // Evaluate the nested expression using vectorized evaluation
+    let results = final_list_index.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result (list[1][2] should be 30)
-    assert_eq!(result, Value::Int32(30));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(30));
 }

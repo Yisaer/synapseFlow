@@ -1,5 +1,7 @@
 use super::func::{BinaryFunc, UnaryFunc};
 use super::scalar::ScalarExpr;
+use super::datafusion_func::adapter::DATAFUSION_FUNCTIONS;
+use super::custom_func::CUSTOM_FUNCTIONS;
 use datatypes::{
     BooleanType, ConcreteDatatype, Float64Type, Int64Type, StringType, Value,
 };
@@ -291,7 +293,22 @@ fn convert_function_call(
     name: &sqlparser::ast::ObjectName,
     args: &[FunctionArg],
 ) -> Result<ScalarExpr, ConversionError> {
+    use crate::expr::custom_func::ConcatFunc;
+    use std::sync::Arc;
+    
     let function_name = name.to_string();
+    
+    // Validate function name against allowed lists
+    let is_df_function = DATAFUSION_FUNCTIONS.contains(&function_name.as_str());
+    let is_custom_function = CUSTOM_FUNCTIONS.contains(&function_name.as_str());
+    
+    if !is_df_function && !is_custom_function {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "Unknown function: '{}'. Available DataFusion functions: {:?}. Available custom functions: {:?}",
+            function_name, DATAFUSION_FUNCTIONS, CUSTOM_FUNCTIONS
+        )));
+    }
+    
     let mut scalar_args = Vec::new();
 
     for arg in args {
@@ -312,7 +329,27 @@ fn convert_function_call(
             }
         }
     }
-
+    
+    // If function is in CUSTOM_FUNCTIONS, use CallFunc
+    if is_custom_function {
+        // Create the appropriate custom function based on name
+        let custom_func: Arc<dyn crate::expr::custom_func::CustomFunc> = match function_name.as_str() {
+            "concat" => Arc::new(ConcatFunc),
+            _ => {
+                return Err(ConversionError::UnsupportedExpression(format!(
+                    "Function '{}' is in CUSTOM_FUNCTIONS but not implemented",
+                    function_name
+                )));
+            }
+        };
+        
+        return Ok(ScalarExpr::CallFunc {
+            func: custom_func,
+            args: scalar_args,
+        });
+    }
+    
+    // Otherwise, use CallDf for DataFusion functions
     Ok(ScalarExpr::CallDf {
         function_name,
         args: scalar_args,

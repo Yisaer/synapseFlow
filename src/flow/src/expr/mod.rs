@@ -9,7 +9,7 @@ pub use context::EvalContext;
 pub use custom_func::ConcatFunc;
 pub use datafusion_func::*;
 pub use func::{BinaryFunc, UnaryFunc};
-pub use scalar::{CustomFunc, ScalarExpr};
+pub use scalar::{ScalarExpr};
 pub use sql_conversion::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar,
     extract_select_expressions,

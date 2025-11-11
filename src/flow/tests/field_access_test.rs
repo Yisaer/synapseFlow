@@ -3,7 +3,7 @@ use datatypes::types::{StructField, StructType};
 use datatypes::value::StructValue;
 use flow::expr::scalar::ScalarExpr;
 use flow::expr::evaluator::DataFusionEvaluator;
-use flow::model::Tuple;
+use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
 
 /// Tests basic struct field access functionality
@@ -29,12 +29,16 @@ fn test_field_access_simple() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
-    // Create a tuple with the struct value
-    let tuple = Tuple::from_values(schema, vec![struct_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "struct_col".to_string(), "test_table".to_string(),
+        vec![struct_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create field access expression: test_table.struct_col.x
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -44,10 +48,11 @@ fn test_field_access_simple() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the field access expression
-    let result = field_access_expr.eval(&evaluator, &tuple).unwrap();
+    let results = field_access_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::Int32(42));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(42));
 }
 
 /// Tests struct string field access functionality
@@ -73,12 +78,16 @@ fn test_field_access_string_field() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
-    // Create a tuple with the struct value
-    let tuple = Tuple::from_values(schema, vec![struct_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "struct_col".to_string(), "test_table".to_string(),
+        vec![struct_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create field access expression: test_table.struct_col.y
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -88,10 +97,11 @@ fn test_field_access_string_field() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the field access expression
-    let result = field_access_expr.eval(&evaluator, &tuple).unwrap();
+    let results = field_access_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::String("hello".to_string()));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::String("hello".to_string()));
 }
 
 /// Tests nested struct field access functionality
@@ -129,12 +139,16 @@ fn test_field_access_nested() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
-        ColumnSchema::new("outer_struct".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(outer_struct_type)),
+    let _schema = Schema::new(vec![
+        ColumnSchema::new("outer_struct".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(outer_struct_type.clone())),
     ]);
 
-    // Create a tuple with the outer struct value
-    let tuple = Tuple::from_values(schema, vec![outer_struct_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "outer_struct".to_string(), "test_table".to_string(),
+        vec![outer_struct_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create nested field access expression: test_table.outer_struct.inner.a
     let column_expr = ScalarExpr::column("test_table", "outer_struct");
@@ -145,10 +159,11 @@ fn test_field_access_nested() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the nested field access expression
-    let result = nested_access_expr.eval(&evaluator, &tuple).unwrap();
+    let results = nested_access_expr.eval_with_collection(&evaluator, &collection).unwrap();
     
     // Verify result
-    assert_eq!(result, Value::Int32(123));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0], Value::Int32(123));
 }
 
 /// Tests error handling when accessing non-existent struct fields
@@ -170,12 +185,16 @@ fn test_field_access_field_not_found() {
     ));
 
     // Create schema for the tuple
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("struct_col".to_string(), "test_table".to_string(), ConcreteDatatype::Struct(struct_type.clone())),
     ]);
 
-    // Create a tuple with the struct value
-    let tuple = Tuple::from_values(schema, vec![struct_value]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "struct_col".to_string(), "test_table".to_string(),
+        vec![struct_value]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create field access expression for non-existent field: test_table.struct_col.y
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -185,7 +204,7 @@ fn test_field_access_field_not_found() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the field access expression - should fail
-    let result = field_access_expr.eval(&evaluator, &tuple);
+    let result = field_access_expr.eval_with_collection(&evaluator, &collection);
     
     // Verify error
     assert!(result.is_err());
@@ -200,12 +219,16 @@ fn test_field_access_field_not_found() {
 #[test]
 fn test_field_access_not_struct() {
     // Create schema for the tuple
-    let schema = Schema::new(vec![
+    let _schema = Schema::new(vec![
         ColumnSchema::new("int_col".to_string(), "test_table".to_string(), ConcreteDatatype::Int32(Int32Type)),
     ]);
 
-    // Create a tuple with an Int32 value
-    let tuple = Tuple::from_values(schema, vec![Value::Int32(42)]);
+    // Create a single-row collection for vectorized testing
+    let column = Column::new(
+        "int_col".to_string(), "test_table".to_string(),
+        vec![Value::Int32(42)]
+    );
+    let collection = RecordBatch::new( vec![column]).unwrap();
 
     // Create field access expression on non-struct value: test_table.int_col.x
     let column_expr = ScalarExpr::column("test_table", "int_col");
@@ -215,7 +238,7 @@ fn test_field_access_not_struct() {
     let evaluator = DataFusionEvaluator::new();
 
     // Evaluate the field access expression - should fail
-    let result = field_access_expr.eval(&evaluator, &tuple);
+    let result = field_access_expr.eval_with_collection(&evaluator, &collection);
     
     // Verify error
     assert!(result.is_err());

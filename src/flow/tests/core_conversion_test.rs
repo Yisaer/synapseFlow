@@ -4,8 +4,8 @@
 //! Core flow: directly receive SelectStmt, convert to ScalarExpr, verify calculation results
 
 use flow::{StreamSqlConverter, DataFusionEvaluator, ScalarExpr};
-use flow::model::Tuple;
-use datatypes::Value;
+use flow::model::{RecordBatch, Column};
+use datatypes::{Value, ConcreteDatatype, Int64Type, ColumnSchema};
 use parser::parse_sql;
 use std::collections::HashMap;
 
@@ -81,17 +81,26 @@ fn test_core_conversion_flow() {
     let mut data = HashMap::new();
     data.insert(("default".to_string(), "a".to_string()), Value::Int64(5));  // a = 5
     data.insert(("default".to_string(), "b".to_string()), Value::Int64(3));  // b = 3
-    let tuple = Tuple::new(data);
     
     // Calculate first expression: a + b = 5 + 3 = 8
-    let result1 = expressions[0].eval(&evaluator, &tuple).expect("Calculation should succeed");
-    println!("Expression 1 (a+b) calculation result: {:?}", result1);
-    assert_eq!(result1, Value::Int64(8), "a+b should equal 8");
+    // Create single-row collection for vectorized evaluation
+    let _schema = datatypes::Schema::new(vec![
+        ColumnSchema::new("a".to_string(), "default".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), "default".to_string(), ConcreteDatatype::Int64(Int64Type)),
+    ]);
+    let collection = RecordBatch::new( vec![
+        Column::new("a".to_string(), "default".to_string(), vec![Value::Int64(5)]),
+        Column::new("b".to_string(), "default".to_string(), vec![Value::Int64(3)]),
+    ]).unwrap();
+    
+    let results1 = expressions[0].eval_with_collection(&evaluator, &collection).expect("Calculation should succeed");
+    println!("Expression 1 (a+b) calculation result: {:?}", results1);
+    assert_eq!(results1[0], Value::Int64(8), "a+b should equal 8");
     
     // Calculate second expression: 42 (literal)
-    let result2 = expressions[1].eval(&evaluator, &tuple).expect("Calculation should succeed");
-    println!("Expression 2 (42) calculation result: {:?}", result2);
-    assert_eq!(result2, Value::Int64(42), "Literal 42 should equal 42");
+    let results2 = expressions[1].eval_with_collection(&evaluator, &collection).expect("Calculation should succeed");
+    println!("Expression 2 (42) calculation result: {:?}", results2);
+    assert_eq!(results2[0], Value::Int64(42), "Literal 42 should equal 42");
     
     println!("Core conversion flow test completed!");
     println!("Verification result: parser → SelectStmt → StreamSqlConverter → ScalarExpr → Calculation Results");

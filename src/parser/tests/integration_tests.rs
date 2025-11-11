@@ -34,6 +34,101 @@ fn test_stream_dialect_basic_parsing() {
     }
 }
 
+// Demo test showing WHERE condition functionality
+#[test]
+fn demo_where_condition_functionality() {
+    println!("\n=== WHERE Condition Functionality Demo ===\n");
+    
+    let test_cases = vec![
+        ("Simple WHERE clause", "SELECT name FROM users WHERE age > 18"),
+        ("Complex WHERE with AND/OR", "SELECT id, name FROM products WHERE price < 100 AND category = 'electronics' OR featured = true"),
+        ("WHERE with function", "SELECT email FROM customers WHERE LENGTH(name) > 5"),
+        ("No WHERE clause", "SELECT name, age FROM users"),
+    ];
+    
+    for (description, sql) in test_cases {
+        println!("Test: {}", description);
+        println!("SQL: {}", sql);
+        
+        match parse_sql(sql) {
+            Ok(select_stmt) => {
+                println!("Parse successful!");
+                println!("Found {} SELECT fields", select_stmt.select_fields.len());
+                
+                // Check WHERE condition
+                match &select_stmt.where_condition {
+                    Some(where_expr) => {
+                        println!("WHERE condition present: {:?}", where_expr);
+                        match where_expr {
+                            Expr::BinaryOp { op, .. } => println!("  Type: Binary operation ({:?})", op),
+                            Expr::Function(func) => println!("  Type: Function call ('{}')", func.name),
+                            _ => println!("  Type: Other expression"),
+                        }
+                    }
+                    None => {
+                        println!("No WHERE condition (correctly set to None)");
+                    }
+                }
+                
+                // Check HAVING clause (should be None for these examples)
+                match &select_stmt.having {
+                    Some(having_expr) => println!("HAVING clause present: {:?}", having_expr),
+                    None => println!("No HAVING clause (correctly set to None)"),
+                }
+            }
+            Err(e) => {
+                println!("Parse failed: {}", e);
+            }
+        }
+        println!();
+    }
+    
+    println!("WHERE Condition Functionality Demo Complete!");
+}
+
+#[test]
+fn test_stream_dialect_where_condition_parsing() {
+    let sql = "SELECT id, name FROM users WHERE age >= 21 AND status = 'active' OR city = 'NYC'";
+    
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    
+    // Verify SELECT fields
+    assert_eq!(select_stmt.select_fields.len(), 2);
+    println!("✓ StreamDialect parsed {} SELECT fields", select_stmt.select_fields.len());
+    
+    // Verify WHERE condition is present and correct
+    assert!(select_stmt.where_condition.is_some(), "WHERE condition should be extracted");
+    
+    let where_expr = select_stmt.where_condition.as_ref().unwrap();
+    println!("✓ WHERE condition extracted: {:?}", where_expr);
+    
+    // Verify WHERE condition structure (should be a complex binary operation)
+    match where_expr {
+        Expr::BinaryOp { op, left, right } => {
+            println!("  WHERE is binary operation: {:?}", op);
+            println!("  Left operand: {:?}", left);
+            println!("  Right operand: {:?}", right);
+        }
+        _ => {
+            println!("  WHERE expression type: {:?}", where_expr);
+        }
+    }
+}
+
+#[test]
+fn test_stream_dialect_where_without_condition() {
+    let sql = "SELECT name, age FROM users";
+    
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    
+    // Verify SELECT fields
+    assert_eq!(select_stmt.select_fields.len(), 2);
+    
+    // Verify WHERE condition is None when no WHERE clause
+    assert!(select_stmt.where_condition.is_none(), "WHERE condition should be None when no WHERE clause");
+    println!("✓ WHERE condition correctly set to None for SQL without WHERE clause");
+}
+
 #[test]
 fn test_stream_dialect_tumblingwindow_parsing() {
     let tumbling_sql = r#"
@@ -225,9 +320,24 @@ fn test_stream_dialect_where_clause_expressions() {
     
     let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
     
-    // Should parse SELECT fields (WHERE clause is processed but not in select_fields)
+    // Should parse SELECT fields
     assert_eq!(select_stmt.select_fields.len(), 2); // name and age
     println!("✓ StreamDialect parsed {} fields from SELECT with WHERE", select_stmt.select_fields.len());
+    
+    // Verify WHERE condition is extracted
+    assert!(select_stmt.where_condition.is_some(), "WHERE condition should be present");
+    println!("✓ WHERE condition successfully extracted");
+    
+    // Verify the WHERE condition structure
+    match &select_stmt.where_condition {
+        Some(Expr::BinaryOp { op, .. }) => {
+            println!("  WHERE condition: Binary operation {:?}", op);
+        }
+        Some(expr) => {
+            println!("  WHERE condition: {:?}", expr);
+        }
+        None => panic!("WHERE condition should not be None"),
+    }
     
     // Verify the SELECT fields are correct
     for (i, field) in select_stmt.select_fields.iter().enumerate() {
