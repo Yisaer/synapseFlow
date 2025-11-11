@@ -121,6 +121,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_agg_replacement_expr_field_name() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT sum(a) + 1");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.select_fields.len(), 1);
+
+        let field = &select_stmt.select_fields[0];
+        assert_eq!(field.alias, Some("sum(a) + 1".to_string()));
+        assert_eq!(field.expr.to_string(), "col_1 + 1".to_string());
+    }
+
+    #[test]
     fn test_parse_simple_select() {
         let parser = StreamSqlParser::new();
         let result = parser.parse("SELECT a + b");
@@ -191,64 +204,6 @@ mod tests {
     }
 }
 
-/// Demo test showing the complete StreamDialect parser workflow
-#[cfg(test)]
-mod demo_tests {
-    use super::*;
-    
-    #[test]
-    fn demo_stream_dialect_parsing() {
-        println!("\n=== StreamDialect Parser Demo ===\n");
-        
-        let parser = StreamSqlParser::new();
-        
-        // Demo 1: Simple SELECT
-        println!("1. Simple SELECT:");
-        let sql1 = "SELECT a + b, c * 2, CONCAT(name, '_test') AS full_name";
-        println!("   SQL: {}", sql1);
-        
-        match parser.parse(sql1) {
-            Ok(select_stmt) => {
-                println!("   ✓ Parse successful!");
-                println!("   ✓ Found {} select fields", select_stmt.select_fields.len());
-                
-                for (i, field) in select_stmt.select_fields.iter().enumerate() {
-                    println!("   Field {}: {:?}", i + 1, field.expr);
-                    if let Some(alias) = &field.alias {
-                        println!("     Alias: {}", alias);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("   ✗ Parse failed: {}", e);
-            }
-        }
-        
-        // Demo 2: Complex expression
-        println!("\n2. Complex Expression:");
-        let sql2 = "SELECT (a + b) * c AS result";
-        println!("   SQL: {}", sql2);
-        
-        match parse_sql(sql2) {
-            Ok(select_stmt) => {
-                println!("   ✓ Parse successful!");
-                println!("   ✓ Found {} select fields", select_stmt.select_fields.len());
-                
-                for field in &select_stmt.select_fields {
-                    println!("   Field: {:?}", field.expr);
-                    if let Some(alias) = &field.alias {
-                        println!("     Alias: {}", alias);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("   ✗ Parse failed: {}", e);
-            }
-        }
-        
-        println!("\n✅ StreamDialect Parser Demo Complete!");
-    }
-}
 #[cfg(test)]
 mod source_info_tests {
     use super::*;

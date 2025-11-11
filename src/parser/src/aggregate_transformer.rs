@@ -21,7 +21,8 @@ pub fn transform_aggregate_functions(
     // Process select fields: extract aggregates and replace in one step
     for field in &mut select_stmt.select_fields {
         let (new_expr, field_aggregates) = extract_and_replace_aggregates(&field.expr, &mut replacement_counter)?;
-        
+
+        field.alias = Some(field.expr.to_string());
         // Update the field expression
         field.expr = new_expr;
         
@@ -191,8 +192,6 @@ mod tests {
 
     #[test]
     fn test_simple_aggregate_transformation() {
-        println!("\n=== Testing Simple Aggregate Transformation ===");
-        
         // Create a simple SELECT with aggregate
         let expr = Expr::Function(Function {
             name: ObjectName(vec![Ident::new("sum")]),
