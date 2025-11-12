@@ -1,78 +1,112 @@
-//! Control source processor - starting point for control signals
+//! ControlSourceProcessor - starting point for data flow
+//!
+//! This processor is responsible for receiving and sending control signals
+//! that coordinate the entire stream processing pipeline.
 
-use async_trait::async_trait;
 use tokio::sync::mpsc;
-use crate::processor::{StreamProcessor, StreamData, ControlSignal, ProcessorHandle, stream_processor::utils};
+use crate::processor::{Processor, ProcessorError, StreamData};
 
-/// ControlSourceProcessor - generates and forwards control signals
+/// ControlSourceProcessor - handles control signals for the pipeline
+///
+/// This processor acts as the starting point of the data flow. It can:
+/// - Receive StreamData (which may contain control signals, data, or errors) from inputs
+/// - Forward StreamData to downstream processors
+/// - Coordinate the start/end of stream processing
 pub struct ControlSourceProcessor {
-    /// Number of output channels
-    output_count: usize,
-    /// Processor name for debugging
-    processor_name: String,
+    /// Processor identifier
+    id: String,
+    /// Input channels for receiving StreamData
+    inputs: Vec<mpsc::Receiver<StreamData>>,
+    /// Output channels for sending StreamData downstream
+    outputs: Vec<mpsc::Sender<StreamData>>,
 }
 
 impl ControlSourceProcessor {
     /// Create a new ControlSourceProcessor
-    pub fn new(output_count: usize) -> Self {
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
-            output_count,
-            processor_name: "ControlSourceProcessor".to_string(),
+            id: id.into(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
     
-    /// Create with custom name
-    pub fn with_name(name: String, output_count: usize) -> Self {
-        Self {
-            output_count,
-            processor_name: name,
+    /// Send StreamData to all downstream processors
+    pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
+        for output in &self.outputs {
+            output
+                .send(data.clone())
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed)?;
         }
+        Ok(())
     }
 }
 
-#[async_trait]
-impl StreamProcessor for ControlSourceProcessor {
-    fn name(&self) -> &str {
-        &self.processor_name
+impl Processor for ControlSourceProcessor {
+    fn id(&self) -> &str {
+        &self.id
     }
     
-    fn input_count(&self) -> usize {
-        0 // Control source has no inputs
-    }
-    
-    fn output_count(&self) -> usize {
-        self.output_count
-    }
-    
-    async fn start(&self, _input_receivers: Vec<mpsc::Receiver<StreamData>>) -> ProcessorHandle {
-        let (output_senders, output_receivers) = utils::create_channels(self.output_count);
+    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+        let _id = self.id.clone();
+        let mut inputs = std::mem::take(&mut self.inputs);
+        let outputs = self.outputs.clone();
         
-        let processor_name = self.processor_name.clone();
-        
-        let task_handle = tokio::spawn(async move {
-            println!("{}: 🚀 Starting control source processor", processor_name);
-            
-            // Send initial control signal to start the pipeline
-            let init_signal = StreamData::control(ControlSignal::StreamStart);
-            
-            for (i, sender) in output_senders.iter().enumerate() {
-                if let Err(e) = sender.send(init_signal.clone()).await {
-                    println!("{}: ❌ Failed to send initial signal to output {}: {}", processor_name, i, e);
-                } else {
-                    println!("{}: 📡 Sent initial control signal to output {}", processor_name, i);
-                }
-            }
-            
-            // Keep the processor running to handle future control signals
+        tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                println!("{}: 💓 Control source heartbeat", processor_name);
+                let mut all_closed = true;
+                
+                // Check all input channels
+                for input in &mut inputs {
+                    match input.try_recv() {
+                        Ok(data) => {
+                            all_closed = false;
+                            // Forward to all outputs
+                            for output in &outputs {
+                                if output.send(data.clone()).await.is_err() {
+                                    return Err(ProcessorError::ChannelClosed);
+                                }
+                            }
+                            // Check if this is a terminal signal
+                            if data.is_terminal() {
+                                return Ok(());
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => {
+                            // Channel not empty but no data ready
+                            all_closed = false;
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            // Channel disconnected
+                        }
+                    }
+                }
+                
+                // If all channels are closed, exit
+                if all_closed {
+                    // Send StreamEnd to all outputs before exiting
+                    for output in &outputs {
+                        let _ = output.send(StreamData::stream_end()).await;
+                    }
+                    return Ok(());
+                }
+                
+                // Yield to allow other tasks to run
+                tokio::task::yield_now().await;
             }
-        });
-        
-        ProcessorHandle {
-            task_handle,
-            output_receivers,
-        }
+        })
+    }
+    
+    fn output_senders(&self) -> Vec<mpsc::Sender<StreamData>> {
+        self.outputs.clone()
+    }
+    
+    fn add_input(&mut self, receiver: mpsc::Receiver<StreamData>) {
+        self.inputs.push(receiver);
+    }
+    
+    fn add_output(&mut self, sender: mpsc::Sender<StreamData>) {
+        self.outputs.push(sender);
     }
 }

@@ -1,137 +1,148 @@
-//! Result sink processor - final destination for data streams
+//! ResultSinkProcessor - final destination for data flow
+//!
+//! This processor receives data from upstream processors and prints it.
 
-use async_trait::async_trait;
 use tokio::sync::mpsc;
-use crate::processor::{StreamProcessor, StreamData, ControlSignal, ProcessorHandle, stream_processor::utils};
+use crate::processor::{Processor, ProcessorError, StreamData};
 
-/// ResultSinkProcessor - receives data and forwards results for verification
-/// 
-/// Unlike a true sink, this processor has outputs so we can verify
-/// that data flowed correctly through the entire chain.
+/// ResultSinkProcessor - prints received data
+///
+/// This processor acts as the final destination in the data flow. It:
+/// - Receives StreamData from upstream processors
+/// - Prints Collection data to stdout
+/// - Handles control signals and errors appropriately
 pub struct ResultSinkProcessor {
-    /// Number of input channels
-    input_count: usize,
-    /// Number of output channels (for verification)
-    output_count: usize,
-    /// Processor name for debugging
-    processor_name: String,
+    /// Processor identifier
+    id: String,
+    /// Input channels for receiving data
+    inputs: Vec<mpsc::Receiver<StreamData>>,
+    /// Output channels (typically empty for sink, but kept for consistency)
+    outputs: Vec<mpsc::Sender<StreamData>>,
 }
 
 impl ResultSinkProcessor {
-    /// Create a new ResultSinkProcessor with default 1 output for verification
-    pub fn new(input_count: usize) -> Self {
+    /// Create a new ResultSinkProcessor
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
-            input_count,
-            output_count: 1, // Default 1 output for verification
-            processor_name: "ResultSinkProcessor".to_string(),
+            id: id.into(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
         }
     }
     
-    /// Create with custom name and specified outputs
-    pub fn with_outputs(name: String, input_count: usize, output_count: usize) -> Self {
-        Self {
-            input_count,
-            output_count,
-            processor_name: name,
+    /// Print Collection data
+    fn print_collection(&self, collection: &dyn crate::model::Collection) {
+        println!("[{}] Received Collection: {} rows, {} columns", 
+                 self.id, 
+                 collection.num_rows(), 
+                 collection.num_columns());
+        
+        // Print column information
+        for (idx, column) in collection.columns().iter().enumerate() {
+            println!("  Column {}: {} (source: {})", 
+                     idx, 
+                     column.name, 
+                     column.source_name);
         }
-    }
-    
-    /// Create with custom name and default 1 output
-    pub fn with_name(name: String, input_count: usize) -> Self {
-        Self::with_outputs(name, input_count, 1)
+        
+        // Print sample data (first few rows)
+        let num_rows_to_print = std::cmp::min(5, collection.num_rows());
+        if num_rows_to_print > 0 {
+            println!("  Sample data (first {} rows):", num_rows_to_print);
+            for row_idx in 0..num_rows_to_print {
+                let mut row_data = Vec::new();
+                for column in collection.columns() {
+                    if let Some(value) = column.get(row_idx) {
+                        row_data.push(format!("{}={:?}", column.name, value));
+                    }
+                }
+                println!("    Row {}: {}", row_idx, row_data.join(", "));
+            }
+            if collection.num_rows() > num_rows_to_print {
+                println!("  ... ({} more rows)", collection.num_rows() - num_rows_to_print);
+            }
+        }
     }
 }
 
-#[async_trait]
-impl StreamProcessor for ResultSinkProcessor {
-    fn name(&self) -> &str {
-        &self.processor_name
+impl Processor for ResultSinkProcessor {
+    fn id(&self) -> &str {
+        &self.id
     }
     
-    fn input_count(&self) -> usize {
-        self.input_count
-    }
-    
-    fn output_count(&self) -> usize {
-        self.output_count // Now has outputs for verification
-    }
-    
-    async fn start(&self, input_receivers: Vec<mpsc::Receiver<StreamData>>) -> ProcessorHandle {
-        let processor_name = self.processor_name.clone();
-        let output_count = self.output_count;
+    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+        let id = self.id.clone();
+        let mut inputs = std::mem::take(&mut self.inputs);
         
-        // Create output channels for verification
-        let (output_senders, output_receivers) = utils::create_channels(output_count);
-        
-        let task_handle = tokio::spawn(async move {
-            println!("{}: 🎯 Starting result sink processor with {} inputs and {} verification outputs", 
-                     processor_name, input_receivers.len(), output_count);
-            
-            let mut total_received = 0;
-            let mut completed_inputs = 0;
-            let mut verification_data = Vec::new();
-            
-            // Process all input channels
-            for (i, mut receiver) in input_receivers.into_iter().enumerate() {
-                println!("{}: 📥 Monitoring input channel {}", processor_name, i);
+        tokio::spawn(async move {
+            loop {
+                let mut all_closed = true;
+                let mut received_any = false;
                 
-                loop {
-                    match receiver.recv().await {
-                        Some(stream_data) => {
-                            total_received += 1;
-                            match stream_data {
-                                StreamData::Collection(_collection) => {
-                                    println!("{}: 📊 Received collection from input {}", processor_name, i);
-                                    // Store for verification
-                                    verification_data.push(format!("Collection from input {}", i));
+                // Check all input channels
+                for (idx, input) in inputs.iter_mut().enumerate() {
+                    match input.try_recv() {
+                        Ok(data) => {
+                            all_closed = false;
+                            received_any = true;
+                            
+                            match &data {
+                                StreamData::Collection(collection) => {
+                                    println!("[{}] Input {}: {}", id, idx, data.description());
+                                    // Print collection details
+                                    println!("[{}] Collection details:", id);
+                                    println!("  Rows: {}", collection.num_rows());
+                                    println!("  Columns: {}", collection.num_columns());
+                                    for (col_idx, column) in collection.columns().iter().enumerate() {
+                                        println!("    Column {}: {} from {}", 
+                                                 col_idx, 
+                                                 column.name, 
+                                                 column.source_name);
+                                    }
                                 }
-                                StreamData::Control(control_signal) => {
-                                    println!("{}: 📡 Received control signal from input {}", processor_name, i);
-                                    
-                                    if matches!(control_signal, ControlSignal::StreamEnd) {
-                                        println!("{}: ✅ Stream end signal received on input {}", processor_name, i);
-                                        completed_inputs += 1;
-                                        break;
+                                StreamData::Control(control) => {
+                                    println!("[{}] Input {}: Control signal: {:?}", id, idx, control);
+                                    if matches!(control, crate::processor::ControlSignal::StreamEnd) {
+                                        // Stream ended, but continue to check other inputs
+                                        println!("[{}] StreamEnd received from input {}", id, idx);
                                     }
                                 }
                                 StreamData::Error(error) => {
-                                    println!("{}: ⚠️  Received error from input {}: {:?}", processor_name, i, error);
-                                    // Store error for verification
-                                    verification_data.push(format!("Error: {}", error.message));
+                                    eprintln!("[{}] Input {}: Error: {}", id, idx, error);
                                 }
                             }
                         }
-                        None => {
-                            println!("{}: 🔚 Input channel {} closed", processor_name, i);
-                            break;
+                        Err(mpsc::error::TryRecvError::Empty) => {
+                            all_closed = false;
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            // Channel disconnected
+                            println!("[{}] Input {} disconnected", id, idx);
                         }
                     }
                 }
-            }
-            
-            // Send verification results through output channels
-            println!("{}: 📤 Sending verification results through {} output channels", processor_name, output_count);
-            
-            let summary = format!("ResultSink Summary: {} items received, {} inputs completed, verification data: {:?}", 
-                                total_received, completed_inputs, verification_data);
-            
-            for (i, sender) in output_senders.iter().enumerate() {
-                let verification_stream = StreamData::error_message(summary.clone());
-                if let Err(e) = sender.send(verification_stream).await {
-                    println!("{}: ❌ Failed to send verification data to output {}: {}", processor_name, i, e);
-                } else {
-                    println!("{}: ✅ Sent verification data to output {}", processor_name, i);
+                
+                // If all channels are closed and we haven't received anything, exit
+                if all_closed && !received_any {
+                    println!("[{}] All inputs closed, exiting", id);
+                    return Ok(());
                 }
+                
+                // Yield to allow other tasks to run
+                tokio::task::yield_now().await;
             }
-            
-            println!("{}: 🏁 Processing complete! Total items received: {}, Completed inputs: {}", 
-                     processor_name, total_received, completed_inputs);
-            println!("{}: ✨ Verification data sent through outputs", processor_name);
-        });
-        
-        ProcessorHandle {
-            task_handle,
-            output_receivers,
-        }
+        })
+    }
+    
+    fn output_senders(&self) -> Vec<mpsc::Sender<StreamData>> {
+        self.outputs.clone()
+    }
+    
+    fn add_input(&mut self, receiver: mpsc::Receiver<StreamData>) {
+        self.inputs.push(receiver);
+    }
+    
+    fn add_output(&mut self, sender: mpsc::Sender<StreamData>) {
+        self.outputs.push(sender);
     }
 }
