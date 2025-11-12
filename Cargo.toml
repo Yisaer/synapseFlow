@@ -20,3 +20,7 @@ sqlparser = { version = "0.40", features = ["serde", "visitor"] }
 [[bin]]
 name = "synapse-flow"
 path = "src/main.rs"
+
+[[bin]]
+name = "demo_control_signal"
+path = "src/bin/demo_control_signal.rs"

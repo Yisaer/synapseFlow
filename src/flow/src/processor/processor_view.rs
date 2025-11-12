@@ -170,7 +170,7 @@ impl ProcessorView {
     pub fn broadcast_to_outputs(&self, signal: StreamData) -> Result<(), Vec<broadcast::error::SendError<StreamData>>> {
         let mut errors = Vec::new();
         
-        for (i, sender) in self.output_senders.iter().enumerate() {
+        for (_i, sender) in self.output_senders.iter().enumerate() {
             if let Err(e) = sender.send(signal.clone()) {
                 errors.push(e);
             }

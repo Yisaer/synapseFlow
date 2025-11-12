@@ -29,6 +29,6 @@ pub use stream_processor::{StreamProcessor, utils};
 pub use pipeline_builder::{build_processor_pipeline, build_connected_pipeline, build_connected_pipeline_with_external_io,
                           build_pipeline_with_external_control, build_pipeline_with_external_io, execute_pipeline,
                           ConnectedProcessorNode, ConnectedExternalPipeline, execute_connected_pipeline};
-pub use processor_builder::{ProcessorBuilder, ProcessorBuildResult};
+pub use processor_builder::{ProcessorChainBuilder, ProcessorChainResult};
 pub use control_source_processor::ControlSourceProcessor;
 pub use result_sink_processor::ResultSinkProcessor;

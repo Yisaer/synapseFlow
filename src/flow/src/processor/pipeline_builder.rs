@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 use crate::planner::physical::{PhysicalPlan, PhysicalDataSource, PhysicalFilter, PhysicalProject};
-use crate::processor::{DataSourceProcessor, FilterProcessor, ProjectProcessor, ProcessorView, ProcessorHandle, StreamData, stream_processor::StreamProcessor};
+use crate::processor::{DataSourceProcessor, FilterProcessor, ProjectProcessor, ProcessorView, StreamData, stream_processor::StreamProcessor};
 use crate::processor::control_source_processor::ControlSourceProcessor;
 use crate::processor::result_sink_processor::ResultSinkProcessor;
 use crate::processor::stream_processor::utils;

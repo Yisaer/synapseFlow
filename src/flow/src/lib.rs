@@ -16,5 +16,5 @@ pub use planner::logical::{LogicalPlan, BaseLogicalPlan, DataSource, Project, Fi
 pub use planner::create_physical_plan;
 pub use processor::{
     StreamProcessor, DataSourceProcessor, FilterProcessor, ProjectProcessor, 
-    ProcessorView, ProcessorBuilder, ProcessorBuildResult, build_processor_pipeline
+    ProcessorView, ProcessorChainResult, build_processor_pipeline
 };
