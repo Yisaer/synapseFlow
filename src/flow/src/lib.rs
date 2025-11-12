@@ -15,6 +15,6 @@ pub use datatypes::Schema;
 pub use planner::logical::{LogicalPlan, BaseLogicalPlan, DataSource, Project, Filter};
 pub use planner::create_physical_plan;
 pub use processor::{
-    StreamProcessor, DataSourceProcessor, FilterProcessor, ProjectProcessor, 
-    ProcessorView, ProcessorChainResult, build_processor_pipeline
+    StreamProcessor, ControlSourceProcessor, DataSourceProcessor, ResultSinkProcessor,
+    StreamData, ControlSignal, ProcessorHandle
 };

@@ -1,224 +1,137 @@
-//! Result Sink processor - pipeline exit point for collecting processed data
-//! 
-//! This processor acts as a pipeline exit point that collects final processed data
-//! and forwards it to external consumers via a result channel.
-//! 
-//! Redesigned with single input channel architecture:
-//! - Single input channel for receiving data from upstream
-//! - Multiple output channels (typically 0 for sink, but supports broadcasting)
+//! Result sink processor - final destination for data streams
 
-use tokio::sync::broadcast;
-use std::sync::Arc;
-use crate::processor::{StreamProcessor, ProcessorView, utils, StreamData, ProcessorHandle};
+use async_trait::async_trait;
+use tokio::sync::mpsc;
+use crate::processor::{StreamProcessor, StreamData, ControlSignal, ProcessorHandle, stream_processor::utils};
 
-/// ResultSink processor that serves as a pipeline exit point
+/// ResultSinkProcessor - receives data and forwards results for verification
 /// 
-/// This processor:
-/// 1. Receives processed data from upstream processors via single input channel
-/// 2. Forwards results to external consumers via a result channel
-/// 3. Handles pipeline completion and cleanup
-/// Now designed with single input, multiple output architecture.
+/// Unlike a true sink, this processor has outputs so we can verify
+/// that data flowed correctly through the entire chain.
 pub struct ResultSinkProcessor {
-    /// Input receiver - receives data from upstream
-    input_receiver: broadcast::Receiver<StreamData>,
-    /// Result channel for forwarding processed data to external consumers
-    result_sender: broadcast::Sender<StreamData>,
-    /// Number of downstream processors (typically 0 for sink)
-    downstream_count: usize,
+    /// Number of input channels
+    input_count: usize,
+    /// Number of output channels (for verification)
+    output_count: usize,
     /// Processor name for debugging
     processor_name: String,
 }
 
 impl ResultSinkProcessor {
-    /// Create a new ResultSinkProcessor
-    pub fn new(
-        upstream_receiver: broadcast::Receiver<StreamData>,
-        result_sender: broadcast::Sender<StreamData>,
-        downstream_count: usize,
-    ) -> Self {
+    /// Create a new ResultSinkProcessor with default 1 output for verification
+    pub fn new(input_count: usize) -> Self {
         Self {
-            input_receiver: upstream_receiver,
-            result_sender,
-            downstream_count,
+            input_count,
+            output_count: 1, // Default 1 output for verification
             processor_name: "ResultSinkProcessor".to_string(),
         }
     }
     
-    /// Create a ResultSinkProcessor with single upstream input (common case)
-    pub fn with_single_upstream(
-        upstream_receiver: broadcast::Receiver<StreamData>,
-        result_sender: broadcast::Sender<StreamData>,
-    ) -> Self {
-        Self::new(upstream_receiver, result_sender, 0)
-    }
-    
-    /// Create a ResultSinkProcessor with a name for debugging
-    pub fn with_name(
-        name: String,
-        upstream_receiver: broadcast::Receiver<StreamData>,
-        result_sender: broadcast::Sender<StreamData>,
-        downstream_count: usize,
-    ) -> Self {
+    /// Create with custom name and specified outputs
+    pub fn with_outputs(name: String, input_count: usize, output_count: usize) -> Self {
         Self {
-            input_receiver: upstream_receiver,
-            result_sender,
-            downstream_count,
+            input_count,
+            output_count,
             processor_name: name,
         }
     }
+    
+    /// Create with custom name and default 1 output
+    pub fn with_name(name: String, input_count: usize) -> Self {
+        Self::with_outputs(name, input_count, 1)
+    }
 }
 
+#[async_trait]
 impl StreamProcessor for ResultSinkProcessor {
-    fn start(&self, input_receiver: broadcast::Receiver<StreamData>) -> ProcessorView {
-        // Create output channels (even though typically empty for sink)
-        let output_senders = utils::create_output_senders(self.downstream_count);
-        
-        // Clone data that will be used in the async task
+    fn name(&self) -> &str {
+        &self.processor_name
+    }
+    
+    fn input_count(&self) -> usize {
+        self.input_count
+    }
+    
+    fn output_count(&self) -> usize {
+        self.output_count // Now has outputs for verification
+    }
+    
+    async fn start(&self, input_receivers: Vec<mpsc::Receiver<StreamData>>) -> ProcessorHandle {
         let processor_name = self.processor_name.clone();
-        let output_senders_clone = output_senders.clone();
+        let output_count = self.output_count;
         
-        // Clone the result sender for external forwarding
-        let result_sender_clone = self.result_sender.clone();
-        let result_sender = self.result_sender.clone();
+        // Create output channels for verification
+        let (output_senders, output_receivers) = utils::create_channels(output_count);
         
-        // Clone for the routine (Receiver supports resubscribe)
-        let mut routine_input_receiver = input_receiver.resubscribe();
-        
-        // Spawn the result sink routine
-        let routine = async move {
-            println!("{}: Starting result sink routine", processor_name);
+        let task_handle = tokio::spawn(async move {
+            println!("{}: 🎯 Starting result sink processor with {} inputs and {} verification outputs", 
+                     processor_name, input_receivers.len(), output_count);
             
-            // Main collection loop
-            loop {
-                // Receive processed data from upstream
-                match routine_input_receiver.recv().await {
-                    Ok(stream_data) => {
-                        println!("{}: Received processed data: {:?}", processor_name, stream_data.description());
-                        
-                        // Check if this is a terminal signal
-                        let is_terminal = stream_data.is_terminal();
-                        
-                        // Forward to external consumers (clone to avoid move)
-                        if result_sender.send(stream_data.clone()).is_err() {
-                            println!("{}: No external consumers remaining, continuing to collect", processor_name);
-                            // Continue collecting even if no external consumers
-                            // This prevents data loss in the pipeline
-                        }
-                        
-                        // Also forward to output channels if any (for chaining)
-                        for sender in &output_senders_clone {
-                            if sender.send(stream_data.clone()).is_err() {
-                                println!("{}: Failed to forward to output channel", processor_name);
+            let mut total_received = 0;
+            let mut completed_inputs = 0;
+            let mut verification_data = Vec::new();
+            
+            // Process all input channels
+            for (i, mut receiver) in input_receivers.into_iter().enumerate() {
+                println!("{}: 📥 Monitoring input channel {}", processor_name, i);
+                
+                loop {
+                    match receiver.recv().await {
+                        Some(stream_data) => {
+                            total_received += 1;
+                            match stream_data {
+                                StreamData::Collection(_collection) => {
+                                    println!("{}: 📊 Received collection from input {}", processor_name, i);
+                                    // Store for verification
+                                    verification_data.push(format!("Collection from input {}", i));
+                                }
+                                StreamData::Control(control_signal) => {
+                                    println!("{}: 📡 Received control signal from input {}", processor_name, i);
+                                    
+                                    if matches!(control_signal, ControlSignal::StreamEnd) {
+                                        println!("{}: ✅ Stream end signal received on input {}", processor_name, i);
+                                        completed_inputs += 1;
+                                        break;
+                                    }
+                                }
+                                StreamData::Error(error) => {
+                                    println!("{}: ⚠️  Received error from input {}: {:?}", processor_name, i, error);
+                                    // Store error for verification
+                                    verification_data.push(format!("Error: {}", error.message));
+                                }
                             }
                         }
-                        
-                        if is_terminal {
-                            println!("{}: Received terminal signal, completing collection", processor_name);
+                        None => {
+                            println!("{}: 🔚 Input channel {} closed", processor_name, i);
                             break;
                         }
-                    }
-                    Err(e) => {
-                        // Handle broadcast errors from upstream
-                        let error_data = utils::handle_receive_error(e);
-                        println!("{}: Upstream error: {:?}", processor_name, error_data.description());
-                        
-                        // Forward error to external consumers
-                        let _ = result_sender.send(error_data.clone());
-                        
-                        // Also forward to output channels
-                        for sender in &output_senders_clone {
-                            let _ = sender.send(error_data.clone());
-                        }
-                        break;
                     }
                 }
             }
             
-            println!("{}: Result sink routine completed", processor_name);
-        };
-        
-        let join_handle = tokio::spawn(routine);
-        
-        // For ResultSinkProcessor, we expose the result sender for external forwarding
-        ProcessorView::new(
-            Some(result_sender_clone),
-            input_receiver,
-            output_senders,
-            ProcessorHandle::new(join_handle),
-        )
-    }
-    
-    fn downstream_count(&self) -> usize {
-        self.downstream_count
-    }
-    
-    fn create_input_channel(&self) -> (broadcast::Sender<StreamData>, broadcast::Receiver<StreamData>) {
-        utils::create_input_channel()
-    }
-}
-
-// Private helper methods
-impl ResultSinkProcessor {
-    /// Create result sink routine that runs in tokio task
-    /// Now with single input, multiple output architecture
-    pub fn create_result_sink_routine(
-        self: Arc<Self>,
-        mut input_receiver: broadcast::Receiver<StreamData>,
-        output_senders: Vec<broadcast::Sender<StreamData>>,
-    ) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let result_sender = self.result_sender.clone();
-        let processor_name = self.processor_name.clone();
-        
-        async move {
-            println!("{}: Starting result sink routine", processor_name);
+            // Send verification results through output channels
+            println!("{}: 📤 Sending verification results through {} output channels", processor_name, output_count);
             
-            // Main collection loop
-            loop {
-                // Receive processed data from upstream
-                match input_receiver.recv().await {
-                    Ok(stream_data) => {
-                        println!("{}: Received processed data: {:?}", processor_name, stream_data.description());
-                        
-                        // Check if this is a terminal signal
-                        let is_terminal = stream_data.is_terminal();
-                        
-                        // Forward to external consumers (clone to avoid move)
-                        if result_sender.send(stream_data.clone()).is_err() {
-                            println!("{}: No external consumers remaining, continuing to collect", processor_name);
-                            // Continue collecting even if no external consumers
-                            // This prevents data loss in the pipeline
-                        }
-                        
-                        // Also forward to output channels if any (for chaining)
-                        for sender in &output_senders {
-                            if sender.send(stream_data.clone()).is_err() {
-                                println!("{}: Failed to forward to output channel", processor_name);
-                            }
-                        }
-                        
-                        if is_terminal {
-                            println!("{}: Received terminal signal, completing collection", processor_name);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        // Handle broadcast errors from upstream
-                        let error_data = utils::handle_receive_error(e);
-                        println!("{}: Upstream error: {:?}", processor_name, error_data.description());
-                        
-                        // Forward error to external consumers
-                        let _ = result_sender.send(error_data.clone());
-                        
-                        // Also forward to output channels
-                        for sender in &output_senders {
-                            let _ = sender.send(error_data.clone());
-                        }
-                        break;
-                    }
+            let summary = format!("ResultSink Summary: {} items received, {} inputs completed, verification data: {:?}", 
+                                total_received, completed_inputs, verification_data);
+            
+            for (i, sender) in output_senders.iter().enumerate() {
+                let verification_stream = StreamData::error_message(summary.clone());
+                if let Err(e) = sender.send(verification_stream).await {
+                    println!("{}: ❌ Failed to send verification data to output {}: {}", processor_name, i, e);
+                } else {
+                    println!("{}: ✅ Sent verification data to output {}", processor_name, i);
                 }
             }
             
-            println!("{}: Result sink routine completed", processor_name);
+            println!("{}: 🏁 Processing complete! Total items received: {}, Completed inputs: {}", 
+                     processor_name, total_received, completed_inputs);
+            println!("{}: ✨ Verification data sent through outputs", processor_name);
+        });
+        
+        ProcessorHandle {
+            task_handle,
+            output_receivers,
         }
     }
 }
