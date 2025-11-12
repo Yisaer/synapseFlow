@@ -33,9 +33,6 @@ pub trait Collection: Send + Sync + Any {
     /// Get all columns as a slice
     fn columns(&self) -> &[Column];
     
-    /// Create a new collection with the specified column indices (projection)
-    fn project(&self, column_indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError>;
-    
     /// Apply projection based on PhysicalProjectField definitions
     /// This creates a new collection with projected fields based on the provided field definitions
     /// 

@@ -86,32 +86,6 @@ impl Collection for RecordBatch {
         self.columns()
     }
     
-    fn project(&self, column_indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError> {
-        if column_indices.is_empty() {
-            return Ok(Box::new(RecordBatch::empty()));
-        }
-        
-        // Validate all indices
-        for &idx in column_indices {
-            if idx >= self.num_columns() {
-                return Err(CollectionError::IndexOutOfBounds {
-                    index: idx,
-                    len: self.num_columns(),
-                });
-            }
-        }
-        
-        let mut new_columns = Vec::with_capacity(column_indices.len());
-        for &idx in column_indices {
-            if let Some(col) = self.column(idx) {
-                new_columns.push(col.clone());
-            }
-        }
-        
-        let new_batch = RecordBatch::new(new_columns)?;
-        Ok(Box::new(new_batch))
-    }
-    
     fn apply_projection(&self, fields: &[PhysicalProjectField]) -> Result<Box<dyn Collection>, CollectionError> {
         let num_rows = self.num_rows();
         let mut projected_columns = Vec::with_capacity(fields.len());
