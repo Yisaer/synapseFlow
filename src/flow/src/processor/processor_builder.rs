@@ -4,11 +4,11 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use std::sync::Arc;
 use crate::processor::{
     Processor, ProcessorError, 
-    ControlSourceProcessor, DataSourceProcessor, ResultSinkProcessor,
-    StreamData,
+    ControlSourceProcessor, DataSourceProcessor, ResultSinkProcessor, StreamData,
 };
 use crate::planner::physical::{PhysicalPlan, PhysicalDataSource};
 
@@ -79,20 +79,45 @@ pub struct ProcessorPipeline {
     pub middle_processors: Vec<PlanProcessor>,
     /// Result sink processor (data tail)
     pub result_sink: ResultSinkProcessor,
+    /// Join handles for all running processors
+    handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
 }
 
 impl ProcessorPipeline {
-    /// Start all processors in the pipeline
-    pub fn start(&mut self) -> Vec<tokio::task::JoinHandle<Result<(), ProcessorError>>> {
-        let mut handles = Vec::new();
-        
-        handles.push(self.control_source.start());
-        for processor in &mut self.middle_processors {
-            handles.push(processor.start());
+    /// Start all processors in the pipeline. Subsequent calls are no-ops.
+    pub fn start(&mut self) {
+        if !self.handles.is_empty() {
+            return;
         }
-        handles.push(self.result_sink.start());
-        
-        handles
+        self.handles.push(self.control_source.start());
+        for processor in &mut self.middle_processors {
+            self.handles.push(processor.start());
+        }
+        self.handles.push(self.result_sink.start());
+    }
+
+    /// Gracefully close the pipeline by sending StreamEnd and awaiting all tasks.
+    pub async fn close(&mut self) -> Result<(), ProcessorError> {
+        // Send StreamEnd to signal shutdown
+        self.input
+            .send(StreamData::stream_end())
+            .await
+            .map_err(|_| ProcessorError::ChannelClosed)?;
+
+        // Await all processor tasks
+        while let Some(handle) = self.handles.pop() {
+            match handle.await {
+                Ok(result) => result?,
+                Err(join_err) => {
+                    return Err(ProcessorError::ProcessingError(format!(
+                        "Join error: {}",
+                        join_err
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -350,23 +375,17 @@ fn connect_processors(
 pub fn create_processor_pipeline(
     physical_plan: Arc<dyn PhysicalPlan>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
-    // 1. Create ControlSourceProcessor (data head)
     let mut control_source = ControlSourceProcessor::new("control_source");
-    // Set up pipeline input channel (single input for control source)
     let (pipeline_input_sender, control_input_receiver) = mpsc::channel(100);
     control_source.add_input(control_input_receiver);
-    
-    // 2. Build processors for all nodes in the tree
+
     let mut processor_map = ProcessorMap::new();
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map)?;
-    
-    // 3. Connect processors based on tree structure
+
     connect_processors(Arc::clone(&physical_plan), &mut processor_map, &mut control_source)?;
-    
-    // 4. Create ResultSinkProcessor (data tail)
+
     let mut result_sink = ResultSinkProcessor::new("result_sink");
-    
-    // 5. Connect root node output to ResultSinkProcessor input
+
     let root_index = *physical_plan.get_plan_index();
     if let Some(root_processor) = processor_map.get_processor_mut(root_index) {
         let (sender, receiver) = mpsc::channel(100);
@@ -377,12 +396,10 @@ pub fn create_processor_pipeline(
             "Root processor not found".to_string()
         ));
     }
-    
-    // 6. Set up pipeline output channel (single output from result sink)
+
     let (result_output_sender, pipeline_output_receiver) = mpsc::channel(100);
     result_sink.add_output(result_output_sender);
-    
-    // 7. Collect all processors
+
     let middle_processors = processor_map.get_all_processors();
     
     Ok(ProcessorPipeline {
@@ -391,5 +408,6 @@ pub fn create_processor_pipeline(
         control_source,
         middle_processors,
         result_sink,
+        handles: Vec::new(),
     })
 }

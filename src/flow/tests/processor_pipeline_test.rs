@@ -11,7 +11,7 @@ async fn test_create_processor_pipeline_with_datasource() {
     let mut pipeline = create_processor_pipeline(physical_plan)
         .expect("create_processor_pipeline should succeed");
 
-    let mut handles = pipeline.start();
+    pipeline.start();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -37,18 +37,5 @@ async fn test_create_processor_pipeline_with_datasource() {
         "should receive the same control signal"
     );
 
-    // 6. 发送 StreamEnd 以停止处理器
-    pipeline
-        .input
-        .send(StreamData::stream_end())
-        .await
-        .expect("send stream end");
-
-    // 消费 StreamEnd，确保 result sink 完成
-    let _ = timeout(Duration::from_secs(1), pipeline.output.recv()).await;
-
-    // 7. 等待所有处理器结束
-    for handle in handles.drain(..) {
-        let _ = handle.await;
-    }
+    pipeline.close().await.expect("close pipeline");
 }
