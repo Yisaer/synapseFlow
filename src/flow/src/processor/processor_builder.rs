@@ -364,6 +364,10 @@ pub fn create_processor_pipeline(
         let (sender, receiver) = mpsc::channel(100);
         root_processor.add_output(sender);
         result_sink.add_input(receiver);
+    } else {
+        return Err(ProcessorError::InvalidConfiguration(
+            "Root processor not found".to_string()
+        ));
     }
     
     // 6. Collect all processors
