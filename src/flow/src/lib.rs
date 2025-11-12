@@ -1,6 +1,7 @@
 pub mod expr;
 pub mod model;
 pub mod planner;
+pub mod processor;
 
 pub use expr::{
     create_df_function_call, BinaryFunc, ConcatFunc, ConversionError,
@@ -13,4 +14,7 @@ pub use model::{Collection, RecordBatch};
 pub use datatypes::Schema;
 pub use planner::logical::{LogicalPlan, BaseLogicalPlan, DataSource, Project, Filter};
 pub use planner::create_physical_plan;
-pub use planner::physical::{PhysicalPlan, BasePhysicalPlan, PhysicalDataSource, PhysicalProject, PhysicalFilter};
+pub use processor::{
+    StreamProcessor, DataSourceProcessor, FilterProcessor, ProjectProcessor, 
+    ProcessorView, ProcessorBuilder, ProcessorBuildResult, build_processor_pipeline
+};

@@ -12,3 +12,7 @@ datafusion = "50"
 datafusion-common = "50"
 datafusion-expr = "50"
 sqlparser = { version = "0.40", features = ["serde", "visitor"] }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+thiserror = "1.0"

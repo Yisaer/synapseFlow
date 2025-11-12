@@ -34,6 +34,15 @@ pub trait Collection: Send + Sync + Any {
     
     /// Create a new collection with the specified column indices (projection)
     fn project(&self, column_indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError>;
+    
+    /// Clone this collection
+    fn clone_box(&self) -> Box<dyn Collection>;
+}
+
+impl Clone for Box<dyn Collection> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 /// Column represents a column of data in columnar format

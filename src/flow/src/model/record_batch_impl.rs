@@ -109,4 +109,8 @@ impl Collection for RecordBatch {
         let new_batch = RecordBatch::new(new_columns)?;
         Ok(Box::new(new_batch))
     }
+    
+    fn clone_box(&self) -> Box<dyn Collection> {
+        Box::new(self.clone())
+    }
 }
