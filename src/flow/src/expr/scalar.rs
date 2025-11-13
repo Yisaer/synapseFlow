@@ -81,7 +81,7 @@ impl ScalarExpr {
     /// This is about vectorized computation, not necessarily columnar storage
     pub fn eval_vectorized(
         &self,
-        evaluator: &DataFusionEvaluator,
+        _evaluator: &DataFusionEvaluator,
         collection: &dyn Collection,
     ) -> Result<Vec<Value>, EvalError> {
         match self {
@@ -102,13 +102,13 @@ impl ScalarExpr {
             }
             ScalarExpr::CallUnary { func, expr } => {
                 // Vectorized unary operation
-                let args = expr.eval_vectorized(evaluator, collection)?;
+                let args = expr.eval_vectorized(_evaluator, collection)?;
                 args.into_iter().map(|arg| func.eval_unary(arg)).collect()
             }
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
                 // Vectorized binary operation
-                let left_vals = expr1.eval_vectorized(evaluator, collection)?;
-                let right_vals = expr2.eval_vectorized(evaluator, collection)?;
+                let left_vals = expr1.eval_vectorized(_evaluator, collection)?;
+                let right_vals = expr2.eval_vectorized(_evaluator, collection)?;
 
                 if left_vals.len() != right_vals.len() || left_vals.len() != collection.num_rows() {
                     return Err(EvalError::NotImplemented {
@@ -124,7 +124,7 @@ impl ScalarExpr {
             }
             ScalarExpr::FieldAccess { expr, field_name } => {
                 // Vectorized field access
-                let struct_vals = expr.eval_vectorized(evaluator, collection)?;
+                let struct_vals = expr.eval_vectorized(_evaluator, collection)?;
                 struct_vals
                     .into_iter()
                     .map(|struct_val| {
@@ -146,8 +146,8 @@ impl ScalarExpr {
             }
             ScalarExpr::ListIndex { expr, index_expr } => {
                 // Vectorized list indexing
-                let list_vals = expr.eval_vectorized(evaluator, collection)?;
-                let index_vals = index_expr.eval_vectorized(evaluator, collection)?;
+                let list_vals = expr.eval_vectorized(_evaluator, collection)?;
+                let index_vals = index_expr.eval_vectorized(_evaluator, collection)?;
 
                 if list_vals.len() != index_vals.len() || list_vals.len() != collection.num_rows() {
                     return Err(EvalError::NotImplemented {
@@ -193,7 +193,7 @@ impl ScalarExpr {
                 // Prepare arguments as vectors (one vector per argument, containing all rows)
                 let mut arg_vectors = Vec::new();
                 for arg_expr in args {
-                    arg_vectors.push(arg_expr.eval_vectorized(evaluator, collection)?);
+                    arg_vectors.push(arg_expr.eval_vectorized(_evaluator, collection)?);
                 }
 
                 // Validate vector dimensions
@@ -230,7 +230,7 @@ impl ScalarExpr {
                 // Prepare arguments as vectors (one vector per argument, containing all rows)
                 let mut arg_vectors = Vec::new();
                 for arg_expr in args {
-                    arg_vectors.push(arg_expr.eval_vectorized(evaluator, collection)?);
+                    arg_vectors.push(arg_expr.eval_vectorized(_evaluator, collection)?);
                 }
 
                 // Validate vector dimensions
