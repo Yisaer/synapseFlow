@@ -1372,6 +1372,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "futures",
+ "once_cell",
  "parser",
  "rumqttc",
  "serde_json",

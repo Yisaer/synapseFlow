@@ -26,5 +26,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1"
 futures = "0.3"
 thiserror = "1.0"
+once_cell = "1.19"
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 url = "2"
