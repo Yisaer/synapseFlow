@@ -1,12 +1,12 @@
-//! Source connector abstractions for ingesting external streams.
+//! Connector abstractions for interacting with external systems.
 //!
-//! Connectors expose their payloads as asynchronous streams of bytes.
-//! `DataSourceProcessor` (and other processors) can treat those streams as
-//! just another input without blocking on any single source.
+//! - Source connectors ingest bytes and expose them as async streams.
+//! - Sink connectors consume encoded payloads and push them outward.
 
 use futures::stream::Stream;
 use std::pin::Pin;
 
+pub mod sink;
 pub mod source;
 
 /// Convenience alias for boxed connector streams.
@@ -44,6 +44,8 @@ pub enum ConnectorError {
     Other(String),
 }
 
+pub use sink::mock::{MockSinkConnector, MockSinkHandle};
+pub use sink::{SinkConnector, SinkConnectorError};
 pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
 /// MQTT-specific helpers and connector implementation.
 pub use source::mqtt::{MqttSourceConfig, MqttSourceConnector};

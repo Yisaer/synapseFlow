@@ -1,8 +1,8 @@
 use datatypes::types::{ListType, StructField, StructType};
 use datatypes::value::{ListValue, StructValue};
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
-use flow::expr::DataFusionEvaluator;
 use flow::expr::scalar::ScalarExpr;
+use flow::expr::DataFusionEvaluator;
 use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
 
@@ -154,8 +154,9 @@ fn test_complex_nested_access() {
     let inner_struct_type = StructType::new(inner_struct_fields);
 
     // List type containing the inner structs
-    let middle_list_type =
-        ListType::new(Arc::new(ConcreteDatatype::Struct(inner_struct_type.clone())));
+    let middle_list_type = ListType::new(Arc::new(ConcreteDatatype::Struct(
+        inner_struct_type.clone(),
+    )));
 
     // Create outer struct type: struct { data: List<struct { value: Int32 }>, name: String }
     let outer_struct_fields = Arc::new(vec![

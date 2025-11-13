@@ -6,7 +6,7 @@
 use crate::planner::physical::{PhysicalDataSource, PhysicalFilter, PhysicalPlan, PhysicalProject};
 use crate::processor::{
     ControlSourceProcessor, DataSourceProcessor, FilterProcessor, Processor, ProcessorError,
-    ProjectProcessor, ResultCollectProcessor, StreamData,
+    ProjectProcessor, ResultCollectProcessor, SinkProcessor, StreamData,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -87,6 +87,8 @@ pub struct ProcessorPipeline {
     pub control_source: ControlSourceProcessor,
     /// Middle processors created from PhysicalPlan (various types)
     pub middle_processors: Vec<PlanProcessor>,
+    /// Sink processors wired to the PhysicalPlan root (fan-out for connectors)
+    pub sink_processors: Vec<SinkProcessor>,
     /// Result sink processor (data tail)
     pub result_sink: ResultCollectProcessor,
     /// Join handles for all running processors
@@ -102,6 +104,9 @@ impl ProcessorPipeline {
         self.handles.push(self.control_source.start());
         for processor in &mut self.middle_processors {
             self.handles.push(processor.start());
+        }
+        for sink in &mut self.sink_processors {
+            self.handles.push(sink.start());
         }
         self.handles.push(self.result_sink.start());
     }
@@ -331,6 +336,23 @@ fn connect_processors(
 pub fn create_processor_pipeline(
     physical_plan: Arc<dyn PhysicalPlan>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
+    create_processor_pipeline_with_sinks(physical_plan, vec![SinkProcessor::new("sink_0")])
+}
+
+/// Create a processor pipeline with explicitly provided sink processors.
+///
+/// Supplying multiple sinks allows the PhysicalPlan root output to be fanned
+/// out to different connectors that operate in parallel.
+pub fn create_processor_pipeline_with_sinks(
+    physical_plan: Arc<dyn PhysicalPlan>,
+    mut sink_processors: Vec<SinkProcessor>,
+) -> Result<ProcessorPipeline, ProcessorError> {
+    if sink_processors.is_empty() {
+        return Err(ProcessorError::InvalidConfiguration(
+            "At least one SinkProcessor is required".to_string(),
+        ));
+    }
+
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (pipeline_input_sender, control_input_receiver) = mpsc::channel(100);
     control_source.add_input(control_input_receiver);
@@ -344,17 +366,24 @@ pub fn create_processor_pipeline(
         &mut control_source,
     )?;
 
-    let mut result_sink = ResultCollectProcessor::new("result_sink");
-
     let root_index = *physical_plan.get_plan_index();
     if let Some(root_processor) = processor_map.get_processor_mut(root_index) {
-        let (sender, receiver) = mpsc::channel(100);
-        root_processor.add_output(sender);
-        result_sink.add_input(receiver);
+        for sink in sink_processors.iter_mut() {
+            let (to_sink_sender, to_sink_receiver) = mpsc::channel(100);
+            root_processor.add_output(to_sink_sender);
+            sink.add_input(to_sink_receiver);
+        }
     } else {
         return Err(ProcessorError::InvalidConfiguration(
             "Root processor not found".to_string(),
         ));
+    }
+
+    let mut result_sink = ResultCollectProcessor::new("result_sink");
+    for sink in sink_processors.iter_mut() {
+        let (sender, receiver) = mpsc::channel(100);
+        sink.add_output(sender);
+        result_sink.add_input(receiver);
     }
 
     let (result_output_sender, pipeline_output_receiver) = mpsc::channel(100);
@@ -367,6 +396,7 @@ pub fn create_processor_pipeline(
         output: pipeline_output_receiver,
         control_source,
         middle_processors,
+        sink_processors,
         result_sink,
         handles: Vec::new(),
     })

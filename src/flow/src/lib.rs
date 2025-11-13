@@ -1,11 +1,13 @@
 pub mod codec;
 pub mod connector;
+pub mod encoder;
 pub mod expr;
 pub mod model;
 pub mod planner;
 pub mod processor;
 
 pub use datatypes::Schema;
+pub use encoder::{CollectionEncoder, EncodeError, JsonEncoder};
 #[cfg(feature = "datafusion")]
 pub use expr::datafusion_func::create_df_function_call;
 pub use expr::sql_conversion;
@@ -19,7 +21,7 @@ pub use planner::create_physical_plan;
 pub use planner::logical::{BaseLogicalPlan, DataSource, Filter, LogicalPlan, Project};
 pub use processor::{
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, Processor, ProcessorError,
-    ResultCollectProcessor, StreamData,
+    ResultCollectProcessor, SinkProcessor, StreamData,
 };
 
 use planner::logical::create_logical_plan;
