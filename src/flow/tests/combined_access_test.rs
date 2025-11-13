@@ -1,7 +1,7 @@
 use datatypes::types::{ListType, StructField, StructType};
 use datatypes::value::{ListValue, StructValue};
-use datatypes::{ColumnSchema, ConcreteDatatype, Int32Type, Schema, StringType, Value};
-use flow::expr::evaluator::DataFusionEvaluator;
+use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
+use flow::expr::DataFusionEvaluator;
 use flow::expr::scalar::ScalarExpr;
 use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
@@ -85,9 +85,6 @@ fn test_list_index_then_struct_field() {
     ]);
     let struct_type = StructType::new(struct_fields);
 
-    // Create list type: List<struct { x: Int32, y: String }>
-    let list_type = ListType::new(Arc::new(ConcreteDatatype::Struct(struct_type.clone())));
-
     // Create struct values
     let struct_value1 = Value::Struct(StructValue::new(
         vec![Value::Int32(10), Value::String("first".to_string())],
@@ -156,10 +153,9 @@ fn test_complex_nested_access() {
     )]);
     let inner_struct_type = StructType::new(inner_struct_fields);
 
-    // Create middle list type: List<struct { value: Int32 }>
-    let middle_list_type = ListType::new(Arc::new(ConcreteDatatype::Struct(
-        inner_struct_type.clone(),
-    )));
+    // List type containing the inner structs
+    let middle_list_type =
+        ListType::new(Arc::new(ConcreteDatatype::Struct(inner_struct_type.clone())));
 
     // Create outer struct type: struct { data: List<struct { value: Int32 }>, name: String }
     let outer_struct_fields = Arc::new(vec![
@@ -244,9 +240,6 @@ fn test_complex_nested_access() {
 fn test_list_of_lists() {
     // Create inner list type: List<Int32>
     let inner_list_type = ListType::new(Arc::new(ConcreteDatatype::Int32(Int32Type)));
-
-    // Create outer list type: List<List<Int32>>
-    let outer_list_type = ListType::new(Arc::new(ConcreteDatatype::List(inner_list_type.clone())));
 
     // Create inner list values
     let inner_list1 = Value::List(ListValue::new(

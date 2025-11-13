@@ -1,7 +1,7 @@
 use datatypes::types::{StructField, StructType};
 use datatypes::value::StructValue;
-use datatypes::{ColumnSchema, ConcreteDatatype, Int32Type, Schema, StringType, Value};
-use flow::expr::evaluator::DataFusionEvaluator;
+use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
+use flow::expr::DataFusionEvaluator;
 use flow::expr::scalar::ScalarExpr;
 use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
