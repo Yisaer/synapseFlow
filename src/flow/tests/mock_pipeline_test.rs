@@ -14,9 +14,8 @@ use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn test_mock_pipeline_with_datasource_connector() {
-    let mut pipeline =
-        create_pipeline("SELECT a + 1 AS a_plus_1, b + 2 AS b_plus_2 FROM stream")
-            .expect("pipeline creation failed");
+    let mut pipeline = create_pipeline("SELECT a + 1 AS a_plus_1, b + 2 AS b_plus_2 FROM stream")
+        .expect("pipeline creation failed");
 
     let mut mock_handle = None;
 
@@ -34,8 +33,7 @@ async fn test_mock_pipeline_with_datasource_connector() {
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let payload =
-        br#"[{"a":10,"b":100},{"a":20,"b":200},{"a":30,"b":300}]"#.to_vec();
+    let payload = br#"[{"a":10,"b":100},{"a":20,"b":200},{"a":30,"b":300}]"#.to_vec();
     mock_handle
         .send(payload)
         .await
@@ -56,22 +54,14 @@ async fn test_mock_pipeline_with_datasource_connector() {
             assert_eq!(col0.name, "a_plus_1");
             assert_eq!(
                 col0.values(),
-                &[
-                    Value::Int64(11),
-                    Value::Int64(21),
-                    Value::Int64(31)
-                ]
+                &[Value::Int64(11), Value::Int64(21), Value::Int64(31)]
             );
 
             let col1 = batch.column(1).expect("missing second column");
             assert_eq!(col1.name, "b_plus_2");
             assert_eq!(
                 col1.values(),
-                &[
-                    Value::Int64(102),
-                    Value::Int64(202),
-                    Value::Int64(302)
-                ]
+                &[Value::Int64(102), Value::Int64(202), Value::Int64(302)]
             );
         }
         StreamData::Control(sig) => {
