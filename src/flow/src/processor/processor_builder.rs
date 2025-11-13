@@ -9,19 +9,21 @@ use tokio::task::JoinHandle;
 use std::sync::Arc;
 use crate::processor::{
     Processor, ProcessorError, 
-    ControlSourceProcessor, DataSourceProcessor, ProjectProcessor, ResultSinkProcessor, StreamData,
+    ControlSourceProcessor, DataSourceProcessor, ProjectProcessor, FilterProcessor, ResultSinkProcessor, StreamData,
 };
-use crate::planner::physical::{PhysicalPlan, PhysicalDataSource, PhysicalProject};
+use crate::planner::physical::{PhysicalPlan, PhysicalDataSource, PhysicalProject, PhysicalFilter};
 
 /// Enum for all processor types created from PhysicalPlan
 ///
 /// This enum allows storing different types of processors in a unified way.
-/// Currently supports DataSourceProcessor and ProjectProcessor.
+/// Currently supports DataSourceProcessor, ProjectProcessor, and FilterProcessor.
 pub enum PlanProcessor {
     /// DataSourceProcessor created from PhysicalDatasource
     DataSource(DataSourceProcessor),
     /// ProjectProcessor created from PhysicalProject
     Project(ProjectProcessor),
+    /// FilterProcessor created from PhysicalFilter
+    Filter(FilterProcessor),
 }
 
 impl PlanProcessor {
@@ -30,6 +32,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
+            PlanProcessor::Filter(p) => p.id(),
         }
     }
     
@@ -38,6 +41,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::DataSource(p) => p.start(),
             PlanProcessor::Project(p) => p.start(),
+            PlanProcessor::Filter(p) => p.start(),
         }
     }
     
@@ -46,6 +50,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::DataSource(p) => p.output_senders(),
             PlanProcessor::Project(p) => p.output_senders(),
+            PlanProcessor::Filter(p) => p.output_senders(),
         }
     }
     
@@ -54,6 +59,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
+            PlanProcessor::Filter(p) => p.add_input(receiver),
         }
     }
     
@@ -62,6 +68,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::DataSource(p) => p.add_output(sender),
             PlanProcessor::Project(p) => p.add_output(sender),
+            PlanProcessor::Filter(p) => p.add_output(sender),
         }
     }
 }
@@ -173,6 +180,13 @@ pub fn create_processor_from_plan_node(
             Arc::new(proj.clone()),
         );
         Ok(PlanProcessor::Project(processor))
+    } else if let Some(filter) = plan.as_any().downcast_ref::<PhysicalFilter>() {
+        let processor_id = format!("filter_{}", _idx);
+        let processor = FilterProcessor::new(
+            processor_id,
+            Arc::new(filter.clone()),
+        );
+        Ok(PlanProcessor::Filter(processor))
     } else {
         Err(ProcessorError::InvalidConfiguration(format!(
             "Unsupported PhysicalPlan type: {}",
