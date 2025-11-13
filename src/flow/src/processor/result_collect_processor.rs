@@ -1,4 +1,4 @@
-//! ResultSinkProcessor - final destination for data flow
+//! ResultCollectProcessor - final destination for data flow
 //!
 //! This processor receives data from upstream processors and forwards it to a single output.
 
@@ -7,13 +7,13 @@ use crate::processor::{Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::mpsc;
 
-/// ResultSinkProcessor - forwards received data to a single output
+/// ResultCollectProcessor - forwards received data to a single output
 ///
 /// This processor acts as the final destination in the data flow. It:
 /// - Receives StreamData from multiple upstream processors (multi-input)
 /// - Forwards all received data to a single output channel (single-output)
 /// - Can be used to collect results or forward to external systems
-pub struct ResultSinkProcessor {
+pub struct ResultCollectProcessor {
     /// Processor identifier
     id: String,
     /// Input channels for receiving data (multi-input)
@@ -22,8 +22,8 @@ pub struct ResultSinkProcessor {
     output: Option<mpsc::Sender<StreamData>>,
 }
 
-impl ResultSinkProcessor {
-    /// Create a new ResultSinkProcessor
+impl ResultCollectProcessor {
+    /// Create a new ResultCollectProcessor
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -39,7 +39,7 @@ impl ResultSinkProcessor {
     }
 }
 
-impl Processor for ResultSinkProcessor {
+impl Processor for ResultCollectProcessor {
     fn id(&self) -> &str {
         &self.id
     }
@@ -48,7 +48,7 @@ impl Processor for ResultSinkProcessor {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let output = self.output.take().ok_or_else(|| {
             ProcessorError::InvalidConfiguration(
-                "ResultSinkProcessor output must be set before starting".to_string(),
+                "ResultCollectProcessor output must be set before starting".to_string(),
             )
         });
 
@@ -94,7 +94,7 @@ impl Processor for ResultSinkProcessor {
     }
 
     fn add_output(&mut self, sender: mpsc::Sender<StreamData>) {
-        // ResultSinkProcessor only supports single output
+        // ResultCollectProcessor only supports single output
         // If output is already set, replace it
         self.output = Some(sender);
     }

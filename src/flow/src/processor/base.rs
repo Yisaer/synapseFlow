@@ -3,7 +3,7 @@
 //! This module defines the core Processor trait and concrete implementations:
 //! - ControlSourceProcessor: Starting point for data flow, handles control signals
 //! - DataSourceProcessor: Processes data from PhysicalDatasource
-//! - ResultSinkProcessor: Final destination, prints received data
+//! - ResultCollectProcessor: Final destination, prints received data
 
 use crate::processor::StreamData;
 use futures::stream::SelectAll;

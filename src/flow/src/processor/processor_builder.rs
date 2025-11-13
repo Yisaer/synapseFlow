@@ -6,7 +6,7 @@
 use crate::planner::physical::{PhysicalDataSource, PhysicalFilter, PhysicalPlan, PhysicalProject};
 use crate::processor::{
     ControlSourceProcessor, DataSourceProcessor, FilterProcessor, Processor, ProcessorError,
-    ProjectProcessor, ResultSinkProcessor, StreamData,
+    ProjectProcessor, ResultCollectProcessor, StreamData,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -77,18 +77,18 @@ impl PlanProcessor {
 /// Contains all processors in the pipeline:
 /// - ControlSourceProcessor: data flow starting point
 /// - Middle processors: created from PhysicalPlan nodes (can be various types)
-/// - ResultSinkProcessor: data flow ending point
+/// - ResultCollectProcessor: data flow ending point
 pub struct ProcessorPipeline {
     /// Pipeline input channel (send data into ControlSourceProcessor)
     pub input: mpsc::Sender<StreamData>,
-    /// Pipeline output channel (receive data from ResultSinkProcessor)
+    /// Pipeline output channel (receive data from ResultCollectProcessor)
     pub output: mpsc::Receiver<StreamData>,
     /// Control source processor (data head)
     pub control_source: ControlSourceProcessor,
     /// Middle processors created from PhysicalPlan (various types)
     pub middle_processors: Vec<PlanProcessor>,
     /// Result sink processor (data tail)
-    pub result_sink: ResultSinkProcessor,
+    pub result_sink: ResultCollectProcessor,
     /// Join handles for all running processors
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
 }
@@ -321,7 +321,7 @@ fn connect_processors(
 /// 3. Connects processors based on tree structure:
 ///    - ControlSourceProcessor output -> leaf nodes input
 ///    - Children outputs -> parent input
-/// 4. Connects root node output -> ResultSinkProcessor input
+/// 4. Connects root node output -> ResultCollectProcessor input
 ///
 /// # Arguments
 /// * `physical_plan` - The root PhysicalPlan node (data flow end point)
@@ -344,7 +344,7 @@ pub fn create_processor_pipeline(
         &mut control_source,
     )?;
 
-    let mut result_sink = ResultSinkProcessor::new("result_sink");
+    let mut result_sink = ResultCollectProcessor::new("result_sink");
 
     let root_index = *physical_plan.get_plan_index();
     if let Some(root_processor) = processor_map.get_processor_mut(root_index) {

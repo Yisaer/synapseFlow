@@ -17,7 +17,7 @@ pub use planner::create_physical_plan;
 pub use planner::logical::{BaseLogicalPlan, DataSource, Filter, LogicalPlan, Project};
 pub use processor::{
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, Processor, ProcessorError,
-    ResultSinkProcessor, StreamData,
+    ResultCollectProcessor, StreamData,
 };
 
 use planner::logical::create_logical_plan;
