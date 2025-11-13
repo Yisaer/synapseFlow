@@ -6,6 +6,8 @@
 //! - ResultSinkProcessor: Final destination, prints received data
 
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use futures::stream::SelectAll;
 use crate::processor::StreamData;
 
 /// Trait for all stream processors
@@ -56,3 +58,39 @@ impl std::fmt::Display for ProcessorError {
 }
 
 impl std::error::Error for ProcessorError {}
+
+/// Combined input stream built from multiple mpsc receivers
+pub(crate) type ProcessorInputStream = SelectAll<ReceiverStream<StreamData>>;
+
+/// Convert a list of mpsc receivers into a single SelectAll stream
+pub(crate) fn fan_in_streams(
+    inputs: Vec<mpsc::Receiver<StreamData>>,
+) -> ProcessorInputStream {
+    let mut streams = SelectAll::new();
+    for receiver in inputs {
+        streams.push(ReceiverStream::new(receiver));
+    }
+    streams
+}
+
+/// Broadcast a StreamData payload to every downstream sender
+pub(crate) async fn broadcast_all(
+    outputs: &[mpsc::Sender<StreamData>],
+    data: StreamData,
+) -> Result<(), ProcessorError> {
+    if outputs.is_empty() {
+        return Ok(());
+    }
+
+    if let Some((last, rest)) = outputs.split_last() {
+        for sender in rest {
+            sender
+                .send(data.clone())
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed)?;
+        }
+        last.send(data).await.map_err(|_| ProcessorError::ChannelClosed)?;
+    }
+
+    Ok(())
+}

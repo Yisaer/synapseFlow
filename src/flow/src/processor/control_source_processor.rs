@@ -4,8 +4,11 @@
 //! that coordinate the entire stream processing pipeline.
 
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use futures::stream::StreamExt;
 use std::collections::HashMap;
 use crate::processor::{Processor, ProcessorError, StreamData};
+use crate::processor::base::broadcast_all;
 
 /// ControlSourceProcessor - handles control signals for the pipeline
 ///
@@ -83,7 +86,6 @@ impl Processor for ControlSourceProcessor {
     }
     
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
-        let _id = self.id.clone();
         let input_result = self.input.take()
             .ok_or_else(|| ProcessorError::InvalidConfiguration(
                 "ControlSourceProcessor input must be set before starting".to_string()
@@ -91,40 +93,22 @@ impl Processor for ControlSourceProcessor {
         let outputs = self.outputs.clone();
         
         tokio::spawn(async move {
-            let mut input = match input_result {
+            let input = match input_result {
                 Ok(input) => input,
                 Err(e) => return Err(e),
             };
-            
-            loop {
-                match input.try_recv() {
-                    Ok(data) => {
-                        // Forward to all outputs
-                        for output in &outputs {
-                            if output.send(data.clone()).await.is_err() {
-                                return Err(ProcessorError::ChannelClosed);
-                            }
-                        }
-                        // Check if this is a terminal signal
-                        if data.is_terminal() {
-                            return Ok(());
-                        }
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        // Channel not empty but no data ready, continue
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        // Channel disconnected, send StreamEnd to all outputs and exit
-                        for output in &outputs {
-                            let _ = output.send(StreamData::stream_end()).await;
-                        }
-                        return Ok(());
-                    }
+            let mut stream = ReceiverStream::new(input);
+
+            while let Some(data) = stream.next().await {
+                broadcast_all(&outputs, data.clone()).await?;
+                if data.is_terminal() {
+                    return Ok(());
                 }
-                
-                // Yield to allow other tasks to run
-                tokio::task::yield_now().await;
             }
+
+            // Input closed without explicit StreamEnd, propagate shutdown.
+            broadcast_all(&outputs, StreamData::stream_end()).await?;
+            Ok(())
         })
     }
     

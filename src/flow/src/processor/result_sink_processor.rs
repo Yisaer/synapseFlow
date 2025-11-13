@@ -3,7 +3,9 @@
 //! This processor receives data from upstream processors and forwards it to a single output.
 
 use tokio::sync::mpsc;
+use futures::stream::StreamExt;
 use crate::processor::{Processor, ProcessorError, StreamData};
+use crate::processor::base::fan_in_streams;
 
 /// ResultSinkProcessor - forwards received data to a single output
 ///
@@ -43,8 +45,7 @@ impl Processor for ResultSinkProcessor {
     }
     
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
-        let _id = self.id.clone();
-        let mut inputs = std::mem::take(&mut self.inputs);
+        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let output = self.output.take()
             .ok_or_else(|| ProcessorError::InvalidConfiguration(
                 "ResultSinkProcessor output must be set before starting".to_string()
@@ -55,49 +56,27 @@ impl Processor for ResultSinkProcessor {
                 Ok(output) => output,
                 Err(e) => return Err(e),
             };
-            
-            loop {
-                let mut all_closed = true;
-                let mut received_any = false;
-                
-                // Check all input channels
-                for input in inputs.iter_mut() {
-                    match input.try_recv() {
-                        Ok(data) => {
-                            all_closed = false;
-                            received_any = true;
-                            
-                            // Forward data to the single output
-                            if output.send(data.clone()).await.is_err() {
-                                return Err(ProcessorError::ChannelClosed);
-                            }
-                            
-                            // Check if this is a terminal signal
-                            if data.is_terminal() {
-                                // Forward StreamEnd to output before exiting
-                                let _ = output.send(StreamData::stream_end()).await;
-                                return Ok(());
-                            }
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            all_closed = false;
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // Channel disconnected
-                        }
-                    }
-                }
-                
-                // If all channels are closed and we haven't received anything, exit
-                if all_closed && !received_any {
-                    // Send StreamEnd to output before exiting
-                    let _ = output.send(StreamData::stream_end()).await;
+
+            while let Some(data) = input_streams.next().await {
+                output
+                    .send(data.clone())
+                    .await
+                    .map_err(|_| ProcessorError::ChannelClosed)?;
+
+                if data.is_terminal() {
+                    output
+                        .send(StreamData::stream_end())
+                        .await
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
                     return Ok(());
                 }
-                
-                // Yield to allow other tasks to run
-                tokio::task::yield_now().await;
             }
+
+            output
+                .send(StreamData::stream_end())
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed)?;
+            Ok(())
         })
     }
     

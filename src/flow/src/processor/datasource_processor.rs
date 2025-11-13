@@ -4,7 +4,9 @@
 //! as StreamData::Collection.
 
 use tokio::sync::mpsc;
+use futures::stream::StreamExt;
 use crate::processor::{Processor, ProcessorError, StreamData};
+use crate::processor::base::{fan_in_streams, broadcast_all};
 
 /// DataSourceProcessor - reads data from PhysicalDatasource
 ///
@@ -40,65 +42,26 @@ impl Processor for DataSourceProcessor {
     }
     
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
-        let mut inputs = std::mem::take(&mut self.inputs);
         let outputs = self.outputs.clone();
+        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         
         tokio::spawn(async move {
-            loop {
-                let mut all_closed = true;
-                let mut received_data = false;
-                
-                // Check all input channels
-                for input in &mut inputs {
-                    match input.try_recv() {
-                        Ok(data) => {
-                            all_closed = false;
-                            received_data = true;
-                            
-                            // Handle control signals
-                            if let Some(control) = data.as_control() {
-                                match control {
-                                    crate::processor::ControlSignal::StreamEnd => {
-                                        // Forward StreamEnd to outputs
-                                        for output in &outputs {
-                                            let _ = output.send(data.clone()).await;
-                                        }
-                                        return Ok(());
-                                    }
-                                    _ => {
-                                        // Forward other control signals
-                                        for output in &outputs {
-                                            if output.send(data.clone()).await.is_err() {
-                                                return Err(ProcessorError::ChannelClosed);
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Forward non-control data (Collection or Error)
-                                for output in &outputs {
-                                    if output.send(data.clone()).await.is_err() {
-                                        return Err(ProcessorError::ChannelClosed);
-                                    }
-                                }
-                            }
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            all_closed = false;
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // Channel disconnected
-                        }
+            while let Some(data) = input_streams.next().await {
+                match data.as_control() {
+                    Some(crate::processor::ControlSignal::StreamEnd) => {
+                        broadcast_all(&outputs, data.clone()).await?;
+                        return Ok(());
+                    }
+                    Some(_) => {
+                        broadcast_all(&outputs, data.clone()).await?;
+                    }
+                    None => {
+                        broadcast_all(&outputs, data.clone()).await?;
                     }
                 }
-                // If all channels are closed and no data received, exit
-                if all_closed && !received_data {
-                    return Ok(());
-                }
-                
-                // Yield to allow other tasks to run
-                tokio::task::yield_now().await;
             }
+
+            Ok(())
         })
     }
     
