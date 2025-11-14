@@ -2,6 +2,7 @@
 
 use crate::model::Collection;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use std::time::Instant;
 
 /// Errors that can occur during encoding.
 #[derive(thiserror::Error, Debug)]
@@ -40,28 +41,36 @@ impl CollectionEncoder for JsonEncoder {
     }
 
     fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
+        let start = Instant::now();
         let num_rows = collection.num_rows();
-        if num_rows == 0 || collection.num_columns() == 0 {
-            return serde_json::to_vec(&JsonValue::Array(Vec::new()))
-                .map_err(EncodeError::Serialization);
-        }
-
-        let columns = collection.columns();
-        let mut rows = Vec::with_capacity(num_rows);
-        for row_idx in 0..num_rows {
-            let mut json_row = JsonMap::with_capacity(columns.len());
-            for column in columns {
-                let key = column_identifier(column);
-                let value = column
-                    .get(row_idx)
-                    .map(value_to_json)
-                    .unwrap_or(JsonValue::Null);
-                json_row.insert(key, value);
+        let payload = if num_rows == 0 || collection.num_columns() == 0 {
+            serde_json::to_vec(&JsonValue::Array(Vec::new()))
+        } else {
+            let columns = collection.columns();
+            let mut rows = Vec::with_capacity(num_rows);
+            for row_idx in 0..num_rows {
+                let mut json_row = JsonMap::with_capacity(columns.len());
+                for column in columns {
+                    let key = column_identifier(column);
+                    let value = column
+                        .get(row_idx)
+                        .map(value_to_json)
+                        .unwrap_or(JsonValue::Null);
+                    json_row.insert(key, value);
+                }
+                rows.push(JsonValue::Object(json_row));
             }
-            rows.push(JsonValue::Object(json_row));
+            serde_json::to_vec(&JsonValue::Array(rows))
         }
-
-        serde_json::to_vec(&JsonValue::Array(rows)).map_err(EncodeError::Serialization)
+        .map_err(EncodeError::Serialization)?;
+        println!(
+            "[JsonEncoder:{}] encoded {} rows into {} bytes in {:?}",
+            self.id,
+            num_rows,
+            payload.len(),
+            start.elapsed()
+        );
+        Ok(payload)
     }
 }
 

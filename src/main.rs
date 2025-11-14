@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
 
-use crate::metrics::{CPU_USAGE_GAUGE, MEMORY_USAGE_GAUGE};
+use crate::metrics::{CPU_SECONDS_TOTAL_COUNTER, CPU_USAGE_GAUGE, MEMORY_USAGE_GAUGE};
 use flow::codec::JsonDecoder;
 use flow::connector::{MqttSinkConfig, MqttSinkConnector, MqttSourceConfig, MqttSourceConnector};
 use flow::processor::processor_builder::PlanProcessor;
@@ -84,7 +84,12 @@ async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             system.refresh_process(pid);
             if let Some(proc_info) = system.process(pid) {
-                CPU_USAGE_GAUGE.set(proc_info.cpu_usage() as i64);
+                let cpu_usage_percent = proc_info.cpu_usage() as f64;
+                CPU_USAGE_GAUGE.set(cpu_usage_percent as i64);
+                let delta_secs = (cpu_usage_percent / 100.0) * poll_interval as f64;
+                if delta_secs.is_finite() && delta_secs >= 0.0 {
+                    CPU_SECONDS_TOTAL_COUNTER.inc_by(delta_secs);
+                }
                 MEMORY_USAGE_GAUGE.set(proc_info.memory() as i64);
             } else {
                 CPU_USAGE_GAUGE.set(0);

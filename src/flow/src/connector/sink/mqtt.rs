@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
 use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, QoS, Transport};
+use std::time::Instant;
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -222,6 +223,8 @@ impl SinkConnector for MqttSinkConnector {
             MQTT_SINK_RECORDS_IN
                 .with_label_values(&[self.id.as_str()])
                 .inc();
+            let start = Instant::now();
+            let payload_len = payload.len();
             client
                 .publish(
                     &self.config.topic,
@@ -234,6 +237,15 @@ impl SinkConnector for MqttSinkConnector {
                     MQTT_SINK_RECORDS_OUT
                         .with_label_values(&[self.id.as_str()])
                         .inc()
+                })
+                .map(|_| {
+                    println!(
+                        "[MqttSinkConnector:{}] published {} bytes to {} in {:?}",
+                        self.id,
+                        payload_len,
+                        self.config.topic,
+                        start.elapsed()
+                    )
                 })
         } else {
             Err(SinkConnectorError::Unavailable(format!(
@@ -280,6 +292,7 @@ fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnec
         })?;
 
     let mut options = MqttOptions::new(config.client_id(), host, port);
+    options.set_max_packet_size(64 * 1024 * 1024, 64 * 1024 * 1024);
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
     }

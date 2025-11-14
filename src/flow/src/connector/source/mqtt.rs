@@ -112,6 +112,10 @@ impl SourceConnector for MqttSourceConnector {
                         while let Ok(event) = events.recv().await {
                             match event {
                                 Ok(SharedMqttEvent::Payload(payload)) => {
+                                    println!(
+                                        "[MqttSourceConnector:{metrics_id}] received payload ({} bytes)",
+                                        payload.len()
+                                    );
                                     MQTT_SOURCE_RECORDS_IN
                                         .with_label_values(&[metrics_id.as_str()])
                                         .inc();
@@ -177,6 +181,10 @@ async fn run_standalone_loop(
     loop {
         match event_loop.poll().await {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
+                println!(
+                    "[MqttSourceConnector:{connector_id}] received payload ({} bytes)",
+                    publish.payload.len()
+                );
                 MQTT_SOURCE_RECORDS_IN
                     .with_label_values(&[connector_id.as_str()])
                     .inc();
@@ -227,6 +235,7 @@ fn build_mqtt_options(config: &MqttSourceConfig) -> Result<MqttOptions, Connecto
         })?;
 
     let mut options = MqttOptions::new(config.client_id(), host, port);
+    options.set_max_packet_size(64 * 1024 * 1024, 64 * 1024 * 1024);
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
     }
