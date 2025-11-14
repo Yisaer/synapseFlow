@@ -4,11 +4,12 @@
 
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalProject, PhysicalProjectField};
-use crate::processor::base::{broadcast_all, fan_in_streams};
+use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// ProjectProcessor - evaluates projection expressions
 ///
@@ -22,19 +23,20 @@ pub struct ProjectProcessor {
     /// Physical projection configuration
     physical_project: Arc<PhysicalProject>,
     /// Input channels for receiving data
-    inputs: Vec<mpsc::Receiver<StreamData>>,
-    /// Output channels for sending data downstream
-    outputs: Vec<mpsc::Sender<StreamData>>,
+    inputs: Vec<broadcast::Receiver<StreamData>>,
+    /// Broadcast channel for downstream processors
+    output: broadcast::Sender<StreamData>,
 }
 
 impl ProjectProcessor {
     /// Create a new ProjectProcessor from PhysicalProject
     pub fn new(id: impl Into<String>, physical_project: Arc<PhysicalProject>) -> Self {
+        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         Self {
             id: id.into(),
             physical_project,
             inputs: Vec::new(),
-            outputs: Vec::new(),
+            output,
         }
     }
 
@@ -69,19 +71,33 @@ impl Processor for ProjectProcessor {
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
-        let outputs = self.outputs.clone();
+        let output = self.output.clone();
         let fields = self.physical_project.fields.clone();
 
         tokio::spawn(async move {
-            while let Some(data) = input_streams.next().await {
+            while let Some(item) = input_streams.next().await {
+                let data = match item {
+                    Ok(data) => data,
+                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                        return Err(ProcessorError::ProcessingError(format!(
+                            "ProjectProcessor input lagged by {} messages",
+                            skipped
+                        )))
+                    }
+                };
+
                 if let Some(control) = data.as_control() {
                     match control {
                         crate::processor::ControlSignal::StreamEnd => {
-                            broadcast_all(&outputs, data.clone()).await?;
+                            output
+                                .send(data.clone())
+                                .map_err(|_| ProcessorError::ChannelClosed)?;
                             return Ok(());
                         }
                         _ => {
-                            broadcast_all(&outputs, data.clone()).await?;
+                            output
+                                .send(data.clone())
+                                .map_err(|_| ProcessorError::ChannelClosed)?;
                         }
                     }
                     continue;
@@ -91,17 +107,23 @@ impl Processor for ProjectProcessor {
                     match apply_projection(collection, &fields) {
                         Ok(projected_collection) => {
                             let projected_data = StreamData::collection(projected_collection);
-                            broadcast_all(&outputs, projected_data).await?;
+                            output
+                                .send(projected_data)
+                                .map_err(|_| ProcessorError::ChannelClosed)?;
                         }
                         Err(e) => {
                             let error_data = StreamData::error(
                                 StreamError::new(e.to_string()).with_source(id.clone()),
                             );
-                            broadcast_all(&outputs, error_data).await?;
+                            output
+                                .send(error_data)
+                                .map_err(|_| ProcessorError::ChannelClosed)?;
                         }
                     }
                 } else {
-                    broadcast_all(&outputs, data.clone()).await?;
+                    output
+                        .send(data.clone())
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
                 }
             }
 
@@ -109,15 +131,11 @@ impl Processor for ProjectProcessor {
         })
     }
 
-    fn output_senders(&self) -> Vec<mpsc::Sender<StreamData>> {
-        self.outputs.clone()
+    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+        Some(self.output.subscribe())
     }
 
-    fn add_input(&mut self, receiver: mpsc::Receiver<StreamData>) {
+    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
         self.inputs.push(receiver);
-    }
-
-    fn add_output(&mut self, sender: mpsc::Sender<StreamData>) {
-        self.outputs.push(sender);
     }
 }

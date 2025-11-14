@@ -3,12 +3,11 @@
 //! This processor is responsible for receiving and sending control signals
 //! that coordinate the entire stream processing pipeline.
 
-use crate::processor::base::broadcast_all;
+use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
 use crate::processor::{Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
-use std::collections::HashMap;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 /// ControlSourceProcessor - handles control signals for the pipeline
 ///
@@ -20,63 +19,44 @@ pub struct ControlSourceProcessor {
     /// Processor identifier
     id: String,
     /// Single input channel for receiving StreamData (single-input)
-    input: Option<mpsc::Receiver<StreamData>>,
-    /// Output channels for sending StreamData downstream (multi-output)
-    outputs: Vec<mpsc::Sender<StreamData>>,
-    /// Mapping from downstream processor id to output channel
-    output_map: HashMap<String, mpsc::Sender<StreamData>>,
+    input: Option<broadcast::Receiver<StreamData>>,
+    /// Broadcast channel for all downstream processors
+    output: broadcast::Sender<StreamData>,
 }
 
 impl ControlSourceProcessor {
     /// Create a new ControlSourceProcessor
     pub fn new(id: impl Into<String>) -> Self {
+        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         Self {
             id: id.into(),
             input: None,
-            outputs: Vec::new(),
-            output_map: HashMap::new(),
+            output,
         }
     }
 
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
-        for output in &self.outputs {
-            output
-                .send(data.clone())
-                .await
-                .map_err(|_| ProcessorError::ChannelClosed)?;
-        }
-        Ok(())
+        self.output
+            .send(data)
+            .map(|_| ())
+            .map_err(|_| ProcessorError::ChannelClosed)
     }
 
-    /// Register an output channel for a specific downstream processor id
-    pub fn add_output_for_processor(
-        &mut self,
-        processor_id: impl Into<String>,
-        sender: mpsc::Sender<StreamData>,
-    ) {
-        let id = processor_id.into();
-        self.outputs.push(sender.clone());
-        self.output_map.insert(id, sender);
-    }
-
-    /// Send StreamData to a specific downstream processor by id
+    /// Send StreamData to a specific downstream processor by id.
+    ///
+    /// The broadcast-based fan-out no longer supports targeted sends, so this
+    /// method now returns an error to signal that behavior.
     pub async fn send_stream_data(
         &self,
         processor_id: &str,
         data: StreamData,
     ) -> Result<(), ProcessorError> {
-        if let Some(output) = self.output_map.get(processor_id) {
-            output
-                .send(data)
-                .await
-                .map_err(|_| ProcessorError::ChannelClosed)
-        } else {
-            Err(ProcessorError::InvalidConfiguration(format!(
-                "Unknown processor id: {}",
-                processor_id
-            )))
-        }
+        let _ = data;
+        Err(ProcessorError::InvalidConfiguration(format!(
+            "Targeted sends are not supported for control source outputs (requested: {})",
+            processor_id
+        )))
     }
 }
 
@@ -91,40 +71,48 @@ impl Processor for ControlSourceProcessor {
                 "ControlSourceProcessor input must be set before starting".to_string(),
             )
         });
-        let outputs = self.outputs.clone();
+        let output = self.output.clone();
 
         tokio::spawn(async move {
             let input = match input_result {
                 Ok(input) => input,
                 Err(e) => return Err(e),
             };
-            let mut stream = ReceiverStream::new(input);
+            let mut stream = BroadcastStream::new(input);
 
-            while let Some(data) = stream.next().await {
-                broadcast_all(&outputs, data.clone()).await?;
+            while let Some(item) = stream.next().await {
+                let data = match item {
+                    Ok(data) => data,
+                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                        return Err(ProcessorError::ProcessingError(format!(
+                            "Control source input lagged by {} messages",
+                            skipped
+                        )))
+                    }
+                };
+                output
+                    .send(data.clone())
+                    .map_err(|_| ProcessorError::ChannelClosed)?;
                 if data.is_terminal() {
                     return Ok(());
                 }
             }
 
             // Input closed without explicit StreamEnd, propagate shutdown.
-            broadcast_all(&outputs, StreamData::stream_end()).await?;
+            output
+                .send(StreamData::stream_end())
+                .map_err(|_| ProcessorError::ChannelClosed)?;
             Ok(())
         })
     }
 
-    fn output_senders(&self) -> Vec<mpsc::Sender<StreamData>> {
-        self.outputs.clone()
+    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+        Some(self.output.subscribe())
     }
 
-    fn add_input(&mut self, receiver: mpsc::Receiver<StreamData>) {
+    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
         // ControlSourceProcessor only supports single input
         // If input is already set, replace it
         self.input = Some(receiver);
-    }
-
-    fn add_output(&mut self, sender: mpsc::Sender<StreamData>) {
-        let auto_id = format!("auto_output_{}", self.outputs.len());
-        self.add_output_for_processor(auto_id, sender);
     }
 }

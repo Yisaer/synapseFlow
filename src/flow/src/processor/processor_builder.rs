@@ -11,7 +11,7 @@ use crate::processor::{
     ProjectProcessor, ResultCollectProcessor, SinkProcessor, StreamData,
 };
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 /// Enum for all processor types created from PhysicalPlan
@@ -46,30 +46,21 @@ impl PlanProcessor {
         }
     }
 
-    /// Get output channel senders
-    pub fn output_senders(&self) -> Vec<mpsc::Sender<crate::processor::StreamData>> {
+    /// Subscribe to the processor's output stream
+    pub fn subscribe_output(&self) -> Option<broadcast::Receiver<crate::processor::StreamData>> {
         match self {
-            PlanProcessor::DataSource(p) => p.output_senders(),
-            PlanProcessor::Project(p) => p.output_senders(),
-            PlanProcessor::Filter(p) => p.output_senders(),
+            PlanProcessor::DataSource(p) => p.subscribe_output(),
+            PlanProcessor::Project(p) => p.subscribe_output(),
+            PlanProcessor::Filter(p) => p.subscribe_output(),
         }
     }
 
     /// Add an input channel
-    pub fn add_input(&mut self, receiver: mpsc::Receiver<crate::processor::StreamData>) {
+    pub fn add_input(&mut self, receiver: broadcast::Receiver<crate::processor::StreamData>) {
         match self {
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
-        }
-    }
-
-    /// Add an output channel
-    pub fn add_output(&mut self, sender: mpsc::Sender<crate::processor::StreamData>) {
-        match self {
-            PlanProcessor::DataSource(p) => p.add_output(sender),
-            PlanProcessor::Project(p) => p.add_output(sender),
-            PlanProcessor::Filter(p) => p.add_output(sender),
         }
     }
 }
@@ -93,6 +84,10 @@ pub struct ProcessorPipeline {
     pub sink_processors: Vec<SinkProcessor>,
     /// Result sink processor (data tail)
     pub result_sink: ResultCollectProcessor,
+    /// Broadcast sender feeding the control source input
+    control_input_sender: broadcast::Sender<StreamData>,
+    /// Buffered receiver that bridges external input into the control input sender
+    control_input_buffer: Option<mpsc::Receiver<StreamData>>,
     /// Join handles for all running processors
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
 }
@@ -102,6 +97,18 @@ impl ProcessorPipeline {
     pub fn start(&mut self) {
         if !self.handles.is_empty() {
             return;
+        }
+        if let Some(buffer) = self.control_input_buffer.take() {
+            let sender = self.control_input_sender.clone();
+            self.handles.push(tokio::spawn(async move {
+                let mut receiver = buffer;
+                while let Some(data) = receiver.recv().await {
+                    sender
+                        .send(data)
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                }
+                Ok(())
+            }));
         }
         self.handles.push(self.control_source.start());
         for processor in &mut self.middle_processors {
@@ -120,6 +127,9 @@ impl ProcessorPipeline {
             .send(StreamData::stream_end())
             .await
             .map_err(|_| ProcessorError::ChannelClosed)?;
+        let (dummy_tx, _) = mpsc::channel(1);
+        let old_input = std::mem::replace(&mut self.input, dummy_tx);
+        drop(old_input);
 
         // Await all processor tasks
         while let Some(handle) = self.handles.pop() {
@@ -211,6 +221,10 @@ impl ProcessorMap {
         }
     }
 
+    fn get_processor(&self, plan_index: i64) -> Option<&PlanProcessor> {
+        self.processors.get(&plan_index)
+    }
+
     fn get_processor_mut(&mut self, plan_index: i64) -> Option<&mut PlanProcessor> {
         self.processors.get_mut(&plan_index)
     }
@@ -293,9 +307,9 @@ fn connect_processors(
     let leaf_indices = collect_leaf_indices(Arc::clone(&physical_plan));
     for leaf_index in leaf_indices {
         if let Some(processor) = processor_map.get_processor_mut(leaf_index) {
-            let processor_id = processor.id().to_string();
-            let (sender, receiver) = mpsc::channel(100);
-            control_source.add_output_for_processor(processor_id, sender);
+            let receiver = control_source.subscribe_output().ok_or_else(|| {
+                ProcessorError::InvalidConfiguration("control source output unavailable".into())
+            })?;
             processor.add_input(receiver);
         }
     }
@@ -303,15 +317,16 @@ fn connect_processors(
     // 2. Connect children outputs to parent inputs
     let relations = collect_parent_child_relations(Arc::clone(&physical_plan));
     for (parent_index, child_index) in relations {
-        // Create channel
-        let (sender, receiver) = mpsc::channel(100);
+        let receiver = processor_map
+            .get_processor(child_index)
+            .and_then(|proc| proc.subscribe_output())
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(format!(
+                    "Processor {} has no broadcast output",
+                    child_index
+                ))
+            })?;
 
-        // Connect child output
-        if let Some(child_processor) = processor_map.get_processor_mut(child_index) {
-            child_processor.add_output(sender);
-        }
-
-        // Connect parent input
         if let Some(parent_processor) = processor_map.get_processor_mut(parent_index) {
             parent_processor.add_input(receiver);
         }
@@ -340,7 +355,9 @@ pub fn create_processor_pipeline(
     }
 
     let mut control_source = ControlSourceProcessor::new("control_source");
-    let (pipeline_input_sender, control_input_receiver) = mpsc::channel(100);
+    let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
+    let (control_input_sender, control_input_receiver) =
+        broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
     control_source.add_input(control_input_receiver);
 
     let mut processor_map = ProcessorMap::new();
@@ -353,27 +370,37 @@ pub fn create_processor_pipeline(
     )?;
 
     let root_index = *physical_plan.get_plan_index();
-    if let Some(root_processor) = processor_map.get_processor_mut(root_index) {
-        for sink in sink_processors.iter_mut() {
-            let (to_sink_sender, to_sink_receiver) = mpsc::channel(100);
-            root_processor.add_output(to_sink_sender);
-            sink.add_input(to_sink_receiver);
-        }
-    } else {
+    if processor_map.get_processor(root_index).is_none() {
         return Err(ProcessorError::InvalidConfiguration(
             "Root processor not found".to_string(),
         ));
     }
 
+    for sink in sink_processors.iter_mut() {
+        let receiver = processor_map
+            .get_processor(root_index)
+            .and_then(|proc| proc.subscribe_output())
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(
+                    "Root processor is missing broadcast output".to_string(),
+                )
+            })?;
+        sink.add_input(receiver);
+    }
+
     let mut result_sink = ResultCollectProcessor::new("result_sink");
     for sink in sink_processors.iter_mut() {
-        let (sender, receiver) = mpsc::channel(100);
-        sink.add_output(sender);
+        let receiver = sink.subscribe_output().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration(format!(
+                "Sink processor {} missing broadcast output",
+                sink.id()
+            ))
+        })?;
         result_sink.add_input(receiver);
     }
 
     let (result_output_sender, pipeline_output_receiver) = mpsc::channel(100);
-    result_sink.add_output(result_output_sender);
+    result_sink.set_output(result_output_sender);
 
     let middle_processors = processor_map.get_all_processors();
 
@@ -384,6 +411,8 @@ pub fn create_processor_pipeline(
         middle_processors,
         sink_processors,
         result_sink,
+        control_input_sender,
+        control_input_buffer: Some(pipeline_input_receiver),
         handles: Vec::new(),
     })
 }

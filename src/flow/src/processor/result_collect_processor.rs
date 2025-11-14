@@ -5,7 +5,8 @@
 use crate::processor::base::fan_in_streams;
 use crate::processor::{Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// ResultCollectProcessor - forwards received data to a single output
 ///
@@ -17,7 +18,7 @@ pub struct ResultCollectProcessor {
     /// Processor identifier
     id: String,
     /// Input channels for receiving data (multi-input)
-    inputs: Vec<mpsc::Receiver<StreamData>>,
+    inputs: Vec<broadcast::Receiver<StreamData>>,
     /// Single output channel for forwarding received data (single-output)
     output: Option<mpsc::Sender<StreamData>>,
 }
@@ -36,6 +37,11 @@ impl ResultCollectProcessor {
     /// Returns None if output is not set
     pub fn output_receiver(&self) -> Option<&mpsc::Sender<StreamData>> {
         self.output.as_ref()
+    }
+
+    /// Set the downstream output channel (typically the pipeline output)
+    pub fn set_output(&mut self, sender: mpsc::Sender<StreamData>) {
+        self.output = Some(sender);
     }
 }
 
@@ -58,7 +64,17 @@ impl Processor for ResultCollectProcessor {
                 Err(e) => return Err(e),
             };
 
-            while let Some(data) = input_streams.next().await {
+            while let Some(item) = input_streams.next().await {
+                let data = match item {
+                    Ok(data) => data,
+                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                        return Err(ProcessorError::ProcessingError(format!(
+                            "ResultCollectProcessor input lagged by {} messages",
+                            skipped
+                        )))
+                    }
+                };
+
                 output
                     .send(data.clone())
                     .await
@@ -81,21 +97,11 @@ impl Processor for ResultCollectProcessor {
         })
     }
 
-    fn output_senders(&self) -> Vec<mpsc::Sender<StreamData>> {
-        // Return single output as a vector (for compatibility with Processor trait)
-        self.output
-            .as_ref()
-            .map(|s| vec![s.clone()])
-            .unwrap_or_default()
+    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+        None
     }
 
-    fn add_input(&mut self, receiver: mpsc::Receiver<StreamData>) {
+    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
         self.inputs.push(receiver);
-    }
-
-    fn add_output(&mut self, sender: mpsc::Sender<StreamData>) {
-        // ResultCollectProcessor only supports single output
-        // If output is already set, replace it
-        self.output = Some(sender);
     }
 }

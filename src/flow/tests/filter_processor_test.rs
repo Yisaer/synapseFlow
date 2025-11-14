@@ -9,7 +9,7 @@ use flow::model::{Column, RecordBatch};
 use flow::planner::physical::PhysicalFilter;
 use flow::processor::{FilterProcessor, Processor, StreamData};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
 /// Test FilterProcessor with a simple filter expression
@@ -52,12 +52,11 @@ async fn test_filter_processor_basic() {
     let mut filter_processor = FilterProcessor::new("test_filter", physical_filter);
 
     // Create channels
-    let (input_sender, input_receiver) = mpsc::channel(10);
-    let (output_sender, mut output_receiver) = mpsc::channel(10);
+    let (input_sender, input_receiver) = broadcast::channel(10);
+    let mut output_receiver = filter_processor.subscribe_output().expect("output stream");
 
     // Connect processor
     filter_processor.add_input(input_receiver);
-    filter_processor.add_output(output_sender);
 
     // Start processor
     let handle = filter_processor.start();
@@ -66,7 +65,7 @@ async fn test_filter_processor_basic() {
     let stream_data = StreamData::collection(Box::new(batch));
     input_sender
         .send(stream_data)
-        .await
+        .map_err(|_| "Failed to send data")
         .expect("Failed to send data");
 
     // Give processor time to process
@@ -75,7 +74,7 @@ async fn test_filter_processor_basic() {
     // Send end signal
     input_sender
         .send(StreamData::stream_end())
-        .await
+        .map_err(|_| "Failed to send end signal")
         .expect("Failed to send end signal");
 
     // Receive filtered data with timeout
@@ -154,12 +153,11 @@ async fn test_filter_processor_no_match() {
     let mut filter_processor = FilterProcessor::new("test_filter_no_match", physical_filter);
 
     // Create channels
-    let (input_sender, input_receiver) = mpsc::channel(10);
-    let (output_sender, mut output_receiver) = mpsc::channel(10);
+    let (input_sender, input_receiver) = broadcast::channel(10);
+    let mut output_receiver = filter_processor.subscribe_output().expect("output stream");
 
     // Connect processor
     filter_processor.add_input(input_receiver);
-    filter_processor.add_output(output_sender);
 
     // Start processor
     let handle = filter_processor.start();
@@ -168,7 +166,7 @@ async fn test_filter_processor_no_match() {
     let stream_data = StreamData::collection(Box::new(batch));
     input_sender
         .send(stream_data)
-        .await
+        .map_err(|_| "Failed to send data")
         .expect("Failed to send data");
 
     // Give processor time to process
@@ -177,7 +175,7 @@ async fn test_filter_processor_no_match() {
     // Send end signal
     input_sender
         .send(StreamData::stream_end())
-        .await
+        .map_err(|_| "Failed to send end signal")
         .expect("Failed to send end signal");
 
     // Receive filtered data with timeout

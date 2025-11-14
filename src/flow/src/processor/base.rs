@@ -7,8 +7,11 @@
 
 use crate::processor::StreamData;
 use futures::stream::SelectAll;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+
+/// Default buffer size for processor broadcast channels
+pub(crate) const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 
 /// Trait for all stream processors
 ///
@@ -24,13 +27,10 @@ pub trait Processor: Send + Sync {
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>>;
 
     /// Get output channel senders (for connecting downstream processors)
-    fn output_senders(&self) -> Vec<mpsc::Sender<StreamData>>;
+    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>>;
 
     /// Add an input channel (connect upstream processor)
-    fn add_input(&mut self, receiver: mpsc::Receiver<StreamData>);
-
-    /// Add an output channel (connect downstream processor)
-    fn add_output(&mut self, sender: mpsc::Sender<StreamData>);
+    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>);
 }
 
 /// Error type for processor operations
@@ -61,38 +61,14 @@ impl std::fmt::Display for ProcessorError {
 
 impl std::error::Error for ProcessorError {}
 
-/// Combined input stream built from multiple mpsc receivers
-pub(crate) type ProcessorInputStream = SelectAll<ReceiverStream<StreamData>>;
+/// Combined input stream built from multiple broadcast receivers
+pub(crate) type ProcessorInputStream = SelectAll<BroadcastStream<StreamData>>;
 
-/// Convert a list of mpsc receivers into a single SelectAll stream
-pub(crate) fn fan_in_streams(inputs: Vec<mpsc::Receiver<StreamData>>) -> ProcessorInputStream {
+/// Convert a list of broadcast receivers into a single SelectAll stream
+pub(crate) fn fan_in_streams(inputs: Vec<broadcast::Receiver<StreamData>>) -> ProcessorInputStream {
     let mut streams = SelectAll::new();
     for receiver in inputs {
-        streams.push(ReceiverStream::new(receiver));
+        streams.push(BroadcastStream::new(receiver));
     }
     streams
-}
-
-/// Broadcast a StreamData payload to every downstream sender
-pub(crate) async fn broadcast_all(
-    outputs: &[mpsc::Sender<StreamData>],
-    data: StreamData,
-) -> Result<(), ProcessorError> {
-    if outputs.is_empty() {
-        return Ok(());
-    }
-
-    if let Some((last, rest)) = outputs.split_last() {
-        for sender in rest {
-            sender
-                .send(data.clone())
-                .await
-                .map_err(|_| ProcessorError::ChannelClosed)?;
-        }
-        last.send(data)
-            .await
-            .map_err(|_| ProcessorError::ChannelClosed)?;
-    }
-
-    Ok(())
 }
