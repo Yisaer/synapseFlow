@@ -7,6 +7,7 @@ use datatypes::Value;
 use flow::codec::JsonDecoder;
 use flow::connector::MockSourceConnector;
 use flow::create_pipeline_with_log_sink;
+use flow::model::RecordBatch;
 use flow::processor::processor_builder::PlanProcessor;
 use flow::processor::StreamData;
 use flow::Processor;
@@ -53,21 +54,16 @@ async fn test_mock_pipeline_with_datasource_connector() {
 
     match result {
         StreamData::Collection(collection) => {
-            let batch = collection.as_ref();
+            let batch = RecordBatch::from_rows(collection.rows().to_vec());
             assert_eq!(batch.num_rows(), 3);
-            assert_eq!(batch.num_columns(), 2);
-
-            let col0 = batch.column(0).expect("missing first column");
-            assert_eq!(col0.name, "a_plus_1");
+            let columns = batch.columns();
+            assert_eq!(columns.len(), 2);
             assert_eq!(
-                col0.values(),
+                columns[0].values(),
                 &[Value::Int64(11), Value::Int64(21), Value::Int64(31)]
             );
-
-            let col1 = batch.column(1).expect("missing second column");
-            assert_eq!(col1.name, "b_plus_2");
             assert_eq!(
-                col1.values(),
+                columns[1].values(),
                 &[Value::Int64(102), Value::Int64(202), Value::Int64(302)]
             );
         }

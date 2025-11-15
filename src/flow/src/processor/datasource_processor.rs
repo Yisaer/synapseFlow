@@ -5,7 +5,7 @@
 
 use crate::codec::RecordDecoder;
 use crate::connector::{ConnectorEvent, SourceConnector};
-use crate::model::{Collection, Column, RecordBatch};
+use crate::model::{Collection, RecordBatch};
 use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
@@ -146,20 +146,17 @@ impl DataSourceProcessor {
     }
 
     fn rewrite_collection_sources(
-        collection: Box<dyn Collection>,
+        collection: Arc<dyn Collection>,
         source_name: &str,
-    ) -> Result<Box<dyn Collection>, ProcessorError> {
-        let mut renamed_columns = Vec::with_capacity(collection.columns().len());
-        for column in collection.columns() {
-            renamed_columns.push(Column::new(
-                source_name.to_string(),
-                column.name.clone(),
-                column.values().to_vec(),
-            ));
+    ) -> Result<Arc<dyn Collection>, ProcessorError> {
+        let mut rows = collection.rows().to_vec();
+        for tuple in rows.iter_mut() {
+            tuple.source_name = source_name.to_string();
+            for (src, _) in tuple.columns.iter_mut() {
+                *src = source_name.to_string();
+            }
         }
-        RecordBatch::new(renamed_columns)
-            .map(|batch| Box::new(batch) as Box<dyn Collection>)
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
+        Ok(Arc::new(RecordBatch::from_rows(rows)))
     }
 }
 

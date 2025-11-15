@@ -1,7 +1,6 @@
 use datatypes::value::ListValue;
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
 use flow::expr::scalar::ScalarExpr;
-use flow::expr::DataFusionEvaluator;
 use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
 
@@ -33,13 +32,8 @@ fn test_list_index_simple() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression using vectorized evaluation
-    let results = list_index_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = list_index_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result
     assert_eq!(results.len(), 1);
@@ -74,13 +68,8 @@ fn test_list_index_middle() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression using vectorized evaluation
-    let results = list_index_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = list_index_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result
     assert_eq!(results.len(), 1);
@@ -115,13 +104,8 @@ fn test_list_index_last() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression using vectorized evaluation
-    let results = list_index_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = list_index_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result
     assert_eq!(results.len(), 1);
@@ -159,13 +143,8 @@ fn test_list_index_string_list() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression using vectorized evaluation
-    let results = list_index_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = list_index_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result
     assert_eq!(results.len(), 1);
@@ -200,11 +179,8 @@ fn test_list_index_out_of_bounds() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression - should fail
-    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
+    let results = list_index_expr.eval_with_collection(&collection);
 
     // Verify error
     assert!(results.is_err());
@@ -243,11 +219,8 @@ fn test_list_index_negative_index() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression - should fail
-    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
+    let results = list_index_expr.eval_with_collection(&collection);
 
     // Verify error
     assert!(results.is_err());
@@ -280,11 +253,8 @@ fn test_list_index_not_list() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression - should fail
-    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
+    let results = list_index_expr.eval_with_collection(&collection);
 
     // Verify error
     assert!(results.is_err());
@@ -323,11 +293,8 @@ fn test_list_index_invalid_index_type() {
     );
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression - should fail
-    let results = list_index_expr.eval_with_collection(&evaluator, &collection);
+    let results = list_index_expr.eval_with_collection(&collection);
 
     // Verify error
     assert!(results.is_err());
@@ -374,13 +341,8 @@ fn test_list_index_dynamic_index() {
     let index_expr = ScalarExpr::column("test_table", "index_col");
     let list_index_expr = ScalarExpr::list_index(list_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the list index expression using vectorized evaluation
-    let results = list_index_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = list_index_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result (index 3 should be 40)
     assert_eq!(results.len(), 1);

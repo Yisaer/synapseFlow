@@ -5,7 +5,7 @@
 
 use datatypes::Value;
 use flow::model::{Column, RecordBatch};
-use flow::{DataFusionEvaluator, ScalarExpr, StreamSqlConverter};
+use flow::{ScalarExpr, StreamSqlConverter};
 use parser::parse_sql;
 use std::collections::HashMap;
 
@@ -69,8 +69,6 @@ fn test_core_conversion_flow() {
     //
     // 6. Create test data for calculation verification
     println!("Step 5: Calculation results verification");
-    let evaluator = DataFusionEvaluator::new();
-
     // Create tuple with HashMap data matching our column references
     let mut data = HashMap::new();
     data.insert(("".to_string(), "a".to_string()), Value::Int64(5)); // a = 5
@@ -83,13 +81,13 @@ fn test_core_conversion_flow() {
     .unwrap();
 
     let results1 = expressions[0]
-        .eval_with_collection(&evaluator, &collection)
+        .eval_with_collection(&collection)
         .expect("Calculation should succeed");
     assert_eq!(results1[0], Value::Int64(8), "a+b should equal 8");
 
     // Calculate second expression: 42 (literal)
     let results2 = expressions[1]
-        .eval_with_collection(&evaluator, &collection)
+        .eval_with_collection(&collection)
         .expect("Calculation should succeed");
     assert_eq!(results2[0], Value::Int64(42), "Literal 42 should equal 42");
 }

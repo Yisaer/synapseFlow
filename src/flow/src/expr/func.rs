@@ -821,8 +821,6 @@ pub enum EvalError {
     NotImplemented { feature: String },
     /// Column not found error
     ColumnNotFound { source: String, column: String },
-    /// DataFusion error
-    DataFusionError { message: String },
 }
 
 impl std::fmt::Display for EvalError {
@@ -867,9 +865,6 @@ impl std::fmt::Display for EvalError {
             }
             EvalError::ColumnNotFound { source, column } => {
                 write!(f, "Column not found: {}.{}", source, column)
-            }
-            EvalError::DataFusionError { message } => {
-                write!(f, "DataFusion error: {}", message)
             }
         }
     }

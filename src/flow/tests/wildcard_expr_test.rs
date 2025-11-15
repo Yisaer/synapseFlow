@@ -1,5 +1,5 @@
 use datatypes::{StructField, StructType, StructValue, Value};
-use flow::expr::{func::EvalError, DataFusionEvaluator, StreamSqlConverter};
+use flow::expr::{func::EvalError, StreamSqlConverter};
 use flow::model::{Column, RecordBatch};
 use parser::parse_sql;
 use std::sync::Arc;
@@ -40,13 +40,12 @@ fn eval_first_projection(sql: &str, batch: &RecordBatch) -> Result<Vec<Value>, E
         .drain(..)
         .next()
         .expect("at least one projection");
-    let evaluator = DataFusionEvaluator::new();
-    expr.eval_with_collection(&evaluator, batch)
+    expr.eval_with_collection(batch)
 }
 
 fn expected_structs(batch: &RecordBatch, source_selector: Option<&str>) -> Vec<Value> {
-    let selected_columns: Vec<_> = batch
-        .columns()
+    let columns = batch.columns();
+    let selected_columns: Vec<_> = columns
         .iter()
         .filter(|column| {
             if let Some(prefix) = source_selector {

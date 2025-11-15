@@ -3,6 +3,7 @@
 //! Defines the data types that flow between processors in the stream processing pipeline.
 
 use crate::model::Collection;
+use std::sync::Arc;
 
 /// Control signals for stream processing
 #[derive(Debug, Clone, PartialEq)]
@@ -20,8 +21,8 @@ pub enum ControlSignal {
 /// Core data type for stream processing - unified enum for all data types
 #[derive(Clone)]
 pub enum StreamData {
-    /// Data payload - Collection (boxed trait object)
-    Collection(Box<dyn Collection>),
+    /// Data payload - Collection (shared reference)
+    Collection(Arc<dyn Collection>),
     /// Control signal for flow management
     Control(ControlSignal),
     /// Error that occurred during processing - wrapped for flow continuation
@@ -80,7 +81,7 @@ impl std::error::Error for StreamError {}
 impl StreamData {
     /// Create Collection data
     pub fn collection(collection: Box<dyn Collection>) -> Self {
-        StreamData::Collection(collection)
+        StreamData::Collection(Arc::from(collection))
     }
 
     /// Create control signal

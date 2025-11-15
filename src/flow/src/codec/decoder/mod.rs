@@ -1,9 +1,9 @@
 //! Decoder abstractions for turning raw bytes into RecordBatch collections.
 
-use crate::model::{CollectionError, Column, RecordBatch};
+use crate::model::{CollectionError, Column, RecordBatch, Tuple};
 use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 /// Errors that can occur while decoding payloads.
 #[derive(thiserror::Error, Debug)]
@@ -26,6 +26,9 @@ pub enum CodecError {
 pub trait RecordDecoder: Send + Sync + 'static {
     /// Convert raw bytes into a RecordBatch.
     fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError>;
+
+    /// Convert raw bytes into row-oriented tuples.
+    fn decode_tuples(&self, payload: &[u8]) -> Result<Vec<Tuple>, CodecError>;
 }
 
 /// Minimal decoder that wraps each payload as a one-row, single-column batch.
@@ -52,6 +55,16 @@ impl RecordDecoder for RawStringDecoder {
             vec![Value::String(value)],
         );
         Ok(RecordBatch::new(vec![column])?)
+    }
+
+    fn decode_tuples(&self, payload: &[u8]) -> Result<Vec<Tuple>, CodecError> {
+        let value = String::from_utf8(payload.to_vec())?;
+        let tuple = Tuple::new(
+            self.source_name.clone(),
+            vec![(self.source_name.clone(), self.column_name.clone())],
+            vec![Value::String(value)],
+        );
+        Ok(vec![tuple])
     }
 }
 
@@ -98,6 +111,42 @@ impl JsonDecoder {
         self.build_from_object_rows(rows)
     }
 
+    pub fn decode_tuples(&self, payload: &[u8]) -> Result<Vec<Tuple>, CodecError> {
+        let json = serde_json::from_slice(payload)?;
+        self.decode_value_to_tuples(json)
+    }
+
+    fn decode_value_to_tuples(&self, json: JsonValue) -> Result<Vec<Tuple>, CodecError> {
+        match json {
+            JsonValue::Object(map) => self.build_tuples_from_object_rows(vec![map]),
+            JsonValue::Array(items) => self.decode_array_to_tuples(items),
+            other => Err(CodecError::Other(format!(
+                "JSON root must be object or array, got {other:?}"
+            ))),
+        }
+    }
+
+    fn decode_array_to_tuples(&self, items: Vec<JsonValue>) -> Result<Vec<Tuple>, CodecError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if !items.iter().all(|v| v.is_object()) {
+            return Err(CodecError::Other(
+                "JSON array must contain only objects".to_string(),
+            ));
+        }
+
+        let rows: Vec<JsonMap<String, JsonValue>> = items
+            .into_iter()
+            .map(|v| match v {
+                JsonValue::Object(map) => map,
+                _ => unreachable!("validated object rows"),
+            })
+            .collect();
+        self.build_tuples_from_object_rows(rows)
+    }
+
     fn build_from_object_rows(
         &self,
         rows: Vec<JsonMap<String, JsonValue>>,
@@ -106,39 +155,25 @@ impl JsonDecoder {
             return Ok(RecordBatch::empty());
         }
 
-        let mut column_order = Vec::new();
-        let mut column_values: HashMap<String, Vec<Value>> = HashMap::new();
+        let tuples = self.build_tuples_from_object_rows(rows)?;
+        Ok(RecordBatch::from_rows(tuples))
+    }
 
-        for (row_idx, row) in rows.iter().enumerate() {
-            // Extend existing columns with a placeholder for this row; values will
-            // be overwritten below if the field is present in the row.
-            for values in column_values.values_mut() {
-                values.push(Value::Null);
-            }
-
+    fn build_tuples_from_object_rows(
+        &self,
+        rows: Vec<JsonMap<String, JsonValue>>,
+    ) -> Result<Vec<Tuple>, CodecError> {
+        let mut tuples = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut columns = Vec::with_capacity(row.len());
+            let mut values = Vec::with_capacity(row.len());
             for (key, value) in row {
-                let entry = column_values.entry(key.clone()).or_insert_with(|| {
-                    column_order.push(key.clone());
-                    vec![Value::Null; row_idx + 1]
-                });
-                entry[row_idx] = json_to_value(value);
+                columns.push((self.source_name.clone(), key));
+                values.push(json_to_value(&value));
             }
+            tuples.push(Tuple::new(self.source_name.clone(), columns, values));
         }
-
-        if column_order.is_empty() {
-            return Err(CodecError::Other(
-                "JSON object rows must contain at least one field".to_string(),
-            ));
-        }
-
-        let mut columns = Vec::with_capacity(column_order.len());
-        for key in column_order {
-            if let Some(values) = column_values.remove(&key) {
-                columns.push(Column::new(self.source_name.clone(), key, values));
-            }
-        }
-
-        Ok(RecordBatch::new(columns)?)
+        Ok(tuples)
     }
 }
 
@@ -147,6 +182,10 @@ impl RecordDecoder for JsonDecoder {
         let json = serde_json::from_slice(payload)?;
         let batch = self.decode_value(json)?;
         Ok(batch)
+    }
+
+    fn decode_tuples(&self, payload: &[u8]) -> Result<Vec<Tuple>, CodecError> {
+        JsonDecoder::decode_tuples(self, payload)
     }
 }
 
@@ -188,5 +227,37 @@ fn json_to_value(value: &JsonValue) -> Value {
 
             Value::Struct(StructValue::new(values, StructType::new(Arc::new(fields))))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::Value;
+
+    #[test]
+    fn json_decoder_decodes_tuples_with_missing_fields() {
+        let decoder = JsonDecoder::new("orders");
+        let payload = br#"[{"amount":10,"status":"ok"},{"status":"fail"}]"#.as_ref();
+        let tuples = decoder.decode_tuples(payload).expect("decode tuples");
+
+        assert_eq!(tuples.len(), 2);
+        assert_eq!(tuples[0].source_name, "orders");
+        assert_eq!(
+            tuples[0].columns,
+            vec![
+                ("orders".to_string(), "amount".to_string()),
+                ("orders".to_string(), "status".to_string())
+            ]
+        );
+        assert_eq!(
+            tuples[0].values,
+            vec![Value::Int64(10), Value::String("ok".to_string())]
+        );
+        assert_eq!(
+            tuples[1].columns,
+            vec![("orders".to_string(), "status".to_string())]
+        );
+        assert_eq!(tuples[1].values, vec![Value::String("fail".to_string())]);
     }
 }

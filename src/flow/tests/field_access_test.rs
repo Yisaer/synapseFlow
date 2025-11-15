@@ -2,7 +2,6 @@ use datatypes::types::{StructField, StructType};
 use datatypes::value::StructValue;
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
 use flow::expr::scalar::ScalarExpr;
-use flow::expr::DataFusionEvaluator;
 use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
 
@@ -37,13 +36,8 @@ fn test_field_access_simple() {
     let column_expr = ScalarExpr::column("test_table", "struct_col");
     let field_access_expr = ScalarExpr::field_access(column_expr, "x");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the field access expression
-    let results = field_access_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = field_access_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result
     assert_eq!(results.len(), 1);
@@ -81,13 +75,8 @@ fn test_field_access_string_field() {
     let column_expr = ScalarExpr::column("test_table", "struct_col");
     let field_access_expr = ScalarExpr::field_access(column_expr, "y");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the field access expression
-    let results = field_access_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = field_access_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result
     assert_eq!(results.len(), 1);
@@ -142,12 +131,9 @@ fn test_field_access_nested() {
     let inner_access_expr = ScalarExpr::field_access(column_expr, "inner");
     let nested_access_expr = ScalarExpr::field_access(inner_access_expr, "a");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the nested field access expression
     let results = nested_access_expr
-        .eval_with_collection(&evaluator, &collection)
+        .eval_with_collection(&collection)
         .unwrap();
 
     // Verify result
@@ -187,11 +173,8 @@ fn test_field_access_field_not_found() {
     let column_expr = ScalarExpr::column("test_table", "struct_col");
     let field_access_expr = ScalarExpr::field_access(column_expr, "y");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the field access expression - should fail
-    let result = field_access_expr.eval_with_collection(&evaluator, &collection);
+    let result = field_access_expr.eval_with_collection(&collection);
 
     // Verify error
     assert!(result.is_err());
@@ -220,11 +203,8 @@ fn test_field_access_not_struct() {
     let column_expr = ScalarExpr::column("test_table", "int_col");
     let field_access_expr = ScalarExpr::field_access(column_expr, "x");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the field access expression - should fail
-    let result = field_access_expr.eval_with_collection(&evaluator, &collection);
+    let result = field_access_expr.eval_with_collection(&collection);
 
     // Verify error
     assert!(result.is_err());

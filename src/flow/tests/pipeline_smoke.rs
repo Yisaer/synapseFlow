@@ -18,7 +18,7 @@ async fn pipeline_smoke_receives_output() {
 
     pipeline
         .input
-        .send(StreamData::Collection(Box::new(batch)))
+        .send(StreamData::collection(Box::new(batch)))
         .await
         .expect("send");
 

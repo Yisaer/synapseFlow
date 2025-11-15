@@ -1,3 +1,4 @@
+use crate::model::Tuple;
 use crate::planner::physical::PhysicalProjectField;
 use datatypes::Value;
 use std::any::Any;
@@ -10,17 +11,8 @@ pub trait Collection: Send + Sync + Any {
     /// Get the number of rows in this collection
     fn num_rows(&self) -> usize;
 
-    /// Get the number of columns in this collection
-    fn num_columns(&self) -> usize;
-
-    /// Get a column by index
-    fn column(&self, index: usize) -> Option<&Column>;
-
-    /// Get a column by source name and column name
-    fn column_by_name(&self, source_name: &str, name: &str) -> Option<&Column>;
-
-    /// Get a column by column name only (ignores source name)
-    fn column_by_column_name(&self, name: &str) -> Option<&Column>;
+    /// Get a view of the rows stored in this collection
+    fn rows(&self) -> &[Tuple];
 
     /// Check if the collection is empty
     fn is_empty(&self) -> bool {
@@ -33,25 +25,8 @@ pub trait Collection: Send + Sync + Any {
     /// Take a selection of rows by indices
     fn take(&self, indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError>;
 
-    /// Get all columns as a slice
-    fn columns(&self) -> &[Column];
-
     /// Apply projection based on PhysicalProjectField definitions
     /// This creates a new collection with projected fields based on the provided field definitions
-    ///
-    /// # Arguments
-    /// * `fields` - A slice of PhysicalProjectField containing the projection field definitions
-    ///
-    /// # Returns
-    /// A new collection with the projected fields, or an error if projection fails
-    ///
-    /// # Note
-    /// This is an abstract method that must be implemented by specific collection types.
-    /// Implementations should consider the collection's storage characteristics (e.g., columnar vs row-based)
-    /// for optimal performance. For example:
-    /// - Columnar implementations (like RecordBatch) should work directly with columns
-    /// - Row-based implementations might need to iterate through rows
-    /// - Expression evaluation should be batched for better performance
     fn apply_projection(
         &self,
         fields: &[PhysicalProjectField],
@@ -153,8 +128,6 @@ pub enum CollectionError {
         end: usize,
         len: usize,
     },
-    /// Invalid column index
-    InvalidColumnIndex { index: usize, num_columns: usize },
     /// Column not found by name
     ColumnNotFound { name: String },
     /// Type mismatch
@@ -176,13 +149,6 @@ impl std::fmt::Display for CollectionError {
                     f,
                     "Invalid slice range [{}..{}] for length {}",
                     start, end, len
-                )
-            }
-            CollectionError::InvalidColumnIndex { index, num_columns } => {
-                write!(
-                    f,
-                    "Invalid column index {} for {} columns",
-                    index, num_columns
                 )
             }
             CollectionError::ColumnNotFound { name } => {

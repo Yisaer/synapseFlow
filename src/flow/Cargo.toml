@@ -3,23 +3,10 @@ name = "flow"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = []
-datafusion = [
-    "dep:arrow",
-    "dep:datafusion",
-    "dep:datafusion-common",
-    "dep:datafusion-expr",
-]
-
 [dependencies]
 datatypes = { path = "../datatypes" }
 parser = { path = "../parser" }
 serde_json = "1.0"
-arrow = { version = "56.2", default-features = false, optional = true }
-datafusion = { version = "50", optional = true }
-datafusion-common = { version = "50", optional = true }
-datafusion-expr = { version = "50", optional = true }
 sqlparser = { version = "0.40", features = ["serde", "visitor"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

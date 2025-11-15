@@ -1,9 +1,7 @@
-use datatypes::{ConcreteDatatype, StructField, StructType, StructValue, Value};
-
 use crate::expr::custom_func::CustomFunc;
-use crate::expr::datafusion_func::DataFusionEvaluator;
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
-use crate::model::Collection;
+use crate::model::{Collection, Tuple};
+use datatypes::{ConcreteDatatype, StructField, StructType, StructValue, Value};
 use std::sync::Arc;
 
 /// A scalar expression, which can be evaluated to a value.
@@ -46,13 +44,6 @@ pub enum ScalarExpr {
         /// The index expression (can be any scalar expression)
         index_expr: Box<ScalarExpr>,
     },
-    /// A call to a DataFusion scalar function
-    CallDf {
-        /// The name of the DataFusion function (e.g., "concat", "upper", "lower")
-        function_name: String,
-        /// The arguments to the function
-        args: Vec<ScalarExpr>,
-    },
     /// A call to a custom user-implemented function
     CallFunc {
         /// The custom function implementation
@@ -63,240 +54,135 @@ pub enum ScalarExpr {
 }
 
 impl ScalarExpr {
-    /// Evaluate this expression against a collection using vectorized evaluation.
-    /// This method performs vectorized evaluation where one call can process multiple rows.
-    ///
-    /// # Arguments
-    ///
-    /// * `evaluator` - The DataFusion evaluator for handling CallDf expressions
-    /// * `collection` - The collection containing data (can be row-based or column-based)
-    ///
-    /// # Returns
-    ///
-    /// Returns a vector of evaluated values, one for each row in the collection.
+    /// Evaluate this expression against a collection row by row.
     pub fn eval_with_collection(
         &self,
-        evaluator: &DataFusionEvaluator,
         collection: &dyn Collection,
     ) -> Result<Vec<Value>, EvalError> {
-        self.eval_vectorized(evaluator, collection)
+        let mut results = Vec::with_capacity(collection.num_rows());
+        for row in collection.rows() {
+            results.push(self.eval_with_tuple(row)?);
+        }
+        Ok(results)
     }
 
-    /// Core vectorized evaluation implementation
-    /// This is about vectorized computation, not necessarily columnar storage
-    pub fn eval_vectorized(
-        &self,
-        _evaluator: &DataFusionEvaluator,
-        collection: &dyn Collection,
-    ) -> Result<Vec<Value>, EvalError> {
+    /// Evaluate this expression against a single tuple (row).
+    pub fn eval_with_tuple(&self, tuple: &Tuple) -> Result<Value, EvalError> {
         match self {
             ScalarExpr::Column {
                 source_name,
                 column_name,
-            } => collection
-                .column_by_name(source_name, column_name)
-                .or_else(|| collection.column_by_column_name(column_name))
-                .map(|col| col.values().to_vec())
-                .ok_or_else(|| EvalError::ColumnNotFound {
-                    source: source_name.clone(),
-                    column: column_name.clone(),
-                }),
+            } => {
+                if let Some(value) = tuple.value_by_name(source_name, column_name) {
+                    Ok(value.clone())
+                } else if let Some(value) = tuple.value_by_column(column_name) {
+                    Ok(value.clone())
+                } else {
+                    Err(EvalError::ColumnNotFound {
+                        source: source_name.clone(),
+                        column: column_name.clone(),
+                    })
+                }
+            }
             ScalarExpr::Wildcard { source_name } => {
-                let selected_columns: Vec<_> = collection
-                    .columns()
+                let selected: Vec<_> = tuple
+                    .columns
                     .iter()
-                    .filter(|column| {
-                        if let Some(prefix) = source_name {
-                            column.source_name() == prefix
-                        } else {
-                            true
-                        }
+                    .zip(tuple.values.iter())
+                    .filter(|((src, _), _)| match source_name {
+                        Some(prefix) => src == prefix,
+                        None => true,
                     })
                     .collect();
 
-                if selected_columns.is_empty() && source_name.is_some() {
+                if selected.is_empty() && source_name.is_some() {
                     return Err(EvalError::ColumnNotFound {
                         source: source_name.clone().unwrap_or_default(),
                         column: "*".to_string(),
                     });
                 }
 
-                let fields: Vec<StructField> = selected_columns
-                    .iter()
-                    .map(|column| {
-                        let datatype = column.data_type().unwrap_or(ConcreteDatatype::Null);
-                        StructField::new(column.name().to_string(), datatype, true)
-                    })
-                    .collect();
-                let struct_type = StructType::new(std::sync::Arc::new(fields));
-
-                let mut rows = Vec::with_capacity(collection.num_rows());
-
-                for row_idx in 0..collection.num_rows() {
-                    let mut items = Vec::with_capacity(selected_columns.len());
-                    for column in &selected_columns {
-                        items.push(column.get(row_idx).cloned().unwrap_or(Value::Null));
-                    }
-                    rows.push(Value::Struct(StructValue::new(items, struct_type.clone())));
+                let mut fields = Vec::with_capacity(selected.len());
+                let mut values = Vec::with_capacity(selected.len());
+                for ((_, column_name), value) in selected {
+                    fields.push(StructField::new(
+                        column_name.clone(),
+                        value.datatype(),
+                        true,
+                    ));
+                    values.push(value.clone());
                 }
 
-                Ok(rows)
+                Ok(Value::Struct(StructValue::new(
+                    values,
+                    StructType::new(Arc::new(fields)),
+                )))
             }
-            ScalarExpr::Literal(val, _) => {
-                // Literal value - create a vector of the same value
-                Ok(vec![val.clone(); collection.num_rows()])
-            }
+            ScalarExpr::Literal(val, _) => Ok(val.clone()),
             ScalarExpr::CallUnary { func, expr } => {
-                // Vectorized unary operation
-                let args = expr.eval_vectorized(_evaluator, collection)?;
-                args.into_iter().map(|arg| func.eval_unary(arg)).collect()
+                let arg = expr.eval_with_tuple(tuple)?;
+                func.eval_unary(arg)
             }
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
-                // Vectorized binary operation
-                let left_vals = expr1.eval_vectorized(_evaluator, collection)?;
-                let right_vals = expr2.eval_vectorized(_evaluator, collection)?;
-
-                if left_vals.len() != right_vals.len() || left_vals.len() != collection.num_rows() {
-                    return Err(EvalError::NotImplemented {
-                        feature: "Vector length mismatch in binary operation".to_string(),
-                    });
-                }
-
-                left_vals
-                    .into_iter()
-                    .zip(right_vals)
-                    .map(|(left, right)| func.eval_binary(left, right))
-                    .collect()
+                let left = expr1.eval_with_tuple(tuple)?;
+                let right = expr2.eval_with_tuple(tuple)?;
+                func.eval_binary(left, right)
             }
             ScalarExpr::FieldAccess { expr, field_name } => {
-                // Vectorized field access
-                let struct_vals = expr.eval_vectorized(_evaluator, collection)?;
-                struct_vals
-                    .into_iter()
-                    .map(|struct_val| {
-                        if let Value::Struct(struct_val) = struct_val {
-                            struct_val.get_field(field_name).cloned().ok_or_else(|| {
-                                EvalError::FieldNotFound {
-                                    field_name: field_name.clone(),
-                                    struct_type: format!("{:?}", struct_val.fields()),
-                                }
-                            })
-                        } else {
-                            Err(EvalError::TypeMismatch {
-                                expected: "Struct".to_string(),
-                                actual: format!("{:?}", struct_val),
-                            })
+                let struct_val = expr.eval_with_tuple(tuple)?;
+                if let Value::Struct(struct_val) = struct_val {
+                    struct_val.get_field(field_name).cloned().ok_or_else(|| {
+                        EvalError::FieldNotFound {
+                            field_name: field_name.clone(),
+                            struct_type: format!("{:?}", struct_val.fields()),
                         }
                     })
-                    .collect()
+                } else {
+                    Err(EvalError::TypeMismatch {
+                        expected: "Struct".to_string(),
+                        actual: format!("{:?}", struct_val),
+                    })
+                }
             }
             ScalarExpr::ListIndex { expr, index_expr } => {
-                // Vectorized list indexing
-                let list_vals = expr.eval_vectorized(_evaluator, collection)?;
-                let index_vals = index_expr.eval_vectorized(_evaluator, collection)?;
+                let list_val = expr.eval_with_tuple(tuple)?;
+                let index_val = index_expr.eval_with_tuple(tuple)?;
 
-                if list_vals.len() != index_vals.len() || list_vals.len() != collection.num_rows() {
-                    return Err(EvalError::NotImplemented {
-                        feature: "Vector length mismatch in list indexing".to_string(),
-                    });
-                }
-
-                list_vals
-                    .into_iter()
-                    .zip(index_vals)
-                    .map(|(list_val, index_val)| {
-                        if let Value::List(list_val) = list_val {
-                            if let Value::Int64(index) = index_val {
-                                if index >= 0 && (index as usize) < list_val.len() {
-                                    Ok(list_val.get(index as usize).unwrap().clone())
-                                } else {
-                                    Err(EvalError::ListIndexOutOfBounds {
-                                        index: index as usize,
-                                        list_length: list_val.len(),
-                                    })
-                                }
-                            } else {
-                                Err(EvalError::InvalidIndexType {
-                                    expected: "Int64".to_string(),
-                                    actual: format!("{:?}", index_val),
-                                })
-                            }
-                        } else {
-                            Err(EvalError::TypeMismatch {
-                                expected: "List".to_string(),
-                                actual: format!("{:?}", list_val),
-                            })
+                match (list_val, index_val) {
+                    (Value::List(list), Value::Int64(index)) => {
+                        if index < 0 || (index as usize) >= list.len() {
+                            return Err(EvalError::ListIndexOutOfBounds {
+                                index: index as usize,
+                                list_length: list.len(),
+                            });
                         }
-                    })
-                    .collect()
-            }
-            #[cfg(feature = "datafusion")]
-            ScalarExpr::CallDf {
-                function_name,
-                args,
-            } => {
-                // Vectorized DataFusion function evaluation
-                // Prepare arguments as vectors (one vector per argument, containing all rows)
-                let mut arg_vectors = Vec::new();
-                for arg_expr in args {
-                    arg_vectors.push(arg_expr.eval_vectorized(_evaluator, collection)?);
-                }
-
-                // Validate vector dimensions
-                let num_rows = collection.num_rows();
-                for (i, arg_vec) in arg_vectors.iter().enumerate() {
-                    if arg_vec.len() != num_rows {
-                        return Err(EvalError::NotImplemented {
-                            feature: format!(
-                                "Argument {} has {} values, expected {}",
-                                i,
-                                arg_vec.len(),
-                                num_rows
-                            ),
-                        });
+                        list.get(index as usize)
+                            .cloned()
+                            .ok_or(EvalError::ListIndexOutOfBounds {
+                                index: index as usize,
+                                list_length: list.len(),
+                            })
                     }
+                    (Value::List(_), other) => Err(EvalError::InvalidIndexType {
+                        expected: "Int64".to_string(),
+                        actual: format!("{:?}", other),
+                    }),
+                    (other, _) => Err(EvalError::TypeMismatch {
+                        expected: "List".to_string(),
+                        actual: format!("{:?}", other),
+                    }),
                 }
-
-                // Use DataFusion's native vectorized evaluation
-                evaluator
-                    .evaluate_df_function_vectorized(function_name, &arg_vectors, collection)
-                    .map_err(|df_error| EvalError::DataFusionError {
-                        message: df_error.to_string(),
-                    })
             }
-            #[cfg(not(feature = "datafusion"))]
-            ScalarExpr::CallDf { function_name, .. } => Err(EvalError::DataFusionError {
-                message: format!(
-                    "Function '{}' requires enabling the 'datafusion' feature",
-                    function_name
-                ),
-            }),
             ScalarExpr::CallFunc { func, args } => {
-                // Vectorized custom function evaluation
-                // Prepare arguments as vectors (one vector per argument, containing all rows)
-                let mut arg_vectors = Vec::new();
+                let mut arg_vectors = Vec::with_capacity(args.len());
                 for arg_expr in args {
-                    arg_vectors.push(arg_expr.eval_vectorized(_evaluator, collection)?);
+                    arg_vectors.push(vec![arg_expr.eval_with_tuple(tuple)?]);
                 }
-
-                // Validate vector dimensions
-                let num_rows = collection.num_rows();
-                for (i, arg_vec) in arg_vectors.iter().enumerate() {
-                    if arg_vec.len() != num_rows {
-                        return Err(EvalError::NotImplemented {
-                            feature: format!(
-                                "Argument {} has {} values, expected {}",
-                                i,
-                                arg_vec.len(),
-                                num_rows
-                            ),
-                        });
-                    }
-                }
-
-                // Use vectorized validation and evaluation
                 func.validate_vectorized(&arg_vectors)?;
-                func.eval_vectorized(&arg_vectors)
+                let results = func.eval_vectorized(&arg_vectors)?;
+                results.into_iter().next().ok_or(EvalError::NotImplemented {
+                    feature: "Custom function returned no result".to_string(),
+                })
             }
         }
     }
@@ -340,14 +226,6 @@ impl ScalarExpr {
             func,
             expr1: Box::new(self),
             expr2: Box::new(other),
-        }
-    }
-
-    /// Create a DataFusion function call expression
-    pub fn call_df(function_name: impl Into<String>, args: Vec<ScalarExpr>) -> Self {
-        ScalarExpr::CallDf {
-            function_name: function_name.into(),
-            args,
         }
     }
 
@@ -426,12 +304,6 @@ impl std::fmt::Debug for ScalarExpr {
             ScalarExpr::ListIndex { expr, index_expr } => {
                 write!(f, "ListIndex({:?}, {:?})", expr, index_expr)
             }
-            ScalarExpr::CallDf {
-                function_name,
-                args,
-            } => {
-                write!(f, "CallDf({}, {:?})", function_name, args)
-            }
             ScalarExpr::CallFunc { func, args } => {
                 write!(f, "CallFunc({}, {:?})", func.name(), args)
             }
@@ -494,22 +366,9 @@ impl PartialEq for ScalarExpr {
                 },
             ) => ea == eb && ia == ib,
             (
-                ScalarExpr::CallDf {
-                    function_name: na,
-                    args: aa,
-                },
-                ScalarExpr::CallDf {
-                    function_name: nb,
-                    args: ab,
-                },
-            ) => na == nb && aa == ab,
-            (
                 ScalarExpr::CallFunc { func: fa, args: aa },
                 ScalarExpr::CallFunc { func: fb, args: ab },
-            ) => {
-                // Compare custom functions by name and arguments
-                fa.name() == fb.name() && aa == ab
-            }
+            ) => fa.name() == fb.name() && aa == ab,
             _ => false,
         }
     }

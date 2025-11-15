@@ -2,7 +2,6 @@ use datatypes::types::{ListType, StructField, StructType};
 use datatypes::value::{ListValue, StructValue};
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
 use flow::expr::scalar::ScalarExpr;
-use flow::expr::DataFusionEvaluator;
 use flow::model::{Column, RecordBatch};
 use std::sync::Arc;
 
@@ -58,13 +57,8 @@ fn test_struct_field_then_list_index() {
     );
     let combined_expr = ScalarExpr::list_index(field_access_expr, index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the combined expression using vectorized evaluation
-    let results = combined_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = combined_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result (numbers[1] should be 200)
     assert_eq!(results.len(), 1);
@@ -124,13 +118,8 @@ fn test_list_index_then_struct_field() {
     let list_index_expr = ScalarExpr::list_index(column_expr, index_expr);
     let combined_expr = ScalarExpr::field_access(list_index_expr, "y");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the combined expression using vectorized evaluation
-    let results = combined_expr
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = combined_expr.eval_with_collection(&collection).unwrap();
 
     // Verify result (list[1].y should be "second")
     assert_eq!(results.len(), 1);
@@ -219,12 +208,9 @@ fn test_complex_nested_access() {
     let list_index_expr = ScalarExpr::list_index(field_access_expr, index_expr);
     let final_field_access = ScalarExpr::field_access(list_index_expr, "value");
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the complex expression using vectorized evaluation
     let results = final_field_access
-        .eval_with_collection(&evaluator, &collection)
+        .eval_with_collection(&collection)
         .unwrap();
 
     // Verify result (data[2].value should be 300)
@@ -285,13 +271,8 @@ fn test_list_of_lists() {
     );
     let final_list_index = ScalarExpr::list_index(first_list_index, second_index_expr);
 
-    // Create evaluator
-    let evaluator = DataFusionEvaluator::new();
-
     // Evaluate the nested expression using vectorized evaluation
-    let results = final_list_index
-        .eval_with_collection(&evaluator, &collection)
-        .unwrap();
+    let results = final_list_index.eval_with_collection(&collection).unwrap();
 
     // Verify result (list[1][2] should be 30)
     assert_eq!(results.len(), 1);

@@ -56,7 +56,7 @@ async fn run_test_case(test_case: TestCase) {
         test_case.name
     ));
 
-    let stream_data = StreamData::Collection(Box::new(test_batch));
+    let stream_data = StreamData::collection(Box::new(test_batch));
     pipeline
         .input
         .send(stream_data)
@@ -78,7 +78,7 @@ async fn run_test_case(test_case: TestCase) {
 
     match received_data {
         StreamData::Collection(result_collection) => {
-            let batch = result_collection.as_ref();
+            let batch = FlowRecordBatch::from_rows(result_collection.rows().to_vec());
 
             // Check basic properties
             assert_eq!(
@@ -87,31 +87,38 @@ async fn run_test_case(test_case: TestCase) {
                 "Wrong number of rows for test: {}",
                 test_case.name
             );
-            assert_eq!(
-                batch.num_columns(),
-                test_case.expected_columns,
-                "Wrong number of columns for test: {}",
-                test_case.name
-            );
-
-            // Check specific columns
-            for check in test_case.column_checks {
-                let col = batch.column(check.column_index).expect(&format!(
-                    "Column {} not found for test: {}",
-                    check.column_index, test_case.name
-                ));
-                assert_eq!(
-                    col.name, check.expected_name,
-                    "Wrong column name at index {} for test: {}",
-                    check.column_index, test_case.name
-                );
-                assert_eq!(
-                    col.values(),
-                    &check.expected_values,
-                    "Wrong values in column {} for test: {}",
-                    check.column_index,
+            let all_columns = batch.columns();
+            if test_case.expected_rows == 0 {
+                assert!(
+                    all_columns.is_empty(),
+                    "Row-less batches have no materialized columns for test: {}",
                     test_case.name
                 );
+            } else {
+                assert_eq!(
+                    all_columns.len(),
+                    test_case.expected_columns,
+                    "Wrong number of columns for test: {}",
+                    test_case.name
+                );
+
+                for check in test_case.column_checks {
+                    let column = all_columns
+                        .get(check.column_index)
+                        .expect("column snapshot");
+                    assert_eq!(
+                        column.name, check.expected_name,
+                        "Wrong column name at index {} for test: {}",
+                        check.column_index, test_case.name
+                    );
+                    assert_eq!(
+                        column.values(),
+                        &check.expected_values,
+                        "Wrong values in column {} for test: {}",
+                        check.column_index,
+                        test_case.name
+                    );
+                }
             }
         }
         StreamData::Control(_) => {
@@ -325,7 +332,7 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     let batch = FlowRecordBatch::new(vec![column]).expect("record batch");
     pipeline
         .input
-        .send(StreamData::Collection(Box::new(batch)))
+        .send(StreamData::collection(Box::new(batch)))
         .await
         .expect("send data");
 

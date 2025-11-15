@@ -98,23 +98,18 @@ async fn test_filter_processor_basic() {
     // Verify results
 
     // Should have 2 rows (a=20, a=30) and 2 columns
+    assert_eq!(filtered_collection.num_rows(), 2);
+    let batch = RecordBatch::from_rows(filtered_collection.rows().to_vec());
+    let columns = batch.columns();
+    assert_eq!(columns.len(), 2);
     assert_eq!(
-        filtered_collection.num_rows(),
-        2,
-        "Should have 2 filtered rows"
+        columns[0].values(),
+        &vec![Value::Int64(20), Value::Int64(30)]
     );
     assert_eq!(
-        filtered_collection.num_columns(),
-        2,
-        "Should have 2 columns"
+        columns[1].values(),
+        &vec![Value::Int64(200), Value::Int64(300)]
     );
-
-    // Check filtered values
-    let col_a = filtered_collection.column(0).expect("Should have column a");
-    let col_b = filtered_collection.column(1).expect("Should have column b");
-
-    assert_eq!(col_a.values(), &vec![Value::Int64(20), Value::Int64(30)]);
-    assert_eq!(col_b.values(), &vec![Value::Int64(200), Value::Int64(300)]);
 }
 
 /// Test FilterProcessor with no matching rows
@@ -199,14 +194,7 @@ async fn test_filter_processor_no_match() {
     // Verify results
 
     // Should have 0 rows but still 1 column
-    assert_eq!(
-        filtered_collection.num_rows(),
-        0,
-        "Should have 0 rows when no matches"
-    );
-    assert_eq!(
-        filtered_collection.num_columns(),
-        1,
-        "Should still have 1 column"
-    );
+    assert_eq!(filtered_collection.num_rows(), 0);
+    let batch = RecordBatch::from_rows(filtered_collection.rows().to_vec());
+    assert_eq!(batch.column_pairs().len(), 0);
 }
