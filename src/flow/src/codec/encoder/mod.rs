@@ -2,7 +2,6 @@
 
 use crate::model::Collection;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
-use std::time::Instant;
 
 /// Errors that can occur during encoding.
 #[derive(thiserror::Error, Debug)]
@@ -41,7 +40,6 @@ impl CollectionEncoder for JsonEncoder {
     }
 
     fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
-        let start = Instant::now();
         let num_rows = collection.num_rows();
         let payload = if num_rows == 0 || collection.num_columns() == 0 {
             serde_json::to_vec(&JsonValue::Array(Vec::new()))
@@ -63,13 +61,6 @@ impl CollectionEncoder for JsonEncoder {
             serde_json::to_vec(&JsonValue::Array(rows))
         }
         .map_err(EncodeError::Serialization)?;
-        println!(
-            "[JsonEncoder:{}] encoded {} rows into {} bytes in {:?}",
-            self.id,
-            num_rows,
-            payload.len(),
-            start.elapsed()
-        );
         Ok(payload)
     }
 }

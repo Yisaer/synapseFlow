@@ -26,8 +26,10 @@ pub struct DataSourceProcessor {
     source_name: String,
     /// Input channels for receiving control signals
     inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<StreamData>>,
     /// Broadcast channel for downstream consumers
     output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<StreamData>,
     /// External source connectors that feed this processor
     connectors: Vec<ConnectorBinding>,
 }
@@ -59,10 +61,13 @@ impl DataSourceProcessor {
     /// Create a new DataSourceProcessor from PhysicalDatasource
     pub fn new(source_name: impl Into<String>) -> Self {
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         Self {
             source_name: source_name.into(),
             inputs: Vec::new(),
+            control_inputs: Vec::new(),
             output,
+            control_output,
             connectors: Vec::new(),
         }
     }
@@ -165,46 +170,73 @@ impl Processor for DataSourceProcessor {
 
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let output = self.output.clone();
+        let control_output = self.control_output.clone();
         let processor_id = self.source_name.clone();
         let mut base_inputs = std::mem::take(&mut self.inputs);
         base_inputs.extend(self.activate_connectors());
         let mut input_streams = fan_in_streams(base_inputs);
+        let control_receivers = std::mem::take(&mut self.control_inputs);
+        let mut control_streams = fan_in_streams(control_receivers);
+        let mut control_active = !control_streams.is_empty();
         tokio::spawn(async move {
-            while let Some(item) = input_streams.next().await {
-                let mut data = match item {
-                    Ok(data) => data,
-                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                        return Err(ProcessorError::ProcessingError(format!(
-                            "DataSource input lagged by {} messages",
-                            skipped
-                        )))
+            loop {
+                tokio::select! {
+                    control_item = control_streams.next(), if control_active => {
+                        if let Some(result) = control_item {
+                            let control_data = match result {
+                                Ok(data) => data,
+                                Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                                    return Err(ProcessorError::ProcessingError(format!(
+                                        "DataSource control input lagged by {} messages",
+                                        skipped
+                                    )))
+                                }
+                            };
+                            let _ = control_output.send(control_data.clone());
+                            if control_data.is_terminal() {
+                                println!("[DataSourceProcessor:{}] received StreamEnd (control)", processor_id);
+                                return Ok(());
+                            }
+                            continue;
+                        } else {
+                            control_active = false;
+                        }
                     }
-                };
-                if let StreamData::Collection(collection) = data {
-                    let rows = collection.num_rows() as u64;
-                    DATASOURCE_RECORDS_IN
-                        .with_label_values(&[processor_id.as_str()])
-                        .inc_by(rows);
-                    let renamed =
-                        DataSourceProcessor::rewrite_collection_sources(collection, &processor_id)?;
-                    DATASOURCE_RECORDS_OUT
-                        .with_label_values(&[processor_id.as_str()])
-                        .inc_by(rows);
-                    data = StreamData::Collection(renamed);
-                }
-                output
-                    .send(data.clone())
-                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                    item = input_streams.next() => {
+                        match item {
+                            Some(Ok(mut data)) => {
+                                if let StreamData::Collection(collection) = data {
+                                    let rows = collection.num_rows() as u64;
+                                    DATASOURCE_RECORDS_IN
+                                        .with_label_values(&[processor_id.as_str()])
+                                        .inc_by(rows);
+                                    let renamed =
+                                        DataSourceProcessor::rewrite_collection_sources(collection, &processor_id)?;
+                                    DATASOURCE_RECORDS_OUT
+                                        .with_label_values(&[processor_id.as_str()])
+                                        .inc_by(rows);
+                                    data = StreamData::Collection(renamed);
+                                }
+                                output
+                                    .send(data.clone())
+                                    .map_err(|_| ProcessorError::ChannelClosed)?;
 
-                if matches!(
-                    data.as_control(),
-                    Some(crate::processor::ControlSignal::StreamEnd)
-                ) {
-                    return Ok(());
+                                if data.is_control() && data.is_terminal() {
+                                    println!("[DataSourceProcessor:{}] received StreamEnd (data)", processor_id);
+                                    return Ok(());
+                                }
+                            }
+                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
+                                return Err(ProcessorError::ProcessingError(format!(
+                                    "DataSource input lagged by {} messages",
+                                    skipped
+                                )))
+                            }
+                            None => return Ok(()),
+                        }
+                    }
                 }
             }
-
-            Ok(())
         })
     }
 
@@ -212,7 +244,15 @@ impl Processor for DataSourceProcessor {
         Some(self.output.subscribe())
     }
 
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+        Some(self.control_output.subscribe())
+    }
+
     fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
         self.inputs.push(receiver);
+    }
+
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+        self.control_inputs.push(receiver);
     }
 }

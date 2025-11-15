@@ -3,7 +3,7 @@
 use crate::model::{CollectionError, Column, RecordBatch};
 use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::{collections::BTreeSet, sync::Arc, time::Instant};
+use std::{collections::BTreeSet, sync::Arc};
 
 /// Errors that can occur while decoding payloads.
 #[derive(thiserror::Error, Debug)]
@@ -138,15 +138,8 @@ impl JsonDecoder {
 
 impl RecordDecoder for JsonDecoder {
     fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError> {
-        let start = Instant::now();
         let json = serde_json::from_slice(payload)?;
         let batch = self.decode_value(json)?;
-        println!(
-            "[JsonDecoder:{}] decoded payload into RecordBatch with {} rows in {:?}",
-            self.source_name,
-            batch.num_rows(),
-            start.elapsed()
-        );
         Ok(batch)
     }
 }

@@ -29,8 +29,14 @@ pub trait Processor: Send + Sync {
     /// Get output channel senders (for connecting downstream processors)
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>>;
 
+    /// Subscribe to the processor's control signal output (high priority path)
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>>;
+
     /// Add an input channel (connect upstream processor)
     fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>);
+
+    /// Add a control-signal input channel (connect upstream control path)
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>);
 }
 
 /// Error type for processor operations

@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::signal::ctrl_c().await?;
     println!("Stopping pipeline...");
-    pipeline.close().await?;
+    pipeline.quick_close().await?;
     Ok(())
 }
 

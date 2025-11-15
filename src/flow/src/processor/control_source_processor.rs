@@ -22,21 +22,28 @@ pub struct ControlSourceProcessor {
     input: Option<broadcast::Receiver<StreamData>>,
     /// Broadcast channel for all downstream processors
     output: broadcast::Sender<StreamData>,
+    /// Dedicated control channel for urgent control propagation
+    control_output: broadcast::Sender<StreamData>,
 }
 
 impl ControlSourceProcessor {
     /// Create a new ControlSourceProcessor
     pub fn new(id: impl Into<String>) -> Self {
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         Self {
             id: id.into(),
             input: None,
             output,
+            control_output,
         }
     }
 
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
+        if data.is_control() {
+            let _ = self.control_output.send(data.clone());
+        }
         self.output
             .send(data)
             .map(|_| ())
@@ -72,6 +79,8 @@ impl Processor for ControlSourceProcessor {
             )
         });
         let output = self.output.clone();
+        let control_output = self.control_output.clone();
+        let processor_id = self.id.clone();
 
         tokio::spawn(async move {
             let input = match input_result {
@@ -90,10 +99,14 @@ impl Processor for ControlSourceProcessor {
                         )))
                     }
                 };
+                if data.is_control() {
+                    let _ = control_output.send(data.clone());
+                }
                 output
                     .send(data.clone())
                     .map_err(|_| ProcessorError::ChannelClosed)?;
                 if data.is_terminal() {
+                    println!("[ControlSourceProcessor:{processor_id}] received StreamEnd");
                     return Ok(());
                 }
             }
@@ -110,9 +123,13 @@ impl Processor for ControlSourceProcessor {
         Some(self.output.subscribe())
     }
 
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+        Some(self.control_output.subscribe())
+    }
+
     fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        // ControlSourceProcessor only supports single input
-        // If input is already set, replace it
         self.input = Some(receiver);
     }
+
+    fn add_control_input(&mut self, _receiver: broadcast::Receiver<StreamData>) {}
 }
