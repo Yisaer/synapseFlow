@@ -60,6 +60,17 @@ impl AffiliateRow {
         Self { index, values }
     }
 
+    /// Insert or overwrite a derived column.
+    pub fn insert(&mut self, key: Arc<String>, value: Value) {
+        if let Some(idx) = self.index.get(&key).copied() {
+            self.values[idx] = value;
+        } else {
+            let idx = self.values.len();
+            self.values.push(value);
+            self.index.insert(key, idx);
+        }
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = (&Arc<String>, &Value)> {
         self.index
             .iter()
@@ -81,8 +92,18 @@ pub struct Tuple {
 }
 
 impl Tuple {
-    pub fn new(messages: Vec<Arc<Message>>, affiliate: Option<AffiliateRow>) -> Self {
-        Self { messages, affiliate }
+    pub fn new(messages: Vec<Arc<Message>>) -> Self {
+        Self {
+            messages,
+            affiliate: None,
+        }
+    }
+
+    pub fn add_affiliate_column(&mut self, column: Arc<String>, value: Value) {
+        match &mut self.affiliate {
+            Some(aff) => aff.insert(column, value),
+            None => self.affiliate = Some(AffiliateRow::new(vec![(column, value)])),
+        }
     }
 
     pub fn entries(&self) -> Vec<((&str, &str), &Value)> {
