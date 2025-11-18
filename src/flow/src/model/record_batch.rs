@@ -39,6 +39,9 @@ impl Clone for RecordBatch {
     }
 }
 
+type ColumnValues = Vec<Value>;
+type ColumnEntry = (Arc<String>, ColumnValues);
+
 /// Build rows from simple column tuples `(source, column, values)`.
 pub fn rows_from_columns_simple(
     columns: Vec<(String, String, Vec<Value>)>,
@@ -48,7 +51,7 @@ pub fn rows_from_columns_simple(
     }
 
     let expected_len = columns[0].2.len();
-    let mut grouped: HashMap<String, Vec<(Arc<String>, Vec<Value>)>> = HashMap::new();
+    let mut grouped: HashMap<String, Vec<ColumnEntry>> = HashMap::new();
 
     for (source, name, values) in columns {
         if values.len() != expected_len {
@@ -59,10 +62,7 @@ pub fn rows_from_columns_simple(
                 expected_len
             )));
         }
-        grouped
-            .entry(source)
-            .or_insert_with(Vec::new)
-            .push((Arc::new(name), values));
+        grouped.entry(source).or_default().push((Arc::new(name), values));
     }
 
     let mut rows = Vec::with_capacity(expected_len);

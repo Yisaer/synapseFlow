@@ -47,7 +47,7 @@ async fn run_test_case(test_case: TestCase) {
     let columns = test_case
         .input_data
         .into_iter()
-        .map(|(col_name, values)| ("".to_string(), col_name, values))
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
         .collect();
 
     let test_batch = batch_from_columns_simple(columns)
@@ -55,10 +55,12 @@ async fn run_test_case(test_case: TestCase) {
 
     let stream_data = StreamData::collection(Box::new(test_batch));
     pipeline
-        .input
-        .send(stream_data)
+        .send_stream_data("stream", stream_data)
         .await
-        .expect(&format!("Failed to send test data for: {}", test_case.name));
+        .expect(&format!(
+            "Failed to send test data for: {}",
+            test_case.name
+        ));
 
     // Receive and verify results
     let mut output = pipeline
@@ -102,7 +104,8 @@ async fn run_test_case(test_case: TestCase) {
                     let mut values = Vec::with_capacity(rows.len());
                     for row in rows {
                         let value = row
-                            .value_by_name("", &check.expected_name)
+                            .value_by_name("stream", &check.expected_name)
+                            .or_else(|| row.value_by_name("", &check.expected_name))
                             .unwrap_or_else(|| panic!("column {} missing", check.expected_name));
                         values.push(value.clone());
                     }
@@ -313,14 +316,13 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let batch = batch_from_columns_simple(vec![(
-        "".to_string(),
+        "stream".to_string(),
         "a".to_string(),
         vec![Value::Int64(10)],
     )])
     .expect("record batch");
     pipeline
-        .input
-        .send(StreamData::collection(Box::new(batch)))
+        .send_stream_data("stream", StreamData::collection(Box::new(batch)))
         .await
         .expect("send data");
 

@@ -154,14 +154,17 @@ async fn delete_pipeline_handler(
         return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
     };
 
-    if let PipelineStatus::Running = entry.status {
-        if let Err(err) = entry.pipeline.quick_close().await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to stop pipeline {id}: {err}"),
-            )
-                .into_response();
+    match entry.status {
+        PipelineStatus::Running => {
+            if let Err(err) = entry.pipeline.quick_close().await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to stop pipeline {id}: {err}"),
+                )
+                    .into_response();
+            }
         }
+        PipelineStatus::Created => {}
     }
 
     (StatusCode::OK, format!("pipeline {id} deleted")).into_response()

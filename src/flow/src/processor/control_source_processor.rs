@@ -59,12 +59,6 @@ impl ControlSourceProcessor {
         _processor_id: &str,
         data: StreamData,
     ) -> Result<(), ProcessorError> {
-        let data = match data {
-            StreamData::Collection(collection) => {
-                StreamData::Collection(collection)
-            }
-            other => other,
-        };
         self.send(data).await
     }
 }
