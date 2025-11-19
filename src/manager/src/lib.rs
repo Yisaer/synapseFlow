@@ -137,7 +137,10 @@ async fn create_pipeline_handler(
 
     let pipeline = match build_pipeline(&req) {
         Ok(p) => p,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            println!("[manager] failed to create pipeline {}: {}", req.id, err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
 
     pipelines.insert(
@@ -147,6 +150,7 @@ async fn create_pipeline_handler(
             status: PipelineStatus::Created,
         },
     );
+    println!("[manager] pipeline {} created", req.id);
 
     (
         StatusCode::CREATED,
@@ -169,11 +173,13 @@ async fn start_pipeline_handler(
     };
 
     if let PipelineStatus::Running = entry.status {
+        println!("[manager] pipeline {} already running", id);
         return (StatusCode::OK, format!("pipeline {id} already running")).into_response();
     }
 
     entry.pipeline.start();
     entry.status = PipelineStatus::Running;
+    println!("[manager] pipeline {} started", id);
     (StatusCode::OK, format!("pipeline {id} started")).into_response()
 }
 
@@ -237,7 +243,10 @@ async fn create_schema_handler(Json(req): Json<CreateSchemaRequest>) -> impl Int
 
     let catalog = global_catalog();
     match catalog.insert(req.source.clone(), schema) {
-        Ok(_) => (StatusCode::CREATED, Json(req.source)).into_response(),
+        Ok(_) => {
+            println!("[manager] schema {} created", req.source);
+            (StatusCode::CREATED, Json(req.source)).into_response()
+        }
         Err(err) => (
             StatusCode::CONFLICT,
             format!("failed to create schema: {}", err),
