@@ -4,7 +4,7 @@
 //! that coordinate the entire stream processing pipeline.
 
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
-use crate::processor::{Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
@@ -41,8 +41,15 @@ impl ControlSourceProcessor {
 
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
-        if data.is_control() {
-            let _ = self.control_output.send(data.clone());
+        if let StreamData::Control(signal) = &data {
+            if signal.routes_via_control() {
+                self.control_output
+                    .send(data.clone())
+                    .map_err(|_| ProcessorError::ChannelClosed)?;
+            }
+            if !signal.routes_via_data() {
+                return Ok(());
+            }
         }
         self.output
             .send(data)
@@ -95,13 +102,27 @@ impl Processor for ControlSourceProcessor {
                         )))
                     }
                 };
-                if data.is_control() {
-                    let _ = control_output.send(data.clone());
-                }
+
                 let is_terminal = data.is_terminal();
-                output
-                    .send(data)
-                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                let mut deliver_to_data = true;
+
+                if let StreamData::Control(signal) = &data {
+                    if signal.routes_via_control() {
+                        control_output
+                            .send(data.clone())
+                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                    }
+                    if !signal.routes_via_data() {
+                        deliver_to_data = false;
+                    }
+                }
+
+                if deliver_to_data {
+                    output
+                        .send(data)
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                }
+
                 if is_terminal {
                     println!("[ControlSourceProcessor:{processor_id}] received StreamEnd");
                     return Ok(());

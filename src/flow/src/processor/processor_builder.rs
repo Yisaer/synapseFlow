@@ -7,8 +7,8 @@ use crate::codec::encoder::JsonEncoder;
 use crate::connector::MockSinkConnector;
 use crate::planner::physical::{PhysicalDataSource, PhysicalFilter, PhysicalPlan, PhysicalProject};
 use crate::processor::{
-    ControlSourceProcessor, DataSourceProcessor, FilterProcessor, Processor, ProcessorError,
-    ProjectProcessor, ResultCollectProcessor, SinkProcessor, StreamData,
+    ControlSignal, ControlSourceProcessor, DataSourceProcessor, FilterProcessor, Processor,
+    ProcessorError, ProjectProcessor, ResultCollectProcessor, SinkProcessor, StreamData,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -145,6 +145,14 @@ impl ProcessorPipeline {
         }
     }
 
+    /// Broadcast a control signal into the pipeline, respecting its channel target.
+    pub fn broadcast_control_signal(&self, signal: ControlSignal) -> Result<(), ProcessorError> {
+        self.control_input_sender
+            .send(StreamData::control(signal))
+            .map(|_| ())
+            .map_err(|_| ProcessorError::ChannelClosed)
+    }
+
     /// Close the pipeline gracefully using the data path.
     pub async fn close(&mut self) -> Result<(), ProcessorError> {
         self.graceful_close().await
@@ -156,9 +164,9 @@ impl ProcessorPipeline {
         self.await_all_handles().await
     }
 
-    /// Quickly close the pipeline by delivering StreamEnd to the control channel.
+    /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
     pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        self.send_stream_end_via_control()?;
+        self.broadcast_control_signal(ControlSignal::StreamQuickEnd)?;
         self.replace_input_sender();
         self.await_all_handles().await
     }
@@ -170,13 +178,6 @@ impl ProcessorPipeline {
             .map_err(|_| ProcessorError::ChannelClosed)?;
         self.replace_input_sender();
         Ok(())
-    }
-
-    fn send_stream_end_via_control(&self) -> Result<(), ProcessorError> {
-        self.control_input_sender
-            .send(StreamData::stream_end())
-            .map(|_| ())
-            .map_err(|_| ProcessorError::ChannelClosed)
     }
 
     fn replace_input_sender(&mut self) {

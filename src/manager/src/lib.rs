@@ -201,6 +201,7 @@ async fn delete_pipeline_handler(
                 )
                     .into_response();
             }
+            println!("[manager] pipeline {id} quick close completed");
         }
         PipelineStatus::Created => {}
     }

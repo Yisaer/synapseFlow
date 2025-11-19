@@ -7,14 +7,36 @@ use crate::model::Collection;
 /// Control signals for stream processing
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlSignal {
-    /// Stream end signal  
-    StreamEnd,
+    /// Graceful stream end propagated via the data channel
+    StreamGracefulEnd,
+    /// Immediate stream end propagated via the control channel
+    StreamQuickEnd,
     /// Watermark for time-based processing
     Watermark(std::time::SystemTime),
     /// Resume normal processing
     Resume,
     /// Flush buffered data
     Flush,
+}
+
+impl ControlSignal {
+    /// Whether this signal should propagate via the control channel
+    pub fn routes_via_control(&self) -> bool {
+        !matches!(self, ControlSignal::StreamGracefulEnd)
+    }
+
+    /// Whether this signal should propagate via the data channel
+    pub fn routes_via_data(&self) -> bool {
+        matches!(self, ControlSignal::StreamGracefulEnd)
+    }
+
+    /// Whether this signal indicates stream termination
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ControlSignal::StreamGracefulEnd | ControlSignal::StreamQuickEnd
+        )
+    }
 }
 
 /// Core data type for stream processing - unified enum for all data types
@@ -113,9 +135,12 @@ impl StreamData {
         matches!(self, StreamData::Error(_))
     }
 
-    /// Check if this is a terminal signal (StreamEnd)
+    /// Check if this is a terminal signal (Stream end variants)
     pub fn is_terminal(&self) -> bool {
-        matches!(self, StreamData::Control(ControlSignal::StreamEnd))
+        match self {
+            StreamData::Control(signal) => signal.is_terminal(),
+            _ => false,
+        }
     }
 
     /// Extract Collection if present
@@ -174,7 +199,12 @@ impl StreamData {
 impl StreamData {
     /// Create stream end signal
     pub fn stream_end() -> Self {
-        StreamData::control(ControlSignal::StreamEnd)
+        StreamData::control(ControlSignal::StreamGracefulEnd)
+    }
+
+    /// Create quick stream end signal
+    pub fn quick_end() -> Self {
+        StreamData::control(ControlSignal::StreamQuickEnd)
     }
 
     /// Create resume signal

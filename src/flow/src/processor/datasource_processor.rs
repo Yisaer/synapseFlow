@@ -166,6 +166,7 @@ impl Processor for DataSourceProcessor {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(result) = control_item {
                             let control_data = match result {
