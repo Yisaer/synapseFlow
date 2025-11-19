@@ -2,6 +2,16 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+#[cfg(not(target_env = "msvc"))]
+fn log_allocator() {
+    println!("[synapse-flow] global allocator: jemalloc");
+}
+
+#[cfg(target_env = "msvc")]
+fn log_allocator() {
+    println!("[synapse-flow] global allocator: system default");
+}
+
 mod metrics;
 
 use crate::metrics::{CPU_USAGE_GAUGE, MEMORY_USAGE_GAUGE};
@@ -25,6 +35,7 @@ const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    log_allocator();
     let profiling_enabled = profile_server_enabled();
     if profiling_enabled {
         ensure_jemalloc_profiling();
