@@ -18,3 +18,4 @@ rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"
 url = "2"
 prometheus = "0.13"
 indexmap = "2.2"
+uuid = { version = "1", features = ["v4"] }

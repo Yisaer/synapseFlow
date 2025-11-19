@@ -51,7 +51,7 @@ impl MqttSourceConfig {
     fn client_id(&self) -> String {
         self.client_id
             .clone()
-            .unwrap_or_else(|| self.source_name.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
 }
 
