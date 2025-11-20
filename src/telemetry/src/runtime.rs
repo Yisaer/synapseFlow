@@ -17,8 +17,7 @@ pub fn spawn_tokio_metrics_collector(poll_interval: Duration) {
     let monitor = RuntimeMonitor::new(&handle);
     let runtime_handle = handle.clone();
     tokio::spawn(async move {
-        let mut intervals = monitor.intervals();
-        while let Some(interval) = intervals.next() {
+        for interval in monitor.intervals() {
             let live_tasks = live_tasks_from_interval(&interval, &runtime_handle);
             TOKIO_TASKS_GAUGE.set(clamp_usize_to_i64(live_tasks));
             sleep(poll_interval).await;
