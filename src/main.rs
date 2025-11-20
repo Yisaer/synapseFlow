@@ -12,9 +12,6 @@ fn log_allocator() {
     println!("[synapse-flow] global allocator: system default");
 }
 
-mod metrics;
-
-use crate::metrics::{CPU_USAGE_GAUGE, MEMORY_USAGE_GAUGE};
 use pprof::protos::Message;
 use pprof::ProfilerGuard;
 use std::env;
@@ -26,7 +23,13 @@ use std::process;
 use std::thread;
 use std::time::Duration as StdDuration;
 use sysinfo::{Pid, System};
+use telemetry::{
+    spawn_tokio_metrics_collector, CPU_USAGE_GAUGE, HEAP_IN_ALLOCATOR_GAUGE, HEAP_IN_USE_GAUGE,
+    MEMORY_USAGE_GAUGE,
+};
 use tikv_jemalloc_ctl::raw;
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemalloc_ctl::{epoch, stats};
 use tokio::time::{sleep, Duration};
 
 const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
@@ -79,6 +82,8 @@ async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error + Send 
         .filter(|secs| *secs > 0)
         .unwrap_or(DEFAULT_METRICS_INTERVAL_SECS);
 
+    spawn_tokio_metrics_collector(StdDuration::from_secs(poll_interval));
+
     tokio::spawn(async move {
         let mut system = System::new();
         let pid = Pid::from_u32(process::id());
@@ -92,10 +97,37 @@ async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error + Send 
                 CPU_USAGE_GAUGE.set(0);
                 MEMORY_USAGE_GAUGE.set(0);
             }
+            update_heap_metrics();
             sleep(Duration::from_secs(poll_interval)).await;
         }
     });
     Ok(())
+}
+
+#[cfg(not(target_env = "msvc"))]
+fn update_heap_metrics() {
+    if epoch::advance().is_err() {
+        return;
+    }
+    let allocated = stats::allocated::read().unwrap_or(0);
+    let resident = stats::resident::read().unwrap_or(0);
+    HEAP_IN_USE_GAUGE.set(clamp_usize_to_i64(allocated));
+    HEAP_IN_ALLOCATOR_GAUGE.set(clamp_usize_to_i64(resident));
+}
+
+#[cfg(target_env = "msvc")]
+fn update_heap_metrics() {
+    HEAP_IN_USE_GAUGE.set(0);
+    HEAP_IN_ALLOCATOR_GAUGE.set(0);
+}
+
+#[cfg(not(target_env = "msvc"))]
+fn clamp_usize_to_i64(value: usize) -> i64 {
+    if value > i64::MAX as usize {
+        i64::MAX
+    } else {
+        value as i64
+    }
 }
 
 fn start_profile_server() {

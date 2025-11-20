@@ -1,0 +1,13 @@
+[package]
+name = "telemetry"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+once_cell = "1.19"
+prometheus = "0.13"
+tokio = { version = "1", features = ["rt", "time"] }
+tokio-metrics = { version = "0.4.5", features = ["rt"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
