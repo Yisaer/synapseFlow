@@ -34,12 +34,38 @@ use tokio::time::{sleep, Duration};
 
 const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 5;
-const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
+const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:8080";
+
+#[derive(Debug, Clone, Copy)]
+struct CliFlags {
+    profiling_enabled: Option<bool>,
+}
+
+impl CliFlags {
+    fn parse() -> Self {
+        let mut profiling_enabled = None;
+        for arg in env::args().skip(1) {
+            match arg.as_str() {
+                "--enable-profiling" | "--profiling" => profiling_enabled = Some(true),
+                "--disable-profiling" | "--no-profiling" => profiling_enabled = Some(false),
+                _ => {}
+            }
+        }
+        Self { profiling_enabled }
+    }
+
+    fn profiling_override(&self) -> Option<bool> {
+        self.profiling_enabled
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     log_allocator();
-    let profiling_enabled = profile_server_enabled();
+    let cli_flags = CliFlags::parse();
+    let profiling_enabled = cli_flags
+        .profiling_override()
+        .unwrap_or_else(profile_server_enabled);
     if profiling_enabled {
         ensure_jemalloc_profiling();
     }
@@ -72,6 +98,7 @@ async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error + Send 
     let addr: SocketAddr = env::var("METRICS_ADDR")
         .unwrap_or_else(|_| DEFAULT_METRICS_ADDR.to_string())
         .parse()?;
+    println!("[synapse-flow] enabling metrics exporter at {}", addr);
     let exporter = prometheus_exporter::start(addr)?;
     // Leak exporter handle so the HTTP endpoint stays alive for the duration of the process.
     Box::leak(Box::new(exporter));
@@ -140,6 +167,7 @@ fn start_profile_server() {
         }
     };
 
+    println!("[ProfileServer] enabling profiling endpoints on {}", addr);
     thread::spawn(move || {
         if let Err(err) = run_profile_server(addr) {
             eprintln!("[ProfileServer] server error: {err}");
