@@ -14,19 +14,24 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
-prometheus_exporter = "0.8"
-sysinfo = "0.30"
-pprof = { version = "0.6.1", features = ["flamegraph", "protobuf"] }
-tikv-jemallocator = { version = "0.6.0", features = ["profiling"] }
-tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
+prometheus_exporter = { version = "0.8", optional = true }
+sysinfo = { version = "0.30", optional = true }
+pprof = { version = "0.6.1", features = ["flamegraph", "protobuf"], optional = true }
+tikv-jemallocator = { version = "0.6.0", features = ["profiling"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"], optional = true }
 manager = { path = "src/manager" }
-telemetry = { path = "src/telemetry" }
+telemetry = { path = "src/telemetry", optional = true }
+
+[features]
+default = ["metrics", "profiling"]
+metrics = ["dep:prometheus_exporter", "dep:sysinfo", "telemetry"]
+profiling = ["dep:pprof", "dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 [[bin]]
 name = "synapse-flow"
 path = "src/main.rs"
 
-[profile.release-min]
+[profile.release-thin]
 inherits = "release"
 opt-level = "z"
 lto = "thin"

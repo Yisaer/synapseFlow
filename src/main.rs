@@ -1,39 +1,60 @@
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
 fn log_allocator() {
     println!("[synapse-flow] global allocator: jemalloc");
 }
 
-#[cfg(target_env = "msvc")]
+#[cfg(all(feature = "profiling", target_env = "msvc"))]
+fn log_allocator() {
+    println!("[synapse-flow] profiling enabled but using system allocator on MSVC");
+}
+
+#[cfg(not(feature = "profiling"))]
 fn log_allocator() {
     println!("[synapse-flow] global allocator: system default");
 }
 
-use pprof::protos::Message;
-use pprof::ProfilerGuard;
+#[cfg(feature = "profiling")]
+use pprof::{protos::Message, ProfilerGuard};
 use std::env;
+#[cfg(feature = "profiling")]
 use std::ffi::CString;
+#[cfg(feature = "profiling")]
 use std::fs;
+#[cfg(feature = "profiling")]
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(any(feature = "metrics", feature = "profiling"))]
+use std::net::SocketAddr;
+#[cfg(feature = "profiling")]
+use std::net::{TcpListener, TcpStream};
+#[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::process;
+#[cfg(feature = "profiling")]
 use std::thread;
+#[cfg(feature = "metrics")]
 use std::time::Duration as StdDuration;
+#[cfg(feature = "metrics")]
 use sysinfo::{Pid, System};
+#[cfg(feature = "metrics")]
 use telemetry::{
     spawn_tokio_metrics_collector, CPU_USAGE_GAUGE, HEAP_IN_ALLOCATOR_GAUGE, HEAP_IN_USE_GAUGE,
     MEMORY_USAGE_GAUGE,
 };
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
 use tikv_jemalloc_ctl::raw;
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(feature = "metrics", not(target_env = "msvc")))]
 use tikv_jemalloc_ctl::{epoch, stats};
+#[cfg(feature = "metrics")]
 use tokio::time::{sleep, Duration};
 
+#[cfg(feature = "metrics")]
 const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
+#[cfg(feature = "metrics")]
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 5;
+#[cfg(feature = "profiling")]
 const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
 
 #[derive(Debug, Clone, Copy)]
@@ -94,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+#[cfg(feature = "metrics")]
 async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = env::var("METRICS_ADDR")
         .unwrap_or_else(|_| DEFAULT_METRICS_ADDR.to_string())
@@ -131,7 +153,12 @@ async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error + Send 
     Ok(())
 }
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(feature = "metrics"))]
+async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(())
+}
+
+#[cfg(all(feature = "metrics", not(target_env = "msvc")))]
 fn update_heap_metrics() {
     if epoch::advance().is_err() {
         return;
@@ -142,13 +169,17 @@ fn update_heap_metrics() {
     HEAP_IN_ALLOCATOR_GAUGE.set(clamp_usize_to_i64(resident));
 }
 
-#[cfg(target_env = "msvc")]
+#[cfg(all(feature = "metrics", target_env = "msvc"))]
 fn update_heap_metrics() {
     HEAP_IN_USE_GAUGE.set(0);
     HEAP_IN_ALLOCATOR_GAUGE.set(0);
 }
 
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(feature = "metrics"))]
+#[allow(dead_code)]
+fn update_heap_metrics() {}
+
+#[cfg(feature = "metrics")]
 fn clamp_usize_to_i64(value: usize) -> i64 {
     if value > i64::MAX as usize {
         i64::MAX
@@ -157,6 +188,7 @@ fn clamp_usize_to_i64(value: usize) -> i64 {
     }
 }
 
+#[cfg(feature = "profiling")]
 fn start_profile_server() {
     let addr_str = env::var("PROFILE_ADDR").unwrap_or_else(|_| DEFAULT_PROFILE_ADDR.to_string());
     let addr: SocketAddr = match addr_str.parse() {
@@ -175,6 +207,10 @@ fn start_profile_server() {
     });
 }
 
+#[cfg(not(feature = "profiling"))]
+fn start_profile_server() {}
+
+#[cfg(feature = "profiling")]
 fn run_profile_server(addr: SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     println!(
@@ -195,6 +231,7 @@ fn run_profile_server(addr: SocketAddr) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "profiling")]
 fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 2048];
     let len = stream.read(&mut buf)?;
@@ -238,6 +275,7 @@ fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[cfg(feature = "profiling")]
 fn generate_profile(duration: u64) -> Result<Vec<u8>, String> {
     let report = run_profiler(duration)?;
     let profile = report.pprof().map_err(|err| err.to_string())?;
@@ -246,6 +284,7 @@ fn generate_profile(duration: u64) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+#[cfg(feature = "profiling")]
 fn generate_flamegraph(duration: u64) -> Result<Vec<u8>, String> {
     let report = run_profiler(duration)?;
     let mut body = Vec::new();
@@ -255,12 +294,14 @@ fn generate_flamegraph(duration: u64) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+#[cfg(feature = "profiling")]
 fn run_profiler(duration: u64) -> Result<pprof::Report, String> {
     let guard = ProfilerGuard::new(100).map_err(|err| err.to_string())?;
     thread::sleep(StdDuration::from_secs(duration));
     guard.report().build().map_err(|err| err.to_string())
 }
 
+#[cfg(feature = "profiling")]
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
     // Ensure profiling is active; if jemalloc lacks profiling support, return a clear error.
     if let Err(err) = unsafe { raw::write(b"prof.active\0", true) } {
@@ -280,6 +321,7 @@ fn capture_heap_profile() -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+#[cfg(feature = "profiling")]
 fn write_response(
     stream: &mut TcpStream,
     status: u16,
@@ -305,6 +347,7 @@ fn write_response(
     Ok(())
 }
 
+#[cfg(feature = "profiling")]
 fn split_target(target: &str) -> (&str, Option<&str>) {
     if let Some((path, query)) = target.split_once('?') {
         (path, Some(query))
@@ -313,6 +356,7 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
     }
 }
 
+#[cfg(feature = "profiling")]
 fn parse_seconds(query: Option<&str>) -> Option<u64> {
     query
         .and_then(|q| {
@@ -328,13 +372,21 @@ fn parse_seconds(query: Option<&str>) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
+#[cfg(feature = "profiling")]
 fn ensure_jemalloc_profiling() {
     // Best-effort: try to activate runtime profiling. If jemalloc was built
     // without profiling, mallctl will return an error and heap endpoint will
     // later surface a clearer message.
-    let _ = unsafe { raw::write(b"prof.active\0", true) };
+    #[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+    {
+        let _ = unsafe { raw::write(b"prof.active\0", true) };
+    }
 }
 
+#[cfg(not(feature = "profiling"))]
+fn ensure_jemalloc_profiling() {}
+
+#[cfg(feature = "profiling")]
 fn profile_server_enabled() -> bool {
     matches!(
         env::var("PROFILE_SERVER_ENABLE")
@@ -343,4 +395,9 @@ fn profile_server_enabled() -> bool {
             .as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+#[cfg(not(feature = "profiling"))]
+fn profile_server_enabled() -> bool {
+    false
 }

@@ -1,22 +1,20 @@
-.PHONY: build release test fmt clippy clean help
+.PHONY: build release release-thin test fmt clippy clean help
 
 # 默认目标
 .DEFAULT_GOAL := help
-
-SCRIPTS_DIR := $(CURDIR)/scripts
-export PATH := $(SCRIPTS_DIR):$(PATH)
 
 # 构建调试版本
 build:
 	@echo "Building debug version..."
 	@cargo build
 
-# 构建发布版本
-RELEASE_LEVEL ?= patch
-
 release:
-	@echo "Running cargo release ($(RELEASE_LEVEL)) with size-optimized profile..."
-	@cargo release $(RELEASE_LEVEL) --workspace --profile release-min --no-tag --no-push --skip-publish --no-confirm --dry-run
+	@echo "Building release binary (standard profile)..."
+	@cargo build --release
+
+release-thin:
+	@echo "Building minimal binary via release-thin profile..."
+	@cargo build --profile release-thin --no-default-features
 
 # 运行测试
 test:
