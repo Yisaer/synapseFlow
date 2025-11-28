@@ -15,35 +15,28 @@ use std::sync::Arc;
 
 /// Create a physical plan from a logical plan
 ///
-/// This function walks through the logical plan tree and creates corresponding physical plan nodes.
-/// Uses downcast_ref for type-safe pattern matching and delegates to specific creation functions.
+/// This function walks through the logical plan tree and creates corresponding physical plan nodes
+/// by pattern matching on the logical plan enum.
 pub fn create_physical_plan(
-    logical_plan: Arc<dyn LogicalPlan>,
+    logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-) -> Result<Arc<dyn PhysicalPlan>, String> {
-    // Try to downcast to specific logical plan types and delegate to corresponding creation functions
-    if let Some(logical_ds) = logical_plan.as_any().downcast_ref::<LogicalDataSource>() {
-        create_physical_data_source(logical_ds, *logical_plan.get_plan_index(), bindings)
-    } else if let Some(logical_filter) = logical_plan.as_any().downcast_ref::<LogicalFilter>() {
-        create_physical_filter(
+) -> Result<Arc<PhysicalPlan>, String> {
+    match logical_plan.as_ref() {
+        LogicalPlan::DataSource(logical_ds) => {
+            create_physical_data_source(logical_ds, logical_plan.get_plan_index(), bindings)
+        }
+        LogicalPlan::Filter(logical_filter) => create_physical_filter(
             logical_filter,
             &logical_plan,
-            *logical_plan.get_plan_index(),
+            logical_plan.get_plan_index(),
             bindings,
-        )
-    } else if let Some(logical_project) = logical_plan.as_any().downcast_ref::<LogicalProject>() {
-        create_physical_project(
+        ),
+        LogicalPlan::Project(logical_project) => create_physical_project(
             logical_project,
             &logical_plan,
-            *logical_plan.get_plan_index(),
+            logical_plan.get_plan_index(),
             bindings,
-        )
-    } else {
-        // Handle unsupported plan types
-        Err(format!(
-            "Unsupported logical plan type: {}",
-            logical_plan.get_plan_type()
-        ))
+        ),
     }
 }
 
@@ -52,7 +45,7 @@ fn create_physical_data_source(
     logical_ds: &LogicalDataSource,
     index: i64,
     bindings: &SchemaBinding,
-) -> Result<Arc<dyn PhysicalPlan>, String> {
+) -> Result<Arc<PhysicalPlan>, String> {
     let entry = find_binding_entry(logical_ds, bindings)?;
     let schema = entry.schema.clone();
     match entry.kind {
@@ -63,7 +56,7 @@ fn create_physical_data_source(
                 schema,
                 index,
             );
-            Ok(Arc::new(physical_ds))
+            Ok(Arc::new(PhysicalPlan::DataSource(physical_ds)))
         }
         SourceBindingKind::Shared => {
             let physical_shared = PhysicalSharedStream::new(
@@ -72,7 +65,7 @@ fn create_physical_data_source(
                 schema,
                 index,
             );
-            Ok(Arc::new(physical_shared))
+            Ok(Arc::new(PhysicalPlan::SharedStream(physical_shared)))
         }
     }
 }
@@ -80,10 +73,10 @@ fn create_physical_data_source(
 /// Create a PhysicalFilter from a LogicalFilter
 fn create_physical_filter(
     logical_filter: &LogicalFilter,
-    logical_plan: &Arc<dyn LogicalPlan>,
+    logical_plan: &Arc<LogicalPlan>,
     index: i64,
     bindings: &SchemaBinding,
-) -> Result<Arc<dyn PhysicalPlan>, String> {
+) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
@@ -92,13 +85,11 @@ fn create_physical_filter(
     }
 
     // Convert SQL Expr to ScalarExpr
-    let scalar_predicate =
-        convert_expr_to_scalar_with_bindings(&logical_filter.predicate, bindings).map_err(|e| {
-            format!(
-                "Failed to convert filter predicate to scalar expression: {}",
-                e
-            )
-        })?;
+    let scalar_predicate = convert_expr_to_scalar_with_bindings(
+        &logical_filter.predicate,
+        bindings,
+    )
+    .map_err(|e| format!("Failed to convert filter predicate to scalar expression: {}", e))?;
 
     let physical_filter = PhysicalFilter::new(
         logical_filter.predicate.clone(),
@@ -106,16 +97,16 @@ fn create_physical_filter(
         physical_children,
         index,
     );
-    Ok(Arc::new(physical_filter))
+    Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
 }
 
 /// Create a PhysicalProject from a LogicalProject
 fn create_physical_project(
     logical_project: &LogicalProject,
-    logical_plan: &Arc<dyn LogicalPlan>,
+    logical_plan: &Arc<LogicalPlan>,
     index: i64,
     bindings: &SchemaBinding,
-) -> Result<Arc<dyn PhysicalPlan>, String> {
+) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
@@ -135,7 +126,7 @@ fn create_physical_project(
     }
 
     let physical_project = PhysicalProject::new(physical_fields, physical_children, index);
-    Ok(Arc::new(physical_project))
+    Ok(Arc::new(PhysicalPlan::Project(physical_project)))
 }
 
 fn find_binding_entry<'a>(

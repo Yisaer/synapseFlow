@@ -1,6 +1,5 @@
-use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use crate::planner::physical::BasePhysicalPlan;
 use datatypes::Schema;
-use std::any::Any;
 use std::sync::Arc;
 
 /// Physical operator for reading data from a data source
@@ -42,23 +41,5 @@ impl PhysicalDataSource {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
-    }
-}
-
-impl PhysicalPlan for PhysicalDataSource {
-    fn children(&self) -> &[Arc<dyn PhysicalPlan>] {
-        &self.base.children
-    }
-
-    fn get_plan_type(&self) -> &str {
-        "PhysicalDataSource"
-    }
-
-    fn get_plan_index(&self) -> &i64 {
-        &self.base.index
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

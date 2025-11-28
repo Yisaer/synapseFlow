@@ -1,6 +1,5 @@
 use crate::planner::logical::{BaseLogicalPlan, LogicalPlan};
 use sqlparser::ast::Expr;
-use std::any::Any;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -16,26 +15,8 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn new(fields: Vec<ProjectField>, children: Vec<Arc<dyn LogicalPlan>>, index: i64) -> Self {
+    pub fn new(fields: Vec<ProjectField>, children: Vec<Arc<LogicalPlan>>, index: i64) -> Self {
         let base = BaseLogicalPlan::new(children, index);
         Self { base, fields }
-    }
-}
-
-impl LogicalPlan for Project {
-    fn children(&self) -> &[Arc<dyn LogicalPlan>] {
-        &self.base.children
-    }
-
-    fn get_plan_type(&self) -> &str {
-        "Project"
-    }
-
-    fn get_plan_index(&self) -> &i64 {
-        &self.base.index
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

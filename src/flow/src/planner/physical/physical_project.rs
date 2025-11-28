@@ -1,7 +1,6 @@
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
 use sqlparser::ast::Expr;
-use std::any::Any;
 use std::sync::Arc;
 
 /// Field definition for physical projection
@@ -62,7 +61,7 @@ impl PhysicalProject {
     /// Create a new PhysicalProject
     pub fn new(
         fields: Vec<PhysicalProjectField>,
-        children: Vec<Arc<dyn PhysicalPlan>>,
+        children: Vec<Arc<PhysicalPlan>>,
         index: i64,
     ) -> Self {
         let base = BasePhysicalPlan::new(children, index);
@@ -72,28 +71,10 @@ impl PhysicalProject {
     /// Create a new PhysicalProject with a single child
     pub fn with_single_child(
         fields: Vec<PhysicalProjectField>,
-        child: Arc<dyn PhysicalPlan>,
+        child: Arc<PhysicalPlan>,
         index: i64,
     ) -> Self {
         let base = BasePhysicalPlan::new(vec![child], index);
         Self { base, fields }
-    }
-}
-
-impl PhysicalPlan for PhysicalProject {
-    fn children(&self) -> &[Arc<dyn PhysicalPlan>] {
-        &self.base.children
-    }
-
-    fn get_plan_type(&self) -> &str {
-        "PhysicalProject"
-    }
-
-    fn get_plan_index(&self) -> &i64 {
-        &self.base.index
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

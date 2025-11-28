@@ -1,5 +1,3 @@
-use std::any::Any;
-use std::fmt::Debug;
 use std::sync::Arc;
 
 pub mod base_physical;
@@ -14,20 +12,43 @@ pub use physical_filter::PhysicalFilter;
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_shared_stream::PhysicalSharedStream;
 
-/// Core trait for all physical operators in the stream processing engine
-///
-/// Physical plans represent the physical execution structure for stream processing.
-/// They define the execution hierarchy and data flow relationships between operators.
-pub trait PhysicalPlan: Send + Sync + Debug {
+/// Enum describing all supported physical execution nodes
+#[derive(Debug, Clone)]
+pub enum PhysicalPlan {
+    DataSource(PhysicalDataSource),
+    Filter(PhysicalFilter),
+    Project(PhysicalProject),
+    SharedStream(PhysicalSharedStream),
+}
+
+impl PhysicalPlan {
     /// Get the children of this physical plan
-    fn children(&self) -> &[Arc<dyn PhysicalPlan>];
+    pub fn children(&self) -> &[Arc<PhysicalPlan>] {
+        match self {
+            PhysicalPlan::DataSource(plan) => plan.base.children(),
+            PhysicalPlan::Filter(plan) => plan.base.children(),
+            PhysicalPlan::Project(plan) => plan.base.children(),
+            PhysicalPlan::SharedStream(plan) => plan.base.children(),
+        }
+    }
 
     /// Get the type name of this physical plan
-    fn get_plan_type(&self) -> &str;
+    pub fn get_plan_type(&self) -> &str {
+        match self {
+            PhysicalPlan::DataSource(_) => "PhysicalDataSource",
+            PhysicalPlan::Filter(_) => "PhysicalFilter",
+            PhysicalPlan::Project(_) => "PhysicalProject",
+            PhysicalPlan::SharedStream(_) => "PhysicalSharedStream",
+        }
+    }
 
     /// Get the unique index of this physical plan
-    fn get_plan_index(&self) -> &i64;
-
-    /// Allow downcasting to concrete types
-    fn as_any(&self) -> &dyn Any;
+    pub fn get_plan_index(&self) -> i64 {
+        match self {
+            PhysicalPlan::DataSource(plan) => plan.base.index(),
+            PhysicalPlan::Filter(plan) => plan.base.index(),
+            PhysicalPlan::Project(plan) => plan.base.index(),
+            PhysicalPlan::SharedStream(plan) => plan.base.index(),
+        }
+    }
 }

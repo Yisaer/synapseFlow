@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 fn build_physical_plan_from_sql(
     sql: &str,
-) -> Result<Arc<dyn planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
+) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
     let select_stmt = parser::parse_sql(sql)?;
     let schema_binding = build_schema_binding(&select_stmt)?;
     let logical_plan = create_logical_plan(select_stmt)?;

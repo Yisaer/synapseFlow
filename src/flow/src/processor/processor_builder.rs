@@ -5,9 +5,7 @@
 
 use crate::codec::encoder::JsonEncoder;
 use crate::connector::MockSinkConnector;
-use crate::planner::physical::{
-    PhysicalDataSource, PhysicalFilter, PhysicalPlan, PhysicalProject, PhysicalSharedStream,
-};
+use crate::planner::physical::PhysicalPlan;
 use crate::processor::{
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, FilterProcessor, Processor,
     ProcessorError, ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
@@ -273,29 +271,30 @@ impl ProcessorPipeline {
 /// # Returns
 /// A PlanProcessor enum variant corresponding to the plan type
 pub fn create_processor_from_plan_node(
-    plan: &Arc<dyn PhysicalPlan>,
+    plan: &Arc<PhysicalPlan>,
 ) -> Result<PlanProcessor, ProcessorError> {
-    let plan_index = *plan.get_plan_index();
-    if let Some(ds) = plan.as_any().downcast_ref::<PhysicalDataSource>() {
-        let processor =
-            DataSourceProcessor::new(plan_index, ds.source_name().to_string(), ds.schema());
-        Ok(PlanProcessor::DataSource(processor))
-    } else if let Some(shared) = plan.as_any().downcast_ref::<PhysicalSharedStream>() {
-        let processor = SharedStreamProcessor::new(plan_index, shared.stream_name().to_string());
-        Ok(PlanProcessor::SharedSource(processor))
-    } else if let Some(proj) = plan.as_any().downcast_ref::<PhysicalProject>() {
-        let processor_id = format!("project_{}", plan_index);
-        let processor = ProjectProcessor::new(processor_id, Arc::new(proj.clone()));
-        Ok(PlanProcessor::Project(processor))
-    } else if let Some(filter) = plan.as_any().downcast_ref::<PhysicalFilter>() {
-        let processor_id = format!("filter_{}", plan_index);
-        let processor = FilterProcessor::new(processor_id, Arc::new(filter.clone()));
-        Ok(PlanProcessor::Filter(processor))
-    } else {
-        Err(ProcessorError::InvalidConfiguration(format!(
-            "Unsupported PhysicalPlan type: {}",
-            plan.get_plan_type()
-        )))
+    let plan_index = plan.get_plan_index();
+    match plan.as_ref() {
+        PhysicalPlan::DataSource(ds) => {
+            let processor =
+                DataSourceProcessor::new(plan_index, ds.source_name().to_string(), ds.schema());
+            Ok(PlanProcessor::DataSource(processor))
+        }
+        PhysicalPlan::SharedStream(shared) => {
+            let processor =
+                SharedStreamProcessor::new(plan_index, shared.stream_name().to_string());
+            Ok(PlanProcessor::SharedSource(processor))
+        }
+        PhysicalPlan::Project(project) => {
+            let processor_id = format!("project_{}", plan_index);
+            let processor = ProjectProcessor::new(processor_id, Arc::new(project.clone()));
+            Ok(PlanProcessor::Project(processor))
+        }
+        PhysicalPlan::Filter(filter) => {
+            let processor_id = format!("filter_{}", plan_index);
+            let processor = FilterProcessor::new(processor_id, Arc::new(filter.clone()));
+            Ok(PlanProcessor::Filter(processor))
+        }
     }
 }
 
@@ -336,10 +335,10 @@ impl ProcessorMap {
 /// 2. Recursively processes all children
 /// 3. Connects children's outputs to parent's input
 fn build_processors_recursive(
-    plan: Arc<dyn PhysicalPlan>,
+    plan: Arc<PhysicalPlan>,
     processor_map: &mut ProcessorMap,
 ) -> Result<(), ProcessorError> {
-    let plan_index = *plan.get_plan_index();
+    let plan_index = plan.get_plan_index();
 
     // Create processor for current node
     let processor = create_processor_from_plan_node(&plan)?;
@@ -354,11 +353,11 @@ fn build_processors_recursive(
 }
 
 /// Collect leaf node indices from PhysicalPlan tree
-fn collect_leaf_indices(plan: Arc<dyn PhysicalPlan>) -> Vec<i64> {
+fn collect_leaf_indices(plan: Arc<PhysicalPlan>) -> Vec<i64> {
     let mut leaf_indices = Vec::new();
 
     if plan.children().is_empty() {
-        leaf_indices.push(*plan.get_plan_index());
+        leaf_indices.push(plan.get_plan_index());
     } else {
         for child in plan.children() {
             leaf_indices.extend(collect_leaf_indices(Arc::clone(child)));
@@ -369,12 +368,12 @@ fn collect_leaf_indices(plan: Arc<dyn PhysicalPlan>) -> Vec<i64> {
 }
 
 /// Collect parent-child relationships from PhysicalPlan tree
-fn collect_parent_child_relations(plan: Arc<dyn PhysicalPlan>) -> Vec<(i64, i64)> {
+fn collect_parent_child_relations(plan: Arc<PhysicalPlan>) -> Vec<(i64, i64)> {
     let mut relations = Vec::new();
-    let parent_index = *plan.get_plan_index();
+    let parent_index = plan.get_plan_index();
 
     for child in plan.children() {
-        let child_index = *child.get_plan_index();
+        let child_index = child.get_plan_index();
         relations.push((parent_index, child_index));
         // Recursively collect from children
         relations.extend(collect_parent_child_relations(Arc::clone(child)));
@@ -389,7 +388,7 @@ fn collect_parent_child_relations(plan: Arc<dyn PhysicalPlan>) -> Vec<(i64, i64)
 /// - ControlSourceProcessor outputs to leaf node inputs
 /// - Children outputs to parent inputs
 fn connect_processors(
-    physical_plan: Arc<dyn PhysicalPlan>,
+    physical_plan: Arc<PhysicalPlan>,
     processor_map: &mut ProcessorMap,
     control_source: &mut ControlSourceProcessor,
 ) -> Result<(), ProcessorError> {
@@ -444,7 +443,7 @@ fn connect_processors(
 ///    - Children outputs -> parent input
 /// 4. Connects root node output -> provided SinkProcessors -> ResultCollectProcessor inputs
 pub fn create_processor_pipeline(
-    physical_plan: Arc<dyn PhysicalPlan>,
+    physical_plan: Arc<PhysicalPlan>,
     mut sink_processors: Vec<SinkProcessor>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     if sink_processors.is_empty() {
@@ -468,7 +467,7 @@ pub fn create_processor_pipeline(
         &mut control_source,
     )?;
 
-    let root_index = *physical_plan.get_plan_index();
+    let root_index = physical_plan.get_plan_index();
     if processor_map.get_processor(root_index).is_none() {
         return Err(ProcessorError::InvalidConfiguration(
             "Root processor not found".to_string(),
@@ -542,7 +541,7 @@ pub fn create_processor_pipeline(
 
 /// Convenience helper that wires a PhysicalPlan into a pipeline backed by a logging mock sink.
 pub fn create_processor_pipeline_with_log_sink(
-    physical_plan: Arc<dyn PhysicalPlan>,
+    physical_plan: Arc<PhysicalPlan>,
     forward_to_result: bool,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     let mut log_sink = SinkProcessor::new("log_sink");
@@ -569,9 +568,12 @@ mod tests {
     fn test_create_processor_from_physical_project() {
         // Create a simple data source
         let schema = Arc::new(Schema::new(vec![]));
-        let data_source: Arc<dyn crate::planner::physical::PhysicalPlan> = Arc::new(
-            PhysicalDataSource::new("test_source".to_string(), None, schema, 0),
-        );
+        let data_source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
+            "test_source".to_string(),
+            None,
+            schema,
+            0,
+        )));
 
         // Create a projection field
         let project_field = PhysicalProjectField::new(
@@ -584,9 +586,11 @@ mod tests {
         );
 
         // Create a PhysicalProject
-        let physical_project: Arc<dyn crate::planner::physical::PhysicalPlan> = Arc::new(
-            PhysicalProject::with_single_child(vec![project_field], data_source, 1),
-        );
+        let physical_project = Arc::new(PhysicalPlan::Project(PhysicalProject::with_single_child(
+            vec![project_field],
+            data_source,
+            1,
+        )));
 
         // Try to create a processor from the PhysicalProject
         let result = create_processor_from_plan_node(&physical_project);

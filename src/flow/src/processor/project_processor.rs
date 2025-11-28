@@ -3,7 +3,7 @@
 //! This processor evaluates projection expressions and produces output with projected fields.
 
 use crate::model::Collection;
-use crate::planner::physical::{PhysicalProject, PhysicalProjectField};
+use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
 use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
@@ -51,11 +51,12 @@ impl ProjectProcessor {
     /// Returns None if the plan is not a PhysicalProject
     pub fn from_physical_plan(
         id: impl Into<String>,
-        plan: Arc<dyn crate::planner::physical::PhysicalPlan>,
+        plan: Arc<PhysicalPlan>,
     ) -> Option<Self> {
-        plan.as_any()
-            .downcast_ref::<PhysicalProject>()
-            .map(|proj| Self::new(id, Arc::new(proj.clone())))
+        match plan.as_ref() {
+            PhysicalPlan::Project(project) => Some(Self::new(id, Arc::new(project.clone()))),
+            _ => None,
+        }
     }
 }
 

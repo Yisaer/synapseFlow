@@ -3,7 +3,7 @@
 //! This processor evaluates filter expressions and produces output with filtered records.
 
 use crate::model::Collection;
-use crate::planner::physical::PhysicalFilter;
+use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
 use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
@@ -51,11 +51,12 @@ impl FilterProcessor {
     /// Returns None if the plan is not a PhysicalFilter
     pub fn from_physical_plan(
         id: impl Into<String>,
-        plan: Arc<dyn crate::planner::physical::PhysicalPlan>,
+        plan: Arc<PhysicalPlan>,
     ) -> Option<Self> {
-        plan.as_any()
-            .downcast_ref::<PhysicalFilter>()
-            .map(|filter| Self::new(id, Arc::new(filter.clone())))
+        match plan.as_ref() {
+            PhysicalPlan::Filter(filter) => Some(Self::new(id, Arc::new(filter.clone()))),
+            _ => None,
+        }
     }
 }
 

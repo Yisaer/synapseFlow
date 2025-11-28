@@ -1,6 +1,4 @@
-use crate::planner::logical::{BaseLogicalPlan, LogicalPlan};
-use std::any::Any;
-use std::sync::Arc;
+use crate::planner::logical::BaseLogicalPlan;
 
 #[derive(Debug, Clone)]
 pub struct DataSource {
@@ -17,23 +15,5 @@ impl DataSource {
             source_name,
             alias,
         }
-    }
-}
-
-impl LogicalPlan for DataSource {
-    fn children(&self) -> &[Arc<dyn LogicalPlan>] {
-        &self.base.children
-    }
-
-    fn get_plan_type(&self) -> &str {
-        "DataSource"
-    }
-
-    fn get_plan_index(&self) -> &i64 {
-        &self.base.index
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

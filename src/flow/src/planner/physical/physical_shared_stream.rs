@@ -1,11 +1,10 @@
-use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use crate::planner::physical::BasePhysicalPlan;
 use datatypes::Schema;
-use std::any::Any;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct PhysicalSharedStream {
-    base: BasePhysicalPlan,
+    pub base: BasePhysicalPlan,
     stream_name: String,
     alias: Option<String>,
     schema: Arc<Schema>,
@@ -37,23 +36,5 @@ impl PhysicalSharedStream {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
-    }
-}
-
-impl PhysicalPlan for PhysicalSharedStream {
-    fn children(&self) -> &[Arc<dyn PhysicalPlan>] {
-        &self.base.children
-    }
-
-    fn get_plan_type(&self) -> &str {
-        "PhysicalSharedStream"
-    }
-
-    fn get_plan_index(&self) -> &i64 {
-        &self.base.index
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

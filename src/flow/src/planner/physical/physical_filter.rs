@@ -1,7 +1,6 @@
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
 use sqlparser::ast::Expr;
-use std::any::Any;
 use std::sync::Arc;
 
 /// Physical operator for filter operations
@@ -20,7 +19,7 @@ impl PhysicalFilter {
     pub fn new(
         predicate: Expr,
         scalar_predicate: ScalarExpr,
-        children: Vec<Arc<dyn PhysicalPlan>>,
+        children: Vec<Arc<PhysicalPlan>>,
         index: i64,
     ) -> Self {
         let base = BasePhysicalPlan::new(children, index);
@@ -29,23 +28,5 @@ impl PhysicalFilter {
             predicate,
             scalar_predicate,
         }
-    }
-}
-
-impl PhysicalPlan for PhysicalFilter {
-    fn children(&self) -> &[Arc<dyn PhysicalPlan>] {
-        &self.base.children
-    }
-
-    fn get_plan_type(&self) -> &str {
-        "PhysicalFilter"
-    }
-
-    fn get_plan_index(&self) -> &i64 {
-        &self.base.index
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

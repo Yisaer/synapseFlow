@@ -1,24 +1,56 @@
 use parser::SelectStmt;
-use std::any::Any;
-use std::fmt::Debug;
 use std::sync::Arc;
-
-pub trait LogicalPlan: Send + Sync + Debug {
-    fn children(&self) -> &[Arc<dyn LogicalPlan>];
-    fn get_plan_type(&self) -> &str;
-    fn get_plan_index(&self) -> &i64;
-    fn as_any(&self) -> &dyn Any;
-}
 
 #[derive(Debug, Clone)]
 pub struct BaseLogicalPlan {
     pub index: i64,
-    pub children: Vec<Arc<dyn LogicalPlan>>,
+    pub children: Vec<Arc<LogicalPlan>>,
 }
 
 impl BaseLogicalPlan {
-    pub fn new(children: Vec<Arc<dyn LogicalPlan>>, index: i64) -> Self {
+    pub fn new(children: Vec<Arc<LogicalPlan>>, index: i64) -> Self {
         Self { children, index }
+    }
+
+    pub fn children(&self) -> &[Arc<LogicalPlan>] {
+        &self.children
+    }
+
+    pub fn index(&self) -> i64 {
+        self.index
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LogicalPlan {
+    DataSource(DataSource),
+    Filter(Filter),
+    Project(Project),
+}
+
+impl LogicalPlan {
+    pub fn children(&self) -> &[Arc<LogicalPlan>] {
+        match self {
+            LogicalPlan::DataSource(plan) => plan.base.children(),
+            LogicalPlan::Filter(plan) => plan.base.children(),
+            LogicalPlan::Project(plan) => plan.base.children(),
+        }
+    }
+
+    pub fn get_plan_type(&self) -> &str {
+        match self {
+            LogicalPlan::DataSource(_) => "DataSource",
+            LogicalPlan::Filter(_) => "Filter",
+            LogicalPlan::Project(_) => "Project",
+        }
+    }
+
+    pub fn get_plan_index(&self) -> i64 {
+        match self {
+            LogicalPlan::DataSource(plan) => plan.base.index(),
+            LogicalPlan::Filter(plan) => plan.base.index(),
+            LogicalPlan::Project(plan) => plan.base.index(),
+        }
     }
 }
 
@@ -36,7 +68,7 @@ impl BaseLogicalPlan {
 /// # Returns
 ///
 /// Returns the root LogicalPlan node
-pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<dyn LogicalPlan>, String> {
+pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<LogicalPlan>, String> {
     let start_index = 0i64;
     let mut current_index = start_index;
 
@@ -45,14 +77,14 @@ pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<dyn LogicalPla
         return Err("No data source found in SELECT statement".to_string());
     }
 
-    let mut current_plans: Vec<Arc<dyn LogicalPlan>> = Vec::new();
+    let mut current_plans: Vec<Arc<LogicalPlan>> = Vec::new();
     for source_info in &select_stmt.source_infos {
         let datasource = DataSource::new(
             source_info.name.clone(),
             source_info.alias.clone(),
             current_index,
         );
-        current_plans.push(Arc::new(datasource));
+        current_plans.push(Arc::new(LogicalPlan::DataSource(datasource)));
         current_index += 1;
     }
 
@@ -62,7 +94,7 @@ pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<dyn LogicalPla
         // For now, we'll keep the original expression in the Filter node
         // In a full implementation, we'd convert this to a ScalarExpr
         let filter = Filter::new(where_expr, current_plans, current_index);
-        current_plans = vec![Arc::new(filter)];
+        current_plans = vec![Arc::new(LogicalPlan::Filter(filter))];
         current_index += 1;
     }
 
@@ -82,7 +114,7 @@ pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<dyn LogicalPla
 
     let project = Project::new(project_fields, current_plans, current_index);
 
-    Ok(Arc::new(project) as Arc<dyn LogicalPlan>)
+    Ok(Arc::new(LogicalPlan::Project(project)))
 }
 
 pub mod datasource;
@@ -107,13 +139,13 @@ mod logical_plan_tests {
 
         // Should be a Project node
         assert_eq!(plan.get_plan_type(), "Project");
-        assert_eq!(plan.get_plan_index(), &1); // DataSource(0) -> Project(1)
+        assert_eq!(plan.get_plan_index(), 1); // DataSource(0) -> Project(1)
 
         // Check that it has one child (DataSource)
         let children = plan.children();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].get_plan_type(), "DataSource");
-        assert_eq!(children[0].get_plan_index(), &0);
+        assert_eq!(children[0].get_plan_index(), 0);
     }
 
     #[test]
@@ -125,19 +157,19 @@ mod logical_plan_tests {
 
         // Should be a Project node
         assert_eq!(plan.get_plan_type(), "Project");
-        assert_eq!(plan.get_plan_index(), &2); // DataSource(0) -> Filter(1) -> Project(2)
+        assert_eq!(plan.get_plan_index(), 2); // DataSource(0) -> Filter(1) -> Project(2)
 
         // Check the filter in the middle
         let children = plan.children();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].get_plan_type(), "Filter");
-        assert_eq!(children[0].get_plan_index(), &1);
+        assert_eq!(children[0].get_plan_index(), 1);
 
         // Check the datasource at the bottom
         let filter_children = children[0].children();
         assert_eq!(filter_children.len(), 1);
         assert_eq!(filter_children[0].get_plan_type(), "DataSource");
-        assert_eq!(filter_children[0].get_plan_index(), &0);
+        assert_eq!(filter_children[0].get_plan_index(), 0);
     }
 
     #[test]
@@ -167,11 +199,11 @@ mod logical_plan_tests {
         // Verify the structure is correct
         assert_eq!(plan.get_plan_type(), "Project");
 
-        // Downcast to Project to access fields
-        let project = plan
-            .as_any()
-            .downcast_ref::<Project>()
-            .expect("Should be a Project");
+        // Extract project fields
+        let project = match plan.as_ref() {
+            LogicalPlan::Project(project) => project,
+            other => panic!("Expected Project, found {}", other.get_plan_type()),
+        };
 
         // Verify we have 3 fields
         assert_eq!(project.fields.len(), 3);

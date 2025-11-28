@@ -11,12 +11,12 @@ pub struct BasePhysicalPlan {
     pub index: i64,
 
     /// Child physical plans that this plan depends on
-    pub children: Vec<Arc<dyn PhysicalPlan>>,
+    pub children: Vec<Arc<PhysicalPlan>>,
 }
 
 impl BasePhysicalPlan {
     /// Create a new BasePhysicalPlan
-    pub fn new(children: Vec<Arc<dyn PhysicalPlan>>, index: i64) -> Self {
+    pub fn new(children: Vec<Arc<PhysicalPlan>>, index: i64) -> Self {
         Self { children, index }
     }
 
@@ -26,5 +26,13 @@ impl BasePhysicalPlan {
             children: Vec::new(),
             index,
         }
+    }
+
+    pub fn children(&self) -> &[Arc<PhysicalPlan>] {
+        &self.children
+    }
+
+    pub fn index(&self) -> i64 {
+        self.index
     }
 }
