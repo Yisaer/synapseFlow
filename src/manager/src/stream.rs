@@ -181,7 +181,6 @@ pub async fn delete_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-
     let pipelines_using_stream = {
         let pipelines = state.pipelines.lock().await;
         pipelines

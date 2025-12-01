@@ -3,9 +3,12 @@
 //! This module provides utilities to build processor pipelines from PhysicalPlan,
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
-use crate::codec::encoder::JsonEncoder;
-use crate::connector::MockSinkConnector;
+use crate::codec::{CollectionEncoder, JsonEncoder};
+use crate::connector::sink::mqtt::MqttSinkConnector;
+use crate::connector::sink::nop::NopSinkConnector;
+use crate::connector::sink::SinkConnector;
 use crate::planner::physical::PhysicalPlan;
+use crate::planner::sink::{PipelineSink, SinkConnectorConfig, SinkEncoderConfig};
 use crate::processor::{
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, FilterProcessor, Processor,
     ProcessorError, ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
@@ -295,6 +298,9 @@ pub fn create_processor_from_plan_node(
             let processor = FilterProcessor::new(processor_id, Arc::new(filter.clone()));
             Ok(PlanProcessor::Filter(processor))
         }
+        PhysicalPlan::DataSink(_) => Err(ProcessorError::InvalidConfiguration(
+            "Data sink nodes are not converted into processors".to_string(),
+        )),
     }
 }
 
@@ -433,25 +439,26 @@ fn connect_processors(
     Ok(())
 }
 
-/// Create a complete processor pipeline from a PhysicalPlan tree and custom sinks.
+/// Create a complete processor pipeline from a PhysicalPlan tree.
 ///
-/// This function:
-/// 1. Recursively traverses the PhysicalPlan tree
-/// 2. Creates a processor for each PhysicalPlan node
-/// 3. Connects processors based on tree structure:
-///    - ControlSourceProcessor output -> leaf nodes input
-///    - Children outputs -> parent input
-/// 4. Connects root node output -> provided SinkProcessors -> ResultCollectProcessor inputs
+/// The provided plan is expected to terminate in a `PhysicalDataSink` node that
+/// carries the declarative sink configuration.
 pub fn create_processor_pipeline(
+    physical_plan: Arc<PhysicalPlan>,
+) -> Result<ProcessorPipeline, ProcessorError> {
+    let (plan_without_sinks, sink_processors) = extract_pipeline_sinks(physical_plan)?;
+    if sink_processors.is_empty() {
+        return Err(ProcessorError::InvalidConfiguration(
+            "At least one sink definition is required".to_string(),
+        ));
+    }
+    build_processor_pipeline(plan_without_sinks, sink_processors)
+}
+
+fn build_processor_pipeline(
     physical_plan: Arc<PhysicalPlan>,
     mut sink_processors: Vec<SinkProcessor>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
-    if sink_processors.is_empty() {
-        return Err(ProcessorError::InvalidConfiguration(
-            "At least one SinkProcessor is required".to_string(),
-        ));
-    }
-
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
     let (control_input_sender, control_input_receiver) =
@@ -539,20 +546,63 @@ pub fn create_processor_pipeline(
     })
 }
 
-/// Convenience helper that wires a PhysicalPlan into a pipeline backed by a logging mock sink.
-pub fn create_processor_pipeline_with_log_sink(
-    physical_plan: Arc<PhysicalPlan>,
-    forward_to_result: bool,
-) -> Result<ProcessorPipeline, ProcessorError> {
-    let mut log_sink = SinkProcessor::new("log_sink");
-    if forward_to_result {
-        log_sink.enable_result_forwarding();
+fn extract_pipeline_sinks(
+    plan: Arc<PhysicalPlan>,
+) -> Result<(Arc<PhysicalPlan>, Vec<SinkProcessor>), ProcessorError> {
+    match plan.as_ref() {
+        PhysicalPlan::DataSink(sink_plan) => {
+            if sink_plan.base.children().len() != 1 {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "Data sink node must have exactly one child".to_string(),
+                ));
+            }
+            let child = Arc::clone(&sink_plan.base.children()[0]);
+            let mut sinks = Vec::new();
+            for sink in &sink_plan.sinks {
+                sinks.push(build_sink_processor(sink)?);
+            }
+            Ok((child, sinks))
+        }
+        _ => Err(ProcessorError::InvalidConfiguration(
+            "Physical plan must terminate with a data sink node".to_string(),
+        )),
     }
-    let (connector, _handle) = MockSinkConnector::new("log_sink_connector");
-    let encoder = Arc::new(JsonEncoder::new("log_sink_encoder"));
-    log_sink.add_connector(Box::new(connector), encoder);
+}
 
-    create_processor_pipeline(physical_plan, vec![log_sink])
+fn build_sink_processor(sink: &PipelineSink) -> Result<SinkProcessor, ProcessorError> {
+    let mut processor = SinkProcessor::new(sink.sink_id.clone());
+    if sink.forward_to_result {
+        processor.enable_result_forwarding();
+    } else {
+        processor.disable_result_forwarding();
+    }
+    for connector in &sink.connectors {
+        let boxed_connector = instantiate_connector(&connector.connector_id, &connector.connector)?;
+        let encoder = instantiate_encoder(&connector.encoder);
+        processor.add_connector(boxed_connector, encoder);
+    }
+    Ok(processor)
+}
+
+fn instantiate_encoder(cfg: &SinkEncoderConfig) -> Arc<dyn CollectionEncoder> {
+    match cfg {
+        SinkEncoderConfig::Json { encoder_id } => Arc::new(JsonEncoder::new(encoder_id.clone())),
+    }
+}
+
+fn instantiate_connector(
+    connector_id: &str,
+    cfg: &SinkConnectorConfig,
+) -> Result<Box<dyn SinkConnector>, ProcessorError> {
+    match cfg {
+        SinkConnectorConfig::Mqtt(mqtt_cfg) => Ok(Box::new(MqttSinkConnector::new(
+            connector_id.to_string(),
+            mqtt_cfg.clone(),
+        ))),
+        SinkConnectorConfig::Nop(_) => {
+            Ok(Box::new(NopSinkConnector::new(connector_id.to_string())))
+        }
+    }
 }
 
 #[cfg(test)]

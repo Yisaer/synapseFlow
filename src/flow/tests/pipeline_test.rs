@@ -5,14 +5,13 @@
 
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::global_catalog;
-use flow::connector::MockSinkConnector;
 use flow::create_pipeline;
 use flow::create_pipeline_with_log_sink;
 use flow::model::batch_from_columns_simple;
-use flow::processor::{SinkProcessor, StreamData};
-use flow::JsonEncoder;
-use serde_json::json;
-use std::sync::Arc;
+use flow::planner::sink::{
+    NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
+};
+use flow::processor::StreamData;
 use tokio::time::{timeout, Duration};
 
 /// Test case structure for table-driven tests
@@ -306,9 +305,14 @@ async fn test_create_pipeline_various_queries() {
 async fn test_create_pipeline_with_custom_sink_connectors() {
     install_stream_schema(&[("a".to_string(), vec![Value::Int64(10)])]);
 
-    let mut sink = SinkProcessor::new("custom_sink");
-    let (connector, mut handle) = MockSinkConnector::new("custom_sink_connector");
-    sink.add_connector(Box::new(connector), Arc::new(JsonEncoder::new("json")));
+    let connector = PipelineSinkConnector::new(
+        "custom_sink_connector",
+        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkEncoderConfig::Json {
+            encoder_id: "json".to_string(),
+        },
+    );
+    let sink = PipelineSink::new("custom_sink", vec![connector]).with_forward_to_result(true);
 
     let mut pipeline = create_pipeline("SELECT a FROM stream", vec![sink])
         .expect("pipeline with custom sink should succeed");
@@ -327,13 +331,25 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
         .await
         .expect("send data");
 
-    let payload = timeout(Duration::from_secs(1), handle.recv())
+    let mut output = pipeline
+        .take_output()
+        .expect("pipeline should expose an output receiver");
+    let received = timeout(Duration::from_secs(1), output.recv())
         .await
-        .expect("sink payload timeout")
-        .expect("sink payload missing");
-    let json_payload: serde_json::Value =
-        serde_json::from_slice(&payload).expect("valid json payload");
-    assert_eq!(json_payload, json!([{"a":10}]));
+        .expect("pipeline output timeout")
+        .expect("pipeline output missing");
+    match received {
+        StreamData::Collection(collection) => {
+            let rows = collection.rows();
+            assert_eq!(rows.len(), 1);
+            let value = rows[0]
+                .value_by_name("stream", "a")
+                .or_else(|| rows[0].value_by_name("", "a"))
+                .expect("missing column a");
+            assert_eq!(value, &Value::Int64(10));
+        }
+        other => panic!("expected collection data, got {:?}", other.description()),
+    }
 
     pipeline.close().await.expect("close pipeline");
 }

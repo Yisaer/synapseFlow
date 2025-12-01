@@ -4,12 +4,13 @@ use crate::expr::sql_conversion::{
     convert_expr_to_scalar_with_bindings, SchemaBinding, SchemaBindingEntry, SourceBindingKind,
 };
 use crate::planner::logical::{
-    DataSource as LogicalDataSource, Filter as LogicalFilter, LogicalPlan,
+    DataSinkPlan, DataSource as LogicalDataSource, Filter as LogicalFilter, LogicalPlan,
     Project as LogicalProject,
 };
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PhysicalDataSource, PhysicalFilter, PhysicalPlan, PhysicalProject, PhysicalSharedStream,
+    PhysicalDataSink, PhysicalDataSource, PhysicalFilter, PhysicalPlan, PhysicalProject,
+    PhysicalSharedStream,
 };
 use std::sync::Arc;
 
@@ -33,6 +34,12 @@ pub fn create_physical_plan(
         ),
         LogicalPlan::Project(logical_project) => create_physical_project(
             logical_project,
+            &logical_plan,
+            logical_plan.get_plan_index(),
+            bindings,
+        ),
+        LogicalPlan::DataSink(logical_sink) => create_physical_data_sink(
+            logical_sink,
             &logical_plan,
             logical_plan.get_plan_index(),
             bindings,
@@ -129,6 +136,24 @@ fn create_physical_project(
 
     let physical_project = PhysicalProject::new(physical_fields, physical_children, index);
     Ok(Arc::new(PhysicalPlan::Project(physical_project)))
+}
+
+fn create_physical_data_sink(
+    logical_sink: &DataSinkPlan,
+    logical_plan: &Arc<LogicalPlan>,
+    index: i64,
+    bindings: &SchemaBinding,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let mut physical_children = Vec::new();
+    for child in logical_plan.children() {
+        let physical_child = create_physical_plan(child.clone(), bindings)?;
+        physical_children.push(physical_child);
+    }
+    if physical_children.len() != 1 {
+        return Err("DataSink plan must have exactly one child".to_string());
+    }
+    let physical_sink = PhysicalDataSink::new(physical_children, index, logical_sink.sinks.clone());
+    Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
 }
 
 fn find_binding_entry<'a>(

@@ -1,6 +1,11 @@
 use parser::SelectStmt;
 use std::sync::Arc;
 
+pub mod sink;
+
+use crate::planner::sink::PipelineSink;
+pub use sink::DataSinkPlan;
+
 #[derive(Debug, Clone)]
 pub struct BaseLogicalPlan {
     pub index: i64,
@@ -26,6 +31,7 @@ pub enum LogicalPlan {
     DataSource(DataSource),
     Filter(Filter),
     Project(Project),
+    DataSink(DataSinkPlan),
 }
 
 impl LogicalPlan {
@@ -34,6 +40,7 @@ impl LogicalPlan {
             LogicalPlan::DataSource(plan) => plan.base.children(),
             LogicalPlan::Filter(plan) => plan.base.children(),
             LogicalPlan::Project(plan) => plan.base.children(),
+            LogicalPlan::DataSink(plan) => plan.base.children(),
         }
     }
 
@@ -42,6 +49,7 @@ impl LogicalPlan {
             LogicalPlan::DataSource(_) => "DataSource",
             LogicalPlan::Filter(_) => "Filter",
             LogicalPlan::Project(_) => "Project",
+            LogicalPlan::DataSink(_) => "DataSink",
         }
     }
 
@@ -50,6 +58,7 @@ impl LogicalPlan {
             LogicalPlan::DataSource(plan) => plan.base.index(),
             LogicalPlan::Filter(plan) => plan.base.index(),
             LogicalPlan::Project(plan) => plan.base.index(),
+            LogicalPlan::DataSink(plan) => plan.base.index(),
         }
     }
 }
@@ -68,7 +77,10 @@ impl LogicalPlan {
 /// # Returns
 ///
 /// Returns the root LogicalPlan node
-pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<LogicalPlan>, String> {
+pub fn create_logical_plan(
+    select_stmt: SelectStmt,
+    sinks: Vec<PipelineSink>,
+) -> Result<Arc<LogicalPlan>, String> {
     let start_index = 0i64;
     let mut current_index = start_index;
 
@@ -113,8 +125,26 @@ pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<LogicalPlan>, 
     }
 
     let project = Project::new(project_fields, current_plans, current_index);
+    let base = Arc::new(LogicalPlan::Project(project));
 
-    Ok(Arc::new(LogicalPlan::Project(project)))
+    if sinks.is_empty() {
+        Ok(base)
+    } else {
+        let next_index = max_plan_index(&base) + 1;
+        let sink_plan = DataSinkPlan::new(vec![base], next_index, sinks);
+        Ok(Arc::new(LogicalPlan::DataSink(sink_plan)))
+    }
+}
+
+fn max_plan_index(plan: &Arc<LogicalPlan>) -> i64 {
+    let mut max_index = plan.get_plan_index();
+    for child in plan.children() {
+        let child_max = max_plan_index(child);
+        if child_max > max_index {
+            max_index = child_max;
+        }
+    }
+    max_index
 }
 
 pub mod datasource;
@@ -135,7 +165,7 @@ mod logical_plan_tests {
         let sql = "SELECT a, b FROM users";
         let select_stmt = parse_sql(sql).unwrap();
 
-        let plan = create_logical_plan(select_stmt).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
 
         // Should be a Project node
         assert_eq!(plan.get_plan_type(), "Project");
@@ -153,7 +183,7 @@ mod logical_plan_tests {
         let sql = "SELECT a, b FROM users WHERE a > 10";
         let select_stmt = parse_sql(sql).unwrap();
 
-        let plan = create_logical_plan(select_stmt).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
 
         // Should be a Project node
         assert_eq!(plan.get_plan_type(), "Project");
@@ -177,7 +207,7 @@ mod logical_plan_tests {
         let sql = "SELECT a, b FROM users AS u WHERE a > 10";
         let select_stmt = parse_sql(sql).unwrap();
 
-        let plan = create_logical_plan(select_stmt).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
 
         // Verify the structure is correct
         assert_eq!(plan.get_plan_type(), "Project");
@@ -194,7 +224,7 @@ mod logical_plan_tests {
         let sql = "SELECT a, concat(b), c AS custom_name FROM users";
         let select_stmt = parse_sql(sql).unwrap();
 
-        let plan = create_logical_plan(select_stmt).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
 
         // Verify the structure is correct
         assert_eq!(plan.get_plan_type(), "Project");

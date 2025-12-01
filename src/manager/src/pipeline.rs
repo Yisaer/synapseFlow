@@ -5,11 +5,13 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use flow::connector::sink::nop::NopSinkConnector;
-use flow::connector::{MqttSinkConfig, MqttSinkConnector, MqttSourceConfig, MqttSourceConnector};
+use flow::connector::{MqttSinkConfig, MqttSourceConfig, MqttSourceConnector};
 use flow::processor::Processor;
 use flow::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
-use flow::{JsonDecoder, JsonEncoder, SinkProcessor, create_pipeline};
+use flow::{
+    JsonDecoder, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    SinkEncoderConfig, create_pipeline,
+};
 use parser::parse_sql;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -193,7 +195,7 @@ fn build_sinks(
     broker: &str,
     sink_topic: &str,
     qos: u8,
-) -> Result<Vec<SinkProcessor>, String> {
+) -> Result<Vec<PipelineSink>, String> {
     let sink_kinds = req
         .sinks
         .clone()
@@ -202,28 +204,29 @@ fn build_sinks(
     for (idx, kind) in sink_kinds.iter().enumerate() {
         match kind.as_str() {
             "mqtt" => {
-                let mut sink = SinkProcessor::new(format!("{}_sink_{idx}", req.id));
-                sink.disable_result_forwarding();
-                let sink_config = MqttSinkConfig::new(sink.id(), broker, sink_topic, qos);
-                let sink_connector =
-                    MqttSinkConnector::new(format!("{}_sink_connector_{idx}", req.id), sink_config);
-                sink.add_connector(
-                    Box::new(sink_connector),
-                    Arc::new(JsonEncoder::new(format!("{}_sink_encoder_{idx}", req.id))),
+                let sink_id = format!("{}_sink_{idx}", req.id);
+                let connector_id = format!("{}_sink_connector_{idx}", req.id);
+                let config = MqttSinkConfig::new(sink_id.clone(), broker, sink_topic, qos);
+                let connector = PipelineSinkConnector::new(
+                    connector_id,
+                    SinkConnectorConfig::Mqtt(config),
+                    SinkEncoderConfig::Json {
+                        encoder_id: format!("{}_sink_encoder_{idx}", req.id),
+                    },
                 );
-                sinks.push(sink);
+                sinks.push(PipelineSink::new(sink_id, vec![connector]));
             }
             "nop" => {
-                let mut sink = SinkProcessor::new(format!("{}_nop_sink_{idx}", req.id));
-                sink.disable_result_forwarding();
-                sink.add_connector(
-                    Box::new(NopSinkConnector::new(format!(
-                        "{}_nop_connector_{idx}",
-                        req.id
-                    ))),
-                    Arc::new(JsonEncoder::new(format!("{}_nop_encoder_{idx}", req.id))),
+                let sink_id = format!("{}_nop_sink_{idx}", req.id);
+                let connector_id = format!("{}_nop_connector_{idx}", req.id);
+                let connector = PipelineSinkConnector::new(
+                    connector_id,
+                    SinkConnectorConfig::Nop(NopSinkConfig),
+                    SinkEncoderConfig::Json {
+                        encoder_id: format!("{}_nop_encoder_{idx}", req.id),
+                    },
                 );
-                sinks.push(sink);
+                sinks.push(PipelineSink::new(sink_id, vec![connector]));
             }
             other => return Err(format!("unsupported sink type: {}", other)),
         }
