@@ -30,7 +30,9 @@ pub struct MqttSinkProps {
     pub broker_url: String,
     pub topic: String,
     pub qos: u8,
+    pub retain: bool,
     pub client_id: Option<String>,
+    pub connector_key: Option<String>,
 }
 
 impl MqttSinkProps {
@@ -39,12 +41,24 @@ impl MqttSinkProps {
             broker_url: broker_url.into(),
             topic: topic.into(),
             qos,
+            retain: false,
             client_id: None,
+            connector_key: None,
         }
     }
 
     pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = Some(client_id.into());
+        self
+    }
+
+    pub fn with_retain(mut self, retain: bool) -> Self {
+        self.retain = retain;
+        self
+    }
+
+    pub fn with_connector_key(mut self, connector_key: impl Into<String>) -> Self {
+        self.connector_key = Some(connector_key.into());
         self
     }
 }
