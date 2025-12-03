@@ -6,6 +6,8 @@ use crate::processor::base::{
     send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+#[cfg(test)]
+use datatypes::Value;
 use futures::stream::StreamExt;
 use std::pin::Pin;
 use tokio::sync::broadcast;
@@ -230,5 +232,87 @@ impl Processor for BatchProcessor {
 
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::batch_from_columns_simple;
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn test_batch_processor_count_only() {
+        let mut processor = BatchProcessor::new("batch_count", Some(2), None);
+        let (tx, rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        processor.add_input(rx);
+        let (control_tx, control_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        processor.add_control_input(control_rx);
+        processor.output.subscribe(); // ensure there is at least one subscriber
+        let mut output = processor
+            .subscribe_output()
+            .expect("output available to subscribe");
+        processor.start();
+
+        let data = batch_from_columns_simple(vec![(
+            "stream".to_string(),
+            "val".to_string(),
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+        )])
+        .expect("batch");
+        let _ = tx.send(StreamData::collection(Box::new(data)));
+
+        let first = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .expect("first batch timeout")
+            .expect("first batch missing");
+        assert_eq!(
+            first.as_collection().unwrap().num_rows(),
+            2,
+            "count-only should flush first two rows"
+        );
+        drop(tx);
+        let second = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .expect("second batch timeout")
+            .expect("second batch missing");
+        assert_eq!(
+            second.as_collection().unwrap().num_rows(),
+            1,
+            "remaining row should flush on close"
+        );
+        let _ = control_tx.send(ControlSignal::StreamQuickEnd);
+        let _ = control_tx.send(ControlSignal::StreamQuickEnd);
+    }
+
+    #[tokio::test]
+    async fn test_batch_processor_duration_only() {
+        let mut processor =
+            BatchProcessor::new("batch_duration", None, Some(Duration::from_millis(50)));
+        let (tx, rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        processor.add_input(rx);
+        let (control_tx, control_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        processor.add_control_input(control_rx);
+        let mut output = processor.subscribe_output().expect("output");
+        processor.start();
+
+        let data = batch_from_columns_simple(vec![(
+            "stream".to_string(),
+            "val".to_string(),
+            vec![Value::Int64(1)],
+        )])
+        .expect("batch");
+        let _ = tx.send(StreamData::collection(Box::new(data)));
+
+        let batch = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .expect("duration batch timeout")
+            .expect("duration batch missing");
+        assert_eq!(
+            batch.as_collection().unwrap().num_rows(),
+            1,
+            "duration-only should flush after timeout"
+        );
+        let _ = control_tx.send(ControlSignal::StreamQuickEnd);
     }
 }
