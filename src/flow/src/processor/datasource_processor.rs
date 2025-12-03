@@ -6,7 +6,7 @@
 use crate::codec::{JsonDecoder, RecordDecoder};
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    fan_in_control_streams, fan_in_streams, forward_error, log_received_data, send_control_with_backpressure,
     send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
@@ -265,6 +265,7 @@ impl Processor for DataSourceProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(mut data)) => {
+                                log_received_data(&processor_id, &data);
                                 if let StreamData::Bytes(payload) = &data {
                                     match decoder.decode(payload) {
                                         Ok(batch) => {

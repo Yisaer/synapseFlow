@@ -11,6 +11,35 @@ use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
 
+/// Log received StreamData for debugging
+pub fn log_received_data(processor_id: &str, data: &StreamData) {
+    match data {
+        StreamData::Collection(collection) => {
+            println!("[Processor:{}] received Collection: {} rows", processor_id, collection.num_rows());
+            // Print first few rows for debugging
+            let rows = collection.rows();
+            for (i, row) in rows.iter().take(3).enumerate() {
+                println!("  Row {}: {:?}", i, row);
+            }
+            if rows.len() > 3 {
+                println!("  ... and {} more rows", rows.len() - 3);
+            }
+        }
+        StreamData::Encoded { payload, collection } => {
+            println!("[Processor:{}] received Encoded: {} rows, {} bytes", processor_id, collection.num_rows(), payload.len());
+        }
+        StreamData::Bytes(payload) => {
+            println!("[Processor:{}] received Bytes: {} bytes", processor_id, payload.len());
+        }
+        StreamData::Control(signal) => {
+            println!("[Processor:{}] received Control: {:?}", processor_id, signal);
+        }
+        StreamData::Error(error) => {
+            println!("[Processor:{}] received Error: {}", processor_id, error.message);
+        }
+    }
+}
+
 /// Default buffer size for processor broadcast channels
 pub(crate) const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 

@@ -60,16 +60,57 @@ fn create_physical_result_collect_from_tail(
     index: i64,
     bindings: &SchemaBinding,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    // Convert all sink children to physical plans
-    let mut physical_children = Vec::new();
+    // TailPlan should only have DataSink children
+    let mut sink_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan(child.clone(), bindings)?;
-        physical_children.push(physical_child);
+        match child.as_ref() {
+            LogicalPlan::DataSink(data_sink) => {
+                sink_children.push(data_sink.sink.clone());
+            }
+            _ => return Err("TailPlan should only contain DataSink children".to_string()),
+        }
     }
 
-    // Create PhysicalResultCollect to hold the physical sink children
-    let physical_result_collect = PhysicalResultCollect::new(physical_children, index);
-    Ok(Arc::new(PhysicalPlan::ResultCollect(physical_result_collect)))
+    if sink_children.is_empty() {
+        return Err("TailPlan must have at least one DataSink child".to_string());
+    }
+
+    // Get the base plan (Project) from the first DataSink child
+    let base_plan = logical_plan.children()[0].children()[0].clone();
+    let base_physical = create_physical_plan(base_plan, bindings)?;
+
+    // Handle single sink vs multiple sinks differently
+    if sink_children.len() == 1 {
+        // Single sink: directly create sink node to avoid double nesting
+        create_physical_sink_node(&sink_children, base_physical, index)
+    } else {
+        // Multiple sinks: create individual sink nodes under ResultCollect
+        let mut physical_sinks = Vec::new();
+        let mut next_index = index + 1;
+
+        // Build encoders and connectors for each sink
+        for sink in &sink_children {
+            let (mut encoder_children, mut connectors) = 
+                build_sink_encoders_for_sink(sink, &base_physical, &mut next_index)?;
+            
+            if encoder_children.len() != 1 || connectors.len() != 1 {
+                return Err("Each sink should have exactly one encoder and connector".to_string());
+            }
+
+            let encoder_child = encoder_children.remove(0);
+            let connector = connectors.remove(0);
+            let sink_index = next_index;
+            next_index += 1;
+            
+            let physical_sink = PhysicalDataSink::new(encoder_child, sink_index, connector);
+            physical_sinks.push(Arc::new(PhysicalPlan::DataSink(physical_sink)));
+        }
+
+        // Create ResultCollect to hold all sink nodes
+        let result_collect_index = next_index;
+        let result_collect = PhysicalResultCollect::new(physical_sinks, result_collect_index);
+        Ok(Arc::new(PhysicalPlan::ResultCollect(result_collect)))
+    }
 }
 
 /// Create a PhysicalDataSource from a LogicalDataSource

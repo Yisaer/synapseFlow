@@ -2,7 +2,7 @@
 //!
 //! This processor receives data from upstream processors and forwards it to a single output.
 
-use crate::processor::base::{fan_in_control_streams, fan_in_streams};
+use crate::processor::base::{fan_in_control_streams, fan_in_streams, log_received_data};
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
@@ -108,6 +108,7 @@ impl Processor for ResultCollectProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
+                                log_received_data(&processor_id, &data);
                                 let is_terminal = data.is_terminal();
                                 // Forward data to broadcast
                                 let _ = broadcast_output.send(data.clone());

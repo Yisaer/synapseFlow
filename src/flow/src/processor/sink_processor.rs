@@ -1,7 +1,7 @@
 //! SinkProcessor - routes collections to SinkConnectors and forwards results.
 use crate::connector::SinkConnector;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    fan_in_control_streams, fan_in_streams, forward_error, log_received_data, send_control_with_backpressure,
     send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
@@ -177,6 +177,7 @@ impl Processor for SinkProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Encoded { collection, payload })) => {
+                                log_received_data(&processor_id, &StreamData::Encoded { collection: collection.clone(), payload: payload.clone() });
                                 let rows = collection.num_rows() as u64;
                                 if let Err(err) =
                                     Self::handle_payload(&processor_id, &mut connector, &payload, rows).await
@@ -195,6 +196,7 @@ impl Processor for SinkProcessor {
                                 }
                             }
                             Some(Ok(StreamData::Bytes(payload))) => {
+                                log_received_data(&processor_id, &StreamData::Bytes(payload.clone()));
                                 if let Err(err) =
                                     Self::handle_payload(&processor_id, &mut connector, &payload, 1).await
                                 {
@@ -212,6 +214,7 @@ impl Processor for SinkProcessor {
                                 }
                             }
                             Some(Ok(StreamData::Collection(collection))) => {
+                                log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
                                 let message =
                                     "sink processor received unencoded collection without encoder stage";
                                 println!("[SinkProcessor:{processor_id}] {message}");
@@ -220,6 +223,7 @@ impl Processor for SinkProcessor {
                                 continue;
                             }
                             Some(Ok(data)) => {
+                                log_received_data(&processor_id, &data);
                                 let is_terminal = data.is_terminal();
                                 send_with_backpressure(&output, data.clone()).await?;
 

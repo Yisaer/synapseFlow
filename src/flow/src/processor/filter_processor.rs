@@ -5,7 +5,7 @@
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    fan_in_control_streams, fan_in_streams, forward_error, log_received_data, send_control_with_backpressure,
     send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
@@ -108,6 +108,7 @@ impl Processor for FilterProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                log_received_data(&id, &StreamData::Collection(collection.clone()));
                                 match apply_filter(collection.as_ref(), &filter_expr) {
                                     Ok(filtered_collection) => {
                                         let filtered_data = StreamData::collection(filtered_collection);
@@ -124,6 +125,7 @@ impl Processor for FilterProcessor {
                                 }
                             }
                             Some(Ok(data)) => {
+                                log_received_data(&id, &data);
                                 let is_terminal = data.is_terminal();
                                 send_with_backpressure(&output, data).await?;
                                 if is_terminal {

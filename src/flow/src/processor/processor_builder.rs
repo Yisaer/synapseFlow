@@ -566,11 +566,31 @@ fn connect_processors(
 
     // 2. Connect children outputs to parent inputs
     let relations = collect_parent_child_relations(Arc::clone(&physical_plan));
+    
+    // Debug: Print connection relationships
+    println!("=== Processor Connection Relationships ===");
+    let mut relation_counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for (parent_idx, child_idx) in &relations {
+        *relation_counts.entry(*child_idx).or_insert(0) += 1;
+        if let (Some(child_name), Some(parent_name)) = (index_to_name_map.get(child_idx), index_to_name_map.get(parent_idx)) {
+            println!("  {} (index: {}) -> {} (index: {})", child_name, child_idx, parent_name, parent_idx);
+        }
+    }
+    println!("Child processor subscription counts:");
+    for (child_idx, count) in relation_counts {
+        if let Some(child_name) = index_to_name_map.get(&child_idx) {
+            println!("  {} (index: {}): {} parent(s)", child_name, child_idx, count);
+        }
+    }
+    println!("=========================================");
+    
     for (parent_index, child_index) in relations {
         if let (Some(child_plan_name), Some(parent_plan_name)) = (
             index_to_name_map.get(&child_index),
             index_to_name_map.get(&parent_index)
         ) {
+            println!("Connecting {} -> {}", child_plan_name, parent_plan_name);
+            
             let receiver = processor_map
                 .get_processor(child_plan_name)
                 .and_then(|proc| proc.subscribe_output())
@@ -634,6 +654,7 @@ pub fn create_processor_pipeline(
     let mut middle_processors = processor_map.get_all_processors();
 
     // Extract ResultCollect processor (if any) to serve as pipeline output
+    // In multi-sink scenarios, there should be only one top-level ResultCollect processor
     if let Some(pos) = middle_processors
         .iter()
         .position(|p| matches!(p, PlanProcessor::ResultCollect(_)))

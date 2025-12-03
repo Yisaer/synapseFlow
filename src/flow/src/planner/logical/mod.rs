@@ -297,6 +297,11 @@ mod logical_plan_tests {
 
         let plan = create_logical_plan(select_stmt, vec![sink]).unwrap();
 
+        // Debug output
+        println!("=== Single Sink Logical Plan ===");
+        crate::planner::logical::print_logical_plan(&plan, 0);
+        println!("================================");
+
         // Should be a Tail node (single sink now creates TailPlan for consistency)
         assert_eq!(plan.get_plan_type(), "Tail");
         
