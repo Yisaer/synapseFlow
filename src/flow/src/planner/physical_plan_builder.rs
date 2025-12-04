@@ -263,7 +263,6 @@ fn build_sink_chain_with_builder(
         add_streaming_encoder_with_builder(
             sink,
             connector,
-            0,
             input_child,
             builder,
             &mut encoder_children,
@@ -277,7 +276,6 @@ fn build_sink_chain_with_builder(
         add_regular_encoder_with_builder(
             sink,
             connector,
-            0,
             encoder_input,
             builder,
             &mut encoder_children,
@@ -326,7 +324,6 @@ fn create_batch_processor_if_needed_with_builder(
 fn add_streaming_encoder_with_builder(
     sink: &PipelineSink,
     connector: &PipelineSinkConnector,
-    _connector_idx: usize,
     input_child: &Arc<PhysicalPlan>,
     builder: &mut PhysicalPlanBuilder,
     encoder_children: &mut Vec<Arc<PhysicalPlan>>,
@@ -347,7 +344,6 @@ fn add_streaming_encoder_with_builder(
     connectors.push(PhysicalSinkConnector::new(
         sink.sink_id.clone(),
         sink.forward_to_result, // Always forward if sink is configured to do so (single connector)
-        connector.connector_id.clone(),
         connector.connector.clone(),
         connector_index,
     ));
@@ -357,7 +353,6 @@ fn add_streaming_encoder_with_builder(
 fn add_regular_encoder_with_builder(
     sink: &PipelineSink,
     connector: &PipelineSinkConnector,
-    _connector_idx: usize,
     encoder_input: Arc<PhysicalPlan>,
     builder: &mut PhysicalPlanBuilder,
     encoder_children: &mut Vec<Arc<PhysicalPlan>>,
@@ -377,7 +372,6 @@ fn add_regular_encoder_with_builder(
     connectors.push(PhysicalSinkConnector::new(
         sink.sink_id.clone(),
         sink.forward_to_result, // Always forward if sink is configured to do so (single connector)
-        connector.connector_id.clone(),
         connector.connector.clone(),
         connector_index,
     ));

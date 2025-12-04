@@ -25,7 +25,7 @@ impl fmt::Debug for PhysicalDataSink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PhysicalDataSink")
             .field("index", &self.base.index())
-            .field("connector", &self.connector.connector_id)
+            .field("sink_id", &self.connector.sink_id)
             .finish()
     }
 }
@@ -35,7 +35,6 @@ impl fmt::Debug for PhysicalDataSink {
 pub struct PhysicalSinkConnector {
     pub sink_id: String,
     pub forward_to_result: bool,
-    pub connector_id: String,
     pub connector: SinkConnectorConfig,
     pub encoder_plan_index: i64,
 }
@@ -44,14 +43,12 @@ impl PhysicalSinkConnector {
     pub fn new(
         sink_id: String,
         forward_to_result: bool,
-        connector_id: String,
         connector: SinkConnectorConfig,
         encoder_plan_index: i64,
     ) -> Self {
         Self {
             sink_id,
             forward_to_result,
-            connector_id,
             connector,
             encoder_plan_index,
         }

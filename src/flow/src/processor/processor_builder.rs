@@ -386,20 +386,15 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::DataSink(sink_plan) => {
-            let processor_id = format!(
-                "sink_{}_{}",
-                sink_plan.connector.sink_id, sink_plan.connector.connector_id
-            );
-            let mut processor = SinkProcessor::new(processor_id);
+            let processor_id = format!("sink_{}_{}", sink_plan.connector.sink_id, plan_name);
+            let mut processor = SinkProcessor::new(processor_id.clone());
             if sink_plan.connector.forward_to_result {
                 processor.enable_result_forwarding();
             } else {
                 processor.disable_result_forwarding();
             }
-            let connector_impl = instantiate_connector(
-                &sink_plan.connector.connector_id,
-                &sink_plan.connector.connector,
-            )?;
+            let connector_impl =
+                instantiate_connector(&processor_id, &sink_plan.connector.connector)?;
             processor.add_connector(connector_impl);
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Sink(
                 processor,
@@ -702,16 +697,16 @@ fn instantiate_encoder(cfg: &SinkEncoderConfig) -> Arc<dyn CollectionEncoder> {
 }
 
 fn instantiate_connector(
-    connector_id: &str,
+    connector_name: &str,
     cfg: &SinkConnectorConfig,
 ) -> Result<Box<dyn SinkConnector>, ProcessorError> {
     match cfg {
         SinkConnectorConfig::Mqtt(mqtt_cfg) => Ok(Box::new(MqttSinkConnector::new(
-            connector_id.to_string(),
+            connector_name.to_string(),
             mqtt_cfg.clone(),
         ))),
         SinkConnectorConfig::Nop(_) => {
-            Ok(Box::new(NopSinkConnector::new(connector_id.to_string())))
+            Ok(Box::new(NopSinkConnector::new(connector_name.to_string())))
         }
     }
 }
