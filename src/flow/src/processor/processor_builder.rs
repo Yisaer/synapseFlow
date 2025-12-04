@@ -387,8 +387,9 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::DataSink(sink_plan) => {
             let processor_id = format!(
-                "sink_{}_{}",
-                sink_plan.connector.sink_id, sink_plan.connector.connector_id
+                "{}_{}",
+                plan_name,
+                sink_plan.connector.sink_id
             );
             let mut processor = SinkProcessor::new(processor_id);
             if sink_plan.connector.forward_to_result {
@@ -397,7 +398,7 @@ fn create_processor_from_plan_node(
                 processor.disable_result_forwarding();
             }
             let connector_impl = instantiate_connector(
-                &sink_plan.connector.connector_id,
+                &sink_plan.connector.sink_id,
                 &sink_plan.connector.connector,
             )?;
             processor.add_connector(connector_impl);
@@ -705,16 +706,16 @@ fn instantiate_encoder(cfg: &SinkEncoderConfig) -> Arc<dyn CollectionEncoder> {
 }
 
 fn instantiate_connector(
-    connector_id: &str,
+    sink_id: &str,
     cfg: &SinkConnectorConfig,
 ) -> Result<Box<dyn SinkConnector>, ProcessorError> {
     match cfg {
         SinkConnectorConfig::Mqtt(mqtt_cfg) => Ok(Box::new(MqttSinkConnector::new(
-            connector_id.to_string(),
+            sink_id.to_string(),
             mqtt_cfg.clone(),
         ))),
         SinkConnectorConfig::Nop(_) => {
-            Ok(Box::new(NopSinkConnector::new(connector_id.to_string())))
+            Ok(Box::new(NopSinkConnector::new(sink_id.to_string())))
         }
     }
 }

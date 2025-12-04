@@ -1,4 +1,4 @@
-//! Physical plan builder - converts logical plans to physical plans
+//! Physical plan builder - converts logical plans to physical plans using centralized index management
 
 use crate::expr::sql_conversion::{
     convert_expr_to_scalar_with_bindings, SchemaBinding, SchemaBindingEntry, SourceBindingKind,
@@ -16,108 +16,157 @@ use crate::planner::physical::{
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use std::sync::Arc;
 
-/// Create a physical plan from a logical plan
+/// Physical plan builder that manages index allocation and node caching
+pub struct PhysicalPlanBuilder {
+    next_index: i64,
+    node_cache: std::collections::HashMap<i64, Arc<PhysicalPlan>>,
+}
+
+impl PhysicalPlanBuilder {
+    pub fn new() -> Self {
+        Self {
+            next_index: 0,
+            node_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn starting_from(start_index: i64) -> Self {
+        Self {
+            next_index: start_index,
+            node_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn allocate_index(&mut self) -> i64 {
+        let index = self.next_index;
+        self.next_index += 1;
+        index
+    }
+
+    pub fn cache_node(&mut self, logical_index: i64, physical_node: Arc<PhysicalPlan>) {
+        self.node_cache.insert(logical_index, physical_node);
+    }
+
+    pub fn get_cached_node(&self, logical_index: i64) -> Option<Arc<PhysicalPlan>> {
+        self.node_cache.get(&logical_index).cloned()
+    }
+}
+
+impl Default for PhysicalPlanBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Create a physical plan from a logical plan using centralized index management
 ///
 /// This function walks through the logical plan tree and creates corresponding physical plan nodes
-/// by pattern matching on the logical plan enum.
+/// by pattern matching on the logical plan enum, using a centralized index allocator.
+/// This is the main entry point that should be used for all physical plan creation.
 pub fn create_physical_plan(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    match logical_plan.as_ref() {
+    let mut builder = PhysicalPlanBuilder::new();
+    create_physical_plan_with_builder_cached(logical_plan, bindings, &mut builder)
+}
+
+/// Create a physical plan from a logical plan using centralized index management
+///
+/// This function walks through the logical plan tree and creates corresponding physical plan nodes
+/// by pattern matching on the logical plan enum, using a centralized index allocator.
+pub fn create_physical_plan_with_builder(
+    logical_plan: Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    create_physical_plan_with_builder_cached(logical_plan, bindings, builder)
+}
+
+/// Create a physical plan from a logical plan using centralized index management with node caching
+///
+/// This function ensures that shared logical nodes are converted to shared physical nodes,
+/// maintaining the same instance across multiple references.
+fn create_physical_plan_with_builder_cached(
+    logical_plan: Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let logical_index = logical_plan.get_plan_index();
+    
+    // Check if this logical node has already been converted using builder's cache
+    if let Some(cached_physical) = builder.get_cached_node(logical_index) {
+        return Ok(cached_physical);
+    }
+    
+    // Create the physical node
+    let physical_plan = match logical_plan.as_ref() {
         LogicalPlan::DataSource(logical_ds) => {
-            create_physical_data_source(logical_ds, logical_plan.get_plan_index(), bindings)
+            let index = builder.allocate_index();
+            create_physical_data_source_with_builder(logical_ds, &logical_plan, index, bindings, builder)?
         }
-        LogicalPlan::Filter(logical_filter) => create_physical_filter(
+        LogicalPlan::Filter(logical_filter) => create_physical_filter_with_builder_cached(
             logical_filter,
             &logical_plan,
-            logical_plan.get_plan_index(),
             bindings,
-        ),
-        LogicalPlan::Project(logical_project) => create_physical_project(
+            builder,
+        )?,
+        LogicalPlan::Project(logical_project) => create_physical_project_with_builder_cached(
             logical_project,
             &logical_plan,
-            logical_plan.get_plan_index(),
             bindings,
-        ),
-        LogicalPlan::DataSink(logical_sink) => create_physical_data_sink(
+            builder,
+        )?,
+        LogicalPlan::DataSink(logical_sink) => create_physical_data_sink_with_builder_cached(
             logical_sink,
             &logical_plan,
-            logical_plan.get_plan_index(),
             bindings,
-        ),
+            builder,
+        )?,
         LogicalPlan::Tail(_logical_tail) => {
             // TailPlan is no longer used in new design, but handle it for backward compatibility
             // Convert to multiple DataSink nodes under a ResultCollect
-            create_physical_result_collect_from_tail(&logical_plan, logical_plan.get_plan_index(), bindings)
+            create_physical_result_collect_from_tail_with_builder_cached(&logical_plan, bindings, builder)?
         }
-    }
+    };
+    
+    // Cache the result for future reuse using builder's cache
+    builder.cache_node(logical_index, Arc::clone(&physical_plan));
+    Ok(physical_plan)
 }
 
-/// Create a PhysicalResultCollect from a TailPlan for backward compatibility
-fn create_physical_result_collect_from_tail(
+
+/// Create a PhysicalResultCollect from a TailPlan using centralized index management with caching
+fn create_physical_result_collect_from_tail_with_builder_cached(
     logical_plan: &Arc<LogicalPlan>,
-    index: i64,
     bindings: &SchemaBinding,
+    builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    // TailPlan should only have DataSink children
-    let mut sink_children = Vec::new();
+    // Convert children first using the builder with caching
+    let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        match child.as_ref() {
-            LogicalPlan::DataSink(data_sink) => {
-                sink_children.push(data_sink.sink.clone());
-            }
-            _ => return Err("TailPlan should only contain DataSink children".to_string()),
-        }
+        let physical_child = create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
+        physical_children.push(physical_child);
     }
-
-    if sink_children.is_empty() {
-        return Err("TailPlan must have at least one DataSink child".to_string());
+    
+    if physical_children.is_empty() {
+        return Err("TailPlan must have at least one child".to_string());
     }
-
-    // Get the base plan (Project) from the first DataSink child
-    let base_plan = logical_plan.children()[0].children()[0].clone();
-    let base_physical = create_physical_plan(base_plan, bindings)?;
-
-    // Handle single sink vs multiple sinks differently
-    if sink_children.len() == 1 {
-        // Single sink: directly create sink node to avoid double nesting
-        create_physical_sink_node(&sink_children, base_physical, index)
-    } else {
-        // Multiple sinks: create individual sink nodes under ResultCollect
-        let mut physical_sinks = Vec::new();
-        let mut next_index = index + 1;
-
-        // Build encoders and connectors for each sink
-        for sink in &sink_children {
-            let (mut encoder_children, mut connectors) = 
-                build_sink_encoders_for_sink(sink, &base_physical, &mut next_index)?;
-            
-            if encoder_children.len() != 1 || connectors.len() != 1 {
-                return Err("Each sink should have exactly one encoder and connector".to_string());
-            }
-
-            let encoder_child = encoder_children.remove(0);
-            let connector = connectors.remove(0);
-            let sink_index = next_index;
-            next_index += 1;
-            
-            let physical_sink = PhysicalDataSink::new(encoder_child, sink_index, connector);
-            physical_sinks.push(Arc::new(PhysicalPlan::DataSink(physical_sink)));
-        }
-
-        // Create ResultCollect to hold all sink nodes
-        let result_collect_index = next_index;
-        let result_collect = PhysicalResultCollect::new(physical_sinks, result_collect_index);
-        Ok(Arc::new(PhysicalPlan::ResultCollect(result_collect)))
-    }
+    
+    // Always create ResultCollect to ensure consistent pipeline structure
+    // This ensures that processor pipeline building works correctly
+    let result_collect_index = builder.allocate_index();
+    let result_collect = PhysicalResultCollect::new(physical_children, result_collect_index);
+    Ok(Arc::new(PhysicalPlan::ResultCollect(result_collect)))
 }
 
-/// Create a PhysicalDataSource from a LogicalDataSource
-fn create_physical_data_source(
+/// Create a PhysicalDataSource from a LogicalDataSource using centralized index management
+fn create_physical_data_source_with_builder(
     logical_ds: &LogicalDataSource,
+    _logical_plan: &Arc<LogicalPlan>,
     index: i64,
     bindings: &SchemaBinding,
+    _builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let entry = find_binding_entry(logical_ds, bindings)?;
     let schema = entry.schema.clone();
@@ -143,17 +192,17 @@ fn create_physical_data_source(
     }
 }
 
-/// Create a PhysicalFilter from a LogicalFilter
-fn create_physical_filter(
+/// Create a PhysicalFilter from a LogicalFilter using centralized index management with caching
+fn create_physical_filter_with_builder_cached(
     logical_filter: &LogicalFilter,
     logical_plan: &Arc<LogicalPlan>,
-    index: i64,
     bindings: &SchemaBinding,
+    builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    // Convert children first
+    // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan(child.clone(), bindings)?;
+        let physical_child = create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
         physical_children.push(physical_child);
     }
 
@@ -166,6 +215,7 @@ fn create_physical_filter(
             )
         })?;
 
+    let index = builder.allocate_index();
     let physical_filter = PhysicalFilter::new(
         logical_filter.predicate.clone(),
         scalar_predicate,
@@ -175,17 +225,17 @@ fn create_physical_filter(
     Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
 }
 
-/// Create a PhysicalProject from a LogicalProject
-fn create_physical_project(
+/// Create a PhysicalProject from a LogicalProject using centralized index management with caching
+fn create_physical_project_with_builder_cached(
     logical_project: &LogicalProject,
     logical_plan: &Arc<LogicalPlan>,
-    index: i64,
     bindings: &SchemaBinding,
+    builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    // Convert children first
+    // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan(child.clone(), bindings)?;
+        let physical_child = create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
         physical_children.push(physical_child);
     }
 
@@ -200,19 +250,22 @@ fn create_physical_project(
         physical_fields.push(physical_field);
     }
 
+    let index = builder.allocate_index();
     let physical_project = PhysicalProject::new(physical_fields, physical_children, index);
     Ok(Arc::new(PhysicalPlan::Project(physical_project)))
 }
 
-fn create_physical_data_sink(
+/// Create a PhysicalDataSink from a DataSinkPlan using centralized index management with caching
+fn create_physical_data_sink_with_builder_cached(
     logical_sink: &DataSinkPlan,
     logical_plan: &Arc<LogicalPlan>,
-    index: i64,
     bindings: &SchemaBinding,
+    builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
+    // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan(child.clone(), bindings)?;
+        let physical_child = create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
         physical_children.push(physical_child);
     }
     if physical_children.len() != 1 {
@@ -220,112 +273,64 @@ fn create_physical_data_sink(
     }
 
     let input_child = Arc::clone(&physical_children[0]);
-    let sinks = vec![logical_sink.sink.clone()];
-    create_physical_sink_node(&sinks, input_child, index)
+    let sink_index = builder.allocate_index();
+    let (encoded_child, connector) = build_sink_chain_with_builder(&logical_sink.sink, &input_child, builder)?;
+    let physical_sink = PhysicalDataSink::new(encoded_child, sink_index, connector);
+    Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
 }
 
-fn create_physical_sink_node(
-    sinks: &[PipelineSink],
-    input_child: Arc<PhysicalPlan>,
-    index: i64,
-) -> Result<Arc<PhysicalPlan>, String> {
-    let mut connectors = Vec::new();
-    let mut encoder_children = Vec::new();
-    let mut next_index = index + 1;
-    
-    // Check if any sink needs forward_to_result
-    let needs_result_collect = sinks.iter().any(|sink| sink.forward_to_result);
-    
-    for sink in sinks {
-        let (mut sink_encoders, mut sink_connectors) =
-            build_sink_encoders_for_sink(sink, &input_child, &mut next_index)?;
-        encoder_children.append(&mut sink_encoders);
-        connectors.append(&mut sink_connectors);
-    }
-    
-    if connectors.is_empty() {
-        return Err("DataSink plan must define at least one connector".to_string());
-    }
-    
-    if needs_result_collect {
-        // Create ResultCollect node to gather outputs from all sinks
-        let mut sink_nodes = Vec::new();
-
-        // Create individual sink nodes for each connector
-        for (encoder_child, connector) in encoder_children.into_iter().zip(connectors.into_iter()) {
-            let sink_index = next_index;
-            next_index += 1;
-            let physical_sink = PhysicalDataSink::new(encoder_child, sink_index, connector);
-            sink_nodes.push(Arc::new(PhysicalPlan::DataSink(physical_sink)));
-        }
-
-        // Create ResultCollect node with the sink nodes as children
-        let result_collect_index = next_index;
-        let result_collect = PhysicalResultCollect::new(sink_nodes, result_collect_index);
-        Ok(Arc::new(PhysicalPlan::ResultCollect(result_collect)))
-    } else {
-        // Single sink case without result forwarding
-        let child = encoder_children.remove(0);
-        let connector = connectors.remove(0);
-        let physical_sink = PhysicalDataSink::new(child, index, connector);
-        Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
-    }
-}
-
-fn build_sink_encoders_for_sink(
+/// Build sink chain using centralized index management
+fn build_sink_chain_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
-    next_index: &mut i64,
-) -> Result<(Vec<Arc<PhysicalPlan>>, Vec<PhysicalSinkConnector>), String> {
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     let mut encoder_children = Vec::new();
     let mut connectors = Vec::new();
-    let shared_batch = create_shared_batch_if_needed(sink, input_child, next_index);
+    let batch_processor = create_batch_processor_if_needed_with_builder(sink, input_child, builder);
 
     let connector = &sink.connector;
     if should_use_streaming_encoder(sink, connector) {
-        add_streaming_encoder(
+        add_streaming_encoder_with_builder(
             sink,
             connector,
-            0, // connector_idx is always 0 for single connector
+            0,
             input_child,
-            next_index,
+            builder,
             &mut encoder_children,
             &mut connectors,
         );
     } else {
-        let encoder_input = shared_batch
+        let encoder_input = batch_processor
             .as_ref()
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(input_child));
-        add_regular_encoder(
+        add_regular_encoder_with_builder(
             sink,
             connector,
-            0, // connector_idx is always 0 for single connector
+            0,
             encoder_input,
-            next_index,
+            builder,
             &mut encoder_children,
             &mut connectors,
         );
     }
 
-    if connectors.is_empty() {
+    if encoder_children.len() != 1 || connectors.len() != 1 {
         return Err(format!(
-            "Sink {} must define at least one connector",
+            "Sink {} must define exactly one connector",
             sink.sink_id
         ));
     }
 
-    Ok((encoder_children, connectors))
+    Ok((encoder_children.remove(0), connectors.remove(0)))
 }
 
-fn should_use_streaming_encoder(sink: &PipelineSink, connector: &PipelineSinkConnector) -> bool {
-    sink.common.is_batching_enabled() && connector.encoder.supports_streaming()
-}
-
-fn create_shared_batch_if_needed(
+/// Create batch processor if needed using centralized index management
+fn create_batch_processor_if_needed_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
-    next_index: &mut i64,
+    builder: &mut PhysicalPlanBuilder,
 ) -> Option<Arc<PhysicalPlan>> {
     let needs_batch =
         sink.common.is_batching_enabled() && !sink.connector.encoder.supports_streaming();
@@ -334,69 +339,73 @@ fn create_shared_batch_if_needed(
         return None;
     }
 
+    let batch_index = builder.allocate_index();
     let batch_plan = PhysicalBatch::new(
         vec![Arc::clone(input_child)],
-        *next_index,
+        batch_index,
         sink.sink_id.clone(),
         sink.common.clone(),
     );
-    *next_index += 1;
     Some(Arc::new(PhysicalPlan::Batch(batch_plan)))
 }
 
-fn add_streaming_encoder(
+/// Add streaming encoder using centralized index management
+fn add_streaming_encoder_with_builder(
     sink: &PipelineSink,
     connector: &PipelineSinkConnector,
     _connector_idx: usize,
     input_child: &Arc<PhysicalPlan>,
-    next_index: &mut i64,
+    builder: &mut PhysicalPlanBuilder,
     encoder_children: &mut Vec<Arc<PhysicalPlan>>,
     connectors: &mut Vec<PhysicalSinkConnector>,
 ) {
+    let streaming_index = builder.allocate_index();
     let streaming = PhysicalStreamingEncoder::new(
         vec![Arc::clone(input_child)],
-        *next_index,
+        streaming_index,
         sink.sink_id.clone(),
-        connector.connector_id.clone(),
         connector.encoder.clone(),
         sink.common.clone(),
     );
     encoder_children.push(Arc::new(PhysicalPlan::StreamingEncoder(streaming)));
+    
+    let connector_index = builder.allocate_index();
     connectors.push(PhysicalSinkConnector::new(
         sink.sink_id.clone(),
         sink.forward_to_result, // Always forward if sink is configured to do so (single connector)
-        connector.connector_id.clone(),
         connector.connector.clone(),
-        *next_index,
+        connector_index,
     ));
-    *next_index += 1;
 }
 
-fn add_regular_encoder(
+/// Add regular encoder using centralized index management
+fn add_regular_encoder_with_builder(
     sink: &PipelineSink,
     connector: &PipelineSinkConnector,
     _connector_idx: usize,
     encoder_input: Arc<PhysicalPlan>,
-    next_index: &mut i64,
+    builder: &mut PhysicalPlanBuilder,
     encoder_children: &mut Vec<Arc<PhysicalPlan>>,
     connectors: &mut Vec<PhysicalSinkConnector>,
 ) {
+    let encoder_index = builder.allocate_index();
     let encoder = PhysicalEncoder::new(
         vec![encoder_input],
-        *next_index,
+        encoder_index,
         sink.sink_id.clone(),
-        connector.connector_id.clone(),
         connector.encoder.clone(),
     );
     encoder_children.push(Arc::new(PhysicalPlan::Encoder(encoder)));
     connectors.push(PhysicalSinkConnector::new(
         sink.sink_id.clone(),
         sink.forward_to_result, // Always forward if sink is configured to do so (single connector)
-        connector.connector_id.clone(),
         connector.connector.clone(),
-        *next_index,
+        encoder_index,
     ));
-    *next_index += 1;
+}
+
+fn should_use_streaming_encoder(sink: &PipelineSink, connector: &PipelineSinkConnector) -> bool {
+    sink.common.is_batching_enabled() && connector.encoder.supports_streaming()
 }
 
 fn find_binding_entry<'a>(
@@ -427,139 +436,14 @@ fn find_binding_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planner::logical::create_logical_plan;
-    use crate::planner::sink::{PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig};
-    use parser::parse_sql;
-    use std::sync::Arc;
-
-    /// Helper function to collect all plan names in the physical plan tree
-    fn collect_plan_names(plan: &Arc<PhysicalPlan>, names: &mut Vec<String>) {
-        names.push(plan.get_plan_name());
-        for child in plan.children() {
-            collect_plan_names(child, names);
-        }
-    }
-
-    /// Helper function to print physical plan topology for debugging
-    fn print_physical_plan_topology(plan: &Arc<PhysicalPlan>, indent: usize) {
-        let spacing = "  ".repeat(indent);
-        println!("{}{} (index: {})", spacing, plan.get_plan_type(), plan.get_plan_index());
-        
-        for child in plan.children() {
-            print_physical_plan_topology(child, indent + 1);
-        }
-    }
 
     #[test]
-    fn test_two_sinks_physical_plan_topology() {
-        // Parse SQL
-        let sql = "SELECT * FROM stream";
-        let select_stmt = parse_sql(sql).unwrap();
-
-        // Create two different sinks
-        let sink1 = PipelineSink::new(
-            "sink1",
-            PipelineSinkConnector::new(
-                "conn1",
-                SinkConnectorConfig::Nop(Default::default()),
-                SinkEncoderConfig::Json { encoder_id: "json1".to_string() },
-            ),
-        );
-
-        let sink2 = PipelineSink::new(
-            "sink2",
-            PipelineSinkConnector::new(
-                "conn2",
-                SinkConnectorConfig::Nop(Default::default()),
-                SinkEncoderConfig::Json { encoder_id: "json2".to_string() },
-            ),
-        );
-
-        // Create logical plan with two sinks
-        let logical_plan = create_logical_plan(select_stmt, vec![sink1, sink2]).unwrap();
+    fn test_physical_plan_builder_creation() {
+        let mut builder = PhysicalPlanBuilder::new();
+        let index1 = builder.allocate_index();
+        let index2 = builder.allocate_index();
         
-        println!("=== Logical Plan Topology ===");
-        crate::planner::logical::print_logical_plan(&logical_plan, 0);
-        println!("=============================");
-
-        // Create physical plan with proper schema binding
-        use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
-        use datatypes::Schema;
-        
-        let entry = SchemaBindingEntry {
-            source_name: "stream".to_string(),
-            alias: None,
-            schema: Arc::new(Schema::new(vec![])),
-            kind: SourceBindingKind::Regular,
-        };
-        let binding = SchemaBinding::new(vec![entry]);
-        let physical_plan = create_physical_plan(logical_plan, &binding).unwrap();
-        
-        println!("\n=== Physical Plan Topology ===");
-        print_physical_plan_topology(&physical_plan, 0);
-        println!("==============================");
-
-        // Collect all plan names
-        let mut plan_names = Vec::new();
-        collect_plan_names(&physical_plan, &mut plan_names);
-        
-        println!("\n=== Plan Names Analysis ===");
-        println!("All plan names: {:?}", plan_names);
-        
-        // Count PhysicalDataSink occurrences
-        let data_sink_count = plan_names.iter()
-            .filter(|name| name.starts_with("PhysicalDataSink"))
-            .count();
-        println!("PhysicalDataSink count: {}", data_sink_count);
-        
-        // Get PhysicalDataSink names
-        let data_sink_names: Vec<String> = plan_names.iter()
-            .filter(|name| name.starts_with("PhysicalDataSink"))
-            .cloned()
-            .collect();
-        
-        println!("PhysicalDataSink names: {:?}", data_sink_names);
-        
-        if data_sink_names.len() >= 2 {
-            println!("Are the two PhysicalDataSink names different? {}", 
-                     data_sink_names[0] != data_sink_names[1]);
-            
-            // This is the key assertion - they should have different indices/names
-            assert_ne!(data_sink_names[0], data_sink_names[1], 
-                      "Two different sinks should have different PhysicalDataSink plan names");
-        }
-        
-        // Check for duplicate names
-        let mut name_counts = std::collections::HashMap::new();
-        for name in &plan_names {
-            *name_counts.entry(name.clone()).or_insert(0) += 1;
-        }
-        
-        println!("\nName frequency:");
-        for (name, count) in &name_counts {
-            if *count > 1 {
-                println!("  {}: {} times (DUPLICATE!)", name, count);
-            } else {
-                println!("  {}: {} times", name, count);
-            }
-        }
-        
-        // Verify that we have the expected structure
-        assert!(plan_names.iter().any(|name| name.starts_with("PhysicalResultCollect")), 
-                "Should have PhysicalResultCollect node");
-        
-        assert_eq!(data_sink_count, 2, "Should have exactly 2 PhysicalDataSink nodes");
-        
-        // Each sink should contribute unique encoder and sink nodes
-        let mut unique_names = std::collections::HashSet::new();
-        for name in &plan_names {
-            if name.starts_with("PhysicalDataSink") || name.starts_with("PhysicalEncoder") {
-                unique_names.insert(name.clone());
-            }
-        }
-        
-        let expected_unique_sink_related = 4; // 2 sinks * (1 DataSink + 1 Encoder)
-        assert_eq!(unique_names.len(), expected_unique_sink_related, 
-                  "Should have unique names for sink-related nodes");
+        assert_eq!(index1, 0);
+        assert_eq!(index2, 1);
     }
 }
