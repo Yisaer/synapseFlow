@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::catalog::{Catalog, CatalogError, StreamDefinition, StreamProps};
+use crate::codec::EncoderRegistry;
 use crate::connector::{
-    ConnectorError, MqttClientManager, MqttSourceConfig, MqttSourceConnector,
+    ConnectorError, ConnectorRegistry, MqttClientManager, MqttSourceConfig, MqttSourceConnector,
     SharedMqttClientConfig,
 };
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
@@ -23,6 +24,8 @@ pub struct FlowInstance {
     pipeline_manager: Arc<PipelineManager>,
     shared_mqtt_clients: Arc<Mutex<HashMap<String, SharedMqttClientConfig>>>,
     mqtt_client_manager: MqttClientManager,
+    connector_registry: Arc<ConnectorRegistry>,
+    encoder_registry: Arc<EncoderRegistry>,
 }
 
 impl FlowInstance {
@@ -31,10 +34,14 @@ impl FlowInstance {
         let catalog = Arc::new(Catalog::new());
         let shared_stream_registry = shared_stream_registry();
         let mqtt_client_manager = MqttClientManager::new();
+        let connector_registry = ConnectorRegistry::with_builtin_sinks();
+        let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
             shared_stream_registry,
             mqtt_client_manager.clone(),
+            Arc::clone(&connector_registry),
+            Arc::clone(&encoder_registry),
         ));
         Self {
             catalog,
@@ -42,6 +49,8 @@ impl FlowInstance {
             pipeline_manager,
             shared_mqtt_clients: Arc::new(Mutex::new(HashMap::new())),
             mqtt_client_manager,
+            connector_registry,
+            encoder_registry,
         }
     }
 
@@ -193,6 +202,8 @@ impl FlowInstance {
             &self.catalog,
             self.shared_stream_registry,
             self.mqtt_client_manager.clone(),
+            Arc::clone(&self.connector_registry),
+            Arc::clone(&self.encoder_registry),
         )
     }
 
@@ -208,7 +219,17 @@ impl FlowInstance {
             &self.catalog,
             self.shared_stream_registry,
             self.mqtt_client_manager.clone(),
+            Arc::clone(&self.connector_registry),
+            Arc::clone(&self.encoder_registry),
         )
+    }
+
+    pub fn connector_registry(&self) -> Arc<ConnectorRegistry> {
+        Arc::clone(&self.connector_registry)
+    }
+
+    pub fn encoder_registry(&self) -> Arc<EncoderRegistry> {
+        Arc::clone(&self.encoder_registry)
     }
 
     async fn ensure_shared_stream(

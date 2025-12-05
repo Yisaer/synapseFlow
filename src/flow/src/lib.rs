@@ -49,7 +49,8 @@ pub use shared_stream::{
     SharedStreamError, SharedStreamInfo, SharedStreamStatus, SharedStreamSubscription,
 };
 
-use connector::MqttClientManager;
+use codec::EncoderRegistry;
+use connector::{ConnectorRegistry, MqttClientManager};
 use planner::logical::create_logical_plan;
 use processor::{create_processor_pipeline, ProcessorPipeline};
 use shared_stream::SharedStreamRegistry;
@@ -108,6 +109,8 @@ fn build_schema_binding(
 /// use flow::{
 ///     catalog::Catalog,
 ///     connector::MqttClientManager,
+///     connector::ConnectorRegistry,
+///     codec::EncoderRegistry,
 ///     create_pipeline,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
@@ -119,6 +122,8 @@ fn build_schema_binding(
 /// let catalog = Catalog::new();
 /// let registry = shared_stream_registry();
 /// let mqtt_clients = MqttClientManager::new();
+/// let connector_registry = ConnectorRegistry::with_builtin_sinks();
+/// let encoder_registry = EncoderRegistry::with_builtin_encoders();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig),
@@ -131,6 +136,8 @@ fn build_schema_binding(
 ///     &catalog,
 ///     registry,
 ///     mqtt_clients,
+///     connector_registry,
+///     encoder_registry,
 /// )?;
 /// # Ok(()) }
 /// ```
@@ -140,9 +147,16 @@ pub fn create_pipeline(
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
     mqtt_client_manager: MqttClientManager,
+    connector_registry: Arc<ConnectorRegistry>,
+    encoder_registry: Arc<EncoderRegistry>,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     let physical_plan = build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry)?;
-    let pipeline = create_processor_pipeline(physical_plan, mqtt_client_manager)?;
+    let pipeline = create_processor_pipeline(
+        physical_plan,
+        mqtt_client_manager,
+        connector_registry,
+        encoder_registry,
+    )?;
     Ok(pipeline)
 }
 
@@ -153,6 +167,8 @@ pub fn create_pipeline_with_log_sink(
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
     mqtt_client_manager: MqttClientManager,
+    connector_registry: Arc<ConnectorRegistry>,
+    encoder_registry: Arc<EncoderRegistry>,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     let connector = PipelineSinkConnector::new(
         "log_sink_connector",
@@ -168,5 +184,7 @@ pub fn create_pipeline_with_log_sink(
         catalog,
         shared_stream_registry,
         mqtt_client_manager,
+        connector_registry,
+        encoder_registry,
     )
 }

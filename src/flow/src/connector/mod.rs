@@ -7,6 +7,7 @@ use futures::stream::Stream;
 use std::pin::Pin;
 
 pub mod mqtt_client;
+pub mod registry;
 pub mod sink;
 pub mod source;
 
@@ -62,6 +63,7 @@ pub enum ConnectorError {
 pub use mqtt_client::{
     MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
 };
+pub use registry::ConnectorRegistry;
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};

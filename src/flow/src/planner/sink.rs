@@ -1,4 +1,5 @@
 use crate::connector::sink::mqtt::MqttSinkConfig;
+use serde_json::Value as JsonValue;
 use std::fmt;
 use std::time::Duration;
 
@@ -82,6 +83,31 @@ impl fmt::Debug for PipelineSinkConnector {
 pub enum SinkConnectorConfig {
     Mqtt(MqttSinkConfig),
     Nop(NopSinkConfig),
+    Custom(CustomSinkConnectorConfig),
+}
+
+impl SinkConnectorConfig {
+    pub fn kind(&self) -> &str {
+        match self {
+            SinkConnectorConfig::Mqtt(_) => "mqtt",
+            SinkConnectorConfig::Nop(_) => "nop",
+            SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),
+        }
+    }
+
+    pub fn custom_settings(&self) -> Option<&JsonValue> {
+        match self {
+            SinkConnectorConfig::Custom(custom) => Some(&custom.settings),
+            _ => None,
+        }
+    }
+}
+
+/// JSON-based payload for custom connectors.
+#[derive(Clone, Debug)]
+pub struct CustomSinkConnectorConfig {
+    pub kind: String,
+    pub settings: JsonValue,
 }
 
 /// Configuration for a no-op sink connector.
@@ -92,6 +118,7 @@ pub struct NopSinkConfig;
 #[derive(Clone, Debug)]
 pub enum SinkEncoderConfig {
     Json { encoder_id: String },
+    Custom(CustomSinkEncoderConfig),
 }
 
 impl SinkEncoderConfig {
@@ -99,8 +126,32 @@ impl SinkEncoderConfig {
     pub fn supports_streaming(&self) -> bool {
         match self {
             SinkEncoderConfig::Json { .. } => true,
+            SinkEncoderConfig::Custom(custom) => custom.supports_streaming,
         }
     }
+
+    pub fn kind(&self) -> &str {
+        match self {
+            SinkEncoderConfig::Json { .. } => "json",
+            SinkEncoderConfig::Custom(custom) => custom.kind.as_str(),
+        }
+    }
+
+    pub fn custom_settings(&self) -> Option<&JsonValue> {
+        match self {
+            SinkEncoderConfig::Custom(custom) => Some(&custom.settings),
+            _ => None,
+        }
+    }
+}
+
+/// Configuration blob for custom encoders.
+#[derive(Clone, Debug)]
+pub struct CustomSinkEncoderConfig {
+    pub encoder_id: String,
+    pub kind: String,
+    pub settings: JsonValue,
+    pub supports_streaming: bool,
 }
 
 /// Common sink-level properties (batching, etc.).
