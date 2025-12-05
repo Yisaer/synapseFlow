@@ -98,7 +98,7 @@ impl SinkEncoderConfig {
     /// Whether this encoder supports streaming aggregation.
     pub fn supports_streaming(&self) -> bool {
         match self {
-            SinkEncoderConfig::Json { .. } => false,
+            SinkEncoderConfig::Json { .. } => true,
         }
     }
 }
