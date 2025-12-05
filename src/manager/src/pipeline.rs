@@ -10,7 +10,7 @@ use flow::pipeline::{
     MqttSinkProps, PipelineDefinition, PipelineError, PipelineStatus, SinkDefinition, SinkProps,
     SinkType,
 };
-use flow::planner::sink::CommonSinkProps;
+use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::Arc;
@@ -58,6 +58,8 @@ pub struct CreatePipelineSinkRequest {
     pub props: SinkPropsRequest,
     #[serde(rename = "commonSinkProps", default)]
     pub common: CommonSinkPropsRequest,
+    #[serde(default)]
+    pub encoder: SinkEncoderRequest,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -101,6 +103,12 @@ pub struct CommonSinkPropsRequest {
     pub batch_count: Option<usize>,
     #[serde(rename = "batchDuration")]
     pub batch_duration_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct SinkEncoderRequest {
+    pub kind: Option<String>,
 }
 
 pub async fn create_pipeline_handler(
@@ -229,11 +237,22 @@ fn build_pipeline_definition(req: &CreatePipelineRequest) -> Result<PipelineDefi
                 if let Some(connector_key) = mqtt_props.connector_key {
                     props = props.with_connector_key(connector_key);
                 }
-                SinkDefinition::new(sink_id, SinkType::Mqtt, SinkProps::Mqtt(props))
+                SinkDefinition::new(sink_id.clone(), SinkType::Mqtt, SinkProps::Mqtt(props))
             }
             other => return Err(format!("unsupported sink type: {other}")),
         };
-        let sink_definition = sink_definition.with_common_props(sink_req.common.to_common_props());
+        let encoder_kind = sink_req
+            .encoder
+            .kind
+            .clone()
+            .unwrap_or_else(|| "json".to_string());
+        if encoder_kind.to_ascii_lowercase() != "json" {
+            return Err(format!("unsupported sink encoder kind: {}", encoder_kind));
+        }
+        let encoder_config = SinkEncoderConfig::new(encoder_kind);
+        let sink_definition = sink_definition
+            .with_encoder(encoder_config)
+            .with_common_props(sink_req.common.to_common_props());
         sinks.push(sink_definition);
     }
     Ok(PipelineDefinition::new(

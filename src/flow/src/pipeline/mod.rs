@@ -3,13 +3,11 @@ use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{
     ConnectorRegistry, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
-use crate::planner::sink::CommonSinkProps;
+use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::Processor;
 use crate::shared_stream::SharedStreamRegistry;
-use crate::{
-    create_pipeline, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
-};
+use crate::{create_pipeline, PipelineSink, PipelineSinkConnector, SinkConnectorConfig};
 use parser::parse_sql;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -96,20 +94,28 @@ pub struct SinkDefinition {
     pub sink_type: SinkType,
     pub props: SinkProps,
     pub common: CommonSinkProps,
+    pub encoder: SinkEncoderConfig,
 }
 
 impl SinkDefinition {
     pub fn new(sink_id: impl Into<String>, sink_type: SinkType, props: SinkProps) -> Self {
+        let sink_id_str = sink_id.into();
         Self {
-            sink_id: sink_id.into(),
+            sink_id: sink_id_str.clone(),
             sink_type,
             props,
             common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
         }
     }
 
     pub fn with_common_props(mut self, common: CommonSinkProps) -> Self {
         self.common = common;
+        self
+    }
+
+    pub fn with_encoder(mut self, encoder: SinkEncoderConfig) -> Self {
+        self.encoder = encoder;
         self
     }
 }
@@ -354,9 +360,7 @@ fn build_sinks_from_definition(
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Mqtt(config),
-                    SinkEncoderConfig::Json {
-                        encoder_id: format!("{}_sink_encoder", sink.sink_id),
-                    },
+                    sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone());

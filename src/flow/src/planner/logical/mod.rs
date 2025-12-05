@@ -336,9 +336,7 @@ mod logical_plan_tests {
             crate::planner::sink::PipelineSinkConnector::new(
                 "test_conn",
                 crate::planner::sink::SinkConnectorConfig::Nop(Default::default()),
-                crate::planner::sink::SinkEncoderConfig::Json {
-                    encoder_id: "test".to_string(),
-                },
+                crate::planner::sink::SinkEncoderConfig::json(),
             ),
         );
 
@@ -374,9 +372,7 @@ mod logical_plan_tests {
             crate::planner::sink::PipelineSinkConnector::new(
                 "conn1",
                 crate::planner::sink::SinkConnectorConfig::Nop(Default::default()),
-                crate::planner::sink::SinkEncoderConfig::Json {
-                    encoder_id: "json1".to_string(),
-                },
+                crate::planner::sink::SinkEncoderConfig::json(),
             ),
         );
 
@@ -385,9 +381,7 @@ mod logical_plan_tests {
             crate::planner::sink::PipelineSinkConnector::new(
                 "conn2",
                 crate::planner::sink::SinkConnectorConfig::Nop(Default::default()),
-                crate::planner::sink::SinkEncoderConfig::Json {
-                    encoder_id: "json2".to_string(),
-                },
+                crate::planner::sink::SinkEncoderConfig::json(),
             ),
         );
 

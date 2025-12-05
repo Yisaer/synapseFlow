@@ -10,6 +10,11 @@ use std::sync::{Arc, RwLock};
 
 type EncoderFactory =
     Arc<dyn Fn(&SinkEncoderConfig) -> Result<Arc<dyn CollectionEncoder>, CodecError> + Send + Sync>;
+
+struct EncoderEntry {
+    factory: EncoderFactory,
+    supports_streaming: bool,
+}
 type DecoderFactory = Arc<
     dyn Fn(&StreamDecoderConfig, Arc<Schema>, &str) -> Result<Arc<dyn RecordDecoder>, CodecError>
         + Send
@@ -72,7 +77,7 @@ impl DecoderRegistry {
 
 /// Registry mapping encoder identifiers to factories.
 pub struct EncoderRegistry {
-    factories: RwLock<HashMap<String, EncoderFactory>>,
+    factories: RwLock<HashMap<String, EncoderEntry>>,
 }
 
 impl Default for EncoderRegistry {
@@ -94,11 +99,22 @@ impl EncoderRegistry {
         registry
     }
 
-    pub fn register_encoder(&self, kind: impl Into<String>, factory: EncoderFactory) {
+    pub fn register_encoder(
+        &self,
+        kind: impl Into<String>,
+        factory: EncoderFactory,
+        supports_streaming: bool,
+    ) {
         self.factories
             .write()
             .expect("encoder registry poisoned")
-            .insert(kind.into(), factory);
+            .insert(
+                kind.into(),
+                EncoderEntry {
+                    factory,
+                    supports_streaming,
+                },
+            );
     }
 
     pub fn instantiate(
@@ -110,21 +126,22 @@ impl EncoderRegistry {
         let factory = guard
             .get(kind)
             .ok_or_else(|| CodecError::Other(format!("encoder kind `{kind}` not registered")))?;
-        factory(config)
+        (factory.factory)(config)
+    }
+
+    pub fn supports_streaming(&self, kind: &str) -> bool {
+        let guard = self.factories.read().expect("encoder registry poisoned");
+        guard
+            .get(kind)
+            .map(|entry| entry.supports_streaming)
+            .unwrap_or(false)
     }
 
     fn register_builtin_encoders(&self) {
         self.register_encoder(
             "json",
-            Arc::new(|config| match config {
-                SinkEncoderConfig::Json { encoder_id } => {
-                    Ok(Arc::new(JsonEncoder::new(encoder_id.clone())) as Arc<_>)
-                }
-                other => Err(CodecError::Other(format!(
-                    "encoder config mismatch, expected json but received {:?}",
-                    other.kind()
-                ))),
-            }),
+            Arc::new(|config| Ok(Arc::new(JsonEncoder::new(config.kind().to_string())) as Arc<_>)),
+            true,
         );
     }
 }

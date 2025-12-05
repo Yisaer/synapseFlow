@@ -62,6 +62,7 @@ fn build_physical_plan_from_sql(
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
+    encoder_registry: &EncoderRegistry,
 ) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
     let select_stmt = parser::parse_sql(sql)?;
     let (schema_binding, stream_defs) =
@@ -69,7 +70,8 @@ fn build_physical_plan_from_sql(
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     println!("[LogicalPlan] topology:");
     logical_plan.print_topology(0);
-    let physical_plan = create_physical_plan(Arc::clone(&logical_plan), &schema_binding)?;
+    let physical_plan =
+        create_physical_plan(Arc::clone(&logical_plan), &schema_binding, encoder_registry)?;
     Ok(physical_plan)
 }
 
@@ -139,7 +141,7 @@ fn build_schema_binding(
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig),
-///     SinkEncoderConfig::Json { encoder_id: "json".into() },
+///     SinkEncoderConfig::json(),
 /// );
 /// let sink = PipelineSink::new("custom_sink", connector);
 /// let pipeline = create_pipeline(
@@ -164,7 +166,13 @@ pub fn create_pipeline(
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let physical_plan = build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry)?;
+    let physical_plan = build_physical_plan_from_sql(
+        sql,
+        sinks,
+        catalog,
+        shared_stream_registry,
+        encoder_registry.as_ref(),
+    )?;
     let pipeline = create_processor_pipeline(
         physical_plan,
         mqtt_client_manager,
@@ -189,9 +197,7 @@ pub fn create_pipeline_with_log_sink(
     let connector = PipelineSinkConnector::new(
         "log_sink_connector",
         SinkConnectorConfig::Nop(NopSinkConfig),
-        SinkEncoderConfig::Json {
-            encoder_id: "log_sink_encoder".into(),
-        },
+        SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
     create_pipeline(

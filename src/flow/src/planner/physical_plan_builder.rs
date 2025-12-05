@@ -1,5 +1,6 @@
 //! Physical plan builder - converts logical plans to physical plans using centralized index management
 
+use crate::codec::EncoderRegistry;
 use crate::expr::sql_conversion::{
     convert_expr_to_scalar_with_bindings, SchemaBinding, SchemaBindingEntry, SourceBindingKind,
 };
@@ -66,9 +67,10 @@ impl Default for PhysicalPlanBuilder {
 pub fn create_physical_plan(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let mut builder = PhysicalPlanBuilder::new();
-    create_physical_plan_with_builder_cached(logical_plan, bindings, &mut builder)
+    create_physical_plan_with_builder_cached(logical_plan, bindings, encoder_registry, &mut builder)
 }
 
 /// Create a physical plan from a logical plan using centralized index management
@@ -78,9 +80,10 @@ pub fn create_physical_plan(
 pub fn create_physical_plan_with_builder(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    create_physical_plan_with_builder_cached(logical_plan, bindings, builder)
+    create_physical_plan_with_builder_cached(logical_plan, bindings, encoder_registry, builder)
 }
 
 /// Create a physical plan from a logical plan using centralized index management with node caching
@@ -90,6 +93,7 @@ pub fn create_physical_plan_with_builder(
 fn create_physical_plan_with_builder_cached(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let logical_index = logical_plan.get_plan_index();
@@ -115,18 +119,21 @@ fn create_physical_plan_with_builder_cached(
             logical_filter,
             &logical_plan,
             bindings,
+            encoder_registry,
             builder,
         )?,
         LogicalPlan::Project(logical_project) => create_physical_project_with_builder_cached(
             logical_project,
             &logical_plan,
             bindings,
+            encoder_registry,
             builder,
         )?,
         LogicalPlan::DataSink(logical_sink) => create_physical_data_sink_with_builder_cached(
             logical_sink,
             &logical_plan,
             bindings,
+            encoder_registry,
             builder,
         )?,
         LogicalPlan::Tail(_logical_tail) => {
@@ -135,6 +142,7 @@ fn create_physical_plan_with_builder_cached(
             create_physical_result_collect_from_tail_with_builder_cached(
                 &logical_plan,
                 bindings,
+                encoder_registry,
                 builder,
             )?
         }
@@ -149,13 +157,18 @@ fn create_physical_plan_with_builder_cached(
 fn create_physical_result_collect_from_tail_with_builder_cached(
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child =
-            create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
+        let physical_child = create_physical_plan_with_builder_cached(
+            child.clone(),
+            bindings,
+            encoder_registry,
+            builder,
+        )?;
         physical_children.push(physical_child);
     }
 
@@ -208,13 +221,18 @@ fn create_physical_filter_with_builder_cached(
     logical_filter: &LogicalFilter,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child =
-            create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
+        let physical_child = create_physical_plan_with_builder_cached(
+            child.clone(),
+            bindings,
+            encoder_registry,
+            builder,
+        )?;
         physical_children.push(physical_child);
     }
 
@@ -242,13 +260,18 @@ fn create_physical_project_with_builder_cached(
     logical_project: &LogicalProject,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child =
-            create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
+        let physical_child = create_physical_plan_with_builder_cached(
+            child.clone(),
+            bindings,
+            encoder_registry,
+            builder,
+        )?;
         physical_children.push(physical_child);
     }
 
@@ -273,13 +296,18 @@ fn create_physical_data_sink_with_builder_cached(
     logical_sink: &DataSinkPlan,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child =
-            create_physical_plan_with_builder_cached(child.clone(), bindings, builder)?;
+        let physical_child = create_physical_plan_with_builder_cached(
+            child.clone(),
+            bindings,
+            encoder_registry,
+            builder,
+        )?;
         physical_children.push(physical_child);
     }
     if physical_children.len() != 1 {
@@ -289,7 +317,7 @@ fn create_physical_data_sink_with_builder_cached(
     let input_child = Arc::clone(&physical_children[0]);
     let sink_index = builder.allocate_index();
     let (encoded_child, connector) =
-        build_sink_chain_with_builder(&logical_sink.sink, &input_child, builder)?;
+        build_sink_chain_with_builder(&logical_sink.sink, &input_child, encoder_registry, builder)?;
     let physical_sink = PhysicalDataSink::new(encoded_child, sink_index, connector);
     Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
 }
@@ -298,14 +326,16 @@ fn create_physical_data_sink_with_builder_cached(
 fn build_sink_chain_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     let mut encoder_children = Vec::new();
     let mut connectors = Vec::new();
-    let batch_processor = create_batch_processor_if_needed_with_builder(sink, input_child, builder);
+    let batch_processor =
+        create_batch_processor_if_needed_with_builder(sink, input_child, encoder_registry, builder);
 
     let connector = &sink.connector;
-    if should_use_streaming_encoder(sink, connector) {
+    if should_use_streaming_encoder(sink, connector, encoder_registry) {
         add_streaming_encoder_with_builder(
             sink,
             connector,
@@ -345,10 +375,12 @@ fn build_sink_chain_with_builder(
 fn create_batch_processor_if_needed_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
+    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Option<Arc<PhysicalPlan>> {
+    let encoder_type = sink.connector.encoder.kind();
     let needs_batch =
-        sink.common.is_batching_enabled() && !sink.connector.encoder.supports_streaming();
+        sink.common.is_batching_enabled() && !encoder_registry.supports_streaming(encoder_type);
 
     if !needs_batch {
         return None;
@@ -419,8 +451,13 @@ fn add_regular_encoder_with_builder(
     ));
 }
 
-fn should_use_streaming_encoder(sink: &PipelineSink, connector: &PipelineSinkConnector) -> bool {
-    sink.common.is_batching_enabled() && connector.encoder.supports_streaming()
+fn should_use_streaming_encoder(
+    sink: &PipelineSink,
+    connector: &PipelineSinkConnector,
+    encoder_registry: &EncoderRegistry,
+) -> bool {
+    sink.common.is_batching_enabled()
+        && encoder_registry.supports_streaming(connector.encoder.kind())
 }
 
 fn find_binding_entry<'a>(

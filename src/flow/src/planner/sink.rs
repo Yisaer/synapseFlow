@@ -115,43 +115,27 @@ pub struct CustomSinkConnectorConfig {
 pub struct NopSinkConfig;
 
 /// Configuration for supported sink encoders.
-#[derive(Clone, Debug)]
-pub enum SinkEncoderConfig {
-    Json { encoder_id: String },
-    Custom(CustomSinkEncoderConfig),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SinkEncoderConfig {
+    kind: String,
 }
 
 impl SinkEncoderConfig {
-    /// Whether this encoder supports streaming aggregation.
-    pub fn supports_streaming(&self) -> bool {
-        match self {
-            SinkEncoderConfig::Json { .. } => true,
-            SinkEncoderConfig::Custom(custom) => custom.supports_streaming,
-        }
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self { kind: kind.into() }
+    }
+
+    pub fn json() -> Self {
+        Self::new("json")
     }
 
     pub fn kind(&self) -> &str {
-        match self {
-            SinkEncoderConfig::Json { .. } => "json",
-            SinkEncoderConfig::Custom(custom) => custom.kind.as_str(),
-        }
+        &self.kind
     }
 
     pub fn custom_settings(&self) -> Option<&JsonValue> {
-        match self {
-            SinkEncoderConfig::Custom(custom) => Some(&custom.settings),
-            _ => None,
-        }
+        None
     }
-}
-
-/// Configuration blob for custom encoders.
-#[derive(Clone, Debug)]
-pub struct CustomSinkEncoderConfig {
-    pub encoder_id: String,
-    pub kind: String,
-    pub settings: JsonValue,
-    pub supports_streaming: bool,
 }
 
 /// Common sink-level properties (batching, etc.).

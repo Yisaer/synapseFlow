@@ -325,9 +325,7 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     let connector = PipelineSinkConnector::new(
         "custom_sink_connector",
         SinkConnectorConfig::Nop(NopSinkConfig),
-        SinkEncoderConfig::Json {
-            encoder_id: "json".to_string(),
-        },
+        SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("custom_sink", connector).with_forward_to_result(true);
 
@@ -382,9 +380,7 @@ async fn test_batch_processor_flushes_on_count() {
     let connector = PipelineSinkConnector::new(
         "batch_sink_connector",
         SinkConnectorConfig::Nop(NopSinkConfig),
-        SinkEncoderConfig::Json {
-            encoder_id: "json".to_string(),
-        },
+        SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("batch_sink", connector)
         .with_forward_to_result(true)
