@@ -246,6 +246,12 @@ impl FlowInstance {
     }
 }
 
+impl Default for FlowInstance {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Combined runtime view for a catalog stream and its shared stream state.
 #[derive(Clone)]
 pub struct StreamRuntimeInfo {
