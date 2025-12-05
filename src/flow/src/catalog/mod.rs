@@ -1,5 +1,4 @@
 use datatypes::Schema;
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -110,46 +109,28 @@ impl StreamDefinition {
 
 /// Configuration describing which decoder should be used for a stream's payloads.
 #[derive(Debug, Clone)]
-pub enum StreamDecoderConfig {
-    Json { decoder_id: String },
-    Custom(CustomStreamDecoderConfig),
+pub struct StreamDecoderConfig {
+    decoder_id: String,
 }
 
 impl StreamDecoderConfig {
-    pub fn kind(&self) -> &str {
-        match self {
-            StreamDecoderConfig::Json { .. } => "json",
-            StreamDecoderConfig::Custom(custom) => custom.kind.as_str(),
+    pub fn new(decoder_id: impl Into<String>) -> Self {
+        Self {
+            decoder_id: decoder_id.into(),
         }
     }
 
     pub fn decoder_id(&self) -> &str {
-        match self {
-            StreamDecoderConfig::Json { decoder_id } => decoder_id.as_str(),
-            StreamDecoderConfig::Custom(custom) => custom.decoder_id.as_str(),
-        }
+        &self.decoder_id
     }
 
-    pub fn custom_settings(&self) -> Option<&JsonValue> {
-        match self {
-            StreamDecoderConfig::Custom(custom) => Some(&custom.settings),
-            _ => None,
-        }
+    pub fn kind(&self) -> &str {
+        "json"
     }
 
     pub fn json_default(stream_id: &str) -> Self {
-        StreamDecoderConfig::Json {
-            decoder_id: format!("{stream_id}_decoder"),
-        }
+        Self::new(format!("{stream_id}_decoder"))
     }
-}
-
-/// Custom decoder configuration payload.
-#[derive(Debug, Clone)]
-pub struct CustomStreamDecoderConfig {
-    pub decoder_id: String,
-    pub kind: String,
-    pub settings: JsonValue,
 }
 
 #[derive(Default)]

@@ -63,14 +63,8 @@ impl DecoderRegistry {
     fn register_builtin_decoders(&self) {
         self.register_decoder(
             "json",
-            Arc::new(|config, schema, stream_name| match config {
-                StreamDecoderConfig::Json { .. } => {
-                    Ok(Arc::new(JsonDecoder::new(stream_name.to_string(), schema)) as Arc<_>)
-                }
-                other => Err(CodecError::Other(format!(
-                    "decoder config mismatch, expected json but received {}",
-                    other.kind()
-                ))),
+            Arc::new(|_config, schema, stream_name| {
+                Ok(Arc::new(JsonDecoder::new(stream_name.to_string(), schema)) as Arc<_>)
             }),
         );
     }

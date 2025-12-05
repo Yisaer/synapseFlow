@@ -65,16 +65,12 @@ impl StreamPropsRequest {
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 pub struct StreamDecoderConfigRequest {
-    pub kind: String,
     pub decoder_id: Option<String>,
 }
 
 impl Default for StreamDecoderConfigRequest {
     fn default() -> Self {
-        Self {
-            kind: "json".to_string(),
-            decoder_id: None,
-        }
+        Self { decoder_id: None }
     }
 }
 
@@ -315,14 +311,11 @@ fn build_stream_props(
 
 fn build_stream_decoder(req: &CreateStreamRequest) -> Result<StreamDecoderConfig, String> {
     let config = req.decoder.clone().unwrap_or_default();
-    match config.kind.to_ascii_lowercase().as_str() {
-        "" | "json" => Ok(StreamDecoderConfig::Json {
-            decoder_id: config
-                .decoder_id
-                .unwrap_or_else(|| format!("{}_decoder", req.name)),
-        }),
-        other => Err(format!("unsupported decoder kind: {other}")),
-    }
+    Ok(StreamDecoderConfig::new(
+        config
+            .decoder_id
+            .unwrap_or_else(|| format!("{}_decoder", req.name)),
+    ))
 }
 
 fn column_schema_from_request(
