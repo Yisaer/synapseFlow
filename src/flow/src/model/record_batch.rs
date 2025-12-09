@@ -78,7 +78,7 @@ pub fn rows_from_columns_simple(
                 for (col_name, values) in cols {
                     let value = values.get(row_idx).cloned().unwrap_or(Value::Null);
                     keys.push(Arc::<str>::from(col_name.as_str()));
-                    values_vec.push(value);
+                    values_vec.push(Arc::new(value));
                 }
                 Arc::new(Message::new(
                     Arc::<str>::from(source.as_str()),

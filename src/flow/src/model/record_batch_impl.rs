@@ -1,8 +1,10 @@
 use super::RecordBatch;
+use crate::expr::scalar::ColumnRef;
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, CollectionError, Tuple};
 use crate::planner::physical::PhysicalProjectField;
 use datatypes::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 impl Collection for RecordBatch {
@@ -55,6 +57,9 @@ impl Collection for RecordBatch {
         let mut projected_rows = Vec::with_capacity(self.num_rows());
         for tuple in self.rows() {
             let mut projected_tuple = Tuple::new(Vec::new());
+            #[allow(clippy::type_complexity)]
+            let mut partial_messages: HashMap<&str, (Vec<Arc<str>>, Vec<Arc<Value>>)> =
+                HashMap::new();
             let mut projected_messages = Vec::new();
 
             for field in fields {
@@ -75,9 +80,41 @@ impl Collection for RecordBatch {
                             if tuple.messages().is_empty() {
                                 continue;
                             }
-                            projected_messages.extend(tuple.messages().iter().cloned());
+                            for message in tuple.messages() {
+                                projected_messages.push(message.clone());
+                            }
                         }
                     }
+                    continue;
+                }
+
+                if let ScalarExpr::Column(ColumnRef::ByIndex {
+                    source_name,
+                    column_index,
+                }) = &field.compiled_expr
+                {
+                    let message = tuple.message_by_source(source_name).ok_or_else(|| {
+                        CollectionError::Other(format!(
+                            "Failed to evaluate expression for field '{}': Column not found: {}",
+                            field.field_name, source_name
+                        ))
+                    })?;
+                    let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
+                        CollectionError::Other(format!(
+                            "Failed to evaluate expression for field '{}': Column not found: {}#{}",
+                            field.field_name, source_name, column_index
+                        ))
+                    })?;
+
+                    let entry = if let Some(existing) = partial_messages.get_mut(source_name.as_str()) {
+                        existing
+                    } else {
+                        partial_messages
+                            .entry(source_name.as_str())
+                            .or_insert_with(|| (Vec::new(), Vec::new()))
+                    };
+                    entry.0.push(col_name.clone());
+                    entry.1.push(value.clone());
                     continue;
                 }
 
@@ -94,9 +131,12 @@ impl Collection for RecordBatch {
                 projected_tuple.add_affiliate_column(Arc::new(field.field_name.clone()), value);
             }
 
-            if !projected_messages.is_empty() {
-                projected_tuple.messages = projected_messages;
+            for (source, (keys, values)) in partial_messages {
+                let msg = Arc::new(crate::model::Message::new(source, keys, values));
+                projected_messages.push(msg);
             }
+
+            projected_tuple.messages = projected_messages;
 
             projected_rows.push(projected_tuple);
         }

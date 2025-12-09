@@ -7,11 +7,15 @@ use std::sync::Arc;
 pub struct Message {
     source: Arc<str>,
     keys: Vec<Arc<str>>,
-    values: Vec<Value>,
+    values: Vec<Arc<Value>>,
 }
 
 impl Message {
-    pub fn new(source: impl Into<Arc<str>>, keys: Vec<Arc<str>>, values: Vec<Value>) -> Self {
+    pub fn new(
+        source: impl Into<Arc<str>>,
+        keys: Vec<Arc<str>>,
+        values: Vec<Arc<Value>>,
+    ) -> Self {
         debug_assert_eq!(
             keys.len(),
             values.len(),
@@ -32,18 +36,31 @@ impl Message {
         self.keys
             .iter()
             .zip(self.values.iter())
-            .map(|(k, v)| (k.as_ref(), v))
+            .map(|(k, v)| (k.as_ref(), v.as_ref()))
+    }
+
+    pub fn entry_by_index(&self, index: usize) -> Option<(&Arc<str>, &Arc<Value>)> {
+        self.keys
+            .get(index)
+            .and_then(|k| self.values.get(index).map(|v| (k, v)))
+    }
+
+    pub fn entry_by_name(&self, column: &str) -> Option<(&Arc<str>, &Arc<Value>)> {
+        self.keys
+            .iter()
+            .position(|k| k.as_ref() == column)
+            .and_then(|idx| self.entry_by_index(idx))
     }
 
     pub fn value(&self, column: &str) -> Option<&Value> {
         self.keys
             .iter()
             .position(|k| k.as_ref() == column)
-            .and_then(|idx| self.values.get(idx))
+            .and_then(|idx| self.values.get(idx).map(|v| v.as_ref()))
     }
 
     pub fn value_by_index(&self, index: usize) -> Option<&Value> {
-        self.values.get(index)
+        self.values.get(index).map(|v| v.as_ref())
     }
 }
 
@@ -168,6 +185,9 @@ impl Tuple {
     }
 
     pub fn message_by_source(&self, source: &str) -> Option<&Arc<Message>> {
+        if source.is_empty() && self.messages.len() == 1 {
+            return self.messages.first();
+        }
         self.messages.iter().find(|msg| msg.source() == source)
     }
 }

@@ -154,11 +154,11 @@ impl JsonDecoder {
                     .map(|json| json_to_value(&json))
                     .unwrap_or(Value::Null);
                 keys.push(self.schema_keys[idx].clone());
-                values.push(value);
+                values.push(Arc::new(value));
             }
             for (key, value) in row {
                 keys.push(Arc::<str>::from(key.as_str()));
-                values.push(json_to_value(&value));
+                values.push(Arc::new(json_to_value(&value)));
             }
             let message = Arc::new(Message::new(
                 Arc::<str>::from(self.stream_name.as_str()),
