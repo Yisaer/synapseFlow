@@ -1,4 +1,4 @@
-use sqlparser::ast::{GroupByExpr, SetExpr, Statement};
+use sqlparser::ast::{Expr, GroupByExpr, SetExpr, Statement};
 use sqlparser::parser::ParserError;
 
 use super::window;
@@ -43,22 +43,27 @@ impl sqlparser::dialect::Dialect for StreamDialect {
     }
 }
 
-/// Collect window function present in a parsed statement
+/// Collect window + remaining GROUP BY expressions present in a parsed statement
 /// Enforces at most one window per statement
-pub fn collect_windows_in_statement(statement: &Statement) -> Result<Option<Window>, ParserError> {
+pub fn collect_window_and_group_by_exprs(
+    statement: &Statement,
+) -> Result<(Option<Window>, Vec<Expr>), ParserError> {
     if let Statement::Query(query) = statement {
         if let SetExpr::Select(select) = &*query.body {
-            return collect_group_by_windows(&select.group_by);
+            return split_group_by_window(&select.group_by);
         }
     }
 
-    Ok(None)
+    Ok((None, Vec::new()))
 }
 
-/// Parse GROUP BY clause to extract supported window (if any)
+/// Parse GROUP BY clause to extract supported window (if any) and keep the remaining expressions
 /// Errors if multiple window functions are present
-pub fn collect_group_by_windows(group_by: &GroupByExpr) -> Result<Option<Window>, ParserError> {
+pub fn split_group_by_window(
+    group_by: &GroupByExpr,
+) -> Result<(Option<Window>, Vec<Expr>), ParserError> {
     let mut found: Option<Window> = None;
+    let mut remaining_exprs: Vec<Expr> = Vec::new();
 
     match group_by {
         GroupByExpr::Expressions(exprs) => {
@@ -70,13 +75,15 @@ pub fn collect_group_by_windows(group_by: &GroupByExpr) -> Result<Option<Window>
                         ));
                     }
                     found = Some(window);
+                } else {
+                    remaining_exprs.push(expr.clone());
                 }
             }
         }
         _ => {}
     };
 
-    Ok(found)
+    Ok((found, remaining_exprs))
 }
 
 #[cfg(test)]
@@ -92,16 +99,30 @@ mod tests {
         let statements = Parser::parse_sql(&dialect, sql).unwrap();
         assert_eq!(statements.len(), 1);
 
-        // Collect the windows from GROUP BY
-        let windows = collect_windows_in_statement(&statements[0]).unwrap();
-        assert!(windows.is_some());
+        // Collect the window + remaining GROUP BY expressions
+        let (window, remaining) = collect_window_and_group_by_exprs(&statements[0]).unwrap();
+        assert!(window.is_some());
+        assert!(remaining.is_empty());
 
         assert!(matches!(
-            windows.unwrap(),
+            window.unwrap(),
             window::Window::Tumbling {
                 ref time_unit,
                 length: 10
             } if *time_unit == window::TimeUnit::Seconds
         ));
+    }
+
+    #[test]
+    fn split_group_by_keeps_non_window_exprs() {
+        let sql = "SELECT * FROM stream GROUP BY tumblingwindow('ss', 10), b";
+        let dialect = StreamDialect::new();
+
+        let statements = Parser::parse_sql(&dialect, sql).unwrap();
+        let (window, remaining) = collect_window_and_group_by_exprs(&statements[0]).unwrap();
+
+        assert!(window.is_some());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].to_string(), "b");
     }
 }

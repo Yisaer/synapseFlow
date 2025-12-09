@@ -1,6 +1,4 @@
-use sqlparser::ast::{
-    Expr, GroupByExpr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit,
-};
+use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
 use sqlparser::parser::Parser;
 
 use crate::aggregate_transformer::transform_aggregate_functions;
@@ -35,13 +33,14 @@ impl StreamSqlParser {
 
         let statement = &parser[0];
 
-        // Collect windows from GROUP BY before we move on
-        let window = crate::dialect::collect_windows_in_statement(statement)
+        // Collect window + non-window GROUP BY expressions before we move on
+        let (window, group_by_exprs) = crate::dialect::collect_window_and_group_by_exprs(statement)
             .map_err(|e| format!("Dialect processing error: {}", e))?;
 
         // Extract raw select fields from the statement (before transformation)
         let mut select_stmt = self.extract_select_fields(statement)?;
         select_stmt.window = window;
+        select_stmt.group_by_exprs = group_by_exprs;
 
         // Transform aggregate functions in one step (search + replace)
         let (transformed_stmt, _aggregate_mappings) = transform_aggregate_functions(select_stmt)?;
@@ -91,10 +90,6 @@ impl StreamSqlParser {
         // Extract WHERE and HAVING clauses if present
         let where_condition = select.selection.clone();
         let having = select.having.clone();
-        let group_by_exprs = match &select.group_by {
-            GroupByExpr::Expressions(exprs) => exprs.clone(),
-            _ => Vec::new(),
-        };
 
         // Use visitor pattern to extract table (source) information
         let mut table_visitor = TableInfoVisitor::new();
@@ -104,7 +99,6 @@ impl StreamSqlParser {
         let mut select_stmt =
             SelectStmt::with_fields_and_conditions(select_fields, where_condition, having);
         select_stmt.source_infos = source_infos;
-        select_stmt.group_by_exprs = group_by_exprs;
 
         Ok(select_stmt)
     }
@@ -125,6 +119,7 @@ pub fn parse_sql(sql: &str) -> Result<SelectStmt, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Window;
 
     #[test]
     fn test_parse_agg_replacement_expr_field_name() {
@@ -280,7 +275,7 @@ mod source_info_tests {
 
         assert!(result.is_ok());
         let select_stmt = result.unwrap();
-        assert_eq!(select_stmt.group_by_exprs.len(), 1);
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
         assert!(select_stmt.window.is_some());
 
         match select_stmt.window {
@@ -305,5 +300,32 @@ mod source_info_tests {
             "unexpected error: {}",
             msg
         );
+    }
+
+    #[test]
+    fn parse_group_by_with_column_and_window() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY tumblingwindow('ss', 10), b";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        // window should be parsed
+        match select_stmt.window {
+            Some(Window::Tumbling { time_unit, length }) => {
+                assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
+                assert_eq!(length, 10);
+            }
+            other => panic!("expected tumbling window, got {:?}", other),
+        }
+
+        // group_by_exprs should only contain the column, not the window function
+        assert_eq!(select_stmt.group_by_exprs.len(), 1);
+        let expr = &select_stmt.group_by_exprs[0];
+        match expr {
+            Expr::Identifier(ident) => assert_eq!(ident.to_string(), "b"),
+            other => panic!("expected group by identifier `b`, got {:?}", other),
+        }
     }
 }
