@@ -37,6 +37,7 @@ use std::process;
 use std::thread;
 #[cfg(feature = "metrics")]
 use std::time::Duration as StdDuration;
+use storage::StorageManager;
 #[cfg(feature = "metrics")]
 use sysinfo::{Pid, System};
 #[cfg(feature = "metrics")]
@@ -57,27 +58,43 @@ const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 5;
 #[cfg(feature = "profiling")]
 const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
+const DEFAULT_DATA_DIR: &str = "./tmp";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CliFlags {
     profiling_enabled: Option<bool>,
+    data_dir: Option<String>,
 }
 
 impl CliFlags {
     fn parse() -> Self {
         let mut profiling_enabled = None;
-        for arg in env::args().skip(1) {
+        let mut data_dir = None;
+        let mut args = env::args().skip(1).peekable();
+        while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--enable-profiling" | "--profiling" => profiling_enabled = Some(true),
                 "--disable-profiling" | "--no-profiling" => profiling_enabled = Some(false),
+                "--data-dir" => {
+                    if let Some(val) = args.next() {
+                        data_dir = Some(val);
+                    }
+                }
                 _ => {}
             }
         }
-        Self { profiling_enabled }
+        Self {
+            profiling_enabled,
+            data_dir,
+        }
     }
 
     fn profiling_override(&self) -> Option<bool> {
         self.profiling_enabled
+    }
+
+    fn data_dir(&self) -> Option<&str> {
+        self.data_dir.as_deref()
     }
 }
 
@@ -98,9 +115,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let manager_addr = env::var("MANAGER_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let data_dir = cli_flags
+        .data_dir()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| DEFAULT_DATA_DIR.to_string());
+
+    let storage = StorageManager::new(&data_dir)?;
+    println!(
+        "[synapse-flow] storage dir: {}",
+        storage.base_dir().display()
+    );
     let instance = FlowInstance::new();
+
+    manager::storage_bridge::load_from_storage(&storage, &instance)
+        .await
+        .map_err(|err| format!("failed to load from storage: {err}"))?;
+
     println!("Starting manager on {}", manager_addr);
-    let manager_future = manager::start_server(manager_addr.clone(), instance);
+    let manager_future = manager::start_server(manager_addr.clone(), instance, storage);
 
     tokio::select! {
         result = manager_future => {

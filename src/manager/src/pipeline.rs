@@ -1,4 +1,4 @@
-use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SINK_TOPIC};
+use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SINK_TOPIC, storage_bridge};
 use axum::{
     Json,
     extract::{Path, State},
@@ -13,23 +13,27 @@ use flow::pipeline::{
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use storage::{StorageError, StorageManager};
 
 #[derive(Clone)]
 pub struct AppState {
     pub instance: Arc<FlowInstance>,
+    pub storage: Arc<StorageManager>,
 }
 
 impl AppState {
-    pub fn with_instance(instance: FlowInstance) -> Self {
+    pub fn new(instance: FlowInstance, storage: StorageManager) -> Self {
         Self {
             instance: Arc::new(instance),
+            storage: Arc::new(storage),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CreatePipelineRequest {
     pub id: String,
     pub sql: String,
@@ -49,7 +53,7 @@ pub struct ListPipelineItem {
     pub status: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CreatePipelineSinkRequest {
     pub id: Option<String>,
     #[serde(rename = "type")]
@@ -62,7 +66,7 @@ pub struct CreatePipelineSinkRequest {
     pub encoder: SinkEncoderRequest,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct SinkPropsRequest {
     #[serde(flatten)]
@@ -85,7 +89,7 @@ impl CommonSinkPropsRequest {
     }
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct MqttSinkPropsRequest {
     pub broker_url: Option<String>,
@@ -96,7 +100,7 @@ pub struct MqttSinkPropsRequest {
     pub connector_key: Option<String>,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct CommonSinkPropsRequest {
     #[serde(rename = "batchCount")]
@@ -105,7 +109,7 @@ pub struct CommonSinkPropsRequest {
     pub batch_duration_ms: Option<u64>,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct SinkEncoderRequest {
     pub kind: Option<String>,
@@ -118,9 +122,34 @@ pub async fn create_pipeline_handler(
     if let Err(err) = validate_create_request(&req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let definition = match build_pipeline_definition(&req) {
-        Ok(def) => def,
+    let stored = match storage_bridge::stored_pipeline_from_request(&req) {
+        Ok(stored) => stored,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    match state.storage.create_pipeline(stored.clone()) {
+        Ok(()) => {}
+        Err(StorageError::AlreadyExists(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("pipeline {} already exists", req.id),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist pipeline {}: {err}", req.id),
+            )
+                .into_response();
+        }
+    }
+
+    let definition = match storage_bridge::pipeline_definition_from_stored(&stored) {
+        Ok(def) => def,
+        Err(err) => {
+            let _ = state.storage.delete_pipeline(&stored.id);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
     match state.instance.create_pipeline(definition) {
         Ok(snapshot) => {
@@ -134,16 +163,22 @@ pub async fn create_pipeline_handler(
             )
                 .into_response()
         }
-        Err(PipelineError::AlreadyExists(_)) => (
-            StatusCode::CONFLICT,
-            format!("pipeline {} already exists", req.id),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::BAD_REQUEST,
-            format!("failed to create pipeline {}: {err}", req.id),
-        )
-            .into_response(),
+        Err(PipelineError::AlreadyExists(_)) => {
+            let _ = state.storage.delete_pipeline(&stored.id);
+            (
+                StatusCode::CONFLICT,
+                format!("pipeline {} already exists", req.id),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            let _ = state.storage.delete_pipeline(&stored.id);
+            (
+                StatusCode::BAD_REQUEST,
+                format!("failed to create pipeline {}: {err}", req.id),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -172,7 +207,18 @@ pub async fn delete_pipeline_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.instance.delete_pipeline(&id).await {
-        Ok(_) => (StatusCode::OK, format!("pipeline {id} deleted")).into_response(),
+        Ok(_) => {
+            if let Err(err) = state.storage.delete_pipeline(&id) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "pipeline {id} deleted in runtime but failed to remove from storage: {err}"
+                    ),
+                )
+                    .into_response();
+            }
+            (StatusCode::OK, format!("pipeline {id} deleted")).into_response()
+        }
         Err(PipelineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
@@ -185,16 +231,41 @@ pub async fn delete_pipeline_handler(
 }
 
 pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse {
-    let list = state
+    let runtime_status: HashMap<String, String> = state
         .instance
         .list_pipelines()
         .into_iter()
-        .map(|snapshot| ListPipelineItem {
-            id: snapshot.definition.id().to_string(),
-            status: status_label(snapshot.status),
+        .map(|snapshot| {
+            (
+                snapshot.definition.id().to_string(),
+                status_label(snapshot.status),
+            )
         })
-        .collect::<Vec<_>>();
-    Json(list)
+        .collect();
+
+    match state.storage.list_pipelines() {
+        Ok(entries) => {
+            let list = entries
+                .into_iter()
+                .map(|entry| {
+                    let status = runtime_status
+                        .get(&entry.id)
+                        .cloned()
+                        .unwrap_or_else(|| "created".to_string());
+                    ListPipelineItem {
+                        id: entry.id,
+                        status,
+                    }
+                })
+                .collect::<Vec<_>>();
+            Json(list).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to list pipelines: {err}"),
+        )
+            .into_response(),
+    }
 }
 
 fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
@@ -210,7 +281,9 @@ fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
     Ok(())
 }
 
-fn build_pipeline_definition(req: &CreatePipelineRequest) -> Result<PipelineDefinition, String> {
+pub(crate) fn build_pipeline_definition(
+    req: &CreatePipelineRequest,
+) -> Result<PipelineDefinition, String> {
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
         let sink_id = sink_req

@@ -1,4 +1,5 @@
 use crate::pipeline::AppState;
+use crate::storage_bridge;
 use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SOURCE_TOPIC};
 use axum::{
     Json,
@@ -19,8 +20,9 @@ use flow::{
     Int32Type, Int64Type, ListType, StringType, StructField, StructType, Uint8Type, Uint16Type,
     Uint32Type, Uint64Type,
 };
+use storage::StorageError;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CreateStreamRequest {
     pub name: String,
     #[serde(rename = "type")]
@@ -34,12 +36,12 @@ pub struct CreateStreamRequest {
     pub decoder: Option<StreamDecoderConfigRequest>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct StreamSchemaRequest {
     pub columns: Vec<StreamColumnRequest>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct StreamColumnRequest {
     pub name: String,
     pub data_type: String,
@@ -49,7 +51,7 @@ pub struct StreamColumnRequest {
     pub element: Option<Box<StreamColumnRequest>>,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct StreamPropsRequest {
     #[serde(flatten)]
@@ -62,13 +64,13 @@ impl StreamPropsRequest {
     }
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct StreamDecoderConfigRequest {
-    pub decoder_id: Option<String>,
+    pub decoder_type: Option<String>,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct MqttStreamPropsRequest {
     pub broker_url: Option<String>,
@@ -145,6 +147,28 @@ pub async fn create_stream_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
+    let stored = match storage_bridge::stored_stream_from_request(&req) {
+        Ok(stored) => stored,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    match state.storage.create_stream(stored.clone()) {
+        Ok(()) => {}
+        Err(StorageError::AlreadyExists(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("stream {} already exists", req.name),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist stream {}: {err}", req.name),
+            )
+                .into_response();
+        }
+    }
+
     let definition =
         StreamDefinition::new(req.name.clone(), Arc::new(schema), stream_props, decoder);
 
@@ -153,20 +177,57 @@ pub async fn create_stream_handler(
             println!("[manager] stream {} created", req.name);
             (StatusCode::CREATED, Json(build_stream_info(info))).into_response()
         }
-        Err(err) => map_flow_instance_error(err),
+        Err(err) => {
+            let _ = state.storage.delete_stream(&req.name);
+            map_flow_instance_error(err)
+        }
     }
 }
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
-    match state.instance.list_streams().await {
-        Ok(streams) => {
-            let payload = streams
-                .into_iter()
-                .map(build_stream_info)
-                .collect::<Vec<_>>();
-            Json(payload).into_response()
+    match state.storage.list_streams() {
+        Ok(entries) => {
+            let mut result = Vec::new();
+            for entry in entries {
+                let req: CreateStreamRequest = match serde_json::from_str(&entry.raw_json) {
+                    Ok(req) => req,
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("decode stored stream {}: {err}", entry.id),
+                        )
+                            .into_response();
+                    }
+                };
+                let schema = match build_schema_from_request(&req) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("build schema for stream {}: {err}", entry.id),
+                        )
+                            .into_response();
+                    }
+                };
+                let columns = schema
+                    .column_schemas()
+                    .iter()
+                    .map(|col| stream_column_info(&col.name, &col.data_type))
+                    .collect();
+                result.push(StreamInfo {
+                    name: req.name,
+                    shared: req.shared,
+                    schema: StreamSchemaInfo { columns },
+                    shared_stream: None,
+                });
+            }
+            Json(result).into_response()
         }
-        Err(err) => map_flow_instance_error(err),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to list streams: {err}"),
+        )
+            .into_response(),
     }
 }
 
@@ -193,7 +254,18 @@ pub async fn delete_stream_handler(
     }
 
     match state.instance.delete_stream(&name).await {
-        Ok(_) => (StatusCode::OK, format!("stream {name} deleted")).into_response(),
+        Ok(_) => {
+            if let Err(err) = state.storage.delete_stream(&name) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "stream {name} deleted in runtime but failed to remove from storage: {err}"
+                    ),
+                )
+                    .into_response();
+            }
+            (StatusCode::OK, format!("stream {name} deleted")).into_response()
+        }
         Err(err) => map_flow_instance_error(err),
     }
 }
@@ -268,7 +340,7 @@ fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnIn
     info
 }
 
-fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
+pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
     let columns: Result<Vec<ColumnSchema>, String> = req
         .schema
         .columns
@@ -278,7 +350,7 @@ fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String
     columns.map(Schema::new)
 }
 
-fn build_stream_props(
+pub(crate) fn build_stream_props(
     stream_type: &str,
     props: &StreamPropsRequest,
 ) -> Result<StreamProps, String> {
@@ -303,11 +375,13 @@ fn build_stream_props(
     }
 }
 
-fn build_stream_decoder(req: &CreateStreamRequest) -> Result<StreamDecoderConfig, String> {
+pub(crate) fn build_stream_decoder(
+    req: &CreateStreamRequest,
+) -> Result<StreamDecoderConfig, String> {
     let config = req.decoder.clone().unwrap_or_default();
     Ok(StreamDecoderConfig::new(
         config
-            .decoder_id
+            .decoder_type
             .unwrap_or_else(|| format!("{}_decoder", req.name)),
     ))
 }

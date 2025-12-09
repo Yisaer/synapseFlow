@@ -10,6 +10,7 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "net", "sync"] }
 flow = { path = "../flow" }
 parser = { path = "../parser" }
+storage = { path = "../storage" }
 
 [lib]
 path = "src/lib.rs"

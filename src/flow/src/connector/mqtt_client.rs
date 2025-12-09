@@ -11,8 +11,9 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::connector::ConnectorError;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedMqttClientConfig {
     pub key: String,
     pub broker_url: String,

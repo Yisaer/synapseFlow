@@ -1,10 +1,12 @@
 mod pipeline;
+pub mod storage_bridge;
 mod stream;
 
 use axum::Router;
 use axum::routing::{delete, post};
 use pipeline::AppState;
 use std::net::SocketAddr;
+use storage::StorageManager;
 use tokio::net::TcpListener;
 
 pub(crate) static DEFAULT_BROKER_URL: &str = "tcp://127.0.0.1:1883";
@@ -15,8 +17,9 @@ pub(crate) static MQTT_QOS: u8 = 0;
 pub async fn start_server(
     addr: String,
     instance: flow::FlowInstance,
+    storage: StorageManager,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = AppState::with_instance(instance);
+    let state = AppState::new(instance, storage);
 
     let app = Router::new()
         .route(

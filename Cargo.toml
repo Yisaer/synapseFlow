@@ -3,7 +3,7 @@ members = [
     "src/flow",
     "src/datatypes",
     "src/parser", "src/manager",
-    "src/telemetry",
+    "src/telemetry", "src/storage",
 ]
 resolver = "2"
 
@@ -22,6 +22,7 @@ tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"], optional = true }
 manager = { path = "src/manager" }
 flow = { path = "src/flow" }
 telemetry = { path = "src/telemetry", optional = true }
+storage = { path = "src/storage" }
 
 [features]
 default = ["metrics", "profiling"]

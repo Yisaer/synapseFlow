@@ -22,7 +22,8 @@ pub struct FlowInstance {
     catalog: Arc<Catalog>,
     shared_stream_registry: &'static SharedStreamRegistry,
     pipeline_manager: Arc<PipelineManager>,
-    shared_mqtt_clients: Arc<Mutex<HashMap<String, SharedMqttClientConfig>>>,
+    // In-memory registry of shared MQTT client configs for discovery/listing.
+    shared_mqtt_client_configs: Arc<Mutex<HashMap<String, SharedMqttClientConfig>>>,
     mqtt_client_manager: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
@@ -50,7 +51,7 @@ impl FlowInstance {
             catalog,
             shared_stream_registry,
             pipeline_manager,
-            shared_mqtt_clients: Arc::new(Mutex::new(HashMap::new())),
+            shared_mqtt_client_configs: Arc::new(Mutex::new(HashMap::new())),
             mqtt_client_manager,
             connector_registry,
             encoder_registry,
@@ -135,7 +136,7 @@ impl FlowInstance {
         self.mqtt_client_manager
             .create_client(config.clone())
             .await?;
-        self.shared_mqtt_clients
+        self.shared_mqtt_client_configs
             .lock()
             .expect("shared mqtt map poisoned")
             .insert(config.key.clone(), config);
@@ -145,7 +146,7 @@ impl FlowInstance {
     /// Drop a shared MQTT client identified by key.
     pub fn drop_shared_mqtt_client(&self, key: &str) -> Result<(), FlowInstanceError> {
         self.mqtt_client_manager.drop_client(key)?;
-        self.shared_mqtt_clients
+        self.shared_mqtt_client_configs
             .lock()
             .expect("shared mqtt map poisoned")
             .remove(key);
@@ -154,7 +155,7 @@ impl FlowInstance {
 
     /// List metadata for registered shared MQTT clients.
     pub fn list_shared_mqtt_clients(&self) -> Vec<SharedMqttClientConfig> {
-        self.shared_mqtt_clients
+        self.shared_mqtt_client_configs
             .lock()
             .expect("shared mqtt map poisoned")
             .values()
@@ -164,7 +165,7 @@ impl FlowInstance {
 
     /// Fetch metadata for a single shared MQTT client.
     pub fn get_shared_mqtt_client(&self, key: &str) -> Option<SharedMqttClientConfig> {
-        self.shared_mqtt_clients
+        self.shared_mqtt_client_configs
             .lock()
             .expect("shared mqtt map poisoned")
             .get(key)

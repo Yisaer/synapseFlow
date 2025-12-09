@@ -166,6 +166,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -363,6 +372,7 @@ dependencies = [
  "parser",
  "prometheus",
  "rumqttc",
+ "serde",
  "serde_json",
  "sqlparser",
  "thiserror",
@@ -864,6 +874,7 @@ dependencies = [
  "parser",
  "serde",
  "serde_json",
+ "storage",
  "tokio",
 ]
 
@@ -1258,6 +1269,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "1.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a0b35b8077c954324cc3504bea8d35e27a2f5d07c0ba41052a35d92f020f84"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1623,6 +1643,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "storage"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "str_stack"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1687,6 +1719,7 @@ dependencies = [
  "manager",
  "pprof",
  "prometheus_exporter",
+ "storage",
  "sysinfo",
  "telemetry",
  "tikv-jemalloc-ctl",
