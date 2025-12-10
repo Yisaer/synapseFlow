@@ -29,15 +29,8 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Publish crates (crates.io)
-        env:
-          CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: |
-          set -euo pipefail
-          for crate in src/datatypes src/parser src/flow .; do
-            (cd "$crate" && cargo publish --allow-dirty)
-          done
+      - name: Publish crates (skipped)
+        run: echo "Crates.io publish skipped."
 
   build-and-upload:
     needs: publish-crates
