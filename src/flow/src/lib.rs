@@ -15,7 +15,7 @@ pub use catalog::{
 };
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
-    JsonDecoder, JsonEncoder, RecordDecoder,
+    EncoderRegistry, JsonDecoder, JsonEncoder, RecordDecoder,
 };
 pub use datatypes::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type,
@@ -50,7 +50,6 @@ pub use shared_stream::{
     SharedStreamError, SharedStreamInfo, SharedStreamStatus, SharedStreamSubscription,
 };
 
-use codec::EncoderRegistry;
 use connector::{ConnectorRegistry, MqttClientManager};
 use planner::logical::create_logical_plan;
 use processor::{create_processor_pipeline, ProcessorPipeline};

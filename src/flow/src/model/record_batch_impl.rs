@@ -63,17 +63,17 @@ impl Collection for RecordBatch {
             let mut projected_messages = Vec::new();
 
             for field in fields {
-                if let ScalarExpr::Wildcard { source_name } = &field.compiled_expr {
-                    match source_name {
+                match &field.compiled_expr {
+                    ScalarExpr::Wildcard { source_name } => match source_name {
                         Some(prefix) => {
                             if let Some(message) = tuple.message_by_source(prefix) {
                                 projected_messages.push(message.clone());
                             } else {
                                 let qualifier = format!("{}.*", prefix);
                                 return Err(CollectionError::Other(format!(
-                                    "Failed to evaluate expression for field '{}': Column not found: {}",
-                                    field.field_name, qualifier
-                                )));
+                                        "Failed to evaluate expression for field '{}': Column not found: {}",
+                                        field.field_name, qualifier
+                                    )));
                             }
                         }
                         None => {
@@ -84,51 +84,52 @@ impl Collection for RecordBatch {
                                 projected_messages.push(message.clone());
                             }
                         }
+                    },
+                    ScalarExpr::Column(ColumnRef::ByIndex {
+                        source_name,
+                        column_index,
+                    }) => {
+                        let message = tuple.message_by_source(source_name).ok_or_else(|| {
+                            CollectionError::Other(format!(
+                                "Failed to evaluate expression for field '{}': Column not found: {}",
+                                field.field_name, source_name
+                            ))
+                        })?;
+                        let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
+                            CollectionError::Other(format!(
+                                "Failed to evaluate expression for field '{}': Column not found: {}#{}",
+                                field.field_name, source_name, column_index
+                            ))
+                        })?;
+
+                        let entry = if let Some(existing) =
+                            partial_messages.get_mut(source_name.as_str())
+                        {
+                            existing
+                        } else {
+                            partial_messages
+                                .entry(source_name.as_str())
+                                .or_insert_with(|| (Vec::new(), Vec::new()))
+                        };
+                        entry.0.push(col_name.clone());
+                        entry.1.push(value.clone());
                     }
-                    continue;
+                    _ => {
+                        let value =
+                            field
+                                .compiled_expr
+                                .eval_with_tuple(tuple)
+                                .map_err(|eval_error| {
+                                    CollectionError::Other(format!(
+                                        "Failed to evaluate expression for field '{}': {}",
+                                        field.field_name, eval_error
+                                    ))
+                                })?;
+
+                        projected_tuple
+                            .add_affiliate_column(Arc::new(field.field_name.clone()), value);
+                    }
                 }
-
-                if let ScalarExpr::Column(ColumnRef::ByIndex {
-                    source_name,
-                    column_index,
-                }) = &field.compiled_expr
-                {
-                    let message = tuple.message_by_source(source_name).ok_or_else(|| {
-                        CollectionError::Other(format!(
-                            "Failed to evaluate expression for field '{}': Column not found: {}",
-                            field.field_name, source_name
-                        ))
-                    })?;
-                    let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
-                        CollectionError::Other(format!(
-                            "Failed to evaluate expression for field '{}': Column not found: {}#{}",
-                            field.field_name, source_name, column_index
-                        ))
-                    })?;
-
-                    let entry = if let Some(existing) = partial_messages.get_mut(source_name.as_str()) {
-                        existing
-                    } else {
-                        partial_messages
-                            .entry(source_name.as_str())
-                            .or_insert_with(|| (Vec::new(), Vec::new()))
-                    };
-                    entry.0.push(col_name.clone());
-                    entry.1.push(value.clone());
-                    continue;
-                }
-
-                let value = field
-                    .compiled_expr
-                    .eval_with_tuple(tuple)
-                    .map_err(|eval_error| {
-                        CollectionError::Other(format!(
-                            "Failed to evaluate expression for field '{}': {}",
-                            field.field_name, eval_error
-                        ))
-                    })?;
-
-                projected_tuple.add_affiliate_column(Arc::new(field.field_name.clone()), value);
             }
 
             for (source, (keys, values)) in partial_messages {

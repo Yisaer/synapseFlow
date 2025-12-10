@@ -223,7 +223,7 @@ mod tests {
             special: false,
         });
 
-        let select_field = SelectField::new(expr, None);
+        let select_field = SelectField::new(expr.clone(), None, expr.to_string());
         let select_stmt = SelectStmt::with_fields(vec![select_field]);
 
         // Transform aggregate functions (now with direct in-place replacement!)

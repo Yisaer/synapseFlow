@@ -5,6 +5,7 @@ use crate::stream::{
 use flow::catalog::StreamDefinition;
 use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::PipelineDefinition;
+use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
 use storage::{StorageManager, StoredMqttClientConfig, StoredPipeline, StoredStream};
 
@@ -19,12 +20,15 @@ pub fn stored_stream_from_request(req: &CreateStreamRequest) -> Result<StoredStr
 }
 
 /// Rebuild a StreamDefinition from stored raw JSON.
-pub fn stream_definition_from_stored(stored: &StoredStream) -> Result<StreamDefinition, String> {
+pub fn stream_definition_from_stored(
+    stored: &StoredStream,
+    decoder_registry: &DecoderRegistry,
+) -> Result<StreamDefinition, String> {
     let req: CreateStreamRequest = serde_json::from_str(&stored.raw_json)
         .map_err(|err| format!("decode stored stream {}: {err}", stored.id))?;
     let schema = build_schema_from_request(&req)?;
     let props = build_stream_props(&req.stream_type, &req.props)?;
-    let decoder = build_stream_decoder(&req)?;
+    let decoder = build_stream_decoder(&req, decoder_registry)?;
     Ok(StreamDefinition::new(
         req.name.clone(),
         Arc::new(schema),
@@ -46,10 +50,11 @@ pub fn stored_pipeline_from_request(req: &CreatePipelineRequest) -> Result<Store
 /// Rebuild a PipelineDefinition from stored raw JSON.
 pub fn pipeline_definition_from_stored(
     stored: &StoredPipeline,
+    encoder_registry: &EncoderRegistry,
 ) -> Result<PipelineDefinition, String> {
     let req: CreatePipelineRequest = serde_json::from_str(&stored.raw_json)
         .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
-    build_pipeline_definition(&req)
+    build_pipeline_definition(&req, encoder_registry)
 }
 
 pub fn mqtt_config_from_stored(stored: &StoredMqttClientConfig) -> SharedMqttClientConfig {
@@ -75,6 +80,8 @@ pub async fn load_from_storage(
     storage: &StorageManager,
     instance: &flow::FlowInstance,
 ) -> Result<(), String> {
+    let encoder_registry = instance.encoder_registry();
+    let decoder_registry = instance.decoder_registry();
     for cfg in storage.list_mqtt_configs().map_err(|e| e.to_string())? {
         instance
             .create_shared_mqtt_client(mqtt_config_from_stored(&cfg))
@@ -83,7 +90,7 @@ pub async fn load_from_storage(
     }
 
     for stream in storage.list_streams().map_err(|e| e.to_string())? {
-        let def = stream_definition_from_stored(&stream)?;
+        let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
         let shared = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
             .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?
             .shared;
@@ -94,7 +101,7 @@ pub async fn load_from_storage(
     }
 
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
-        let def = pipeline_definition_from_stored(&pipeline)?;
+        let def = pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref())?;
         instance.create_pipeline(def).map_err(|e| e.to_string())?;
     }
     Ok(())

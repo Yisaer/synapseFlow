@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use flow::DecoderRegistry;
 use flow::catalog::{CatalogError, MqttStreamProps, StreamDecoderConfig};
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
@@ -32,8 +33,9 @@ pub struct CreateStreamRequest {
     pub props: StreamPropsRequest,
     #[serde(default)]
     pub shared: bool,
+    /// Decoder identifier, e.g. "json".
     #[serde(default)]
-    pub decoder: Option<StreamDecoderConfigRequest>,
+    pub decoder: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -62,12 +64,6 @@ impl StreamPropsRequest {
     fn to_value(&self) -> JsonValue {
         JsonValue::Object(self.fields.clone())
     }
-}
-
-#[derive(Deserialize, Serialize, Clone, Default)]
-#[serde(default)]
-pub struct StreamDecoderConfigRequest {
-    pub decoder_type: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -142,7 +138,8 @@ pub async fn create_stream_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let decoder = match build_stream_decoder(&req) {
+    let decoder_registry = state.instance.decoder_registry();
+    let decoder = match build_stream_decoder(&req, decoder_registry.as_ref()) {
         Ok(config) => config,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -377,13 +374,13 @@ pub(crate) fn build_stream_props(
 
 pub(crate) fn build_stream_decoder(
     req: &CreateStreamRequest,
+    decoder_registry: &DecoderRegistry,
 ) -> Result<StreamDecoderConfig, String> {
-    let config = req.decoder.clone().unwrap_or_default();
-    Ok(StreamDecoderConfig::new(
-        config
-            .decoder_type
-            .unwrap_or_else(|| format!("{}_decoder", req.name)),
-    ))
+    let decode_type = req.decoder.clone().unwrap_or_else(|| "json".to_string());
+    if !decoder_registry.is_registered(&decode_type) {
+        return Err(format!("decoder kind `{decode_type}` not registered"));
+    }
+    Ok(StreamDecoderConfig { decode_type })
 }
 
 fn column_schema_from_request(

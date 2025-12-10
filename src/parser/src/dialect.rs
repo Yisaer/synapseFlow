@@ -49,9 +49,10 @@ pub fn collect_window_and_group_by_exprs(
     statement: &Statement,
 ) -> Result<(Option<Window>, Vec<Expr>), ParserError> {
     if let Statement::Query(query) = statement
-        && let SetExpr::Select(select) = &*query.body {
-            return split_group_by_window(&select.group_by);
-        }
+        && let SetExpr::Select(select) = &*query.body
+    {
+        return split_group_by_window(&select.group_by);
+    }
 
     Ok((None, Vec::new()))
 }

@@ -16,7 +16,7 @@ edition = "2021"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
 prometheus_exporter = { version = "0.8", optional = true }
 sysinfo = { version = "0.30", optional = true }
-pprof = { version = "0.6.1", features = ["flamegraph", "protobuf"], optional = true }
+pprof = { version = "0.13.0", features = ["flamegraph", "protobuf-codec"], optional = true }
 tikv-jemallocator = { version = "0.6.0", features = ["profiling"], optional = true }
 tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"], optional = true }
 manager = { path = "src/manager" }

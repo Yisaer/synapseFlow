@@ -442,7 +442,7 @@ mod tests {
                 format!("{name}/in"),
                 0,
             )),
-            StreamDecoderConfig::json_default(name),
+            StreamDecoderConfig::json(),
         );
         catalog.upsert(definition);
     }

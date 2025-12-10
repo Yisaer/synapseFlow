@@ -71,18 +71,28 @@ impl StreamSqlParser {
         for item in &select.projection {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    select_fields.push(SelectField::new(expr.clone(), None));
+                    let field_name = expr.to_string();
+                    select_fields.push(SelectField::new(expr.clone(), None, field_name));
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    select_fields.push(SelectField::new(expr.clone(), Some(alias.value.clone())));
+                    let field_name = alias.value.clone();
+                    select_fields.push(SelectField::new(
+                        expr.clone(),
+                        Some(alias.value.clone()),
+                        field_name,
+                    ));
                 }
                 SelectItem::Wildcard(_) => {
-                    select_fields.push(SelectField::new(Expr::Identifier(Ident::new("*")), None));
+                    let expr = Expr::Identifier(Ident::new("*"));
+                    let field_name = expr.to_string();
+                    select_fields.push(SelectField::new(expr, None, field_name));
                 }
                 SelectItem::QualifiedWildcard(object_name, _) => {
                     let mut idents = object_name.0.clone();
                     idents.push(Ident::new("*"));
-                    select_fields.push(SelectField::new(Expr::CompoundIdentifier(idents), None));
+                    let expr = Expr::CompoundIdentifier(idents);
+                    let field_name = expr.to_string();
+                    select_fields.push(SelectField::new(expr, None, field_name));
                 }
             }
         }
@@ -119,7 +129,6 @@ pub fn parse_sql(sql: &str) -> Result<SelectStmt, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Window;
 
     #[test]
     fn test_parse_agg_replacement_expr_field_name() {
@@ -131,6 +140,7 @@ mod tests {
 
         let field = &select_stmt.select_fields[0];
         assert_eq!(field.alias, Some("sum(a) + 1".to_string()));
+        assert_eq!(field.field_name, "sum(a) + 1".to_string());
         assert_eq!(field.expr.to_string(), "col_1 + 1".to_string());
     }
 
@@ -145,6 +155,7 @@ mod tests {
 
         let field = &select_stmt.select_fields[0];
         assert!(field.alias.is_none());
+        assert_eq!(field.field_name, "a + b".to_string());
     }
 
     #[test]
@@ -158,6 +169,7 @@ mod tests {
 
         let field = &select_stmt.select_fields[0];
         assert_eq!(field.alias, Some("total".to_string()));
+        assert_eq!(field.field_name, "total".to_string());
     }
 
     #[test]
@@ -171,13 +183,16 @@ mod tests {
 
         // First field: a
         assert_eq!(select_stmt.select_fields[0].alias, None);
+        assert_eq!(select_stmt.select_fields[0].field_name, "a");
         // Second field: b + c
         assert_eq!(select_stmt.select_fields[1].alias, None);
+        assert_eq!(select_stmt.select_fields[1].field_name, "b + c");
         // Third field: CONCAT with alias
         assert_eq!(
             select_stmt.select_fields[2].alias,
             Some("full_name".to_string())
         );
+        assert_eq!(select_stmt.select_fields[2].field_name, "full_name");
     }
 
     #[test]

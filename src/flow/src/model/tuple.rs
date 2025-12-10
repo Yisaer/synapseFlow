@@ -11,11 +11,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(
-        source: impl Into<Arc<str>>,
-        keys: Vec<Arc<str>>,
-        values: Vec<Arc<Value>>,
-    ) -> Self {
+    pub fn new(source: impl Into<Arc<str>>, keys: Vec<Arc<str>>, values: Vec<Arc<Value>>) -> Self {
         debug_assert_eq!(
             keys.len(),
             values.len(),

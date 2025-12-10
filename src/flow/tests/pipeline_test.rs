@@ -463,7 +463,7 @@ async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<
         "stream".to_string(),
         Arc::new(schema),
         StreamProps::Mqtt(MqttStreamProps::default()),
-        StreamDecoderConfig::json_default("stream"),
+        StreamDecoderConfig::json(),
     );
     instance
         .create_stream(definition, false)

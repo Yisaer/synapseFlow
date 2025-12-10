@@ -38,6 +38,8 @@ pub struct SelectField {
     pub expr: Expr,
     /// Optional alias for this field
     pub alias: Option<String>,
+    /// The exposed name for this field (alias or expression string)
+    pub field_name: String,
 }
 
 impl SelectStmt {
@@ -93,7 +95,11 @@ impl Default for SelectStmt {
 
 impl SelectField {
     /// Create a new SelectField
-    pub fn new(expr: Expr, alias: Option<String>) -> Self {
-        Self { expr, alias }
+    pub fn new(expr: Expr, alias: Option<String>, field_name: String) -> Self {
+        Self {
+            expr,
+            alias,
+            field_name,
+        }
     }
 }

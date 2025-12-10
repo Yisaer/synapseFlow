@@ -110,26 +110,18 @@ impl StreamDefinition {
 /// Configuration describing which decoder should be used for a stream's payloads.
 #[derive(Debug, Clone)]
 pub struct StreamDecoderConfig {
-    decoder_id: String,
+    pub decode_type: String,
 }
 
 impl StreamDecoderConfig {
-    pub fn new(decoder_id: impl Into<String>) -> Self {
-        Self {
-            decoder_id: decoder_id.into(),
-        }
-    }
-
-    pub fn decoder_id(&self) -> &str {
-        &self.decoder_id
-    }
-
     pub fn kind(&self) -> &str {
-        "json"
+        &self.decode_type
     }
 
-    pub fn json_default(stream_id: &str) -> Self {
-        Self::new(format!("{stream_id}_decoder"))
+    pub fn json() -> Self {
+        Self {
+            decode_type: "json".to_string(),
+        }
     }
 }
 

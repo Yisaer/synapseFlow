@@ -786,7 +786,7 @@ mod tests {
             "test_source".to_string(),
             None,
             schema,
-            StreamDecoderConfig::json_default("test_source"),
+            StreamDecoderConfig::json(),
             0,
         )));
 

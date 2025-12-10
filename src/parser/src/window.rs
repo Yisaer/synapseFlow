@@ -36,9 +36,10 @@ impl Window {
 /// Attempt to parse a window function from an expression
 pub fn parse_window_expr(expr: &Expr) -> Result<Option<Window>, ParserError> {
     if let Expr::Function(function) = expr
-        && is_supported_window_function(&function.name.to_string()) {
-            return parse_window_function(function).map(Some);
-        }
+        && is_supported_window_function(&function.name.to_string())
+    {
+        return parse_window_function(function).map(Some);
+    }
 
     Ok(None)
 }
