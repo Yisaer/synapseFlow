@@ -32,8 +32,9 @@ pub struct CreateStreamRequest {
     pub props: StreamPropsRequest,
     #[serde(default)]
     pub shared: bool,
+    /// Decoder identifier, e.g. "json".
     #[serde(default)]
-    pub decoder: Option<StreamDecoderConfigRequest>,
+    pub decoder: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -62,12 +63,6 @@ impl StreamPropsRequest {
     fn to_value(&self) -> JsonValue {
         JsonValue::Object(self.fields.clone())
     }
-}
-
-#[derive(Deserialize, Serialize, Clone, Default)]
-#[serde(default)]
-pub struct StreamDecoderConfigRequest {
-    pub decoder_type: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -378,12 +373,8 @@ pub(crate) fn build_stream_props(
 pub(crate) fn build_stream_decoder(
     req: &CreateStreamRequest,
 ) -> Result<StreamDecoderConfig, String> {
-    let config = req.decoder.clone().unwrap_or_default();
-    Ok(StreamDecoderConfig::new(
-        config
-            .decoder_type
-            .unwrap_or_else(|| format!("{}_decoder", req.name)),
-    ))
+    let decode_type = req.decoder.clone().unwrap_or_else(|| "json".to_string());
+    Ok(StreamDecoderConfig::new(decode_type))
 }
 
 fn column_schema_from_request(
