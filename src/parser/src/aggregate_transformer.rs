@@ -4,16 +4,19 @@
 //! To: SELECT col_1 + 1 FROM t GROUP BY b HAVING col_2 > 0
 //! And records the mapping: sum(a) -> col_1, sum(c) -> col_2
 
+use crate::aggregate_registry::AggregateRegistry;
 use crate::select_stmt::SelectStmt;
 use crate::visitor::extract_aggregates_with_visitor;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Ident};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Transform aggregate functions in a SELECT statement and return aggregate mappings
 /// Uses visitor pattern for efficient traversal - now with direct in-place replacement!
 /// Returns: HashMap where key is replacement column name (e.g., "col_1") and value is original aggregate expression
 pub fn transform_aggregate_functions(
     mut select_stmt: SelectStmt,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
 ) -> Result<(SelectStmt, HashMap<String, Expr>), String> {
     let mut all_aggregates = HashMap::new();
     let mut replacement_counter = 0;
@@ -21,7 +24,11 @@ pub fn transform_aggregate_functions(
     // Process select fields: extract aggregates and replace in one step
     for field in &mut select_stmt.select_fields {
         let (new_expr, field_aggregates) =
-            extract_and_replace_aggregates(&field.expr, &mut replacement_counter)?;
+            extract_and_replace_aggregates(
+                &field.expr,
+                &mut replacement_counter,
+                aggregate_registry.clone(),
+            )?;
 
         if !field_aggregates.is_empty() && field.alias.is_none() {
             field.alias = Some(field.expr.to_string());
@@ -38,7 +45,11 @@ pub fn transform_aggregate_functions(
     // Process HAVING clause: extract aggregates and replace in one step
     if let Some(having_expr) = &mut select_stmt.having {
         let (new_having, having_aggregates) =
-            extract_and_replace_aggregates(having_expr, &mut replacement_counter)?;
+            extract_and_replace_aggregates(
+                having_expr,
+                &mut replacement_counter,
+                aggregate_registry,
+            )?;
 
         // Update the having expression
         *having_expr = new_having;
@@ -59,9 +70,10 @@ pub fn transform_aggregate_functions(
 fn extract_and_replace_aggregates(
     expr: &Expr,
     replacement_counter: &mut usize,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
 ) -> Result<(Expr, HashMap<String, Expr>), String> {
     // First, extract all aggregates from this expression
-    let aggregates = extract_aggregates_with_visitor(expr);
+    let aggregates = extract_aggregates_with_visitor(expr, aggregate_registry);
 
     if aggregates.is_empty() {
         return Ok((expr.clone(), HashMap::new()));
@@ -94,17 +106,6 @@ fn replace_aggregates_in_expression(
     mapping: &HashMap<String, String>,
 ) -> Result<Expr, String> {
     match expr {
-        // If this is an aggregate function, replace it
-        Expr::Function(func) if is_aggregate_function(&func.name.to_string()) => {
-            let expr_str = format!("{:?}", expr);
-            if let Some(replacement_name) = mapping.get(&expr_str) {
-                Ok(Expr::Identifier(Ident::new(replacement_name)))
-            } else {
-                // This aggregate was not in our mapping (shouldn't happen)
-                Err(format!("No replacement found for aggregate: {}", expr_str))
-            }
-        }
-
         // For binary operations, recursively replace in left and right
         Expr::BinaryOp { left, op, right } => {
             let new_left = replace_aggregates_in_expression(left, mapping)?;
@@ -172,6 +173,11 @@ fn replace_aggregates_in_expression(
 
         // For function calls that are not aggregates, check their arguments
         Expr::Function(func) => {
+            let expr_str = format!("{:?}", expr);
+            if let Some(replacement_name) = mapping.get(&expr_str) {
+                return Ok(Expr::Identifier(Ident::new(replacement_name)));
+            }
+
             let mut new_args = Vec::new();
             for arg in &func.args {
                 if let FunctionArg::Unnamed(FunctionArgExpr::Expr(inner_expr)) = arg {
@@ -192,15 +198,10 @@ fn replace_aggregates_in_expression(
     }
 }
 
-/// Helper function to identify aggregate functions
-fn is_aggregate_function(function_name: &str) -> bool {
-    let aggregates = ["sum", "count", "avg", "min", "max", "stddev", "variance"];
-    aggregates.contains(&function_name.to_lowercase().as_str())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aggregate_registry::default_aggregate_registry;
     use crate::SelectField;
     use sqlparser::ast::FunctionArg;
     use sqlparser::ast::FunctionArgExpr;
@@ -228,7 +229,8 @@ mod tests {
 
         // Transform aggregate functions (now with direct in-place replacement!)
         let (transformed_stmt, aggregate_mappings) =
-            transform_aggregate_functions(select_stmt).expect("Should transform successfully");
+            transform_aggregate_functions(select_stmt, default_aggregate_registry())
+                .expect("Should transform successfully");
 
         // Verify results
         assert_eq!(aggregate_mappings.len(), 1);

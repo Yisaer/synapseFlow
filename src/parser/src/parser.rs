@@ -1,21 +1,30 @@
 use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
 use sqlparser::parser::Parser;
 
+use crate::aggregate_registry::{default_aggregate_registry, AggregateRegistry};
 use crate::aggregate_transformer::transform_aggregate_functions;
 use crate::dialect::StreamDialect;
 use crate::select_stmt::{SelectField, SelectStmt};
 use crate::visitor::TableInfoVisitor;
+use std::sync::Arc;
 
 /// SQL Parser based on StreamDialect
 pub struct StreamSqlParser {
     dialect: StreamDialect,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
 }
 
 impl StreamSqlParser {
     /// Create a new StreamSqlParser
     pub fn new() -> Self {
+        Self::with_registry(default_aggregate_registry())
+    }
+
+    /// Create a StreamSqlParser with a specific aggregate registry
+    pub fn with_registry(aggregate_registry: Arc<dyn AggregateRegistry>) -> Self {
         Self {
             dialect: StreamDialect::new(),
+            aggregate_registry,
         }
     }
 
@@ -43,7 +52,10 @@ impl StreamSqlParser {
         select_stmt.group_by_exprs = group_by_exprs;
 
         // Transform aggregate functions in one step (search + replace)
-        let (transformed_stmt, _aggregate_mappings) = transform_aggregate_functions(select_stmt)?;
+        let (transformed_stmt, _aggregate_mappings) = transform_aggregate_functions(
+            select_stmt,
+            Arc::clone(&self.aggregate_registry),
+        )?;
 
         Ok(transformed_stmt)
     }
@@ -123,6 +135,15 @@ impl Default for StreamSqlParser {
 /// Convenience function to parse SQL and return SelectStmt
 pub fn parse_sql(sql: &str) -> Result<SelectStmt, String> {
     let parser = StreamSqlParser::new();
+    parser.parse(sql)
+}
+
+/// Convenience function to parse SQL with an explicit aggregate registry
+pub fn parse_sql_with_registry(
+    sql: &str,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
+) -> Result<SelectStmt, String> {
+    let parser = StreamSqlParser::with_registry(aggregate_registry);
     parser.parse(sql)
 }
 

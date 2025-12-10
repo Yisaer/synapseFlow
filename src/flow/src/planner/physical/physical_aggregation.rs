@@ -1,3 +1,4 @@
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::expr::sql_conversion::{convert_expr_to_scalar_with_bindings, SchemaBinding};
 use crate::expr::ScalarExpr;
 use crate::planner::physical::BasePhysicalPlan;
@@ -9,20 +10,9 @@ use std::sync::Arc;
 use super::PhysicalPlan;
 
 #[derive(Debug, Clone)]
-pub enum AggregateFunction {
-    Sum,
-    Count,
-    Avg,
-    Min,
-    Max,
-    Stddev,
-    Variance,
-}
-
-#[derive(Debug, Clone)]
 pub struct AggregateCall {
     pub output_column: String,
-    pub func: AggregateFunction,
+    pub func_name: String,
     pub args: Vec<ScalarExpr>,
     pub distinct: bool,
 }
@@ -40,10 +30,11 @@ impl PhysicalAggregation {
         children: Vec<Arc<PhysicalPlan>>,
         index: i64,
         bindings: &SchemaBinding,
+        aggregate_registry: &AggregateFunctionRegistry,
     ) -> Result<Self, String> {
         let mut aggregate_calls = Vec::new();
         for (output_column, expr) in &aggregate_mappings {
-            let call = build_aggregate_call(output_column, expr, bindings)?;
+            let call = build_aggregate_call(output_column, expr, bindings, aggregate_registry)?;
             aggregate_calls.push(call);
         }
 
@@ -59,22 +50,14 @@ fn build_aggregate_call(
     output_column: &str,
     expr: &Expr,
     bindings: &SchemaBinding,
+    aggregate_registry: &AggregateFunctionRegistry,
 ) -> Result<AggregateCall, String> {
     match expr {
         Expr::Function(func) => {
             let func_name = func.name.to_string().to_lowercase();
-            let agg_func = match func_name.as_str() {
-                "sum" => AggregateFunction::Sum,
-                "count" => AggregateFunction::Count,
-                "avg" => AggregateFunction::Avg,
-                "min" => AggregateFunction::Min,
-                "max" => AggregateFunction::Max,
-                "stddev" => AggregateFunction::Stddev,
-                "variance" => AggregateFunction::Variance,
-                other => {
-                    return Err(format!("Unsupported aggregate function: {}", other));
-                }
-            };
+            if !aggregate_registry.is_registered(&func_name) {
+                return Err(format!("Unsupported aggregate function: {}", func_name));
+            }
 
             let args = extract_aggregate_args(func.args.as_slice(), bindings).map_err(|err| {
                 format!(
@@ -85,7 +68,7 @@ fn build_aggregate_call(
 
             Ok(AggregateCall {
                 output_column: output_column.to_string(),
-                func: agg_func,
+                func_name,
                 args,
                 distinct: func.distinct,
             })

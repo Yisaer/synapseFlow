@@ -19,7 +19,7 @@ pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
 pub use physical_encoder::PhysicalEncoder;
 pub use physical_filter::PhysicalFilter;
-pub use physical_aggregation::{AggregateCall, AggregateFunction, PhysicalAggregation};
+pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;

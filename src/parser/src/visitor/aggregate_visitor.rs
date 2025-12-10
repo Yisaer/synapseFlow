@@ -2,8 +2,10 @@
 //! Uses sqlparser's visitor pattern to efficiently detect and extract aggregate functions
 //! Now with duplicate detection: same aggregate function gets same replacement name
 
+use crate::aggregate_registry::{default_aggregate_registry, AggregateRegistry};
 use sqlparser::ast::{Expr, Visit, Visitor};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Visitor that collects aggregate functions from SQL expressions
 /// Enhanced with duplicate detection - same aggregate function gets same replacement name
@@ -15,21 +17,18 @@ pub struct AggregateVisitor {
     replacement_counter: usize,
     /// Reverse lookup: expr_string -> replacement_name (for duplicate detection)
     expr_to_replacement: HashMap<String, String>,
+    /// Aggregate registry to check supported aggregate functions
+    aggregate_registry: Arc<dyn AggregateRegistry>,
 }
 
 impl AggregateVisitor {
-    pub fn new() -> Self {
+    pub fn new(aggregate_registry: Arc<dyn AggregateRegistry>) -> Self {
         Self {
             aggregates: HashMap::new(),
             replacement_counter: 0,
             expr_to_replacement: HashMap::new(),
+            aggregate_registry,
         }
-    }
-
-    /// Check if a function is an aggregate function
-    fn is_aggregate_function(&self, function_name: &str) -> bool {
-        let aggregates = ["sum", "count", "avg", "min", "max", "stddev", "variance"];
-        aggregates.contains(&function_name.to_lowercase().as_str())
     }
 
     /// Generate a replacement column name using local counter
@@ -56,7 +55,7 @@ impl AggregateVisitor {
 
 impl Default for AggregateVisitor {
     fn default() -> Self {
-        Self::new()
+        Self::new(default_aggregate_registry())
     }
 }
 
@@ -66,7 +65,7 @@ impl Visitor for AggregateVisitor {
     fn pre_visit_expr(&mut self, expr: &Expr) -> std::ops::ControlFlow<()> {
         if let Expr::Function(func) = expr {
             let func_name = func.name.to_string();
-            if self.is_aggregate_function(&func_name) {
+            if self.aggregate_registry.is_aggregate_function(&func_name) {
                 // Check if we've already seen this exact aggregate expression
                 if let Some(_existing_replacement) = self.find_existing_replacement(expr) {
                     // We've seen this exact aggregate before, skip it
@@ -91,15 +90,21 @@ impl Visitor for AggregateVisitor {
 
 /// Simple function to extract aggregate functions using visitor pattern
 /// Returns: HashMap<replacement_name, (function_name, original_expr)>
-pub fn extract_aggregates_with_visitor(expr: &Expr) -> HashMap<String, (String, Expr)> {
-    let mut visitor = AggregateVisitor::new();
+pub fn extract_aggregates_with_visitor(
+    expr: &Expr,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
+) -> HashMap<String, (String, Expr)> {
+    let mut visitor = AggregateVisitor::new(aggregate_registry);
     let _ = expr.visit(&mut visitor);
     visitor.aggregates
 }
 
 /// Check if an expression contains aggregate functions using visitor
-pub fn contains_aggregates_with_visitor(expr: &Expr) -> bool {
-    let mut visitor = AggregateVisitor::new();
+pub fn contains_aggregates_with_visitor(
+    expr: &Expr,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
+) -> bool {
+    let mut visitor = AggregateVisitor::new(aggregate_registry);
     let _ = expr.visit(&mut visitor);
     !visitor.aggregates.is_empty()
 }
@@ -107,6 +112,8 @@ pub fn contains_aggregates_with_visitor(expr: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aggregate_registry::{default_aggregate_registry, StaticAggregateRegistry};
+    use std::sync::Arc;
     use sqlparser::ast::FunctionArg;
     use sqlparser::ast::FunctionArgExpr;
     use sqlparser::ast::ObjectName;
@@ -130,7 +137,7 @@ mod tests {
             special: false,
         });
 
-        let mappings = extract_aggregates_with_visitor(&expr);
+        let mappings = extract_aggregates_with_visitor(&expr, default_aggregate_registry());
 
         assert_eq!(mappings.len(), 1);
         assert!(mappings.contains_key("col_1"));
@@ -177,7 +184,8 @@ mod tests {
             })),
         };
 
-        let mappings = extract_aggregates_with_visitor(&expr);
+        let registry = Arc::new(StaticAggregateRegistry::new(["sum"]));
+        let mappings = extract_aggregates_with_visitor(&expr, registry);
 
         // Should only find ONE aggregate, not two!
         assert_eq!(
@@ -229,7 +237,8 @@ mod tests {
             })),
         };
 
-        let mappings = extract_aggregates_with_visitor(&expr);
+        let registry = Arc::new(StaticAggregateRegistry::new(["sum", "count"]));
+        let mappings = extract_aggregates_with_visitor(&expr, registry);
 
         // Should find TWO different aggregates
         assert_eq!(mappings.len(), 2, "Should find two different aggregates");
@@ -280,7 +289,7 @@ mod tests {
             })),
         };
 
-        let mappings = extract_aggregates_with_visitor(&expr);
+        let mappings = extract_aggregates_with_visitor(&expr, default_aggregate_registry());
 
         // Should find TWO different aggregates (different args)
         assert_eq!(
