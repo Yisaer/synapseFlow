@@ -90,6 +90,7 @@ impl ServerContext {
 /// Initialize the Flow server: metrics/profiling, storage, FlowInstance, and catalog load.
 pub async fn init(
     opts: ServerOptions,
+    instance: FlowInstance,
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
     log_allocator();
     let profiling_enabled = opts
@@ -117,7 +118,6 @@ pub async fn init(
         storage.base_dir().display()
     );
 
-    let instance = FlowInstance::new();
     storage_bridge::load_from_storage(&storage, &instance)
         .await
         .map_err(|err| format!("failed to load from storage: {err}"))?;
@@ -332,6 +332,12 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
     } else {
         (target, None)
     }
+}
+
+/// Prepare Flow registries/instance before initialization, so callers can
+/// register custom encoders/decoders/connectors prior to loading storage.
+pub fn prepare_registry() -> FlowInstance {
+    FlowInstance::new()
 }
 
 #[cfg(feature = "profiling")]

@@ -51,7 +51,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         manager_addr: None,
     };
 
-    let ctx = server::init(options).await?;
-    // Inject custom registrations on ctx.instance() here before starting, if needed.
+    // Prepare the FlowInstance so callers can register custom codecs/connectors.
+    let instance = server::prepare_registry();
+    // Inject custom registrations on `instance` here before starting, if needed.
+
+    let ctx = server::init(options, instance).await?;
     server::start(ctx).await
 }
