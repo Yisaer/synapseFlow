@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use flow::DecoderRegistry;
 use flow::catalog::{CatalogError, MqttStreamProps, StreamDecoderConfig};
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
@@ -137,7 +138,8 @@ pub async fn create_stream_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let decoder = match build_stream_decoder(&req) {
+    let decoder_registry = state.instance.decoder_registry();
+    let decoder = match build_stream_decoder(&req, decoder_registry.as_ref()) {
         Ok(config) => config,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -372,8 +374,12 @@ pub(crate) fn build_stream_props(
 
 pub(crate) fn build_stream_decoder(
     req: &CreateStreamRequest,
+    decoder_registry: &DecoderRegistry,
 ) -> Result<StreamDecoderConfig, String> {
     let decode_type = req.decoder.clone().unwrap_or_else(|| "json".to_string());
+    if !decoder_registry.is_registered(&decode_type) {
+        return Err(format!("decoder kind `{decode_type}` not registered"));
+    }
     Ok(StreamDecoderConfig::new(decode_type))
 }
 

@@ -65,6 +65,11 @@ impl DecoderRegistry {
         factory(config, schema, stream_name)
     }
 
+    pub fn is_registered(&self, kind: &str) -> bool {
+        let guard = self.factories.read().expect("decoder registry poisoned");
+        guard.contains_key(kind)
+    }
+
     fn register_builtin_decoders(&self) {
         self.register_decoder(
             "json",
@@ -127,6 +132,11 @@ impl EncoderRegistry {
             .get(kind)
             .ok_or_else(|| CodecError::Other(format!("encoder kind `{kind}` not registered")))?;
         (factory.factory)(config)
+    }
+
+    pub fn is_registered(&self, kind: &str) -> bool {
+        let guard = self.factories.read().expect("encoder registry poisoned");
+        guard.contains_key(kind)
     }
 
     pub fn supports_streaming(&self, kind: &str) -> bool {

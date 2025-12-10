@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
     MqttSinkProps, PipelineDefinition, PipelineError, PipelineStatus, SinkDefinition, SinkProps,
@@ -62,8 +63,9 @@ pub struct CreatePipelineSinkRequest {
     pub props: SinkPropsRequest,
     #[serde(rename = "commonSinkProps", default)]
     pub common: CommonSinkPropsRequest,
+    /// Encoder kind as a flat string, e.g. "json"
     #[serde(default)]
-    pub encoder: SinkEncoderRequest,
+    pub encoder: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -109,12 +111,6 @@ pub struct CommonSinkPropsRequest {
     pub batch_duration_ms: Option<u64>,
 }
 
-#[derive(Deserialize, Serialize, Default, Clone)]
-#[serde(default)]
-pub struct SinkEncoderRequest {
-    pub kind: Option<String>,
-}
-
 pub async fn create_pipeline_handler(
     State(state): State<AppState>,
     Json(req): Json<CreatePipelineRequest>,
@@ -122,6 +118,11 @@ pub async fn create_pipeline_handler(
     if let Err(err) = validate_create_request(&req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let encoder_registry = state.instance.encoder_registry();
+    let definition = match build_pipeline_definition(&req, encoder_registry.as_ref()) {
+        Ok(def) => def,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let stored = match storage_bridge::stored_pipeline_from_request(&req) {
         Ok(stored) => stored,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -144,13 +145,6 @@ pub async fn create_pipeline_handler(
         }
     }
 
-    let definition = match storage_bridge::pipeline_definition_from_stored(&stored) {
-        Ok(def) => def,
-        Err(err) => {
-            let _ = state.storage.delete_pipeline(&stored.id);
-            return (StatusCode::BAD_REQUEST, err).into_response();
-        }
-    };
     match state.instance.create_pipeline(definition) {
         Ok(snapshot) => {
             println!("[manager] pipeline {} created", snapshot.definition.id());
@@ -283,6 +277,7 @@ fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
 
 pub(crate) fn build_pipeline_definition(
     req: &CreatePipelineRequest,
+    encoder_registry: &EncoderRegistry,
 ) -> Result<PipelineDefinition, String> {
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
@@ -316,11 +311,10 @@ pub(crate) fn build_pipeline_definition(
         };
         let encoder_kind = sink_req
             .encoder
-            .kind
             .clone()
             .unwrap_or_else(|| "json".to_string());
-        if !encoder_kind.eq_ignore_ascii_case("json") {
-            return Err(format!("unsupported sink encoder kind: {}", encoder_kind));
+        if !encoder_registry.is_registered(&encoder_kind) {
+            return Err(format!("encoder kind `{encoder_kind}` not registered"));
         }
         let encoder_config = SinkEncoderConfig::new(encoder_kind);
         let sink_definition = sink_definition
