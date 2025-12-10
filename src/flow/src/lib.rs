@@ -1,3 +1,4 @@
+pub mod aggregation;
 pub mod catalog;
 pub mod codec;
 pub mod connector;
@@ -13,6 +14,7 @@ pub use catalog::{
     Catalog, CatalogError, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
     StreamType,
 };
+pub use aggregation::AggregateFunctionRegistry;
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
     EncoderRegistry, JsonDecoder, JsonEncoder, RecordDecoder,
@@ -67,6 +69,7 @@ pub struct PipelineRegistries {
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
 }
 
 impl PipelineRegistries {
@@ -74,11 +77,13 @@ impl PipelineRegistries {
         connector_registry: Arc<ConnectorRegistry>,
         encoder_registry: Arc<EncoderRegistry>,
         decoder_registry: Arc<DecoderRegistry>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
         Self {
             connector_registry,
             encoder_registry,
             decoder_registry,
+            aggregate_registry,
         }
     }
 
@@ -93,6 +98,10 @@ impl PipelineRegistries {
     pub fn decoder_registry(&self) -> Arc<DecoderRegistry> {
         Arc::clone(&self.decoder_registry)
     }
+
+    pub fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
+        Arc::clone(&self.aggregate_registry)
+    }
 }
 
 fn build_physical_plan_from_sql(
@@ -100,16 +109,20 @@ fn build_physical_plan_from_sql(
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
 ) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql(sql)?;
+    let select_stmt =
+        parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     println!("[LogicalPlan] topology:");
     logical_plan.print_topology(0);
-    let physical_plan =
-        create_physical_plan(Arc::clone(&logical_plan), &schema_binding, encoder_registry)?;
+    let physical_plan = create_physical_plan(
+        Arc::clone(&logical_plan),
+        &schema_binding,
+        registries,
+    )?;
     Ok(physical_plan)
 }
 
@@ -151,6 +164,7 @@ fn build_schema_binding(
 /// # Example
 /// ```no_run
 /// use flow::{
+///     aggregation::AggregateFunctionRegistry,
 ///     catalog::Catalog,
 ///     connector::MqttClientManager,
 ///     connector::ConnectorRegistry,
@@ -168,10 +182,12 @@ fn build_schema_binding(
 /// let catalog = Catalog::new();
 /// let registry = shared_stream_registry();
 /// let mqtt_clients = MqttClientManager::new();
+/// let aggregate_registry = AggregateFunctionRegistry::with_builtins();
 /// let registries = PipelineRegistries::new(
 ///     ConnectorRegistry::with_builtin_sinks(),
 ///     EncoderRegistry::with_builtin_encoders(),
 ///     DecoderRegistry::with_builtin_decoders(),
+///     aggregate_registry,
 /// );
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
@@ -197,20 +213,15 @@ pub fn create_pipeline(
     mqtt_client_manager: MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let encoder_registry = registries.encoder_registry();
-    let physical_plan = build_physical_plan_from_sql(
-        sql,
-        sinks,
-        catalog,
-        shared_stream_registry,
-        encoder_registry.as_ref(),
-    )?;
+    let physical_plan =
+        build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry, registries)?;
     let pipeline = create_processor_pipeline(
         physical_plan,
         mqtt_client_manager,
         registries.connector_registry(),
-        encoder_registry,
+        registries.encoder_registry(),
         registries.decoder_registry(),
+        registries.aggregate_registry(),
     )?;
     Ok(pipeline)
 }

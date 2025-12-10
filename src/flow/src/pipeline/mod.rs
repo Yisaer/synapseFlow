@@ -1,3 +1,4 @@
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{
@@ -10,7 +11,7 @@ use crate::shared_stream::SharedStreamRegistry;
 use crate::{
     create_pipeline, PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
 };
-use parser::parse_sql;
+use parser::parse_sql_with_registry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -186,6 +187,7 @@ pub struct PipelineManager {
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
 }
 
 impl PipelineManager {
@@ -196,6 +198,7 @@ impl PipelineManager {
         connector_registry: Arc<ConnectorRegistry>,
         decoder_registry: Arc<DecoderRegistry>,
         encoder_registry: Arc<EncoderRegistry>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
         Self {
             pipelines: RwLock::new(HashMap::new()),
@@ -205,6 +208,7 @@ impl PipelineManager {
             connector_registry,
             encoder_registry,
             decoder_registry,
+            aggregate_registry,
         }
     }
 
@@ -218,6 +222,7 @@ impl PipelineManager {
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
+            Arc::clone(&self.aggregate_registry),
         );
         let (pipeline, streams) = build_pipeline_runtime(
             &definition,
@@ -304,7 +309,11 @@ fn build_pipeline_runtime(
     mqtt_client_manager: &MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let select_stmt = parse_sql(definition.sql()).map_err(|err| err.to_string())?;
+    let select_stmt = parse_sql_with_registry(
+        definition.sql(),
+        registries.aggregate_registry(),
+    )
+    .map_err(|err| err.to_string())?;
     let streams: Vec<String> = select_stmt
         .source_infos
         .iter()
@@ -472,6 +481,7 @@ mod tests {
         let connector_registry = ConnectorRegistry::with_builtin_sinks();
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         install_stream(&catalog, "test_stream");
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -480,6 +490,7 @@ mod tests {
             Arc::clone(&connector_registry),
             Arc::clone(&decoder_registry),
             Arc::clone(&encoder_registry),
+            Arc::clone(&aggregate_registry),
         );
         let snapshot = manager
             .create_pipeline(sample_pipeline("pipe_a", "test_stream"))
@@ -502,6 +513,7 @@ mod tests {
         let connector_registry = ConnectorRegistry::with_builtin_sinks();
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         install_stream(&catalog, "dup_stream");
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -510,6 +522,7 @@ mod tests {
             connector_registry,
             decoder_registry,
             encoder_registry,
+            aggregate_registry,
         );
         manager
             .create_pipeline(sample_pipeline("dup_pipe", "dup_stream"))

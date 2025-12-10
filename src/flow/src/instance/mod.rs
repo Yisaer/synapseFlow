@@ -7,6 +7,7 @@ use crate::connector::{
     ConnectorError, ConnectorRegistry, MqttClientManager, MqttSourceConfig, MqttSourceConnector,
     SharedMqttClientConfig,
 };
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
 use crate::processor::ProcessorPipeline;
 use crate::shared_stream::{
@@ -28,6 +29,7 @@ pub struct FlowInstance {
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
 }
 
 impl FlowInstance {
@@ -39,6 +41,7 @@ impl FlowInstance {
         let connector_registry = ConnectorRegistry::with_builtin_sinks();
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
             shared_stream_registry,
@@ -46,6 +49,7 @@ impl FlowInstance {
             Arc::clone(&connector_registry),
             Arc::clone(&decoder_registry),
             Arc::clone(&encoder_registry),
+            Arc::clone(&aggregate_registry),
         ));
         Self {
             catalog,
@@ -56,6 +60,7 @@ impl FlowInstance {
             connector_registry,
             encoder_registry,
             decoder_registry,
+            aggregate_registry,
         }
     }
 
@@ -241,11 +246,16 @@ impl FlowInstance {
         Arc::clone(&self.decoder_registry)
     }
 
+    pub fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
+        Arc::clone(&self.aggregate_registry)
+    }
+
     fn pipeline_registries(&self) -> PipelineRegistries {
         PipelineRegistries::new(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
+            Arc::clone(&self.aggregate_registry),
         )
     }
 

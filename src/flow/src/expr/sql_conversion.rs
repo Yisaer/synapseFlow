@@ -281,16 +281,29 @@ fn convert_identifier_to_column(
     if column_name == "*" {
         return Ok(ScalarExpr::wildcard_all());
     }
-    if bindings.entries().is_empty() {
-        return Ok(ScalarExpr::column("", column_name));
+
+    if is_aggregate_placeholder(column_name) {
+        // Aggregation placeholders (e.g., col_1) are produced during aggregate rewrite
+        // and do not belong to any source schema. Treat them as derived columns.
+        return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
     }
+    
+    if bindings.entries().is_empty() {
+        return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
+    }
+    
     match resolve_column_binding(None, column_name, bindings) {
-        Ok((source_name, index)) => Ok(ScalarExpr::column_with_index(
+        Ok((source_name, index)) => ScalarExpr::column_with_index(
             source_name,
             column_name.to_string(),
             Some(index),
-        )),
-        Err(_) => Ok(ScalarExpr::column("", column_name.to_string())),
+        ).map_err(ConversionError::InvalidColumnReference),
+        Err(_err) => {
+            Err(ConversionError::ColumnNotFound(format!(
+                "No schema bindings available for identifier '{}",
+               column_name
+            )))
+        }
     }
 }
 
@@ -327,15 +340,18 @@ fn convert_compound_identifier_to_column(
             let column_name = &idents[1].value;
 
             if bindings.entries().is_empty() {
-                return Ok(ScalarExpr::column(source_name, column_name));
+                return Err(ConversionError::ColumnNotFound(format!(
+                    "No schema bindings available for compound identifier '{}.{}",
+                    source_name, column_name
+                )));
             }
             let (resolved_source, index) =
                 resolve_column_binding(Some(source_name), column_name, bindings)?;
-            Ok(ScalarExpr::column_with_index(
+            ScalarExpr::column_with_index(
                 resolved_source,
                 column_name,
                 Some(index),
-            ))
+            ).map_err(ConversionError::InvalidColumnReference)
         }
         _ => Err(ConversionError::InvalidColumnReference(format!(
             "Unsupported compound identifier with {} parts. Only 1 or 2 parts are supported.",
@@ -377,6 +393,10 @@ fn resolve_column_binding(
     } else {
         Err(ConversionError::ColumnNotFound(column_name.to_string()))
     }
+}
+
+fn is_aggregate_placeholder(name: &str) -> bool {
+    name.starts_with("col_") && name[4..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Convert JsonAccess (struct field access like a->b) to ScalarExpr

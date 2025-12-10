@@ -5,16 +5,18 @@ use crate::expr::sql_conversion::{
     convert_expr_to_scalar_with_bindings, SchemaBinding, SchemaBindingEntry, SourceBindingKind,
 };
 use crate::planner::logical::{
-    DataSinkPlan, DataSource as LogicalDataSource, Filter as LogicalFilter, LogicalPlan,
-    LogicalWindow, LogicalWindowSpec, Project as LogicalProject,
+    aggregation::Aggregation as LogicalAggregation, DataSinkPlan, DataSource as LogicalDataSource,
+    Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec,
+    Project as LogicalProject,
 };
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalEncoder, PhysicalFilter,
-    PhysicalPlan, PhysicalProject, PhysicalResultCollect, PhysicalSharedStream,
+    PhysicalAggregation, PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalEncoder,
+    PhysicalFilter, PhysicalPlan, PhysicalProject, PhysicalResultCollect, PhysicalSharedStream,
     PhysicalSinkConnector, PhysicalStreamingEncoder,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
+use crate::{PipelineRegistries};
 use std::sync::Arc;
 
 /// Physical plan builder that manages index allocation and node caching
@@ -67,10 +69,10 @@ impl Default for PhysicalPlanBuilder {
 pub fn create_physical_plan(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let mut builder = PhysicalPlanBuilder::new();
-    create_physical_plan_with_builder_cached(logical_plan, bindings, encoder_registry, &mut builder)
+    create_physical_plan_with_builder_cached(logical_plan, bindings, registries, &mut builder)
 }
 
 /// Create a physical plan from a logical plan using centralized index management
@@ -80,10 +82,10 @@ pub fn create_physical_plan(
 pub fn create_physical_plan_with_builder(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    create_physical_plan_with_builder_cached(logical_plan, bindings, encoder_registry, builder)
+    create_physical_plan_with_builder_cached(logical_plan, bindings, registries, builder)
 }
 
 /// Create a physical plan from a logical plan using centralized index management with node caching
@@ -93,7 +95,7 @@ pub fn create_physical_plan_with_builder(
 fn create_physical_plan_with_builder_cached(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let logical_index = logical_plan.get_plan_index();
@@ -119,21 +121,30 @@ fn create_physical_plan_with_builder_cached(
             logical_filter,
             &logical_plan,
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?,
         LogicalPlan::Project(logical_project) => create_physical_project_with_builder_cached(
             logical_project,
             &logical_plan,
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?,
+        LogicalPlan::Aggregation(logical_agg) => {
+            create_physical_aggregation_with_builder(
+                logical_agg,
+                &logical_plan,
+                bindings,
+                registries,
+                builder,
+            )?
+        }
         LogicalPlan::DataSink(logical_sink) => create_physical_data_sink_with_builder_cached(
             logical_sink,
             &logical_plan,
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?,
         LogicalPlan::Tail(_logical_tail) => {
@@ -142,7 +153,7 @@ fn create_physical_plan_with_builder_cached(
             create_physical_result_collect_from_tail_with_builder_cached(
                 &logical_plan,
                 bindings,
-                encoder_registry,
+                registries,
                 builder,
             )?
         }
@@ -150,7 +161,7 @@ fn create_physical_plan_with_builder_cached(
             logical_window,
             &logical_plan,
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?,
     };
@@ -164,7 +175,7 @@ fn create_physical_plan_with_builder_cached(
 fn create_physical_result_collect_from_tail_with_builder_cached(
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
@@ -173,7 +184,7 @@ fn create_physical_result_collect_from_tail_with_builder_cached(
         let physical_child = create_physical_plan_with_builder_cached(
             child.clone(),
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?;
         physical_children.push(physical_child);
@@ -194,7 +205,7 @@ fn create_physical_window_with_builder(
     logical_window: &LogicalWindow,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let mut physical_children = Vec::new();
@@ -202,7 +213,7 @@ fn create_physical_window_with_builder(
         let physical_child = create_physical_plan_with_builder_cached(
             child.clone(),
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?;
         physical_children.push(physical_child);
@@ -223,10 +234,34 @@ fn create_physical_window_with_builder(
             let count_window =
                 crate::planner::physical::PhysicalCountWindow::new(count, physical_children, index);
             PhysicalPlan::CountWindow(count_window)
-        }
-    };
+    }
+};
 
     Ok(Arc::new(physical))
+}
+
+fn create_physical_aggregation_with_builder(
+    logical_agg: &LogicalAggregation,
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let mut physical_children = Vec::new();
+    for child in logical_plan.children() {
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
+        physical_children.push(physical_child);
+    }
+    let index = builder.allocate_index();
+    let physical = PhysicalAggregation::new(
+        logical_agg.aggregate_mappings.clone(),
+        physical_children,
+        index,
+        bindings,
+        registries.aggregate_registry().as_ref(),
+    )?;
+    Ok(Arc::new(PhysicalPlan::Aggregation(physical)))
 }
 
 /// Create a PhysicalDataSource from a LogicalDataSource using centralized index management
@@ -267,7 +302,7 @@ fn create_physical_filter_with_builder_cached(
     logical_filter: &LogicalFilter,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
@@ -276,7 +311,7 @@ fn create_physical_filter_with_builder_cached(
         let physical_child = create_physical_plan_with_builder_cached(
             child.clone(),
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?;
         physical_children.push(physical_child);
@@ -306,7 +341,7 @@ fn create_physical_project_with_builder_cached(
     logical_project: &LogicalProject,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
@@ -315,7 +350,7 @@ fn create_physical_project_with_builder_cached(
         let physical_child = create_physical_plan_with_builder_cached(
             child.clone(),
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?;
         physical_children.push(physical_child);
@@ -342,7 +377,7 @@ fn create_physical_data_sink_with_builder_cached(
     logical_sink: &DataSinkPlan,
     logical_plan: &Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    encoder_registry: &EncoderRegistry,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
@@ -351,7 +386,7 @@ fn create_physical_data_sink_with_builder_cached(
         let physical_child = create_physical_plan_with_builder_cached(
             child.clone(),
             bindings,
-            encoder_registry,
+            registries,
             builder,
         )?;
         physical_children.push(physical_child);
@@ -362,8 +397,13 @@ fn create_physical_data_sink_with_builder_cached(
 
     let input_child = Arc::clone(&physical_children[0]);
     let sink_index = builder.allocate_index();
-    let (encoded_child, connector) =
-        build_sink_chain_with_builder(&logical_sink.sink, &input_child, encoder_registry, builder)?;
+    let encoder_registry = registries.encoder_registry();
+    let (encoded_child, connector) = build_sink_chain_with_builder(
+        &logical_sink.sink,
+        &input_child,
+        encoder_registry.as_ref(),
+        builder,
+    )?;
     let physical_sink = PhysicalDataSink::new(encoded_child, sink_index, connector);
     Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
 }

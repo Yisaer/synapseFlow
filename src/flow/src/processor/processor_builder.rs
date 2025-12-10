@@ -3,11 +3,12 @@
 //! This module provides utilities to build processor pipelines from PhysicalPlan,
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::{
-    BatchProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, EncoderProcessor,
+    AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, EncoderProcessor,
     FilterProcessor, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
     SharedStreamProcessor, SinkProcessor, StreamData, StreamingEncoderProcessor,
 };
@@ -21,6 +22,8 @@ use uuid::Uuid;
 /// This enum allows storing different types of processors in a unified way.
 /// All processors are created through PhysicalPlan.
 pub enum PlanProcessor {
+    /// AggregationProcessor created from PhysicalAggregation
+    Aggregation(AggregationProcessor),
     /// DataSourceProcessor created from PhysicalDatasource
     DataSource(DataSourceProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
@@ -47,6 +50,7 @@ struct ProcessorBuilderContext {
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
 }
 
 impl ProcessorBuilderContext {
@@ -55,12 +59,14 @@ impl ProcessorBuilderContext {
         connector_registry: Arc<ConnectorRegistry>,
         encoder_registry: Arc<EncoderRegistry>,
         decoder_registry: Arc<DecoderRegistry>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
         Self {
             mqtt_clients,
             connector_registry,
             encoder_registry,
             decoder_registry,
+            aggregate_registry,
         }
     }
 
@@ -79,12 +85,17 @@ impl ProcessorBuilderContext {
     fn decoder_registry(&self) -> Arc<DecoderRegistry> {
         Arc::clone(&self.decoder_registry)
     }
+
+    fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
+        Arc::clone(&self.aggregate_registry)
+    }
 }
 
 impl PlanProcessor {
     /// Get the processor ID
     pub fn id(&self) -> &str {
         match self {
+            PlanProcessor::Aggregation(p) => p.id(),
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
@@ -106,6 +117,7 @@ impl PlanProcessor {
     /// Start the processor
     pub fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         match self {
+            PlanProcessor::Aggregation(p) => p.start(),
             PlanProcessor::DataSource(p) => p.start(),
             PlanProcessor::SharedSource(p) => p.start(),
             PlanProcessor::Project(p) => p.start(),
@@ -121,6 +133,7 @@ impl PlanProcessor {
     /// Subscribe to the processor's output stream
     pub fn subscribe_output(&self) -> Option<broadcast::Receiver<crate::processor::StreamData>> {
         match self {
+            PlanProcessor::Aggregation(p) => p.subscribe_output(),
             PlanProcessor::DataSource(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
@@ -136,6 +149,7 @@ impl PlanProcessor {
     /// Subscribe to the processor's control output stream
     pub fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         match self {
+            PlanProcessor::Aggregation(p) => p.subscribe_control_output(),
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
@@ -151,6 +165,7 @@ impl PlanProcessor {
     /// Add an input channel
     pub fn add_input(&mut self, receiver: broadcast::Receiver<crate::processor::StreamData>) {
         match self {
+            PlanProcessor::Aggregation(p) => p.add_input(receiver),
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
@@ -166,6 +181,7 @@ impl PlanProcessor {
     /// Add a control input channel
     pub fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         match self {
+            PlanProcessor::Aggregation(p) => p.add_control_input(receiver),
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
@@ -391,6 +407,16 @@ fn create_processor_from_plan_node(
             let processor = ProjectProcessor::new(plan_name.clone(), Arc::new(project.clone()));
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Project(processor),
+            ))
+        }
+        PhysicalPlan::Aggregation(aggregation) => {
+            let processor = AggregationProcessor::new(
+                plan_name.clone(),
+                Arc::new(aggregation.clone()),
+                context.aggregate_registry(),
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::Aggregation(processor),
             ))
         }
         PhysicalPlan::Filter(filter) => {
@@ -699,6 +725,7 @@ pub fn create_processor_pipeline(
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     // Print the PhysicalPlan topology structure for debugging
     println!("=== PhysicalPlan Topology Structure ===");
@@ -720,6 +747,7 @@ pub fn create_processor_pipeline(
         connector_registry,
         encoder_registry,
         decoder_registry,
+        aggregate_registry,
     );
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
 
@@ -811,11 +839,13 @@ mod tests {
         let connector_registry = ConnectorRegistry::with_builtin_sinks();
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext::new(
             MqttClientManager::new(),
             connector_registry,
             encoder_registry,
             decoder_registry,
+            aggregate_registry,
         );
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");

@@ -6,6 +6,7 @@ pub mod physical_data_sink;
 pub mod physical_data_source;
 pub mod physical_encoder;
 pub mod physical_filter;
+pub mod physical_aggregation;
 pub mod physical_project;
 pub mod physical_result_collect;
 pub mod physical_shared_stream;
@@ -18,6 +19,7 @@ pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
 pub use physical_encoder::PhysicalEncoder;
 pub use physical_filter::PhysicalFilter;
+pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;
@@ -30,6 +32,7 @@ pub enum PhysicalPlan {
     DataSource(PhysicalDataSource),
     Filter(PhysicalFilter),
     Project(PhysicalProject),
+    Aggregation(PhysicalAggregation),
     SharedStream(PhysicalSharedStream),
     Batch(PhysicalBatch),
     DataSink(PhysicalDataSink),
@@ -47,6 +50,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
+            PhysicalPlan::Aggregation(plan) => plan.base.children(),
             PhysicalPlan::SharedStream(plan) => plan.base.children(),
             PhysicalPlan::Batch(plan) => plan.base.children(),
             PhysicalPlan::DataSink(plan) => plan.base.children(),
@@ -64,6 +68,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(_) => "PhysicalDataSource",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::Project(_) => "PhysicalProject",
+            PhysicalPlan::Aggregation(_) => "PhysicalAggregation",
             PhysicalPlan::SharedStream(_) => "PhysicalSharedStream",
             PhysicalPlan::Batch(_) => "PhysicalBatch",
             PhysicalPlan::DataSink(_) => "PhysicalDataSink",
@@ -81,6 +86,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
+            PhysicalPlan::Aggregation(plan) => plan.base.index(),
             PhysicalPlan::SharedStream(plan) => plan.base.index(),
             PhysicalPlan::Batch(plan) => plan.base.index(),
             PhysicalPlan::DataSink(plan) => plan.base.index(),

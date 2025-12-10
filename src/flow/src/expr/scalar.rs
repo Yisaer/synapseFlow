@@ -195,24 +195,30 @@ impl ScalarExpr {
         }
     }
 
-    /// Create a column reference expression by source and column name
-    pub fn column(source_name: impl Into<String>, column_name: impl Into<String>) -> Self {
-        Self::column_with_index(source_name, column_name, None)
+
+    /// Create a column reference expression by column name only (no source qualifier)
+    pub fn column_with_column_name(column_name: impl Into<String>) -> Self {
+        ScalarExpr::Column(ColumnRef::ByName {
+            column_name: column_name.into(),
+        })
     }
 
     pub fn column_with_index(
         source_name: impl Into<String>,
         column_name: impl Into<String>,
         column_index: Option<usize>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         match column_index {
-            Some(idx) => ScalarExpr::Column(ColumnRef::ByIndex {
+            Some(idx) => Ok(ScalarExpr::Column(ColumnRef::ByIndex {
                 source_name: source_name.into(),
                 column_index: idx,
-            }),
-            None => ScalarExpr::Column(ColumnRef::ByName {
-                column_name: column_name.into(),
-            }),
+            })),
+            None => {
+                Err(format!(
+                    "column_with_index called with None index for column '{}' - use column_with_column_name for name-based references",
+                    column_name.into()
+                ))
+            }
         }
     }
 
