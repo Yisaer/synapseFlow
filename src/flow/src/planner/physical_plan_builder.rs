@@ -16,9 +16,8 @@ use crate::planner::physical::{
     PhysicalSinkConnector, PhysicalStreamingEncoder,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
-use crate::{AggregateFunctionRegistry, PipelineRegistries};
+use crate::{PipelineRegistries};
 use std::sync::Arc;
-use sqlparser::ast::Expr;
 
 /// Physical plan builder that manages index allocation and node caching
 pub struct PhysicalPlanBuilder {
@@ -100,7 +99,6 @@ fn create_physical_plan_with_builder_cached(
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let logical_index = logical_plan.get_plan_index();
-    let encoder_registry = registries.encoder_registry();
 
     // Check if this logical node has already been converted using builder's cache
     if let Some(cached_physical) = builder.get_cached_node(logical_index) {

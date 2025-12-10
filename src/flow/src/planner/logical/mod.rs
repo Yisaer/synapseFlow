@@ -114,8 +114,10 @@ impl LogicalPlan {
 ///
 /// The plan structure will be:
 /// - DataSource(s) (from SelectStmt::source_infos, one per source)
-/// - Filter (from SelectStmt::where_condition, if present) - takes all DataSources as children
-/// - Project (from SelectStmt::select_fields) - takes Filter or DataSources as children
+/// - Window (from SelectStmt::window, if present) - takes DataSources as children
+/// - Aggregation (from SelectStmt::aggregate_mappings, if present) - takes Window or DataSources as children
+/// - Filter (from SelectStmt::where_condition, if present) - takes Aggregation, Window, or DataSources as children
+/// - Project (from SelectStmt::select_fields) - takes Filter, Aggregation, Window, or DataSources as children
 ///
 /// # Arguments
 ///
@@ -155,17 +157,15 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 2. Create Filter from where_condition if present
-    if let Some(where_expr) = select_stmt.where_condition {
-        // Convert sqlparser Expr to ScalarExpr for the filter predicate
-        // For now, we'll keep the original expression in the Filter node
-        // In a full implementation, we'd convert this to a ScalarExpr
-        let filter = Filter::new(where_expr, current_plans, current_index);
-        current_plans = vec![Arc::new(LogicalPlan::Filter(filter))];
+    // 2. Create Window from window if present
+    if let Some(window) = select_stmt.window {
+        let spec = convert_window_spec(window)?;
+        let window_plan = LogicalWindow::new(spec, current_plans, current_index);
+        current_plans = vec![Arc::new(LogicalPlan::Window(window_plan))];
         current_index += 1;
     }
 
-    // 2.5. Create Aggregation if aggregate mappings exist
+    // 3. Create Aggregation if aggregate mappings exist
     if !select_stmt.aggregate_mappings.is_empty() {
         let aggregation = aggregation::Aggregation::new(
             select_stmt.aggregate_mappings.clone(),
@@ -176,7 +176,17 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 3. Create Project from select_fields
+    // 4. Create Filter from where_condition if present
+    if let Some(where_expr) = select_stmt.where_condition {
+        // Convert sqlparser Expr to ScalarExpr for the filter predicate
+        // For now, we'll keep the original expression in the Filter node
+        // In a full implementation, we'd convert this to a ScalarExpr
+        let filter = Filter::new(where_expr, current_plans, current_index);
+        current_plans = vec![Arc::new(LogicalPlan::Filter(filter))];
+        current_index += 1;
+    }
+
+    // 5. Create Project from select_fields
     let mut project_fields = Vec::new();
     for select_field in select_stmt.select_fields.iter() {
         let field_name = select_field
@@ -190,14 +200,7 @@ pub fn create_logical_plan(
     }
 
     let project = Project::new(project_fields, current_plans, current_index);
-    let mut base = Arc::new(LogicalPlan::Project(project));
-
-    if let Some(window) = select_stmt.window {
-        let spec = convert_window_spec(window)?;
-        let window_index = max_plan_index(&base) + 1;
-        let logical_window = LogicalWindow::new(spec, vec![Arc::clone(&base)], window_index);
-        base = Arc::new(LogicalPlan::Window(logical_window));
-    }
+    let base = Arc::new(LogicalPlan::Project(project));
 
     if sinks.is_empty() {
         Ok(base)

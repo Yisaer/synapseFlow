@@ -7,6 +7,7 @@
 //! - ResultCollectProcessor as final destination
 //! - All processors communicate via StreamData through tokio mspc channels
 
+pub mod aggregation_processor;
 pub mod base;
 pub mod batch_processor;
 pub mod control_source_processor;
@@ -21,6 +22,7 @@ pub mod sink_processor;
 pub mod stream_data;
 pub mod streaming_encoder_processor;
 
+pub use aggregation_processor::AggregationProcessor;
 pub use base::{Processor, ProcessorError};
 pub use batch_processor::BatchProcessor;
 pub use control_source_processor::ControlSourceProcessor;
