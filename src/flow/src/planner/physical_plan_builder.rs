@@ -1,6 +1,4 @@
 //! Physical plan builder - converts logical plans to physical plans using centralized index management
-
-use crate::codec::EncoderRegistry;
 use crate::expr::sql_conversion::{
     convert_expr_to_scalar_with_bindings, SchemaBinding, SchemaBindingEntry, SourceBindingKind,
 };
@@ -13,7 +11,7 @@ use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalEncoder,
     PhysicalFilter, PhysicalPlan, PhysicalProject, PhysicalResultCollect, PhysicalSharedStream,
-    PhysicalSinkConnector, PhysicalStreamingEncoder,
+    PhysicalSinkConnector,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
@@ -375,13 +373,8 @@ fn create_physical_data_sink_with_builder_cached(
 
     let input_child = Arc::clone(&physical_children[0]);
     let sink_index = builder.allocate_index();
-    let encoder_registry = registries.encoder_registry();
-    let (encoded_child, connector) = build_sink_chain_with_builder(
-        &logical_sink.sink,
-        &input_child,
-        encoder_registry.as_ref(),
-        builder,
-    )?;
+    let (encoded_child, connector) =
+        build_sink_chain_with_builder(&logical_sink.sink, &input_child, builder)?;
     let physical_sink = PhysicalDataSink::new(encoded_child, sink_index, connector);
     Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
 }
@@ -390,40 +383,26 @@ fn create_physical_data_sink_with_builder_cached(
 fn build_sink_chain_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
-    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     let mut encoder_children = Vec::new();
     let mut connectors = Vec::new();
-    let batch_processor =
-        create_batch_processor_if_needed_with_builder(sink, input_child, encoder_registry, builder);
+    let batch_processor = create_batch_processor_if_needed_with_builder(sink, input_child, builder);
 
     let connector = &sink.connector;
-    if should_use_streaming_encoder(sink, connector, encoder_registry) {
-        add_streaming_encoder_with_builder(
-            sink,
-            connector,
-            0,
-            input_child,
-            builder,
-            &mut encoder_children,
-            &mut connectors,
-        );
-    } else {
-        let encoder_input = batch_processor
-            .as_ref()
-            .map(Arc::clone)
-            .unwrap_or_else(|| Arc::clone(input_child));
-        add_regular_encoder_with_builder(
-            sink,
-            connector,
-            0,
-            encoder_input,
-            builder,
-            &mut encoder_children,
-            &mut connectors,
-        );
-    }
+    let encoder_input = batch_processor
+        .as_ref()
+        .map(Arc::clone)
+        .unwrap_or_else(|| Arc::clone(input_child));
+    add_regular_encoder_with_builder(
+        sink,
+        connector,
+        0,
+        encoder_input,
+        builder,
+        &mut encoder_children,
+        &mut connectors,
+    );
 
     if encoder_children.len() != 1 || connectors.len() != 1 {
         return Err(format!(
@@ -439,12 +418,9 @@ fn build_sink_chain_with_builder(
 fn create_batch_processor_if_needed_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
-    encoder_registry: &EncoderRegistry,
     builder: &mut PhysicalPlanBuilder,
 ) -> Option<Arc<PhysicalPlan>> {
-    let encoder_type = sink.connector.encoder.kind();
-    let needs_batch =
-        sink.common.is_batching_enabled() && !encoder_registry.supports_streaming(encoder_type);
+    let needs_batch = sink.common.is_batching_enabled();
 
     if !needs_batch {
         return None;
@@ -458,35 +434,6 @@ fn create_batch_processor_if_needed_with_builder(
         sink.common.clone(),
     );
     Some(Arc::new(PhysicalPlan::Batch(batch_plan)))
-}
-
-/// Add streaming encoder using centralized index management
-fn add_streaming_encoder_with_builder(
-    sink: &PipelineSink,
-    connector: &PipelineSinkConnector,
-    _connector_idx: usize,
-    input_child: &Arc<PhysicalPlan>,
-    builder: &mut PhysicalPlanBuilder,
-    encoder_children: &mut Vec<Arc<PhysicalPlan>>,
-    connectors: &mut Vec<PhysicalSinkConnector>,
-) {
-    let streaming_index = builder.allocate_index();
-    let streaming = PhysicalStreamingEncoder::new(
-        vec![Arc::clone(input_child)],
-        streaming_index,
-        sink.sink_id.clone(),
-        connector.encoder.clone(),
-        sink.common.clone(),
-    );
-    encoder_children.push(Arc::new(PhysicalPlan::StreamingEncoder(streaming)));
-
-    let connector_index = builder.allocate_index();
-    connectors.push(PhysicalSinkConnector::new(
-        sink.sink_id.clone(),
-        sink.forward_to_result, // Always forward if sink is configured to do so (single connector)
-        connector.connector.clone(),
-        connector_index,
-    ));
 }
 
 /// Add regular encoder using centralized index management
@@ -513,15 +460,6 @@ fn add_regular_encoder_with_builder(
         connector.connector.clone(),
         encoder_index,
     ));
-}
-
-fn should_use_streaming_encoder(
-    sink: &PipelineSink,
-    connector: &PipelineSinkConnector,
-    encoder_registry: &EncoderRegistry,
-) -> bool {
-    sink.common.is_batching_enabled()
-        && encoder_registry.supports_streaming(connector.encoder.kind())
 }
 
 fn find_binding_entry<'a>(

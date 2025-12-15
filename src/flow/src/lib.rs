@@ -40,6 +40,7 @@ pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain};
 pub use planner::logical::{
     BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project,
 };
+pub use planner::optimize_physical_plan;
 pub use planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig,
@@ -118,9 +119,13 @@ fn build_physical_plan_from_sql(
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     let physical_plan =
         create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
-    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&physical_plan));
+    let optimized_plan = optimize_physical_plan(
+        Arc::clone(&physical_plan),
+        registries.encoder_registry().as_ref(),
+    );
+    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
     println!("[Pipeline Explain]\n{}", explain.to_pretty_string());
-    Ok(physical_plan)
+    Ok(optimized_plan)
 }
 
 fn build_schema_binding(
@@ -224,7 +229,6 @@ pub fn create_pipeline(
     Ok(pipeline)
 }
 
-/// 构建逻辑/物理计划并返回 explain 报告（不创建或启动处理器）。
 pub fn explain_pipeline(
     sql: &str,
     sinks: Vec<PipelineSink>,
@@ -238,7 +242,11 @@ pub fn explain_pipeline(
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     let physical_plan =
         create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
-    Ok(PipelineExplain::new(logical_plan, physical_plan))
+    let optimized_plan = optimize_physical_plan(
+        Arc::clone(&physical_plan),
+        registries.encoder_registry().as_ref(),
+    );
+    Ok(PipelineExplain::new(logical_plan, optimized_plan))
 }
 
 /// Convenience helper for tests and demos that just need a logging mock sink.
