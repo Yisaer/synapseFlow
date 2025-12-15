@@ -77,7 +77,7 @@ impl StreamingEncoderRewrite {
         optimized_children: Vec<Arc<PhysicalPlan>>,
         encoder_registry: &EncoderRegistry,
     ) -> Arc<PhysicalPlan> {
-        if let Some(child) = optimized_children.get(0) {
+        if let Some(child) = optimized_children.first() {
             if let Some((rewritten_child, connector)) =
                 self.rewrite_streaming_encoder_chain(sink, child, encoder_registry)
             {
@@ -108,7 +108,7 @@ impl StreamingEncoderRewrite {
             return None;
         }
 
-        let batch = match encoder.base.children.get(0) {
+        let batch = match encoder.base.children.first() {
             Some(plan) => match plan.as_ref() {
                 PhysicalPlan::Batch(batch) => batch,
                 _ => return None,
@@ -116,7 +116,7 @@ impl StreamingEncoderRewrite {
             None => return None,
         };
 
-        let upstream = batch.base.children.get(0).cloned()?;
+        let upstream = batch.base.children.first().cloned()?;
         let streaming_index = encoder.base.index();
         let streaming_encoder = PhysicalStreamingEncoder::new(
             vec![upstream],
