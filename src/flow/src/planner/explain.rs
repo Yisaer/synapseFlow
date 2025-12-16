@@ -157,6 +157,13 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 info.push(format!("alias={}", alias));
             }
             info.push(format!("decoder={}", ds.decoder().kind()));
+            let cols: Vec<String> = ds
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            info.push(format!("schema=[{}]", cols.join(", ")));
         }
         LogicalPlan::Filter(filter) => {
             info.push(format!("predicate={}", filter.predicate));

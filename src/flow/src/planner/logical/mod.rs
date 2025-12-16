@@ -147,11 +147,13 @@ pub fn create_logical_plan(
                 source_info.name
             )
         })?;
+        let schema = definition.schema();
         let datasource = DataSource::new(
             source_info.name.clone(),
             source_info.alias.clone(),
             definition.decoder().clone(),
             current_index,
+            schema,
         );
         current_plans.push(Arc::new(LogicalPlan::DataSource(datasource)));
         current_index += 1;

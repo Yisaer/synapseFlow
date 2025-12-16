@@ -40,6 +40,7 @@ pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain};
 pub use planner::logical::{
     BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project,
 };
+pub use planner::optimize_logical_plan;
 pub use planner::optimize_physical_plan;
 pub use planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
@@ -117,8 +118,10 @@ fn build_physical_plan_from_sql(
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let (logical_plan, pruned_binding) =
+        optimize_logical_plan(Arc::clone(&logical_plan), &schema_binding);
     let physical_plan =
-        create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
+        create_physical_plan(Arc::clone(&logical_plan), &pruned_binding, registries)?;
     let optimized_plan = optimize_physical_plan(
         Arc::clone(&physical_plan),
         registries.encoder_registry().as_ref(),
@@ -241,8 +244,10 @@ pub fn explain_pipeline(
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let (logical_plan, pruned_binding) =
+        optimize_logical_plan(Arc::clone(&logical_plan), &schema_binding);
     let physical_plan =
-        create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
+        create_physical_plan(Arc::clone(&logical_plan), &pruned_binding, registries)?;
     let optimized_plan = optimize_physical_plan(
         Arc::clone(&physical_plan),
         registries.encoder_registry().as_ref(),
