@@ -387,30 +387,22 @@ mod tests {
 
         let pre_opt_explain =
             PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&physical_plan));
-        let pre_table = pre_opt_explain.physical.table_string();
-        let expected_pre = r"- id                                 | info                                   
-  PhysicalResultCollect_5            | sink_count=1                           
-  └─PhysicalDataSink_2               | sink_id=test_sink, connector=nop       
-    └─PhysicalEncoder_4              | sink_id=test_sink, encoder=json        
-      └─PhysicalBatch_3              | sink_id=test_sink, batch_count=10      
-        └─PhysicalProject_1          | fields=[a]                             
-          └─PhysicalDataSource_0     | source=stream, decoder=json, schema=[a]";
-        assert_eq!(pre_table.trim_end(), expected_pre);
-
+        let pre_table = pre_opt_explain.physical.to_json().to_string();
+        assert_eq!(
+            pre_table,
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalProject_1","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalBatch_3","info":["sink_id=test_sink","batch_count=10"],"operator":"PhysicalBatch"}],"id":"PhysicalEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_2","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+        );
         let optimized_plan = optimize_physical_plan(
             Arc::clone(&physical_plan),
             encoder_registry.as_ref(),
             registries.aggregate_registry(),
         );
         let post_explain = PipelineExplain::new(logical_plan, Arc::clone(&optimized_plan));
-        let post_table = post_explain.physical.table_string();
-        let expected_post = r"- id                                 | info                                          
-  PhysicalResultCollect_5            | sink_count=1                                  
-  └─PhysicalDataSink_2               | sink_id=test_sink, connector=nop              
-    └─PhysicalStreamingEncoder_4     | sink_id=test_sink, encoder=json, batching=true
-      └─PhysicalProject_1            | fields=[a]                                    
-        └─PhysicalDataSource_0       | source=stream, decoder=json, schema=[a]";
-        assert_eq!(post_table.trim_end(), expected_post);
+        let post_table = post_explain.physical.to_json().to_string();
+        assert_eq!(
+            post_table,
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalProject_1","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalStreamingEncoder_4","info":["sink_id=test_sink","encoder=json","batching=true"],"operator":"PhysicalStreamingEncoder"}],"id":"PhysicalDataSink_2","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+        );
     }
 
     #[test]
@@ -474,17 +466,11 @@ mod tests {
 
         let pre_explain =
             PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&physical_plan));
-        let pre_table = pre_explain.physical.table_string();
-        //       let expected_pre = r"- id                                     | info
-        // PhysicalResultCollect_6                | sink_count=1
-        // └─PhysicalDataSink_4                   | sink_id=test_sink, connector=nop
-        //   └─PhysicalEncoder_5                  | sink_id=test_sink, encoder=json
-        //     └─PhysicalProject_3                | fields=[col_1]
-        //       └─PhysicalAggregation_2          | calls=[sum(a) -> col_1], group_by=[b]
-        //         └─PhysicalTumblingWindow_1     | kind=tumbling, unit=Seconds, length=10
-        //           └─PhysicalDataSource_0       | source=stream, decoder=json, schema=[a, b]";
-        //       assert_eq!(pre_table.trim_end(), expected_pre);
-        println!("{}", pre_table);
+        let pre_table = pre_explain.physical.to_json().to_string();
+        assert_eq!(
+            pre_table,
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalTumblingWindow_1","info":["kind=tumbling","unit=Seconds","length=10"],"operator":"PhysicalTumblingWindow"}],"id":"PhysicalAggregation_2","info":["calls=[sum(a) -> col_1]","group_by=[b]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_4","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_6","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+        );
 
         let optimized_plan = optimize_physical_plan(
             Arc::clone(&physical_plan),
@@ -492,15 +478,10 @@ mod tests {
             aggregate_registry,
         );
         let post_explain = PipelineExplain::new(logical_plan, Arc::clone(&optimized_plan));
-        let post_table = post_explain.physical.table_string();
-        //       let expected_post = r"- id                                     | info
-        // PhysicalResultCollect_6                | sink_count=1
-        // └─PhysicalDataSink_4                   | sink_id=test_sink, connector=nop
-        //   └─PhysicalEncoder_5                  | sink_id=test_sink, encoder=json
-        //     └─PhysicalProject_3                | fields=[col_1]
-        //       └─PhysicalStreamingAggregation_2 | calls=[sum(a) -> col_1], window=tumbling, unit=Seconds, length=10
-        //         └─PhysicalDataSource_0         | source=stream, decoder=json, schema=[a]";
-        //       assert_eq!(post_table.trim_end(), expected_post);
-        println!("{}", post_table);
+        let post_table = post_explain.physical.to_json().to_string();
+        assert_eq!(
+            post_table,
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=tumbling","unit=Seconds","length=10"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_4","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_6","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+        );
     }
 }

@@ -400,3 +400,69 @@ fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> A
 fn is_aggregate_placeholder(name: &str) -> bool {
     name.starts_with("col_") && name[4..].chars().all(|c| c.is_ascii_digit())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+    use crate::planner::explain::ExplainReport;
+    use crate::planner::logical::create_logical_plan;
+    use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+    use parser::parse_sql;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn logical_optimizer_prunes_datasource_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "stream".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "stream".to_string(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+        let definition = StreamDefinition::new(
+            "stream",
+            Arc::clone(&schema),
+            StreamProps::Mqtt(MqttStreamProps::default()),
+            StreamDecoderConfig::json(),
+        );
+        let mut stream_defs = HashMap::new();
+        stream_defs.insert("stream".to_string(), Arc::new(definition));
+
+        let select_stmt = parse_sql("SELECT a FROM stream").expect("parse sql");
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
+
+        let bindings = crate::expr::sql_conversion::SchemaBinding::new(vec![
+            crate::expr::sql_conversion::SchemaBindingEntry {
+                source_name: "stream".to_string(),
+                alias: None,
+                schema: Arc::clone(&schema),
+                kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
+            },
+        ]);
+
+        let pre_json = ExplainReport::from_logical(Arc::clone(&logical_plan))
+            .to_json()
+            .to_string();
+        assert_eq!(
+            pre_json,
+            r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}"##
+        );
+        let (optimized_logical, _pruned_binding) =
+            optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
+        let post_json = ExplainReport::from_logical(optimized_logical)
+            .to_json()
+            .to_string();
+        assert_eq!(
+            post_json,
+            r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}"##
+        );
+    }
+}

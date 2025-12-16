@@ -1,5 +1,6 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
+use serde::Serialize;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
 
@@ -17,6 +18,13 @@ pub struct ExplainReport {
 impl ExplainReport {
     pub fn rows(&self) -> Vec<ExplainRow> {
         self.root.collect_rows()
+    }
+
+    /// Build a report from a logical plan only (no physical needed).
+    pub fn from_logical(plan: Arc<LogicalPlan>) -> Self {
+        ExplainReport {
+            root: build_logical_node(&plan),
+        }
     }
 
     pub fn topology_string(&self) -> String {
@@ -51,6 +59,10 @@ impl ExplainReport {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.root).unwrap_or(serde_json::Value::Null)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,9 +89,17 @@ impl PipelineExplain {
             self.physical.table_string()
         )
     }
+
+    /// Structured JSON view containing both logical and physical explains.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "logical": self.logical.to_json(),
+            "physical": self.physical.to_json(),
+        })
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExplainNode {
     pub id: String,
     pub operator: String,
