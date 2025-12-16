@@ -27,6 +27,16 @@ pub struct PhysicalAggregation {
 }
 
 impl PhysicalAggregation {
+    /// Check if all aggregate calls support incremental updates using the provided registry.
+    pub fn all_calls_incremental(
+        aggregate_calls: &[AggregateCall],
+        registry: &AggregateFunctionRegistry,
+    ) -> bool {
+        aggregate_calls
+            .iter()
+            .all(|call| registry.supports_incremental(&call.func_name))
+    }
+
     pub fn new(
         aggregate_mappings: HashMap<String, Expr>,
         group_by_exprs: Vec<Expr>,

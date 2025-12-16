@@ -122,6 +122,7 @@ fn build_physical_plan_from_sql(
     let optimized_plan = optimize_physical_plan(
         Arc::clone(&physical_plan),
         registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
     );
     let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
     println!("[Pipeline Explain]\n{}", explain.to_pretty_string());
@@ -245,6 +246,7 @@ pub fn explain_pipeline(
     let optimized_plan = optimize_physical_plan(
         Arc::clone(&physical_plan),
         registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
     );
     Ok(PipelineExplain::new(logical_plan, optimized_plan))
 }

@@ -10,6 +10,7 @@ pub mod physical_filter;
 pub mod physical_project;
 pub mod physical_result_collect;
 pub mod physical_shared_stream;
+pub mod physical_streaming_aggregation;
 pub mod physical_streaming_encoder;
 pub mod physical_window;
 
@@ -23,6 +24,7 @@ pub use physical_filter::PhysicalFilter;
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;
+pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
 pub use physical_window::{PhysicalCountWindow, PhysicalTumblingWindow};
 
@@ -37,6 +39,7 @@ pub enum PhysicalPlan {
     Batch(PhysicalBatch),
     DataSink(PhysicalDataSink),
     Encoder(PhysicalEncoder),
+    StreamingAggregation(PhysicalStreamingAggregation),
     StreamingEncoder(PhysicalStreamingEncoder),
     ResultCollect(PhysicalResultCollect),
     TumblingWindow(PhysicalTumblingWindow),
@@ -55,6 +58,7 @@ impl PhysicalPlan {
             PhysicalPlan::Batch(plan) => plan.base.children(),
             PhysicalPlan::DataSink(plan) => plan.base.children(),
             PhysicalPlan::Encoder(plan) => plan.base.children(),
+            PhysicalPlan::StreamingAggregation(plan) => plan.base.children(),
             PhysicalPlan::StreamingEncoder(plan) => plan.base.children(),
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.children(),
@@ -73,6 +77,7 @@ impl PhysicalPlan {
             PhysicalPlan::Batch(_) => "PhysicalBatch",
             PhysicalPlan::DataSink(_) => "PhysicalDataSink",
             PhysicalPlan::Encoder(_) => "PhysicalEncoder",
+            PhysicalPlan::StreamingAggregation(_) => "PhysicalStreamingAggregation",
             PhysicalPlan::StreamingEncoder(_) => "PhysicalStreamingEncoder",
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
             PhysicalPlan::TumblingWindow(_) => "PhysicalTumblingWindow",
@@ -91,6 +96,7 @@ impl PhysicalPlan {
             PhysicalPlan::Batch(plan) => plan.base.index(),
             PhysicalPlan::DataSink(plan) => plan.base.index(),
             PhysicalPlan::Encoder(plan) => plan.base.index(),
+            PhysicalPlan::StreamingAggregation(plan) => plan.base.index(),
             PhysicalPlan::StreamingEncoder(plan) => plan.base.index(),
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.index(),

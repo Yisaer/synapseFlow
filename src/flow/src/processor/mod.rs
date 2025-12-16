@@ -20,6 +20,7 @@ pub mod result_collect_processor;
 pub mod shared_stream_processor;
 pub mod sink_processor;
 pub mod stream_data;
+pub mod streaming_aggregation_processor;
 pub mod streaming_encoder_processor;
 
 pub use aggregation_processor::AggregationProcessor;
@@ -35,4 +36,8 @@ pub use result_collect_processor::ResultCollectProcessor;
 pub use shared_stream_processor::SharedStreamProcessor;
 pub use sink_processor::SinkProcessor;
 pub use stream_data::{ControlSignal, StreamData, StreamError};
+pub use streaming_aggregation_processor::{
+    StreamingAggregationProcessor, StreamingCountAggregationProcessor,
+    StreamingTumblingAggregationProcessor,
+};
 pub use streaming_encoder_processor::StreamingEncoderProcessor;

@@ -1,6 +1,6 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
-use crate::planner::physical::PhysicalAggregation;
+use sqlparser::ast::Expr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,7 +261,10 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
             info.push(format!("fields=[{}]", fields.join("; ")));
         }
         PhysicalPlan::Aggregation(aggregation) => {
-            info.push(format!("calls=[{}]", format_aggregation_calls(aggregation)));
+            info.push(format!(
+                "calls=[{}]",
+                format_aggregation_calls(&aggregation.aggregate_mappings)
+            ));
             if !aggregation.group_by_exprs.is_empty() {
                 let group_exprs = aggregation
                     .group_by_exprs
@@ -269,6 +272,31 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
                     .map(|e| e.to_string())
                     .collect::<Vec<_>>();
                 info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+            }
+        }
+        PhysicalPlan::StreamingAggregation(aggregation) => {
+            info.push(format!(
+                "calls=[{}]",
+                format_aggregation_calls(&aggregation.aggregate_mappings)
+            ));
+            if !aggregation.group_by_exprs.is_empty() {
+                let group_exprs = aggregation
+                    .group_by_exprs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>();
+                info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+            }
+            match aggregation.window {
+                crate::planner::physical::StreamingWindowSpec::Tumbling { time_unit, length } => {
+                    info.push("window=tumbling".to_string());
+                    info.push(format!("unit={:?}", time_unit));
+                    info.push(format!("length={}", length));
+                }
+                crate::planner::physical::StreamingWindowSpec::Count { count } => {
+                    info.push("window=count".to_string());
+                    info.push(format!("count={}", count));
+                }
             }
         }
         PhysicalPlan::Batch(batch) => {
@@ -319,9 +347,8 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
     }
 }
 
-fn format_aggregation_calls(aggregation: &PhysicalAggregation) -> String {
-    aggregation
-        .aggregate_mappings
+fn format_aggregation_calls(mappings: &std::collections::HashMap<String, Expr>) -> String {
+    mappings
         .iter()
         .map(|(out, expr)| format!("{} -> {}", expr, out))
         .collect::<Vec<_>>()

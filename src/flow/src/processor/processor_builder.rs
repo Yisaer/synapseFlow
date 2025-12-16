@@ -11,7 +11,7 @@ use crate::processor::{
     AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, EncoderProcessor, FilterProcessor, Processor, ProcessorError,
     ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, StreamData,
-    StreamingEncoderProcessor,
+    StreamingAggregationProcessor, StreamingEncoderProcessor,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -39,6 +39,8 @@ pub enum PlanProcessor {
     Encoder(EncoderProcessor),
     /// Streaming encoder processor combining batch + encoder
     StreamingEncoder(StreamingEncoderProcessor),
+    /// Streaming aggregation combining window + aggregation
+    StreamingAggregation(StreamingAggregationProcessor),
     /// SinkProcessor created from PhysicalDataSink
     Sink(SinkProcessor),
     /// ResultCollectProcessor created from PhysicalResultCollect
@@ -104,6 +106,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.id(),
             PlanProcessor::Encoder(p) => p.id(),
             PlanProcessor::StreamingEncoder(p) => p.id(),
+            PlanProcessor::StreamingAggregation(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
         }
@@ -126,6 +129,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.start(),
             PlanProcessor::Encoder(p) => p.start(),
             PlanProcessor::StreamingEncoder(p) => p.start(),
+            PlanProcessor::StreamingAggregation(p) => p.start(),
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
         }
@@ -142,6 +146,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.subscribe_output(),
             PlanProcessor::Encoder(p) => p.subscribe_output(),
             PlanProcessor::StreamingEncoder(p) => p.subscribe_output(),
+            PlanProcessor::StreamingAggregation(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
         }
@@ -158,6 +163,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.subscribe_control_output(),
             PlanProcessor::Encoder(p) => p.subscribe_control_output(),
             PlanProcessor::StreamingEncoder(p) => p.subscribe_control_output(),
+            PlanProcessor::StreamingAggregation(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
         }
@@ -174,6 +180,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.add_input(receiver),
             PlanProcessor::Encoder(p) => p.add_input(receiver),
             PlanProcessor::StreamingEncoder(p) => p.add_input(receiver),
+            PlanProcessor::StreamingAggregation(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
         }
@@ -190,6 +197,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.add_control_input(receiver),
             PlanProcessor::Encoder(p) => p.add_control_input(receiver),
             PlanProcessor::StreamingEncoder(p) => p.add_control_input(receiver),
+            PlanProcessor::StreamingAggregation(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
         }
@@ -444,6 +452,16 @@ fn create_processor_from_plan_node(
             let processor = EncoderProcessor::new(plan_name.clone(), encoder_impl);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Encoder(processor),
+            ))
+        }
+        PhysicalPlan::StreamingAggregation(agg) => {
+            let processor = StreamingAggregationProcessor::new(
+                plan_name.clone(),
+                Arc::new(agg.clone()),
+                context.aggregate_registry(),
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::StreamingAggregation(processor),
             ))
         }
         PhysicalPlan::StreamingEncoder(streaming) => {

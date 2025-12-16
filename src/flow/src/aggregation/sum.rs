@@ -53,6 +53,10 @@ impl AggregateFunction for SumFunction {
     fn create_accumulator(&self) -> Box<dyn AggregateAccumulator> {
         Box::new(SumAccumulator::default())
     }
+
+    fn supports_incremental(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Default, Clone)]
