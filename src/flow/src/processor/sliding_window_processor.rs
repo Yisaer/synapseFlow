@@ -113,11 +113,10 @@ impl Processor for SlidingWindowProcessor {
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 let is_graceful = matches!(signal, ControlSignal::StreamGracefulEnd);
-                                send_control_with_backpressure(&control_output, signal.clone()).await?;
+                                send_with_backpressure(&output, StreamData::control(signal)).await?;
                                 if is_terminal {
                                     if is_graceful {
                                         state.flush_all().await?;
-                                        send_with_backpressure(&output, StreamData::stream_end()).await?;
                                     }
                                     println!("[SlidingWindowProcessor:{id}] stopped");
                                     return Ok(());
@@ -204,12 +203,9 @@ struct WindowRequest {
 }
 
 /// Processing-time sliding window state (monotonic timestamps).
-struct ProcessingState {
-    rows: VecDeque<crate::model::Tuple>,
-    pending: VecDeque<WindowRequest>,
-    lookback: Duration,
-    lookahead: Option<Duration>,
-    output: broadcast::Sender<StreamData>,
+enum ProcessingState {
+    WithLookahead(ProcessingWithLookaheadState),
+    WithoutLookahead(ProcessingWithoutLookaheadState),
 }
 
 impl ProcessingState {
@@ -218,6 +214,105 @@ impl ProcessingState {
         lookahead: Option<Duration>,
         output: broadcast::Sender<StreamData>,
     ) -> Self {
+        match lookahead {
+            Some(lookahead) => Self::WithLookahead(ProcessingWithLookaheadState::new(
+                lookback, lookahead, output,
+            )),
+            None => Self::WithoutLookahead(ProcessingWithoutLookaheadState::new(lookback, output)),
+        }
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        match self {
+            ProcessingState::WithLookahead(state) => state.add_collection(collection).await,
+            ProcessingState::WithoutLookahead(state) => state.add_collection(collection).await,
+        }
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        match self {
+            ProcessingState::WithLookahead(state) => state.flush_up_to(watermark).await,
+            ProcessingState::WithoutLookahead(state) => state.flush_up_to(watermark).await,
+        }
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        match self {
+            ProcessingState::WithLookahead(state) => state.flush_all().await,
+            ProcessingState::WithoutLookahead(state) => state.flush_all().await,
+        }
+    }
+}
+
+struct ProcessingWithoutLookaheadState {
+    rows: VecDeque<crate::model::Tuple>,
+    lookback: Duration,
+    output: broadcast::Sender<StreamData>,
+}
+
+impl ProcessingWithoutLookaheadState {
+    fn new(lookback: Duration, output: broadcast::Sender<StreamData>) -> Self {
+        Self {
+            rows: VecDeque::new(),
+            lookback,
+            output,
+        }
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        for tuple in collection.rows() {
+            self.rows.push_back(tuple.clone());
+            let t = tuple.timestamp;
+            let start = t
+                .checked_sub(self.lookback)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            self.emit_window(start, t).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_up_to(&mut self, _watermark: SystemTime) -> Result<(), ProcessorError> {
+        Ok(())
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        Ok(())
+    }
+
+    async fn emit_window(&self, start: SystemTime, end: SystemTime) -> Result<(), ProcessorError> {
+        let mut rows = Vec::new();
+        for row in self.rows.iter() {
+            if row.timestamp < start {
+                continue;
+            }
+            if row.timestamp > end {
+                break;
+            }
+            rows.push(row.clone());
+        }
+        let batch = crate::model::RecordBatch::new(rows)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
+        Ok(())
+    }
+}
+
+struct ProcessingWithLookaheadState {
+    rows: VecDeque<crate::model::Tuple>,
+    pending: VecDeque<WindowRequest>,
+    lookback: Duration,
+    lookahead: Duration,
+    output: broadcast::Sender<StreamData>,
+}
+
+impl ProcessingWithLookaheadState {
+    fn new(lookback: Duration, lookahead: Duration, output: broadcast::Sender<StreamData>) -> Self {
         Self {
             rows: VecDeque::new(),
             pending: VecDeque::new(),
@@ -234,31 +329,22 @@ impl ProcessingState {
         for tuple in collection.rows() {
             self.rows.push_back(tuple.clone());
             let t = tuple.timestamp;
-            if let Some(lookahead) = self.lookahead {
-                let start = t
-                    .checked_sub(self.lookback)
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                let end = t + lookahead;
-                self.pending.push_back(WindowRequest { start, end });
-            } else {
-                let start = t
-                    .checked_sub(self.lookback)
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                self.emit_window(start, t).await?;
-            }
+            let start = t
+                .checked_sub(self.lookback)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let end = t + self.lookahead;
+            self.pending.push_back(WindowRequest { start, end });
         }
         Ok(())
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        if self.lookahead.is_some() {
-            while let Some(front) = self.pending.front() {
-                if front.end > watermark {
-                    break;
-                }
-                let request = self.pending.pop_front().unwrap();
-                self.emit_window(request.start, request.end).await?;
+        while let Some(front) = self.pending.front() {
+            if front.end > watermark {
+                break;
             }
+            let request = self.pending.pop_front().unwrap();
+            self.emit_window(request.start, request.end).await?;
         }
         self.trim(watermark);
         Ok(())
@@ -274,12 +360,10 @@ impl ProcessingState {
     fn trim(&mut self, watermark: SystemTime) {
         let min_start = if let Some(front) = self.pending.front() {
             front.start
-        } else if self.lookahead.is_some() {
+        } else {
             watermark
                 .checked_sub(self.lookback)
                 .unwrap_or(SystemTime::UNIX_EPOCH)
-        } else {
-            return;
         };
         while let Some(front) = self.rows.front() {
             if front.timestamp >= min_start {
@@ -308,12 +392,9 @@ impl ProcessingState {
 }
 
 /// Event-time sliding window state (out-of-order timestamps).
-struct EventState {
-    rows_by_sec: BTreeMap<u64, Vec<crate::model::Tuple>>,
-    pending_by_end: BTreeMap<u64, Vec<WindowRequest>>,
-    lookback: Duration,
-    lookahead: Option<Duration>,
-    output: broadcast::Sender<StreamData>,
+enum EventState {
+    WithLookahead(EventWithLookaheadState),
+    WithoutLookahead(EventWithoutLookaheadState),
 }
 
 impl EventState {
@@ -322,6 +403,108 @@ impl EventState {
         lookahead: Option<Duration>,
         output: broadcast::Sender<StreamData>,
     ) -> Self {
+        match lookahead {
+            Some(lookahead) => {
+                Self::WithLookahead(EventWithLookaheadState::new(lookback, lookahead, output))
+            }
+            None => Self::WithoutLookahead(EventWithoutLookaheadState::new(lookback, output)),
+        }
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        match self {
+            EventState::WithLookahead(state) => state.add_collection(collection).await,
+            EventState::WithoutLookahead(state) => state.add_collection(collection).await,
+        }
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        match self {
+            EventState::WithLookahead(state) => state.flush_up_to(watermark).await,
+            EventState::WithoutLookahead(state) => state.flush_up_to(watermark).await,
+        }
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        match self {
+            EventState::WithLookahead(state) => state.flush_all().await,
+            EventState::WithoutLookahead(state) => state.flush_all().await,
+        }
+    }
+}
+
+struct EventWithoutLookaheadState {
+    rows_by_sec: BTreeMap<u64, Vec<crate::model::Tuple>>,
+    lookback: Duration,
+    output: broadcast::Sender<StreamData>,
+}
+
+impl EventWithoutLookaheadState {
+    fn new(lookback: Duration, output: broadcast::Sender<StreamData>) -> Self {
+        Self {
+            rows_by_sec: BTreeMap::new(),
+            lookback,
+            output,
+        }
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        for tuple in collection.rows() {
+            let sec = to_epoch_sec(tuple.timestamp)?;
+            self.rows_by_sec.entry(sec).or_default().push(tuple.clone());
+
+            let t = tuple.timestamp;
+            let start = t
+                .checked_sub(self.lookback)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            self.emit_window(start, t).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_up_to(&mut self, _watermark: SystemTime) -> Result<(), ProcessorError> {
+        Ok(())
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        Ok(())
+    }
+
+    async fn emit_window(&self, start: SystemTime, end: SystemTime) -> Result<(), ProcessorError> {
+        let start_sec = to_epoch_sec(start)?;
+        let end_sec = to_epoch_sec(end)?;
+        let mut rows = Vec::new();
+        for (_sec, bucket) in self.rows_by_sec.range(start_sec..=end_sec) {
+            for row in bucket {
+                if row.timestamp < start || row.timestamp > end {
+                    continue;
+                }
+                rows.push(row.clone());
+            }
+        }
+        let batch = crate::model::RecordBatch::new(rows)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
+        Ok(())
+    }
+}
+
+struct EventWithLookaheadState {
+    rows_by_sec: BTreeMap<u64, Vec<crate::model::Tuple>>,
+    pending_by_end: BTreeMap<u64, Vec<WindowRequest>>,
+    lookback: Duration,
+    lookahead: Duration,
+    output: broadcast::Sender<StreamData>,
+}
+
+impl EventWithLookaheadState {
+    fn new(lookback: Duration, lookahead: Duration, output: broadcast::Sender<StreamData>) -> Self {
         Self {
             rows_by_sec: BTreeMap::new(),
             pending_by_end: BTreeMap::new(),
@@ -343,33 +526,27 @@ impl EventState {
             let start = t
                 .checked_sub(self.lookback)
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            if let Some(lookahead) = self.lookahead {
-                let end = t + lookahead;
-                let end_sec = to_epoch_sec(end)?;
-                self.pending_by_end
-                    .entry(end_sec)
-                    .or_default()
-                    .push(WindowRequest { start, end });
-            } else {
-                self.emit_window(start, t).await?;
-            }
+            let end = t + self.lookahead;
+            let end_sec = to_epoch_sec(end)?;
+            self.pending_by_end
+                .entry(end_sec)
+                .or_default()
+                .push(WindowRequest { start, end });
         }
         Ok(())
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        if self.lookahead.is_some() {
-            let watermark_sec = to_epoch_sec(watermark)?;
-            let ready: Vec<u64> = self
-                .pending_by_end
-                .range(..=watermark_sec)
-                .map(|(k, _)| *k)
-                .collect();
-            for end_sec in ready {
-                if let Some(requests) = self.pending_by_end.remove(&end_sec) {
-                    for request in requests {
-                        self.emit_window(request.start, request.end).await?;
-                    }
+        let watermark_sec = to_epoch_sec(watermark)?;
+        let ready: Vec<u64> = self
+            .pending_by_end
+            .range(..=watermark_sec)
+            .map(|(k, _)| *k)
+            .collect();
+        for end_sec in ready {
+            if let Some(requests) = self.pending_by_end.remove(&end_sec) {
+                for request in requests {
+                    self.emit_window(request.start, request.end).await?;
                 }
             }
         }
@@ -390,10 +567,6 @@ impl EventState {
     }
 
     fn trim(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        if self.lookahead.is_none() && self.pending_by_end.is_empty() {
-            return Ok(());
-        }
-
         let min_start = if let Some((_, requests)) = self.pending_by_end.iter().next() {
             requests
                 .iter()

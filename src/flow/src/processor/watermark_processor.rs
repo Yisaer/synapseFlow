@@ -1,4 +1,4 @@
-//! WatermarkProcessor - emits or forwards watermarks以驱动时间相关算子。
+//! WatermarkProcessor - emits or forwards watermarks to drive time-related operators.
 
 use crate::planner::physical::{
     PhysicalPlan, PhysicalWatermark, WatermarkConfig, WatermarkStrategy,
@@ -229,9 +229,19 @@ impl Processor for TumblingWatermarkProcessor {
 /// a deadline watermark per trigger tuple at `deadline = tuple.timestamp + L`.
 ///
 /// Event-time watermark semantics are not implemented yet.
+///
+/// Implementation note (why there is a heap + a single `Sleep`):
+/// - Each incoming tuple yields a deadline time `t + lookahead`; we push all deadlines into a
+///   min-heap (`BinaryHeap<Reverse<_>>`) so we can always find the earliest pending deadline.
+/// - We do NOT spawn one task per tuple. Instead, the processor's main loop keeps at most one
+///   active timer (`next_sleep`) that sleeps until the current earliest deadline.
+/// - When `next_sleep` fires, we pop that earliest deadline and emit a `StreamData::Watermark`
+///   for it, then rebuild `next_sleep` for the next earliest deadline (if any).
+/// This avoids unbounded numbers of concurrent timers while still emitting per-tuple deadlines
+/// at precise times.
 pub struct SlidingWatermarkProcessor {
     id: String,
-    lookahead: Option<Duration>,
+    lookahead: Duration,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
@@ -242,10 +252,19 @@ impl SlidingWatermarkProcessor {
     pub fn new(id: impl Into<String>, physical: Arc<PhysicalWatermark>) -> Self {
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let lookahead = match &physical.config {
-            WatermarkConfig::Sliding { lookahead, .. } => lookahead.map(Duration::from_secs),
-            _ => None,
+        let lookahead_secs = match &physical.config {
+            WatermarkConfig::Sliding {
+                lookahead: Some(lookahead),
+                ..
+            } => *lookahead,
+            WatermarkConfig::Sliding {
+                lookahead: None, ..
+            } => {
+                panic!("SlidingWatermarkProcessor requires sliding watermark lookahead")
+            }
+            _ => panic!("SlidingWatermarkProcessor requires WatermarkConfig::Sliding"),
         };
+        let lookahead = Duration::from_secs(lookahead_secs);
         Self {
             id: id.into(),
             lookahead,
@@ -360,19 +379,17 @@ impl Processor for SlidingWatermarkProcessor {
                             Some(Ok(data)) => {
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        if let Some(lookahead) = lookahead {
-                                            for row in collection.rows() {
-                                                let deadline = row.timestamp + lookahead;
-                                                let deadline_nanos =
-                                                    SlidingWatermarkProcessor::to_nanos(deadline)?;
-                                                pending_deadlines.push(Reverse(deadline_nanos));
-                                            }
-                                            next_sleep = if let Some(Reverse(nanos)) = pending_deadlines.peek() {
-                                                Some(SlidingWatermarkProcessor::build_sleep(*nanos)?)
-                                            } else {
-                                                None
-                                            };
+                                        for row in collection.rows() {
+                                            let deadline = row.timestamp + lookahead;
+                                            let deadline_nanos =
+                                                SlidingWatermarkProcessor::to_nanos(deadline)?;
+                                            pending_deadlines.push(Reverse(deadline_nanos));
                                         }
+                                        next_sleep = if let Some(Reverse(nanos)) = pending_deadlines.peek() {
+                                            Some(SlidingWatermarkProcessor::build_sleep(*nanos)?)
+                                        } else {
+                                            None
+                                        };
                                         send_with_backpressure(&output, StreamData::collection(collection))
                                             .await?;
                                     }
