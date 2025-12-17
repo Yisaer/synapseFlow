@@ -104,9 +104,12 @@ impl Processor for TumblingWindowProcessor {
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
+                                let is_graceful = matches!(signal, ControlSignal::StreamGracefulEnd);
                                 send_with_backpressure(&output, StreamData::control(signal)).await?;
                                 if is_terminal {
-                                    state.flush_all().await?;
+                                    if is_graceful {
+                                        state.flush_all().await?;
+                                    }
                                     println!("[TumblingWindowProcessor:{id}] stopped");
                                     return Ok(());
                                 }
@@ -115,7 +118,7 @@ impl Processor for TumblingWindowProcessor {
                                 let is_terminal = other.is_terminal();
                                 send_with_backpressure(&output, other).await?;
                                 if is_terminal {
-                                    state.flush_all().await?;
+                                    // Non-graceful end on data path: drop buffered rows.
                                     println!("[TumblingWindowProcessor:{id}] stopped");
                                     return Ok(());
                                 }
@@ -128,7 +131,7 @@ impl Processor for TumblingWindowProcessor {
                                 forward_error(&output, &id, message).await?;
                             }
                             None => {
-                                state.flush_all().await?;
+                                // Upstream ended without control signal: drop buffered rows.
                                 println!("[TumblingWindowProcessor:{id}] stopped");
                                 return Ok(());
                             }
@@ -283,15 +286,27 @@ impl ProcessingState {
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        let mut current_rows = Vec::new();
+        // Flush whole windows whose end <= watermark.
         while let Some(front) = self.rows.front() {
-            if front.timestamp >= watermark {
+            let window_start = window_start_secs(front.timestamp, self.len_secs)?;
+            let window_end = SystemTime::UNIX_EPOCH
+                + Duration::from_secs(window_start.saturating_add(self.len_secs));
+            if window_end > watermark {
                 break;
             }
-            current_rows.push(self.rows.pop_front().unwrap());
-        }
 
-        if !current_rows.is_empty() {
+            let mut current_rows = Vec::new();
+            while let Some(row) = self.rows.front() {
+                let row_start = window_start_secs(row.timestamp, self.len_secs)?;
+                if row_start != window_start {
+                    break;
+                }
+                current_rows.push(self.rows.pop_front().unwrap());
+            }
+
+            if current_rows.is_empty() {
+                continue;
+            }
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
@@ -300,13 +315,23 @@ impl ProcessingState {
     }
 
     async fn flush_all(&mut self) -> Result<(), ProcessorError> {
-        if self.rows.is_empty() {
-            return Ok(());
+        while let Some(front) = self.rows.front() {
+            let window_start = window_start_secs(front.timestamp, self.len_secs)?;
+            let mut current_rows = Vec::new();
+            while let Some(row) = self.rows.front() {
+                let row_start = window_start_secs(row.timestamp, self.len_secs)?;
+                if row_start != window_start {
+                    break;
+                }
+                current_rows.push(self.rows.pop_front().unwrap());
+            }
+            if current_rows.is_empty() {
+                continue;
+            }
+            let batch = crate::model::RecordBatch::new(current_rows)
+                .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+            send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
         }
-        let remaining: Vec<_> = self.rows.drain(..).collect();
-        let batch = crate::model::RecordBatch::new(remaining)
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-        send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
         Ok(())
     }
 }
