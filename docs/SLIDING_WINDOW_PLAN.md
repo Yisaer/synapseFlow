@@ -84,7 +84,7 @@ Two options exist; pick one before implementation:
 - Update `src/flow/src/planner/physical_plan_builder.rs` to convert `LogicalWindowSpec::Sliding` into `PhysicalPlan::SlidingWindow`, inserting a `PhysicalWatermark` node before the window (mirroring tumbling windows).
 - This makes the planner fully represent sliding windows end-to-end (parse → logical → physical) even before processors exist.
 - Execution will still fail until step 3; in the interim, processor building should return a clear "not supported yet" error for `SlidingWindow`.
- - Optimization: `Aggregation(Window(Sliding))` should be eligible for the existing `streaming_aggregation_rewrite` rule and rewrite to `PhysicalStreamingAggregation` (similar to tumbling/count).
+- Optimization (deferred): `Aggregation(Window(Sliding))` can later become eligible for `streaming_aggregation_rewrite`, but the rewrite is disabled until sliding streaming aggregation execution is implemented.
 
 **Option B: stop at logical planning for now**
 - Do not add a new physical plan node.

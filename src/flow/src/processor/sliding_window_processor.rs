@@ -1,0 +1,515 @@
+//! SlidingWindowProcessor - emits sliding windows triggered by incoming data.
+//!
+//! Processing-time mode assumes tuple timestamps are non-decreasing.
+//! Window flushing for lookahead windows is driven by incoming watermarks.
+
+use crate::planner::logical::TimeUnit;
+use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
+use crate::processor::base::{
+    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::StreamExt;
+
+pub struct SlidingWindowProcessor {
+    id: String,
+    lookback: Duration,
+    lookahead: Option<Duration>,
+    event_time: bool,
+    inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
+    output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
+}
+
+impl SlidingWindowProcessor {
+    pub fn new(id: impl Into<String>, physical: Arc<PhysicalSlidingWindow>) -> Self {
+        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let lookback = match physical.time_unit {
+            TimeUnit::Seconds => Duration::from_secs(physical.lookback),
+        };
+        let lookahead = match physical.time_unit {
+            TimeUnit::Seconds => physical.lookahead.map(Duration::from_secs),
+        };
+        Self {
+            id: id.into(),
+            lookback,
+            lookahead,
+            event_time: false,
+            inputs: Vec::new(),
+            control_inputs: Vec::new(),
+            output,
+            control_output,
+        }
+    }
+
+    pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
+        match plan.as_ref() {
+            PhysicalPlan::SlidingWindow(window) => Some(Self::new(id, Arc::new(window.clone()))),
+            _ => None,
+        }
+    }
+}
+
+impl Processor for SlidingWindowProcessor {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+        let id = self.id.clone();
+        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
+        let control_receivers = std::mem::take(&mut self.control_inputs);
+        let mut control_streams = fan_in_control_streams(control_receivers);
+        let mut control_active = !control_streams.is_empty();
+        let output = self.output.clone();
+        let control_output = self.control_output.clone();
+
+        let lookback = self.lookback;
+        let lookahead = self.lookahead;
+
+        let mut state = if self.event_time {
+            WindowState::EventTime(EventState::new(lookback, lookahead, output.clone()))
+        } else {
+            WindowState::ProcessingTime(ProcessingState::new(lookback, lookahead, output.clone()))
+        };
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    control_item = control_streams.next(), if control_active => {
+                        if let Some(Ok(control_signal)) = control_item {
+                            let is_terminal = control_signal.is_terminal();
+                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            if is_terminal {
+                                state.flush_all().await?;
+                                send_with_backpressure(&output, StreamData::stream_end()).await?;
+                                println!("[SlidingWindowProcessor:{id}] stopped");
+                                return Ok(());
+                            }
+                            continue;
+                        } else {
+                            control_active = false;
+                        }
+                    }
+                    item = input_streams.next() => {
+                        match item {
+                            Some(Ok(StreamData::Collection(collection))) => {
+                                if let Err(e) = state.add_collection(collection.as_ref()).await {
+                                    forward_error(&output, &id, e.to_string()).await?;
+                                }
+                            }
+                            Some(Ok(StreamData::Watermark(ts))) => {
+                                state.flush_up_to(ts).await?;
+                            }
+                            Some(Ok(StreamData::Control(signal))) => {
+                                let is_terminal = signal.is_terminal();
+                                let is_graceful = matches!(signal, ControlSignal::StreamGracefulEnd);
+                                send_control_with_backpressure(&control_output, signal.clone()).await?;
+                                if is_terminal {
+                                    if is_graceful {
+                                        state.flush_all().await?;
+                                        send_with_backpressure(&output, StreamData::stream_end()).await?;
+                                    }
+                                    println!("[SlidingWindowProcessor:{id}] stopped");
+                                    return Ok(());
+                                }
+                            }
+                            Some(Ok(other)) => {
+                                let is_terminal = other.is_terminal();
+                                send_with_backpressure(&output, other).await?;
+                                if is_terminal {
+                                    println!("[SlidingWindowProcessor:{id}] stopped");
+                                    return Ok(());
+                                }
+                            }
+                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
+                                let message = format!(
+                                    "SlidingWindowProcessor input lagged by {} messages",
+                                    skipped
+                                );
+                                forward_error(&output, &id, message).await?;
+                            }
+                            None => {
+                                println!("[SlidingWindowProcessor:{id}] stopped");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+        Some(self.output.subscribe())
+    }
+
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
+        Some(self.control_output.subscribe())
+    }
+
+    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+        self.inputs.push(receiver);
+    }
+
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
+        self.control_inputs.push(receiver);
+    }
+}
+
+enum WindowState {
+    EventTime(EventState),
+    ProcessingTime(ProcessingState),
+}
+
+impl WindowState {
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        match self {
+            WindowState::EventTime(state) => state.add_collection(collection).await,
+            WindowState::ProcessingTime(state) => state.add_collection(collection).await,
+        }
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        match self {
+            WindowState::EventTime(state) => state.flush_up_to(watermark).await,
+            WindowState::ProcessingTime(state) => state.flush_up_to(watermark).await,
+        }
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        match self {
+            WindowState::EventTime(state) => state.flush_all().await,
+            WindowState::ProcessingTime(state) => state.flush_all().await,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WindowRequest {
+    start: SystemTime,
+    end: SystemTime,
+}
+
+/// Processing-time sliding window state (monotonic timestamps).
+struct ProcessingState {
+    rows: VecDeque<crate::model::Tuple>,
+    pending: VecDeque<WindowRequest>,
+    lookback: Duration,
+    lookahead: Option<Duration>,
+    output: broadcast::Sender<StreamData>,
+}
+
+impl ProcessingState {
+    fn new(
+        lookback: Duration,
+        lookahead: Option<Duration>,
+        output: broadcast::Sender<StreamData>,
+    ) -> Self {
+        Self {
+            rows: VecDeque::new(),
+            pending: VecDeque::new(),
+            lookback,
+            lookahead,
+            output,
+        }
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        for tuple in collection.rows() {
+            self.rows.push_back(tuple.clone());
+            let t = tuple.timestamp;
+            if let Some(lookahead) = self.lookahead {
+                let start = t
+                    .checked_sub(self.lookback)
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let end = t + lookahead;
+                self.pending.push_back(WindowRequest { start, end });
+            } else {
+                let start = t
+                    .checked_sub(self.lookback)
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                self.emit_window(start, t).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        if self.lookahead.is_some() {
+            while let Some(front) = self.pending.front() {
+                if front.end > watermark {
+                    break;
+                }
+                let request = self.pending.pop_front().unwrap();
+                self.emit_window(request.start, request.end).await?;
+            }
+        }
+        self.trim(watermark);
+        Ok(())
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        while let Some(request) = self.pending.pop_front() {
+            self.emit_window(request.start, request.end).await?;
+        }
+        Ok(())
+    }
+
+    fn trim(&mut self, watermark: SystemTime) {
+        let min_start = if let Some(front) = self.pending.front() {
+            front.start
+        } else if self.lookahead.is_some() {
+            watermark
+                .checked_sub(self.lookback)
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        } else {
+            return;
+        };
+        while let Some(front) = self.rows.front() {
+            if front.timestamp >= min_start {
+                break;
+            }
+            self.rows.pop_front();
+        }
+    }
+
+    async fn emit_window(&self, start: SystemTime, end: SystemTime) -> Result<(), ProcessorError> {
+        let mut rows = Vec::new();
+        for row in self.rows.iter() {
+            if row.timestamp < start {
+                continue;
+            }
+            if row.timestamp > end {
+                break;
+            }
+            rows.push(row.clone());
+        }
+        let batch = crate::model::RecordBatch::new(rows)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
+        Ok(())
+    }
+}
+
+/// Event-time sliding window state (out-of-order timestamps).
+struct EventState {
+    rows_by_sec: BTreeMap<u64, Vec<crate::model::Tuple>>,
+    pending_by_end: BTreeMap<u64, Vec<WindowRequest>>,
+    lookback: Duration,
+    lookahead: Option<Duration>,
+    output: broadcast::Sender<StreamData>,
+}
+
+impl EventState {
+    fn new(
+        lookback: Duration,
+        lookahead: Option<Duration>,
+        output: broadcast::Sender<StreamData>,
+    ) -> Self {
+        Self {
+            rows_by_sec: BTreeMap::new(),
+            pending_by_end: BTreeMap::new(),
+            lookback,
+            lookahead,
+            output,
+        }
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: &dyn crate::model::Collection,
+    ) -> Result<(), ProcessorError> {
+        for tuple in collection.rows() {
+            let sec = to_epoch_sec(tuple.timestamp)?;
+            self.rows_by_sec.entry(sec).or_default().push(tuple.clone());
+
+            let t = tuple.timestamp;
+            let start = t
+                .checked_sub(self.lookback)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            if let Some(lookahead) = self.lookahead {
+                let end = t + lookahead;
+                let end_sec = to_epoch_sec(end)?;
+                self.pending_by_end
+                    .entry(end_sec)
+                    .or_default()
+                    .push(WindowRequest { start, end });
+            } else {
+                self.emit_window(start, t).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        if self.lookahead.is_some() {
+            let watermark_sec = to_epoch_sec(watermark)?;
+            let ready: Vec<u64> = self
+                .pending_by_end
+                .range(..=watermark_sec)
+                .map(|(k, _)| *k)
+                .collect();
+            for end_sec in ready {
+                if let Some(requests) = self.pending_by_end.remove(&end_sec) {
+                    for request in requests {
+                        self.emit_window(request.start, request.end).await?;
+                    }
+                }
+            }
+        }
+        self.trim(watermark)?;
+        Ok(())
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        let keys: Vec<u64> = self.pending_by_end.keys().copied().collect();
+        for key in keys {
+            if let Some(requests) = self.pending_by_end.remove(&key) {
+                for request in requests {
+                    self.emit_window(request.start, request.end).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn trim(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        if self.lookahead.is_none() && self.pending_by_end.is_empty() {
+            return Ok(());
+        }
+
+        let min_start = if let Some((_, requests)) = self.pending_by_end.iter().next() {
+            requests
+                .iter()
+                .map(|r| r.start)
+                .min()
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        } else {
+            watermark
+                .checked_sub(self.lookback)
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        };
+        let min_start_sec = to_epoch_sec(min_start)?;
+        let stale: Vec<u64> = self
+            .rows_by_sec
+            .range(..min_start_sec)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in stale {
+            self.rows_by_sec.remove(&key);
+        }
+        Ok(())
+    }
+
+    async fn emit_window(&self, start: SystemTime, end: SystemTime) -> Result<(), ProcessorError> {
+        let start_sec = to_epoch_sec(start)?;
+        let end_sec = to_epoch_sec(end)?;
+        let mut rows = Vec::new();
+        for (_sec, bucket) in self.rows_by_sec.range(start_sec..=end_sec) {
+            for row in bucket {
+                if row.timestamp < start || row.timestamp > end {
+                    continue;
+                }
+                rows.push(row.clone());
+            }
+        }
+        let batch = crate::model::RecordBatch::new(rows)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
+        Ok(())
+    }
+}
+
+fn to_epoch_sec(ts: SystemTime) -> Result<u64, ProcessorError> {
+    Ok(ts
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| ProcessorError::ProcessingError(format!("invalid timestamp: {e}")))?
+        .as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tuple_at(sec: u64) -> crate::model::Tuple {
+        crate::model::Tuple::with_timestamp(Vec::new(), UNIX_EPOCH + Duration::from_secs(sec))
+    }
+
+    #[tokio::test]
+    async fn sliding_window_without_lookahead_emits_on_data() {
+        let physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, None, Vec::new(), 0);
+        let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start();
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(100), tuple_at(105)]).expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            match output_rx.recv().await.unwrap() {
+                StreamData::Collection(collection) => {
+                    seen.push(collection.rows().len());
+                }
+                _ => panic!("unexpected output"),
+            }
+        }
+
+        // For t=100, window [90,100] contains 1 row; for t=105, window [95,105] contains 2 rows.
+        assert_eq!(seen, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn sliding_window_with_lookahead_waits_for_watermark() {
+        let physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, Some(15), Vec::new(), 0);
+        let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start();
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(100), tuple_at(110), tuple_at(115)])
+                .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        // No output until watermark reaches end of first window: 100 + 15 = 115.
+        assert!(input
+            .send(StreamData::watermark(UNIX_EPOCH + Duration::from_secs(114)))
+            .is_ok());
+
+        assert!(output_rx.try_recv().is_err());
+
+        assert!(input
+            .send(StreamData::watermark(UNIX_EPOCH + Duration::from_secs(115)))
+            .is_ok());
+
+        let out = output_rx.recv().await.unwrap();
+        match out {
+            StreamData::Collection(collection) => {
+                // First trigger at 100: window [90,115] includes all 3 rows.
+                assert_eq!(collection.rows().len(), 3);
+            }
+            _ => panic!("unexpected output"),
+        }
+    }
+}
