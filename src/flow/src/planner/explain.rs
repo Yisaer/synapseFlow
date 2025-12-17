@@ -338,6 +338,19 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
                     info.push("window=count".to_string());
                     info.push(format!("count={}", count));
                 }
+                crate::planner::physical::StreamingWindowSpec::Sliding {
+                    time_unit,
+                    lookback,
+                    lookahead,
+                } => {
+                    info.push("window=sliding".to_string());
+                    info.push(format!("unit={:?}", time_unit));
+                    info.push(format!("lookback={}", lookback));
+                    match lookahead {
+                        Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
+                        None => info.push("lookahead=none".to_string()),
+                    }
+                }
             }
         }
         PhysicalPlan::Batch(batch) => {
@@ -376,6 +389,29 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
                 info.push("window=tumbling".to_string());
                 info.push(format!("unit={:?}", time_unit));
                 info.push(format!("length={}", length));
+                match strategy {
+                    WatermarkStrategy::ProcessingTime { interval, .. } => {
+                        info.push("mode=processing_time".to_string());
+                        info.push(format!("interval={}", interval));
+                    }
+                    WatermarkStrategy::External => {
+                        info.push("mode=external".to_string());
+                    }
+                }
+            }
+            WatermarkConfig::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                strategy,
+            } => {
+                info.push("window=sliding".to_string());
+                info.push(format!("unit={:?}", time_unit));
+                info.push(format!("lookback={}", lookback));
+                match lookahead {
+                    Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
+                    None => info.push("lookahead=none".to_string()),
+                }
                 match strategy {
                     WatermarkStrategy::ProcessingTime { interval, .. } => {
                         info.push("mode=processing_time".to_string());

@@ -472,6 +472,14 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
+            if matches!(
+                agg.window,
+                crate::planner::physical::StreamingWindowSpec::Sliding { .. }
+            ) {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "Sliding streaming aggregation processor not implemented yet".to_string(),
+                ));
+            }
             let processor = StreamingAggregationProcessor::new(
                 plan_name.clone(),
                 Arc::new(agg.clone()),

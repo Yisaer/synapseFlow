@@ -34,12 +34,19 @@ pub enum WatermarkConfig {
         length: u64,
         strategy: WatermarkStrategy,
     },
+    Sliding {
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+        strategy: WatermarkStrategy,
+    },
 }
 
 impl WatermarkConfig {
     pub fn strategy(&self) -> &WatermarkStrategy {
         match self {
             WatermarkConfig::Tumbling { strategy, .. } => strategy,
+            WatermarkConfig::Sliding { strategy, .. } => strategy,
         }
     }
 }

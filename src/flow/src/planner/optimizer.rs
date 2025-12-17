@@ -122,6 +122,15 @@ impl StreamingAggregationRewrite {
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)
             }
+            PhysicalPlan::SlidingWindow(window) => {
+                let spec = StreamingWindowSpec::Sliding {
+                    time_unit: window.time_unit,
+                    lookback: window.lookback,
+                    lookahead: window.lookahead,
+                };
+                let upstream = window.base.children.first()?.clone();
+                (spec, upstream)
+            }
             _ => return None,
         };
 
@@ -492,6 +501,87 @@ mod tests {
         assert_eq!(
             post_table,
             r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalWatermark_1","info":["window=tumbling","unit=Seconds","length=10","mode=processing_time","interval=10"],"operator":"PhysicalWatermark"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=tumbling","unit=Seconds","length=10"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_6","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_7","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+        );
+    }
+
+    #[test]
+    fn optimize_rewrites_streaming_agg_for_sliding_window() {
+        let encoder_registry = EncoderRegistry::with_builtin_encoders();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let registries = PipelineRegistries::new(
+            ConnectorRegistry::with_builtin_sinks(),
+            Arc::clone(&encoder_registry),
+            DecoderRegistry::with_builtin_decoders(),
+            Arc::clone(&aggregate_registry),
+        );
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "stream".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "stream".to_string(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+        let definition = StreamDefinition::new(
+            "stream",
+            Arc::clone(&schema),
+            StreamProps::Mqtt(MqttStreamProps::default()),
+            StreamDecoderConfig::json(),
+        );
+        let mut stream_defs = HashMap::new();
+        stream_defs.insert("stream".to_string(), Arc::new(definition));
+
+        let select_stmt = parse_sql_with_registry(
+            "SELECT sum(a) FROM stream GROUP BY slidingwindow('ss', 10),b",
+            registries.aggregate_registry(),
+        )
+        .expect("failed to parse SQL");
+        let bindings = crate::expr::sql_conversion::SchemaBinding::new(vec![
+            crate::expr::sql_conversion::SchemaBindingEntry {
+                source_name: "stream".to_string(),
+                alias: None,
+                schema,
+                kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
+            },
+        ]);
+
+        let connector = PipelineSinkConnector::new(
+            "test_connector",
+            SinkConnectorConfig::Nop(NopSinkConfig),
+            SinkEncoderConfig::json(),
+        );
+        let sink = PipelineSink::new("test_sink", connector);
+
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![sink], &stream_defs).expect("logical plan");
+        let physical_plan =
+            crate::planner::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+                .expect("physical plan");
+
+        let pre_explain =
+            PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&physical_plan));
+        let pre_table = pre_explain.physical.to_json().to_string();
+        assert_eq!(
+            pre_table,
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalWatermark_1","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalWatermark"}],"id":"PhysicalSlidingWindow_2","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalSlidingWindow"}],"id":"PhysicalAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_6","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_7","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+        );
+
+        let optimized_plan = optimize_physical_plan(
+            Arc::clone(&physical_plan),
+            encoder_registry.as_ref(),
+            aggregate_registry,
+        );
+
+        let post_explain = PipelineExplain::new(logical_plan, Arc::clone(&optimized_plan));
+        let post_table = post_explain.physical.to_json().to_string();
+        assert_eq!(
+            post_table,
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalWatermark_1","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalWatermark"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_6","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_7","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
         );
     }
 }

@@ -18,6 +18,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 /// Watermark processor variants by window/operator kind.
 pub enum WatermarkProcessor {
     Tumbling(TumblingWatermarkProcessor),
+    Sliding(TumblingWatermarkProcessor),
 }
 
 impl WatermarkProcessor {
@@ -25,6 +26,9 @@ impl WatermarkProcessor {
         match plan.as_ref() {
             PhysicalPlan::Watermark(watermark) => match &watermark.config {
                 WatermarkConfig::Tumbling { .. } => Some(WatermarkProcessor::Tumbling(
+                    TumblingWatermarkProcessor::new(id, Arc::new(watermark.clone())),
+                )),
+                WatermarkConfig::Sliding { .. } => Some(WatermarkProcessor::Sliding(
                     TumblingWatermarkProcessor::new(id, Arc::new(watermark.clone())),
                 )),
             },
@@ -37,41 +41,47 @@ impl Processor for WatermarkProcessor {
     fn id(&self) -> &str {
         match self {
             WatermarkProcessor::Tumbling(p) => p.id(),
+            WatermarkProcessor::Sliding(p) => p.id(),
         }
     }
 
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         match self {
             WatermarkProcessor::Tumbling(p) => p.start(),
+            WatermarkProcessor::Sliding(p) => p.start(),
         }
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
         match self {
             WatermarkProcessor::Tumbling(p) => p.subscribe_output(),
+            WatermarkProcessor::Sliding(p) => p.subscribe_output(),
         }
     }
 
     fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         match self {
             WatermarkProcessor::Tumbling(p) => p.subscribe_control_output(),
+            WatermarkProcessor::Sliding(p) => p.subscribe_control_output(),
         }
     }
 
     fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
         match self {
             WatermarkProcessor::Tumbling(p) => p.add_input(receiver),
+            WatermarkProcessor::Sliding(p) => p.add_input(receiver),
         }
     }
 
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         match self {
             WatermarkProcessor::Tumbling(p) => p.add_control_input(receiver),
+            WatermarkProcessor::Sliding(p) => p.add_control_input(receiver),
         }
     }
 }
 
-/// Tumbling window watermark
+/// Watermark operator processor.
 pub struct TumblingWatermarkProcessor {
     id: String,
     physical: Arc<PhysicalWatermark>,

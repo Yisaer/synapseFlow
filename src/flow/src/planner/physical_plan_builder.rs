@@ -242,12 +242,26 @@ fn create_physical_window_with_builder(
             lookback,
             lookahead,
         } => {
+            let watermark_index = builder.allocate_index();
+            let watermark = PhysicalWatermark::new(
+                WatermarkConfig::Sliding {
+                    time_unit,
+                    lookback,
+                    lookahead,
+                    strategy: WatermarkStrategy::ProcessingTime {
+                        time_unit,
+                        interval: 1,
+                    },
+                },
+                physical_children,
+                watermark_index,
+            );
             let index = builder.allocate_index();
             let sliding = crate::planner::physical::PhysicalSlidingWindow::new(
                 time_unit,
                 lookback,
                 lookahead,
-                physical_children,
+                vec![Arc::new(PhysicalPlan::Watermark(watermark))],
                 index,
             );
             PhysicalPlan::SlidingWindow(sliding)
