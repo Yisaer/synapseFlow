@@ -7,6 +7,7 @@
 //! - Finalizes aggregates and outputs results when stream ends
 
 use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry};
+use crate::expr::ScalarExpr;
 use crate::model::Collection;
 use crate::planner::physical::{AggregateCall, PhysicalAggregation, PhysicalPlan};
 use crate::processor::base::{
@@ -16,9 +17,16 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use datatypes::Value;
 use futures::stream::StreamExt;
+use sqlparser::ast::Expr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+/// Group-by metadata bundled for evaluation and output decoration.
+struct GroupByMeta {
+    is_simple: bool,
+    output_name: String,
+}
 
 /// Pre-evaluated argument columns for a single aggregate call.
 ///
@@ -32,13 +40,9 @@ struct AggregateCallArgs {
 }
 
 /// Pre-evaluated group-by expressions for the batch.
-///
-/// Example with 3 rows `{b:10,c:1},{b:20,c:2},{b:30,c:3}`:
-/// - GROUP BY `b`           => values_per_expr = [[10,20,30]], is_simple_expr = [true]
-/// - GROUP BY `b, c + 1`    => values_per_expr = [[10,20,30], [2,3,4]], is_simple_expr = [true, false]
 struct PreparedGroupBy {
     values_per_expr: Vec<Vec<Value>>,
-    is_simple_expr: Vec<bool>,
+    meta: Vec<GroupByMeta>,
 }
 
 /// AggregationProcessor - evaluates aggregation expressions
@@ -142,7 +146,7 @@ impl AggregationProcessor {
                 None,
                 rows,
                 &[],
-                &group_by.is_simple_expr,
+                &group_by.meta,
             )?;
             let collection = RecordBatch::new(vec![tuple])
                 .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
@@ -158,7 +162,7 @@ impl AggregationProcessor {
                 Some(state.last_row_idx),
                 rows,
                 &state.key_values,
-                &group_by.is_simple_expr,
+                &group_by.meta,
             )?;
             output_tuples.push(tuple);
         }
@@ -371,7 +375,7 @@ impl AggregationProcessor {
         last_row_idx: Option<usize>,
         all_rows: &[crate::model::Tuple],
         key_values: &[Value],
-        group_by_simple_flags: &[bool],
+        group_by_meta: &[GroupByMeta],
     ) -> Result<crate::model::Tuple, String> {
         use crate::model::AffiliateRow;
         use std::sync::Arc;
@@ -388,9 +392,10 @@ impl AggregationProcessor {
 
         // Add computed group-by keys (non-simple column refs) to affiliate so downstream can access them.
         for (idx, value) in key_values.iter().enumerate() {
-            if !group_by_simple_flags.get(idx).copied().unwrap_or(false) {
-                let name = physical_aggregation.group_by_exprs[idx].to_string();
-                affiliate_entries.push((Arc::new(name), value.clone()));
+            if let Some(meta) = group_by_meta.get(idx) {
+                if !meta.is_simple {
+                    affiliate_entries.push((Arc::new(meta.output_name.clone()), value.clone()));
+                }
             }
         }
 
@@ -413,8 +418,23 @@ impl AggregationProcessor {
     }
 }
 
-fn is_simple_column_expr(expr: &sqlparser::ast::Expr) -> bool {
-    matches!(expr, sqlparser::ast::Expr::Identifier(_))
+fn is_simple_column_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Identifier(_))
+}
+
+fn build_group_by_meta(exprs: &[Expr], scalars: &[ScalarExpr]) -> Vec<GroupByMeta> {
+    assert_eq!(
+        exprs.len(),
+        scalars.len(),
+        "group-by exprs and scalars length mismatch"
+    );
+    exprs
+        .iter()
+        .map(|expr| GroupByMeta {
+            is_simple: is_simple_column_expr(expr),
+            output_name: expr.to_string(),
+        })
+        .collect()
 }
 
 impl AggregationProcessor {
@@ -445,15 +465,14 @@ impl AggregationProcessor {
             values_per_expr.push(values);
         }
 
-        let is_simple_expr = physical_aggregation
-            .group_by_exprs
-            .iter()
-            .map(is_simple_column_expr)
-            .collect();
+        let meta = build_group_by_meta(
+            &physical_aggregation.group_by_exprs,
+            &physical_aggregation.group_by_scalars,
+        );
 
         Ok(PreparedGroupBy {
             values_per_expr,
-            is_simple_expr,
+            meta,
         })
     }
 }
