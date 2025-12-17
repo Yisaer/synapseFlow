@@ -122,4 +122,17 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].to_string(), "b");
     }
+
+    #[test]
+    fn split_group_by_keeps_non_window_exprs_for_sliding_window() {
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10), b";
+        let dialect = StreamDialect::new();
+
+        let statements = Parser::parse_sql(&dialect, sql).unwrap();
+        let (window, remaining) = collect_window_and_group_by_exprs(&statements[0]).unwrap();
+
+        assert!(window.is_some());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].to_string(), "b");
+    }
 }

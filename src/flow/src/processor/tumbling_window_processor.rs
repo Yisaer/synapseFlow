@@ -82,8 +82,6 @@ impl Processor for TumblingWindowProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                state.flush_all().await?;
-                                send_with_backpressure(&output, StreamData::stream_end()).await?;
                                 println!("[TumblingWindowProcessor:{id}] stopped");
                                 return Ok(());
                             }
@@ -95,7 +93,7 @@ impl Processor for TumblingWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                if let Err(e) = state.add_collection(collection.as_ref()).await {
+                                if let Err(e) = state.add_collection(collection).await {
                                     forward_error(&output, &id, e.to_string()).await?;
                                 }
                             }
@@ -167,7 +165,7 @@ enum WindowState {
 impl WindowState {
     async fn add_collection(
         &mut self,
-        collection: &dyn crate::model::Collection,
+        collection: Box<dyn crate::model::Collection>,
     ) -> Result<(), ProcessorError> {
         match self {
             WindowState::EventTime(state) => state.add_collection(collection).await,
@@ -208,11 +206,14 @@ impl EventState {
 
     async fn add_collection(
         &mut self,
-        collection: &dyn crate::model::Collection,
+        collection: Box<dyn crate::model::Collection>,
     ) -> Result<(), ProcessorError> {
-        for tuple in collection.rows() {
+        let rows = collection
+            .into_rows()
+            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
+        for tuple in rows {
             let key = window_start_secs(tuple.timestamp, self.len_secs)?;
-            self.windows.entry(key).or_default().push(tuple.clone());
+            self.windows.entry(key).or_default().push(tuple);
         }
         Ok(())
     }
@@ -277,10 +278,13 @@ impl ProcessingState {
 
     async fn add_collection(
         &mut self,
-        collection: &dyn crate::model::Collection,
+        collection: Box<dyn crate::model::Collection>,
     ) -> Result<(), ProcessorError> {
-        for tuple in collection.rows() {
-            self.rows.push_back(tuple.clone());
+        let rows = collection
+            .into_rows()
+            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
+        for tuple in rows {
+            self.rows.push_back(tuple);
         }
         Ok(())
     }

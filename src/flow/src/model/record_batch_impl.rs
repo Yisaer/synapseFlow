@@ -182,4 +182,9 @@ impl Collection for RecordBatch {
     fn clone_box(&self) -> Box<dyn Collection> {
         Box::new(self.clone())
     }
+
+    fn into_rows(self: Box<Self>) -> Result<Vec<Tuple>, CollectionError> {
+        let batch: RecordBatch = *self;
+        Ok(batch.into_rows())
+    }
 }

@@ -9,8 +9,18 @@ use std::sync::Arc;
 /// Window spec captured for streaming aggregation rewrite.
 #[derive(Debug, Clone)]
 pub enum StreamingWindowSpec {
-    Tumbling { time_unit: TimeUnit, length: u64 },
-    Count { count: u64 },
+    Tumbling {
+        time_unit: TimeUnit,
+        length: u64,
+    },
+    Count {
+        count: u64,
+    },
+    Sliding {
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+    },
 }
 
 /// Physical node that fuses window + aggregation for incremental processing.

@@ -8,6 +8,16 @@ pub enum Window {
     Tumbling { time_unit: TimeUnit, length: u64 },
     /// Fixed-size window defined by number of rows
     Count { count: u64 },
+    /// Sliding window triggered by each received record.
+    ///
+    /// For a trigger time `t`, the window range is `[t - lookback, t + lookahead]`.
+    /// When `lookahead` is `None`, the window is emitted immediately at `t`.
+    /// When `lookahead` is `Some(x)`, the window is emitted at `t + x`.
+    Sliding {
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+    },
 }
 
 /// Supported time units for window definitions.
@@ -25,10 +35,19 @@ impl Window {
         Window::Count { count }
     }
 
+    pub fn sliding(time_unit: TimeUnit, lookback: u64, lookahead: Option<u64>) -> Self {
+        Window::Sliding {
+            time_unit,
+            lookback,
+            lookahead,
+        }
+    }
+
     fn function_name(&self) -> &'static str {
         match self {
             Window::Tumbling { .. } => "tumblingwindow",
             Window::Count { .. } => "countwindow",
+            Window::Sliding { .. } => "slidingwindow",
         }
     }
 }
@@ -49,6 +68,7 @@ pub fn parse_window_function(function: &Function) -> Result<Window, ParserError>
     match function.name.to_string().to_lowercase().as_str() {
         "tumblingwindow" => parse_tumbling_window(function),
         "countwindow" => parse_count_window(function),
+        "slidingwindow" => parse_sliding_window(function),
         name => Err(ParserError::ParserError(format!(
             "Unsupported window function: {}",
             name
@@ -66,6 +86,20 @@ pub fn window_to_expr(window: &Window) -> Expr {
             ]
         }
         Window::Count { count } => vec![make_number_arg(*count)],
+        Window::Sliding {
+            time_unit,
+            lookback,
+            lookahead,
+        } => {
+            let mut args = vec![
+                make_string_arg(time_unit.as_str()),
+                make_number_arg(*lookback),
+            ];
+            if let Some(lookahead) = lookahead {
+                args.push(make_number_arg(*lookahead));
+            }
+            args
+        }
     };
 
     Expr::Function(Function {
@@ -104,6 +138,31 @@ fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
 
     let count = parse_number_arg(&function.args[0], "countwindow", "count")?;
     Ok(Window::count(count))
+}
+
+fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
+    if function.args.len() != 2 && function.args.len() != 3 {
+        return Err(ParserError::ParserError(
+            "slidingwindow requires 2 or 3 arguments: (time_unit, lookback [, lookahead])"
+                .to_string(),
+        ));
+    }
+
+    let time_unit = parse_string_arg(&function.args[0], "slidingwindow", "time unit")?;
+    let lookback = parse_number_arg(&function.args[1], "slidingwindow", "lookback")?;
+    let lookahead = if function.args.len() == 3 {
+        Some(parse_number_arg(
+            &function.args[2],
+            "slidingwindow",
+            "lookahead",
+        )?)
+    } else {
+        None
+    };
+
+    let time_unit = TimeUnit::try_from_str(&time_unit)?;
+
+    Ok(Window::sliding(time_unit, lookback, lookahead))
 }
 
 fn parse_string_arg(
@@ -149,7 +208,7 @@ fn parse_number_arg(
 fn is_supported_window_function(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "tumblingwindow" | "countwindow"
+        "tumblingwindow" | "countwindow" | "slidingwindow"
     )
 }
 
@@ -158,7 +217,7 @@ impl TimeUnit {
         match raw.to_ascii_lowercase().as_str() {
             "ss" => Ok(TimeUnit::Seconds),
             other => Err(ParserError::ParserError(format!(
-                "unsupported time unit `{}` for tumblingwindow (only `ss` allowed)",
+                "unsupported time unit `{}` (only `ss` allowed)",
                 other
             ))),
         }
@@ -214,6 +273,23 @@ mod tests {
         })
     }
 
+    fn sliding_expr(lookahead: Option<u64>) -> Expr {
+        let mut args = vec![make_string_arg("ss"), make_number_arg(10)];
+        if let Some(lookahead) = lookahead {
+            args.push(make_number_arg(lookahead));
+        }
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("slidingwindow")]),
+            args,
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        })
+    }
+
     #[test]
     fn parse_tumbling_window_expr() {
         let parsed = parse_window_expr(&tumbling_expr()).unwrap();
@@ -227,6 +303,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_sliding_window_expr_without_lookahead() {
+        let parsed = parse_window_expr(&sliding_expr(None)).unwrap();
+        assert_eq!(parsed, Some(Window::sliding(TimeUnit::Seconds, 10, None)));
+    }
+
+    #[test]
+    fn parse_sliding_window_expr_with_lookahead() {
+        let parsed = parse_window_expr(&sliding_expr(Some(15))).unwrap();
+        assert_eq!(
+            parsed,
+            Some(Window::sliding(TimeUnit::Seconds, 10, Some(15)))
+        );
+    }
+
+    #[test]
     fn parse_window_expr_non_window() {
         let expr = Expr::Identifier(Ident::new("a"));
         let parsed = parse_window_expr(&expr).unwrap();
@@ -236,6 +327,22 @@ mod tests {
     #[test]
     fn window_round_trip_back_to_expr() {
         let window = Window::tumbling(TimeUnit::Seconds, 25);
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn sliding_window_round_trip_back_to_expr() {
+        let window = Window::sliding(TimeUnit::Seconds, 10, None);
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn sliding_window_round_trip_back_to_expr_with_lookahead() {
+        let window = Window::sliding(TimeUnit::Seconds, 10, Some(15));
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));

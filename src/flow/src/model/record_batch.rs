@@ -29,6 +29,10 @@ impl RecordBatch {
     pub fn num_rows(&self) -> usize {
         self.rows.len()
     }
+
+    pub(crate) fn into_rows(self) -> Vec<Tuple> {
+        self.rows
+    }
 }
 
 impl Clone for RecordBatch {

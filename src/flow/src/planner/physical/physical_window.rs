@@ -37,3 +37,29 @@ impl PhysicalCountWindow {
         Self { base, count }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct PhysicalSlidingWindow {
+    pub base: BasePhysicalPlan,
+    pub time_unit: TimeUnit,
+    pub lookback: u64,
+    pub lookahead: Option<u64>,
+}
+
+impl PhysicalSlidingWindow {
+    pub fn new(
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+        children: Vec<Arc<PhysicalPlan>>,
+        index: i64,
+    ) -> Self {
+        let base = BasePhysicalPlan::new(children, index);
+        Self {
+            base,
+            time_unit,
+            lookback,
+            lookahead,
+        }
+    }
+}

@@ -10,8 +10,18 @@ pub enum TimeUnit {
 /// Logical window specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalWindowSpec {
-    Tumbling { time_unit: TimeUnit, length: u64 },
-    Count { count: u64 },
+    Tumbling {
+        time_unit: TimeUnit,
+        length: u64,
+    },
+    Count {
+        count: u64,
+    },
+    Sliding {
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+    },
 }
 
 /// Logical plan node for windowing.

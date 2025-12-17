@@ -10,9 +10,9 @@ use crate::planner::physical::PhysicalPlan;
 use crate::processor::{
     AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, EncoderProcessor, FilterProcessor, Processor, ProcessorError,
-    ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, StreamData,
-    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
-    WatermarkProcessor,
+    ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
+    SlidingWindowProcessor, StreamData, StreamingAggregationProcessor, StreamingEncoderProcessor,
+    TumblingWindowProcessor, WatermarkProcessor,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -46,6 +46,8 @@ pub enum PlanProcessor {
     Watermark(WatermarkProcessor),
     /// Tumbling window processor driven by watermarks
     TumblingWindow(TumblingWindowProcessor),
+    /// Sliding window processor driven by watermarks (for lookahead windows)
+    SlidingWindow(SlidingWindowProcessor),
     /// SinkProcessor created from PhysicalDataSink
     Sink(SinkProcessor),
     /// ResultCollectProcessor created from PhysicalResultCollect
@@ -114,6 +116,7 @@ impl PlanProcessor {
             PlanProcessor::StreamingAggregation(p) => p.id(),
             PlanProcessor::Watermark(p) => p.id(),
             PlanProcessor::TumblingWindow(p) => p.id(),
+            PlanProcessor::SlidingWindow(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
         }
@@ -139,6 +142,7 @@ impl PlanProcessor {
             PlanProcessor::StreamingAggregation(p) => p.start(),
             PlanProcessor::Watermark(p) => p.start(),
             PlanProcessor::TumblingWindow(p) => p.start(),
+            PlanProcessor::SlidingWindow(p) => p.start(),
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
         }
@@ -158,6 +162,7 @@ impl PlanProcessor {
             PlanProcessor::StreamingAggregation(p) => p.subscribe_output(),
             PlanProcessor::Watermark(p) => p.subscribe_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_output(),
+            PlanProcessor::SlidingWindow(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
         }
@@ -177,6 +182,7 @@ impl PlanProcessor {
             PlanProcessor::StreamingAggregation(p) => p.subscribe_control_output(),
             PlanProcessor::Watermark(p) => p.subscribe_control_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_control_output(),
+            PlanProcessor::SlidingWindow(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
         }
@@ -196,6 +202,7 @@ impl PlanProcessor {
             PlanProcessor::StreamingAggregation(p) => p.add_input(receiver),
             PlanProcessor::Watermark(p) => p.add_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_input(receiver),
+            PlanProcessor::SlidingWindow(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
         }
@@ -215,6 +222,7 @@ impl PlanProcessor {
             PlanProcessor::StreamingAggregation(p) => p.add_control_input(receiver),
             PlanProcessor::Watermark(p) => p.add_control_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_control_input(receiver),
+            PlanProcessor::SlidingWindow(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
         }
@@ -472,6 +480,14 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
+            if matches!(
+                agg.window,
+                crate::planner::physical::StreamingWindowSpec::Sliding { .. }
+            ) {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "Sliding streaming aggregation processor not implemented yet".to_string(),
+                ));
+            }
             let processor = StreamingAggregationProcessor::new(
                 plan_name.clone(),
                 Arc::new(agg.clone()),
@@ -525,6 +541,18 @@ fn create_processor_from_plan_node(
                     })?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::TumblingWindow(processor),
+            ))
+        }
+        PhysicalPlan::SlidingWindow(_) => {
+            let processor =
+                SlidingWindowProcessor::from_physical_plan(plan_name.clone(), Arc::clone(plan))
+                    .ok_or_else(|| {
+                        ProcessorError::InvalidConfiguration(
+                            "Unsupported sliding window configuration".to_string(),
+                        )
+                    })?;
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::SlidingWindow(processor),
             ))
         }
         PhysicalPlan::DataSink(sink_plan) => {

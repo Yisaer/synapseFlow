@@ -322,6 +322,30 @@ mod source_info_tests {
     }
 
     #[test]
+    fn parse_group_by_sliding_window() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT * FROM stream GROUP BY slidingwindow('ss', 10)");
+
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+        assert!(select_stmt.window.is_some());
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+            }) => {
+                assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, None);
+            }
+            other => panic!("Expected sliding window, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn reject_multiple_windows() {
         let parser = StreamSqlParser::new();
         let result =
@@ -355,6 +379,36 @@ mod source_info_tests {
         }
 
         // group_by_exprs should only contain the column, not the window function
+        assert_eq!(select_stmt.group_by_exprs.len(), 1);
+        let expr = &select_stmt.group_by_exprs[0];
+        match expr {
+            Expr::Identifier(ident) => assert_eq!(ident.to_string(), "b"),
+            other => panic!("expected group by identifier `b`, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_with_column_and_sliding_window() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10, 15), b";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+            }) => {
+                assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, Some(15));
+            }
+            other => panic!("expected sliding window, got {:?}", other),
+        }
+
         assert_eq!(select_stmt.group_by_exprs.len(), 1);
         let expr = &select_stmt.group_by_exprs[0];
         match expr {

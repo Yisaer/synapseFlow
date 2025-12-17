@@ -52,6 +52,15 @@ pub trait Collection: Send + Sync + Any {
 
     /// Clone this collection
     fn clone_box(&self) -> Box<dyn Collection>;
+
+    /// Consume this collection and extract owned rows.
+    ///
+    /// Default implementation clones rows from the borrowed view returned by `rows()`.
+    /// Implementations that own their tuples (e.g. `RecordBatch`) should override this method
+    /// to avoid per-row cloning.
+    fn into_rows(self: Box<Self>) -> Result<Vec<Tuple>, CollectionError> {
+        Ok(self.rows().to_vec())
+    }
 }
 
 impl Clone for Box<dyn Collection> {

@@ -239,6 +239,20 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             })
         }
         parser_window::Window::Count { count } => Ok(LogicalWindowSpec::Count { count }),
+        parser_window::Window::Sliding {
+            time_unit,
+            lookback,
+            lookahead,
+        } => {
+            let unit = match time_unit {
+                parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
+            };
+            Ok(LogicalWindowSpec::Sliding {
+                time_unit: unit,
+                lookback,
+                lookahead,
+            })
+        }
     }
 }
 
@@ -326,6 +340,37 @@ mod logical_plan_tests {
         assert_eq!(filter_children.len(), 1);
         assert_eq!(filter_children[0].get_plan_type(), "DataSource");
         assert_eq!(filter_children[0].get_plan_index(), 0);
+    }
+
+    #[test]
+    fn test_create_logical_plan_with_sliding_window() {
+        let sql = "SELECT * FROM users GROUP BY slidingwindow('ss', 10)";
+        let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
+
+        let plan = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap();
+
+        assert_eq!(plan.get_plan_type(), "Project");
+        let project_children = plan.children();
+        assert_eq!(project_children.len(), 1);
+
+        assert_eq!(project_children[0].get_plan_type(), "Window");
+        let window = match project_children[0].as_ref() {
+            LogicalPlan::Window(window) => window,
+            other => panic!("Expected Window, found {}", other.get_plan_type()),
+        };
+        assert!(matches!(
+            window.spec,
+            LogicalWindowSpec::Sliding {
+                time_unit: TimeUnit::Seconds,
+                lookback: 10,
+                lookahead: None
+            }
+        ));
+
+        let window_children = project_children[0].children();
+        assert_eq!(window_children.len(), 1);
+        assert_eq!(window_children[0].get_plan_type(), "DataSource");
     }
 
     #[test]

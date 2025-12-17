@@ -234,6 +234,19 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 info.push("kind=count".to_string());
                 info.push(format!("count={}", count));
             }
+            LogicalWindowSpec::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+            } => {
+                info.push("kind=sliding".to_string());
+                info.push(format!("unit={:?}", time_unit));
+                info.push(format!("lookback={}", lookback));
+                match lookahead {
+                    Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
+                    None => info.push("lookahead=none".to_string()),
+                }
+            }
         },
     }
 
@@ -325,6 +338,19 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
                     info.push("window=count".to_string());
                     info.push(format!("count={}", count));
                 }
+                crate::planner::physical::StreamingWindowSpec::Sliding {
+                    time_unit,
+                    lookback,
+                    lookahead,
+                } => {
+                    info.push("window=sliding".to_string());
+                    info.push(format!("unit={:?}", time_unit));
+                    info.push(format!("lookback={}", lookback));
+                    match lookahead {
+                        Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
+                        None => info.push("lookahead=none".to_string()),
+                    }
+                }
             }
         }
         PhysicalPlan::Batch(batch) => {
@@ -373,6 +399,29 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
                     }
                 }
             }
+            WatermarkConfig::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                strategy,
+            } => {
+                info.push("window=sliding".to_string());
+                info.push(format!("unit={:?}", time_unit));
+                info.push(format!("lookback={}", lookback));
+                match lookahead {
+                    Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
+                    None => info.push("lookahead=none".to_string()),
+                }
+                match strategy {
+                    WatermarkStrategy::ProcessingTime { interval, .. } => {
+                        info.push("mode=processing_time".to_string());
+                        info.push(format!("interval={}", interval));
+                    }
+                    WatermarkStrategy::External => {
+                        info.push("mode=external".to_string());
+                    }
+                }
+            }
         },
         PhysicalPlan::TumblingWindow(window) => {
             info.push("kind=tumbling".to_string());
@@ -382,6 +431,15 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
         PhysicalPlan::CountWindow(window) => {
             info.push("kind=count".to_string());
             info.push(format!("count={}", window.count));
+        }
+        PhysicalPlan::SlidingWindow(window) => {
+            info.push("kind=sliding".to_string());
+            info.push(format!("unit={:?}", window.time_unit));
+            info.push(format!("lookback={}", window.lookback));
+            match window.lookahead {
+                Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
+                None => info.push("lookahead=none".to_string()),
+            }
         }
     }
 
