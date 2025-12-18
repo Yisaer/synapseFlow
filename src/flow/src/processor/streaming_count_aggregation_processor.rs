@@ -149,7 +149,7 @@ impl Processor for StreamingCountAggregationProcessor {
                             }
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(&control_output, control_signal).await?;
+                                send_with_backpressure(&output, StreamData::control(control_signal)).await?;
                                 if is_terminal {
                                     stream_ended = true;
                                     break;

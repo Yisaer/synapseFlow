@@ -122,7 +122,15 @@ impl StreamingAggregationRewrite {
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)
             }
-            PhysicalPlan::SlidingWindow(_) => return None,
+            PhysicalPlan::SlidingWindow(window) => {
+                let spec = StreamingWindowSpec::Sliding {
+                    time_unit: window.time_unit,
+                    lookback: window.lookback,
+                    lookahead: window.lookahead,
+                };
+                let upstream = window.base.children.first()?.clone();
+                (spec, upstream)
+            }
             _ => return None,
         };
 
@@ -497,7 +505,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Sliding streaming aggregation not supported yet; enable when processor support lands"]
     fn optimize_rewrites_streaming_agg_for_sliding_window() {
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
@@ -561,7 +568,7 @@ mod tests {
         let pre_table = pre_explain.physical.to_json().to_string();
         assert_eq!(
             pre_table,
-            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalWatermark_1","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalWatermark"}],"id":"PhysicalSlidingWindow_2","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalSlidingWindow"}],"id":"PhysicalAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_6","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_7","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalSlidingWindow_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalSlidingWindow"}],"id":"PhysicalAggregation_2","info":["calls=[sum(a) -> col_1]","group_by=[b]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_4","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_6","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
         );
 
         let optimized_plan = optimize_physical_plan(
@@ -574,7 +581,7 @@ mod tests {
         let post_table = post_explain.physical.to_json().to_string();
         assert_eq!(
             post_table,
-            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalWatermark_1","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalWatermark"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_6","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_7","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
+            r##"{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_4","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_6","info":["sink_count=1"],"operator":"PhysicalResultCollect"}"##
         );
     }
 
