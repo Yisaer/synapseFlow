@@ -121,6 +121,46 @@ impl SharedStreamRegistry {
         entry.register_consumer(consumer_id.into()).await
     }
 
+    /// Update the required columns for a registered consumer.
+    ///
+    /// This does not change what is currently decoded yet; it only updates registry state and
+    /// recomputes the union required columns. The decoder will apply it in a later step.
+    pub async fn set_consumer_required_columns(
+        &self,
+        name: &str,
+        consumer_id: &str,
+        required_columns: Vec<String>,
+    ) -> Result<Vec<String>, SharedStreamError> {
+        let entry = {
+            let guard = self.streams.read().await;
+            guard
+                .get(name)
+                .cloned()
+                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
+        };
+        entry
+            .set_consumer_required_columns(consumer_id, required_columns)
+            .await
+    }
+
+    /// Return the current union required columns across all registered consumers.
+    ///
+    /// This is an internal planning/debugging aid; pipelines should normally rely on the
+    /// applied `SharedStreamInfo.decoding_columns` when waiting for readiness.
+    pub async fn union_required_columns(
+        &self,
+        name: &str,
+    ) -> Result<Vec<String>, SharedStreamError> {
+        let entry = {
+            let guard = self.streams.read().await;
+            guard
+                .get(name)
+                .cloned()
+                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
+        };
+        Ok(entry.union_required_columns().await)
+    }
+
     /// Whether the given stream name corresponds to a registered shared stream.
     pub async fn is_registered(&self, name: &str) -> bool {
         let guard = self.streams.read().await;
@@ -206,6 +246,11 @@ pub struct SharedStreamInfo {
     pub status: SharedStreamStatus,
     pub connector_id: String,
     pub subscriber_count: usize,
+    /// Columns that the shared stream decoder is currently decoding (applied state).
+    ///
+    /// This is used by pipelines to wait until the shared decoder has applied a required
+    /// projection before the pipeline starts consuming data.
+    pub decoding_columns: Vec<String>,
 }
 
 /// Handle returned to pipeline consumers.
@@ -286,6 +331,9 @@ struct SharedStreamHandles {
 struct SharedStreamState {
     status: SharedStreamStatus,
     subscribers: HashSet<String>,
+    decoding_columns: Vec<String>,
+    consumer_required_columns: HashMap<String, Vec<String>>,
+    union_required_columns: Vec<String>,
 }
 
 impl SharedStreamInner {
@@ -381,6 +429,12 @@ impl SharedStreamInner {
         let data_anchor = data_sender.subscribe();
         let control_anchor = control_sender.subscribe();
 
+        let initial_decoding_columns: Vec<String> = schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
+
         Ok(Self {
             name: stream_name,
             schema,
@@ -400,6 +454,9 @@ impl SharedStreamInner {
             state: Mutex::new(SharedStreamState {
                 status: SharedStreamStatus::Running,
                 subscribers: HashSet::new(),
+                decoding_columns: initial_decoding_columns,
+                consumer_required_columns: HashMap::new(),
+                union_required_columns: Vec::new(),
             }),
         })
     }
@@ -417,6 +474,7 @@ impl SharedStreamInner {
             status: state.status.clone(),
             connector_id: self.connector_id.clone(),
             subscriber_count: state.subscribers.len(),
+            decoding_columns: state.decoding_columns.clone(),
         }
     }
 
@@ -456,9 +514,85 @@ impl SharedStreamInner {
         })
     }
 
+    async fn set_consumer_required_columns(
+        &self,
+        consumer_id: &str,
+        required_columns: Vec<String>,
+    ) -> Result<Vec<String>, SharedStreamError> {
+        let mut state = self.state.lock().await;
+        if !state.subscribers.contains(consumer_id) {
+            return Err(SharedStreamError::Internal(format!(
+                "consumer {consumer_id} not registered for {}",
+                self.name()
+            )));
+        }
+        state
+            .consumer_required_columns
+            .insert(consumer_id.to_string(), required_columns);
+
+        let union_set: HashSet<String> = state
+            .consumer_required_columns
+            .values()
+            .flat_map(|cols| cols.iter().cloned())
+            .collect();
+
+        let union: Vec<String> = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .filter(|name| union_set.contains(name))
+            .collect();
+
+        state.union_required_columns = union.clone();
+        if union.is_empty() {
+            state.decoding_columns = self
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect();
+        } else {
+            state.decoding_columns = union.clone();
+        }
+        Ok(union)
+    }
+
+    async fn union_required_columns(&self) -> Vec<String> {
+        let state = self.state.lock().await;
+        state.union_required_columns.clone()
+    }
+
     async fn unregister_consumer(&self, consumer_id: &str) {
         let mut state = self.state.lock().await;
         state.subscribers.remove(consumer_id);
+        state.consumer_required_columns.remove(consumer_id);
+
+        let union_set: HashSet<String> = state
+            .consumer_required_columns
+            .values()
+            .flat_map(|cols| cols.iter().cloned())
+            .collect();
+
+        let union: Vec<String> = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .filter(|name| union_set.contains(name))
+            .collect();
+
+        state.union_required_columns = union.clone();
+        if union.is_empty() {
+            state.decoding_columns = self
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect();
+        } else {
+            state.decoding_columns = union;
+        }
     }
 
     async fn shutdown(self: Arc<Self>) -> Result<(), SharedStreamError> {
@@ -466,6 +600,8 @@ impl SharedStreamInner {
             let mut state = self.state.lock().await;
             state.status = SharedStreamStatus::Stopped;
             state.subscribers.clear();
+            state.consumer_required_columns.clear();
+            state.union_required_columns.clear();
         }
 
         let _ = self.control_input.send(ControlSignal::StreamQuickEnd);
@@ -549,5 +685,73 @@ mod tests {
             listed.iter().all(|entry| entry.name != name),
             "shared stream should be removed after drop"
         );
+    }
+
+    #[tokio::test]
+    async fn shared_stream_tracks_consumer_required_columns_union() {
+        let name = format!("shared_stream_req_cols_test_{}", Uuid::new_v4().simple());
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                name.clone(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                name.clone(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+        let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
+        let decoder = Arc::new(JsonDecoder::new(
+            name.clone(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
+
+        let config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema))
+            .with_connector(Box::new(connector), decoder);
+        let info = registry().create_stream(config).await.unwrap();
+        assert_eq!(info.name, name);
+
+        let sub_a = registry()
+            .subscribe(&name, "consumer_a")
+            .await
+            .expect("subscribe consumer_a");
+        let sub_b = registry()
+            .subscribe(&name, "consumer_b")
+            .await
+            .expect("subscribe consumer_b");
+
+        registry()
+            .set_consumer_required_columns(&name, "consumer_a", vec!["a".to_string()])
+            .await
+            .expect("set required columns for a");
+        registry()
+            .set_consumer_required_columns(&name, "consumer_b", vec!["b".to_string()])
+            .await
+            .expect("set required columns for b");
+
+        let union = registry()
+            .union_required_columns(&name)
+            .await
+            .expect("union required columns");
+        assert_eq!(union, vec!["a".to_string(), "b".to_string()]);
+
+        sub_a.release().await;
+        let union = registry()
+            .union_required_columns(&name)
+            .await
+            .expect("union required columns");
+        assert_eq!(union, vec!["b".to_string()]);
+
+        sub_b.release().await;
+        let union = registry()
+            .union_required_columns(&name)
+            .await
+            .expect("union required columns");
+        assert!(union.is_empty());
+
+        registry().drop_stream(&name).await.unwrap();
     }
 }

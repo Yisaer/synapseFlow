@@ -388,9 +388,11 @@ fn build_sinks_from_definition(
                     props.qos,
                 );
                 config = config.with_retain(props.retain);
-                if let Some(client_id) = &props.client_id {
-                    config = config.with_client_id(client_id.clone());
-                }
+                let client_id = props
+                    .client_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-{}", definition.id(), sink.sink_id));
+                config = config.with_client_id(client_id);
                 if let Some(conn_key) = &props.connector_key {
                     config = config.with_connector_key(conn_key.clone());
                 }
