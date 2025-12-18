@@ -6,6 +6,8 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
+use crate::expr::scalar::ColumnRef;
+use crate::expr::ScalarExpr;
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::{
     AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
@@ -14,6 +16,7 @@ use crate::processor::{
     SlidingWindowProcessor, StreamData, StreamingAggregationProcessor, StreamingEncoderProcessor,
     TumblingWindowProcessor, WatermarkProcessor,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -63,6 +66,7 @@ struct ProcessorBuilderContext {
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    shared_source_required_columns: HashMap<String, Vec<String>>,
 }
 
 impl ProcessorBuilderContext {
@@ -72,6 +76,7 @@ impl ProcessorBuilderContext {
         encoder_registry: Arc<EncoderRegistry>,
         decoder_registry: Arc<DecoderRegistry>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
+        shared_source_required_columns: HashMap<String, Vec<String>>,
     ) -> Self {
         Self {
             mqtt_clients,
@@ -79,6 +84,7 @@ impl ProcessorBuilderContext {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            shared_source_required_columns,
         }
     }
 
@@ -100,6 +106,12 @@ impl ProcessorBuilderContext {
 
     fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
         Arc::clone(&self.aggregate_registry)
+    }
+
+    fn shared_required_columns(&self, source_name: &str) -> Option<Vec<String>> {
+        self.shared_source_required_columns
+            .get(source_name)
+            .cloned()
     }
 }
 
@@ -398,6 +410,171 @@ impl ProcessorPipeline {
     }
 }
 
+#[derive(Default)]
+struct SourceColumnRequirements {
+    all: bool,
+    indices: HashSet<usize>,
+}
+
+struct SharedSourceInfo {
+    stream_name: String,
+    alias: Option<String>,
+    schema: Arc<datatypes::Schema>,
+}
+
+fn collect_columns_from_scalar_expr(
+    expr: &ScalarExpr,
+    requirements: &mut HashMap<String, SourceColumnRequirements>,
+    all_sources: &mut bool,
+) {
+    match expr {
+        ScalarExpr::Column(ColumnRef::ByIndex {
+            source_name,
+            column_index,
+        }) => {
+            let entry = requirements.entry(source_name.clone()).or_default();
+            entry.indices.insert(*column_index);
+        }
+        ScalarExpr::Column(ColumnRef::ByName { .. }) => {}
+        ScalarExpr::Wildcard { source_name } => {
+            if let Some(prefix) = source_name.as_ref() {
+                requirements.entry(prefix.clone()).or_default().all = true;
+            } else {
+                *all_sources = true;
+            }
+        }
+        ScalarExpr::Literal(_, _) => {}
+        ScalarExpr::CallUnary { expr, .. } => {
+            collect_columns_from_scalar_expr(expr, requirements, all_sources);
+        }
+        ScalarExpr::CallBinary { expr1, expr2, .. } => {
+            collect_columns_from_scalar_expr(expr1, requirements, all_sources);
+            collect_columns_from_scalar_expr(expr2, requirements, all_sources);
+        }
+        ScalarExpr::FieldAccess { expr, .. } => {
+            collect_columns_from_scalar_expr(expr, requirements, all_sources);
+        }
+        ScalarExpr::ListIndex { expr, index_expr } => {
+            collect_columns_from_scalar_expr(expr, requirements, all_sources);
+            collect_columns_from_scalar_expr(index_expr, requirements, all_sources);
+        }
+        ScalarExpr::CallFunc { args, .. } => {
+            for arg in args {
+                collect_columns_from_scalar_expr(arg, requirements, all_sources);
+            }
+        }
+    }
+}
+
+fn collect_shared_source_requirements(
+    plan: &PhysicalPlan,
+    shared_sources: &mut Vec<SharedSourceInfo>,
+    requirements: &mut HashMap<String, SourceColumnRequirements>,
+    all_sources: &mut bool,
+) {
+    match plan {
+        PhysicalPlan::SharedStream(shared) => {
+            shared_sources.push(SharedSourceInfo {
+                stream_name: shared.stream_name().to_string(),
+                alias: shared.alias().map(str::to_string),
+                schema: shared.schema(),
+            });
+        }
+        PhysicalPlan::Project(project) => {
+            for field in &project.fields {
+                collect_columns_from_scalar_expr(&field.compiled_expr, requirements, all_sources);
+            }
+        }
+        PhysicalPlan::Filter(filter) => {
+            collect_columns_from_scalar_expr(&filter.scalar_predicate, requirements, all_sources);
+        }
+        PhysicalPlan::Aggregation(agg) => {
+            for call in &agg.aggregate_calls {
+                for arg in &call.args {
+                    collect_columns_from_scalar_expr(arg, requirements, all_sources);
+                }
+            }
+            for scalar in &agg.group_by_scalars {
+                collect_columns_from_scalar_expr(scalar, requirements, all_sources);
+            }
+        }
+        PhysicalPlan::StreamingAggregation(agg) => {
+            for call in &agg.aggregate_calls {
+                for arg in &call.args {
+                    collect_columns_from_scalar_expr(arg, requirements, all_sources);
+                }
+            }
+            for scalar in &agg.group_by_scalars {
+                collect_columns_from_scalar_expr(scalar, requirements, all_sources);
+            }
+        }
+        _ => {}
+    }
+
+    for child in plan.children() {
+        collect_shared_source_requirements(
+            child.as_ref(),
+            shared_sources,
+            requirements,
+            all_sources,
+        );
+    }
+}
+
+fn compute_shared_required_columns(physical_plan: &PhysicalPlan) -> HashMap<String, Vec<String>> {
+    let mut shared_sources = Vec::new();
+    let mut requirements: HashMap<String, SourceColumnRequirements> = HashMap::new();
+    let mut all_sources = false;
+
+    collect_shared_source_requirements(
+        physical_plan,
+        &mut shared_sources,
+        &mut requirements,
+        &mut all_sources,
+    );
+
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+
+    for shared in shared_sources {
+        let mut required = SourceColumnRequirements::default();
+
+        if all_sources {
+            required.all = true;
+        }
+
+        for key in [Some(shared.stream_name.as_str()), shared.alias.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(entry) = requirements.get(key) {
+                required.all |= entry.all;
+                required.indices.extend(entry.indices.iter().copied());
+            }
+        }
+
+        let required_columns = if required.all {
+            shared
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect()
+        } else {
+            let mut cols = Vec::new();
+            for (idx, col) in shared.schema.column_schemas().iter().enumerate() {
+                if required.indices.contains(&idx) {
+                    cols.push(col.name.clone());
+                }
+            }
+            cols
+        };
+
+        out.insert(shared.stream_name, required_columns);
+    }
+
+    out
+}
+
 /// Create a processor from a PhysicalPlan node
 ///
 /// This function dispatches to the appropriate processor creation function
@@ -450,8 +627,11 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::SharedStream(shared) => {
-            let processor =
+            let mut processor =
                 SharedStreamProcessor::new(&plan_name, shared.stream_name().to_string());
+            if let Some(cols) = context.shared_required_columns(shared.stream_name()) {
+                processor.set_required_columns(cols);
+            }
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
             ))
@@ -832,12 +1012,14 @@ pub fn create_processor_pipeline(
     control_source.add_control_input(control_signal_receiver);
 
     let mut processor_map = ProcessorMap::new();
+    let shared_required_columns = compute_shared_required_columns(physical_plan.as_ref());
     let context = ProcessorBuilderContext::new(
         mqtt_clients,
         connector_registry,
         encoder_registry,
         decoder_registry,
         aggregate_registry,
+        shared_required_columns,
     );
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
 
@@ -944,6 +1126,7 @@ mod tests {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            HashMap::new(),
         );
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");
