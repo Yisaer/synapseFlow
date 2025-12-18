@@ -9,6 +9,12 @@ impl LastRowFunction {
     }
 }
 
+impl Default for LastRowFunction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct LastRowAccumulator {
     last: Option<Value>,
 }

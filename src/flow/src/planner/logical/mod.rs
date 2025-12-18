@@ -355,10 +355,10 @@ fn collect_non_placeholder_column_refs(expr: &sqlparser::ast::Expr) -> Vec<Strin
                         sqlparser::ast::FunctionArg::Unnamed(
                             sqlparser::ast::FunctionArgExpr::Expr(expr),
                         ) => collect(expr, out),
-                        sqlparser::ast::FunctionArg::Named { arg, .. } => match arg {
-                            sqlparser::ast::FunctionArgExpr::Expr(expr) => collect(expr, out),
-                            _ => {}
-                        },
+                        sqlparser::ast::FunctionArg::Named {
+                            arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                            ..
+                        } => collect(expr, out),
                         _ => {}
                     }
                 }
@@ -413,9 +413,7 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
         }
         Expr::InList { expr, list, .. } => {
             expr_contains_aggregate_placeholder(expr)
-                || list
-                    .iter()
-                    .any(|item| expr_contains_aggregate_placeholder(item))
+                || list.iter().any(expr_contains_aggregate_placeholder)
         }
         Expr::Case {
             operand,
@@ -426,12 +424,8 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
             operand
                 .as_ref()
                 .is_some_and(|expr| expr_contains_aggregate_placeholder(expr))
-                || conditions
-                    .iter()
-                    .any(|expr| expr_contains_aggregate_placeholder(expr))
-                || results
-                    .iter()
-                    .any(|expr| expr_contains_aggregate_placeholder(expr))
+                || conditions.iter().any(expr_contains_aggregate_placeholder)
+                || results.iter().any(expr_contains_aggregate_placeholder)
                 || else_result
                     .as_ref()
                     .is_some_and(|expr| expr_contains_aggregate_placeholder(expr))
@@ -440,12 +434,12 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
             sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
                 expr_contains_aggregate_placeholder(expr)
             }
-            sqlparser::ast::FunctionArg::Named { arg, .. } => match arg {
-                sqlparser::ast::FunctionArgExpr::Expr(expr) => {
-                    expr_contains_aggregate_placeholder(expr)
+            sqlparser::ast::FunctionArg::Named { arg, .. } => {
+                if let sqlparser::ast::FunctionArgExpr::Expr(expr) = arg {
+                    return expr_contains_aggregate_placeholder(expr);
                 }
-                _ => false,
-            },
+                false
+            }
             _ => false,
         }),
         Expr::JsonAccess { left, right, .. } => {
@@ -453,9 +447,7 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
         }
         Expr::MapAccess { column, keys } => {
             expr_contains_aggregate_placeholder(column)
-                || keys
-                    .iter()
-                    .any(|expr| expr_contains_aggregate_placeholder(expr))
+                || keys.iter().any(expr_contains_aggregate_placeholder)
         }
         _ => false,
     }
