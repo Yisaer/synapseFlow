@@ -67,7 +67,9 @@ pub use registry::ConnectorRegistry;
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
+pub use source::mock::{
+    get_mock_source_handle, register_mock_source_handle, take_mock_source_handle,
+};
 pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
-pub use source::mock::{get_mock_source_handle, register_mock_source_handle, take_mock_source_handle};
 /// MQTT-specific helpers and connector implementation.
 pub use source::mqtt::{MqttSourceConfig, MqttSourceConnector};

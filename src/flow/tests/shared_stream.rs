@@ -75,11 +75,8 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         Arc::clone(&schema),
         JsonMap::new(),
     ));
-    let config =
-        SharedStreamConfig::new(stream_name.clone(), Arc::clone(&schema)).with_connector(
-            Box::new(connector),
-            decoder,
-        );
+    let config = SharedStreamConfig::new(stream_name.clone(), Arc::clone(&schema))
+        .with_connector(Box::new(connector), decoder);
     registry
         .create_stream(config)
         .await

@@ -5,7 +5,7 @@ use super::window;
 pub use window::{Window, parse_window_expr, window_to_expr};
 
 /// Stream processing dialect that supports window functions in GROUP BY clauses
-/// Currently supports tumblingwindow (time-based) and countwindow (row-count based)
+/// Supported windows: tumblingwindow, slidingwindow, countwindow, statewindow
 #[derive(Debug, Clone)]
 pub struct StreamDialect {}
 

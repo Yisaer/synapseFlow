@@ -479,6 +479,9 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
                 lookahead,
             })
         }
+        parser_window::Window::State { .. } => {
+            Err("statewindow is parsed, but not yet supported by the flow planner".to_string())
+        }
     }
 }
 
