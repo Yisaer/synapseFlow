@@ -208,16 +208,16 @@ fn create_physical_window_with_builder(
         physical_children.push(physical_child);
     }
 
-    let physical = match logical_window.spec {
+    let physical = match &logical_window.spec {
         LogicalWindowSpec::Tumbling { time_unit, length } => {
             let watermark_index = builder.allocate_index();
             let watermark = PhysicalWatermark::new(
                 WatermarkConfig::Tumbling {
-                    time_unit,
-                    length,
+                    time_unit: *time_unit,
+                    length: *length,
                     strategy: WatermarkStrategy::ProcessingTime {
-                        time_unit,
-                        interval: length,
+                        time_unit: *time_unit,
+                        interval: *length,
                     },
                 },
                 physical_children,
@@ -225,8 +225,8 @@ fn create_physical_window_with_builder(
             );
             let index = builder.allocate_index();
             let tumbling = crate::planner::physical::PhysicalTumblingWindow::new(
-                time_unit,
-                length,
+                *time_unit,
+                *length,
                 vec![Arc::new(PhysicalPlan::Watermark(watermark))],
                 index,
             );
@@ -234,8 +234,11 @@ fn create_physical_window_with_builder(
         }
         LogicalWindowSpec::Count { count } => {
             let index = builder.allocate_index();
-            let count_window =
-                crate::planner::physical::PhysicalCountWindow::new(count, physical_children, index);
+            let count_window = crate::planner::physical::PhysicalCountWindow::new(
+                *count,
+                physical_children,
+                index,
+            );
             PhysicalPlan::CountWindow(count_window)
         }
         LogicalWindowSpec::Sliding {
@@ -247,11 +250,11 @@ fn create_physical_window_with_builder(
                 let watermark_index = builder.allocate_index();
                 let watermark = PhysicalWatermark::new(
                     WatermarkConfig::Sliding {
-                        time_unit,
-                        lookback,
-                        lookahead,
+                        time_unit: *time_unit,
+                        lookback: *lookback,
+                        lookahead: *lookahead,
                         strategy: WatermarkStrategy::ProcessingTime {
-                            time_unit,
+                            time_unit: *time_unit,
                             interval: 1,
                         },
                     },
@@ -267,13 +270,30 @@ fn create_physical_window_with_builder(
             };
 
             let sliding = crate::planner::physical::PhysicalSlidingWindow::new(
-                time_unit,
-                lookback,
-                lookahead,
+                *time_unit,
+                *lookback,
+                *lookahead,
                 sliding_children,
                 index,
             );
             PhysicalPlan::SlidingWindow(sliding)
+        }
+        LogicalWindowSpec::State { open, emit } => {
+            let open_scalar = convert_expr_to_scalar_with_bindings(open.as_ref(), bindings)
+                .map_err(|err| err.to_string())?;
+            let emit_scalar = convert_expr_to_scalar_with_bindings(emit.as_ref(), bindings)
+                .map_err(|err| err.to_string())?;
+
+            let index = builder.allocate_index();
+            let state = crate::planner::physical::PhysicalStateWindow::new(
+                open.as_ref().clone(),
+                emit.as_ref().clone(),
+                open_scalar,
+                emit_scalar,
+                physical_children,
+                index,
+            );
+            PhysicalPlan::StateWindow(Box::new(state))
         }
     };
 

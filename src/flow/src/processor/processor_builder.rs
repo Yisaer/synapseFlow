@@ -13,8 +13,8 @@ use crate::processor::{
     AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor, Processor,
     ProcessorError, ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StreamData, StreamingAggregationProcessor, StreamingEncoderProcessor,
-    TumblingWindowProcessor, WatermarkProcessor,
+    SlidingWindowProcessor, StateWindowProcessor, StreamData, StreamingAggregationProcessor,
+    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -53,6 +53,8 @@ pub enum PlanProcessor {
     TumblingWindow(TumblingWindowProcessor),
     /// Sliding window processor driven by watermarks (for lookahead windows)
     SlidingWindow(SlidingWindowProcessor),
+    /// State window processor driven by open/emit conditions
+    StateWindow(StateWindowProcessor),
     /// SinkProcessor created from PhysicalDataSink
     Sink(SinkProcessor),
     /// ResultCollectProcessor created from PhysicalResultCollect
@@ -132,6 +134,7 @@ impl PlanProcessor {
             PlanProcessor::Watermark(p) => p.id(),
             PlanProcessor::TumblingWindow(p) => p.id(),
             PlanProcessor::SlidingWindow(p) => p.id(),
+            PlanProcessor::StateWindow(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
         }
@@ -159,6 +162,7 @@ impl PlanProcessor {
             PlanProcessor::Watermark(p) => p.start(),
             PlanProcessor::TumblingWindow(p) => p.start(),
             PlanProcessor::SlidingWindow(p) => p.start(),
+            PlanProcessor::StateWindow(p) => p.start(),
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
         }
@@ -180,6 +184,7 @@ impl PlanProcessor {
             PlanProcessor::Watermark(p) => p.subscribe_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_output(),
             PlanProcessor::SlidingWindow(p) => p.subscribe_output(),
+            PlanProcessor::StateWindow(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
         }
@@ -201,6 +206,7 @@ impl PlanProcessor {
             PlanProcessor::Watermark(p) => p.subscribe_control_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_control_output(),
             PlanProcessor::SlidingWindow(p) => p.subscribe_control_output(),
+            PlanProcessor::StateWindow(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
         }
@@ -222,6 +228,7 @@ impl PlanProcessor {
             PlanProcessor::Watermark(p) => p.add_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_input(receiver),
             PlanProcessor::SlidingWindow(p) => p.add_input(receiver),
+            PlanProcessor::StateWindow(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
         }
@@ -243,6 +250,7 @@ impl PlanProcessor {
             PlanProcessor::Watermark(p) => p.add_control_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_control_input(receiver),
             PlanProcessor::SlidingWindow(p) => p.add_control_input(receiver),
+            PlanProcessor::StateWindow(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
         }
@@ -744,6 +752,18 @@ fn create_processor_from_plan_node(
                     })?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SlidingWindow(processor),
+            ))
+        }
+        PhysicalPlan::StateWindow(_) => {
+            let processor =
+                StateWindowProcessor::from_physical_plan(plan_name.clone(), Arc::clone(plan))
+                    .ok_or_else(|| {
+                        ProcessorError::InvalidConfiguration(
+                            "Unsupported state window configuration".to_string(),
+                        )
+                    })?;
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::StateWindow(processor),
             ))
         }
         PhysicalPlan::DataSink(sink_plan) => {

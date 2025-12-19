@@ -23,7 +23,7 @@ pub struct SelectStmt {
     pub having: Option<Expr>,
     /// GROUP BY expressions, if any
     pub group_by_exprs: Vec<Expr>,
-    /// Optional stream window declared in GROUP BY (tumbling/count)
+    /// Optional stream window declared in GROUP BY
     pub window: Option<Window>,
     /// Aggregate function mappings: column name -> original aggregate expression
     pub aggregate_mappings: HashMap<String, Expr>,

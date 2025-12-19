@@ -224,7 +224,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
         LogicalPlan::Tail(tail) => {
             info.push(format!("sink_count={}", tail.base.children.len()));
         }
-        LogicalPlan::Window(window) => match window.spec {
+        LogicalPlan::Window(window) => match &window.spec {
             LogicalWindowSpec::Tumbling { time_unit, length } => {
                 info.push("kind=tumbling".to_string());
                 info.push(format!("unit={:?}", time_unit));
@@ -246,6 +246,11 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
                     None => info.push("lookahead=none".to_string()),
                 }
+            }
+            LogicalWindowSpec::State { open, emit } => {
+                info.push("kind=state".to_string());
+                info.push(format!("open={}", open.as_ref()));
+                info.push(format!("emit={}", emit.as_ref()));
             }
         },
     }
@@ -460,6 +465,11 @@ fn build_physical_node_with_prefix(
                 Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
                 None => info.push("lookahead=none".to_string()),
             }
+        }
+        PhysicalPlan::StateWindow(window) => {
+            info.push("kind=state".to_string());
+            info.push(format!("open={}", window.open_expr));
+            info.push(format!("emit={}", window.emit_expr));
         }
     }
 

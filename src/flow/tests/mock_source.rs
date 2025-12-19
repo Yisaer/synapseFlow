@@ -88,4 +88,3 @@ async fn mock_source_attaches_and_can_send_payloads() {
 
     pipeline.close().await.expect("close pipeline");
 }
-

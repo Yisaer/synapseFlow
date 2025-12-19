@@ -1,4 +1,5 @@
 use crate::planner::logical::BaseLogicalPlan;
+use sqlparser::ast::Expr;
 use std::sync::Arc;
 
 /// Supported time units for window definitions.
@@ -8,7 +9,7 @@ pub enum TimeUnit {
 }
 
 /// Logical window specification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LogicalWindowSpec {
     Tumbling {
         time_unit: TimeUnit,
@@ -21,6 +22,10 @@ pub enum LogicalWindowSpec {
         time_unit: TimeUnit,
         lookback: u64,
         lookahead: Option<u64>,
+    },
+    State {
+        open: Box<Expr>,
+        emit: Box<Expr>,
     },
 }
 

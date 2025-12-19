@@ -2,7 +2,7 @@ use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Ident, Object
 use sqlparser::parser::ParserError;
 
 /// Window specification supported by StreamDialect
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Window {
     /// Fixed-size, non-overlapping window defined by time unit + length
     Tumbling { time_unit: TimeUnit, length: u64 },
@@ -18,6 +18,10 @@ pub enum Window {
         lookback: u64,
         lookahead: Option<u64>,
     },
+    /// State window driven by two boolean conditions:
+    /// - `open`: when the window starts collecting state
+    /// - `emit`: when the window emits its current state
+    State { open: Box<Expr>, emit: Box<Expr> },
 }
 
 /// Supported time units for window definitions.
@@ -43,11 +47,19 @@ impl Window {
         }
     }
 
+    pub fn state(open: Expr, emit: Expr) -> Self {
+        Window::State {
+            open: Box::new(open),
+            emit: Box::new(emit),
+        }
+    }
+
     fn function_name(&self) -> &'static str {
         match self {
             Window::Tumbling { .. } => "tumblingwindow",
             Window::Count { .. } => "countwindow",
             Window::Sliding { .. } => "slidingwindow",
+            Window::State { .. } => "statewindow",
         }
     }
 }
@@ -69,6 +81,7 @@ pub fn parse_window_function(function: &Function) -> Result<Window, ParserError>
         "tumblingwindow" => parse_tumbling_window(function),
         "countwindow" => parse_count_window(function),
         "slidingwindow" => parse_sliding_window(function),
+        "statewindow" => parse_state_window(function),
         name => Err(ParserError::ParserError(format!(
             "Unsupported window function: {}",
             name
@@ -100,6 +113,10 @@ pub fn window_to_expr(window: &Window) -> Expr {
             }
             args
         }
+        Window::State { open, emit } => vec![
+            make_expr_arg(open.as_ref().clone()),
+            make_expr_arg(emit.as_ref().clone()),
+        ],
     };
 
     Expr::Function(Function {
@@ -165,6 +182,19 @@ fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
     Ok(Window::sliding(time_unit, lookback, lookahead))
 }
 
+fn parse_state_window(function: &Function) -> Result<Window, ParserError> {
+    if function.args.len() != 2 {
+        return Err(ParserError::ParserError(
+            "statewindow requires 2 arguments: (open, emit)".to_string(),
+        ));
+    }
+
+    let open = parse_expr_arg(&function.args[0], "statewindow", "open")?;
+    let emit = parse_expr_arg(&function.args[1], "statewindow", "emit")?;
+
+    Ok(Window::state(open, emit))
+}
+
 fn parse_string_arg(
     arg: &FunctionArg,
     func_name: &str,
@@ -205,10 +235,10 @@ fn parse_number_arg(
     }
 }
 
-fn is_supported_window_function(name: &str) -> bool {
+pub(crate) fn is_supported_window_function(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "tumblingwindow" | "countwindow" | "slidingwindow"
+        "tumblingwindow" | "countwindow" | "slidingwindow" | "statewindow"
     )
 }
 
@@ -241,6 +271,24 @@ fn make_number_arg(value: u64) -> FunctionArg {
         value.to_string(),
         false,
     ))))
+}
+
+fn make_expr_arg(expr: Expr) -> FunctionArg {
+    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+}
+
+fn parse_expr_arg(
+    arg: &FunctionArg,
+    func_name: &str,
+    field_name: &str,
+) -> Result<Expr, ParserError> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr.clone()),
+        _ => Err(ParserError::ParserError(format!(
+            "{} {} must be an expression",
+            func_name, field_name
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +338,26 @@ mod tests {
         })
     }
 
+    fn state_expr() -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("statewindow")]),
+            args: vec![
+                make_expr_arg(Expr::BinaryOp {
+                    left: Box::new(Expr::Identifier(Ident::new("a"))),
+                    op: sqlparser::ast::BinaryOperator::Gt,
+                    right: Box::new(Expr::Value(Value::Number("0".to_string(), false))),
+                }),
+                make_expr_arg(Expr::Identifier(Ident::new("b"))),
+            ],
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        })
+    }
+
     #[test]
     fn parse_tumbling_window_expr() {
         let parsed = parse_window_expr(&tumbling_expr()).unwrap();
@@ -318,6 +386,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_state_window_expr() {
+        let parsed = parse_window_expr(&state_expr()).unwrap();
+        assert!(matches!(parsed, Some(Window::State { .. })));
+    }
+
+    #[test]
     fn parse_window_expr_non_window() {
         let expr = Expr::Identifier(Ident::new("a"));
         let parsed = parse_window_expr(&expr).unwrap();
@@ -343,6 +417,17 @@ mod tests {
     #[test]
     fn sliding_window_round_trip_back_to_expr_with_lookahead() {
         let window = Window::sliding(TimeUnit::Seconds, 10, Some(15));
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn state_window_round_trip_back_to_expr() {
+        let window = Window::state(
+            Expr::Identifier(Ident::new("open")),
+            Expr::Identifier(Ident::new("emit")),
+        );
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));

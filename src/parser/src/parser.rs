@@ -122,6 +122,8 @@ impl StreamSqlParser {
 
         Ok(select_stmt)
     }
+
+    // Window validation (e.g. only allowed in GROUP BY) is intentionally not enforced here.
 }
 
 impl Default for StreamSqlParser {
@@ -414,6 +416,52 @@ mod source_info_tests {
         match expr {
             Expr::Identifier(ident) => assert_eq!(ident.to_string(), "b"),
             other => panic!("expected group by identifier `b`, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_state_window() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY statewindow(a > 0, b = 1)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        assert!(select_stmt.window.is_some());
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+
+        match select_stmt.window {
+            Some(Window::State { open, emit }) => {
+                assert_eq!(open.as_ref().to_string(), "a > 0");
+                assert_eq!(emit.as_ref().to_string(), "b = 1");
+            }
+            other => panic!("expected state window, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_with_column_and_state_window() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY statewindow(a > 0, b = 1), c";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::State { open, emit }) => {
+                assert_eq!(open.as_ref().to_string(), "a > 0");
+                assert_eq!(emit.as_ref().to_string(), "b = 1");
+            }
+            other => panic!("expected state window, got {:?}", other),
+        }
+
+        assert_eq!(select_stmt.group_by_exprs.len(), 1);
+        let expr = &select_stmt.group_by_exprs[0];
+        match expr {
+            Expr::Identifier(ident) => assert_eq!(ident.to_string(), "c"),
+            other => panic!("expected group by identifier `c`, got {:?}", other),
         }
     }
 }

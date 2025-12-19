@@ -1,5 +1,7 @@
+use crate::expr::ScalarExpr;
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use sqlparser::ast::Expr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,35 @@ impl PhysicalSlidingWindow {
             time_unit,
             lookback,
             lookahead,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalStateWindow {
+    pub base: BasePhysicalPlan,
+    pub open_expr: Expr,
+    pub emit_expr: Expr,
+    pub open_scalar: ScalarExpr,
+    pub emit_scalar: ScalarExpr,
+}
+
+impl PhysicalStateWindow {
+    pub fn new(
+        open_expr: Expr,
+        emit_expr: Expr,
+        open_scalar: ScalarExpr,
+        emit_scalar: ScalarExpr,
+        children: Vec<Arc<PhysicalPlan>>,
+        index: i64,
+    ) -> Self {
+        let base = BasePhysicalPlan::new(children, index);
+        Self {
+            base,
+            open_expr,
+            emit_expr,
+            open_scalar,
+            emit_scalar,
         }
     }
 }
