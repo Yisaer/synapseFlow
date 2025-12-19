@@ -14,6 +14,8 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+type ConnectorDecoderPair = (Box<dyn SourceConnector>, Arc<dyn RecordDecoder>);
+
 /// Factory that can (re)build a connector + decoder pair for a shared stream runtime.
 pub trait SharedStreamConnectorFactory: Send + Sync + 'static {
     /// Return a stable identifier for management/logging even when the stream runtime is stopped.
@@ -22,12 +24,12 @@ pub trait SharedStreamConnectorFactory: Send + Sync + 'static {
     /// Build a fresh connector + decoder for starting (or restarting) the stream runtime.
     fn build(
         &self,
-    ) -> Result<(Box<dyn SourceConnector>, Arc<dyn RecordDecoder>), SharedStreamError>;
+    ) -> Result<ConnectorDecoderPair, SharedStreamError>;
 }
 
 struct OneShotConnectorFactory {
     connector_id: String,
-    inner: std::sync::Mutex<Option<(Box<dyn SourceConnector>, Arc<dyn RecordDecoder>)>>,
+    inner: std::sync::Mutex<Option<ConnectorDecoderPair>>,
 }
 
 impl OneShotConnectorFactory {
@@ -47,7 +49,7 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
 
     fn build(
         &self,
-    ) -> Result<(Box<dyn SourceConnector>, Arc<dyn RecordDecoder>), SharedStreamError> {
+    ) -> Result<ConnectorDecoderPair, SharedStreamError> {
         let mut guard = self
             .inner
             .lock()
