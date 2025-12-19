@@ -5,8 +5,7 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition, StreamProps};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry};
 use crate::connector::{
-    ConnectorError, ConnectorRegistry, MqttClientManager, MqttSourceConfig, MqttSourceConnector,
-    SharedMqttClientConfig,
+    ConnectorError, ConnectorRegistry, MqttClientManager, SharedMqttClientConfig,
 };
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
 use crate::processor::ProcessorPipeline;
@@ -271,28 +270,75 @@ impl FlowInstance {
         match definition.props() {
             StreamProps::Mqtt(props) => {
                 let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
-                let mut source_config = MqttSourceConfig::new(
-                    format!("{}_shared_source", definition.id()),
-                    props.broker_url.clone(),
-                    props.topic.clone(),
-                    props.qos,
-                );
-                if let Some(client_id) = &props.client_id {
-                    source_config = source_config.with_client_id(client_id.clone());
+                struct MqttSharedStreamConnectorFactory {
+                    stream_id: String,
+                    schema: Arc<datatypes::Schema>,
+                    decoder: crate::catalog::StreamDecoderConfig,
+                    broker_url: String,
+                    topic: String,
+                    qos: u8,
+                    client_id: Option<String>,
+                    connector_key: Option<String>,
+                    mqtt_client_manager: crate::connector::MqttClientManager,
+                    decoder_registry: Arc<crate::codec::DecoderRegistry>,
                 }
-                if let Some(connector_key) = &props.connector_key {
-                    source_config = source_config.with_connector_key(connector_key.clone());
+
+                impl crate::shared_stream::SharedStreamConnectorFactory
+                    for MqttSharedStreamConnectorFactory
+                {
+                    fn connector_id(&self) -> String {
+                        format!("{}_shared_source_connector", self.stream_id)
+                    }
+
+                    fn build(
+                        &self,
+                    ) -> Result<
+                        (Box<dyn crate::connector::SourceConnector>, Arc<dyn crate::codec::RecordDecoder>),
+                        crate::shared_stream::SharedStreamError,
+                    > {
+                        let mut source_config = crate::connector::MqttSourceConfig::new(
+                            format!("{}_shared_source", self.stream_id),
+                            self.broker_url.clone(),
+                            self.topic.clone(),
+                            self.qos,
+                        );
+                        if let Some(client_id) = &self.client_id {
+                            source_config = source_config.with_client_id(client_id.clone());
+                        }
+                        if let Some(connector_key) = &self.connector_key {
+                            source_config = source_config.with_connector_key(connector_key.clone());
+                        }
+                        let connector = crate::connector::MqttSourceConnector::new(
+                            self.connector_id(),
+                            source_config,
+                            self.mqtt_client_manager.clone(),
+                        );
+                        let decoder = self.decoder_registry.instantiate(
+                            &self.decoder,
+                            &self.stream_id,
+                            Arc::clone(&self.schema),
+                        );
+                        let decoder = decoder.map_err(|err| {
+                            crate::shared_stream::SharedStreamError::Internal(err.to_string())
+                        })?;
+                        Ok((Box::new(connector), decoder))
+                    }
                 }
-                let connector = MqttSourceConnector::new(
-                    format!("{}_shared_source_connector", definition.id()),
-                    source_config,
-                    self.mqtt_client_manager.clone(),
-                );
-                let decoder = self
-                    .decoder_registry
-                    .instantiate(definition.decoder(), definition.id(), definition.schema())
-                    .map_err(FlowInstanceError::from)?;
-                config.set_connector(Box::new(connector), decoder);
+
+                let factory = Arc::new(MqttSharedStreamConnectorFactory {
+                    stream_id: definition.id().to_string(),
+                    schema: definition.schema(),
+                    decoder: definition.decoder().clone(),
+                    broker_url: props.broker_url.clone(),
+                    topic: props.topic.clone(),
+                    qos: props.qos,
+                    client_id: props.client_id.clone(),
+                    connector_key: props.connector_key.clone(),
+                    mqtt_client_manager: self.mqtt_client_manager.clone(),
+                    decoder_registry: Arc::clone(&self.decoder_registry),
+                });
+
+                config.set_connector_factory(factory);
                 self.shared_stream_registry
                     .create_stream(config)
                     .await

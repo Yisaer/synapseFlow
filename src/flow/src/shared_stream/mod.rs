@@ -14,6 +14,52 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+/// Factory that can (re)build a connector + decoder pair for a shared stream runtime.
+pub trait SharedStreamConnectorFactory: Send + Sync + 'static {
+    /// Return a stable identifier for management/logging even when the stream runtime is stopped.
+    fn connector_id(&self) -> String;
+
+    /// Build a fresh connector + decoder for starting (or restarting) the stream runtime.
+    fn build(
+        &self,
+    ) -> Result<(Box<dyn SourceConnector>, Arc<dyn RecordDecoder>), SharedStreamError>;
+}
+
+struct OneShotConnectorFactory {
+    connector_id: String,
+    inner: std::sync::Mutex<Option<(Box<dyn SourceConnector>, Arc<dyn RecordDecoder>)>>,
+}
+
+impl OneShotConnectorFactory {
+    fn new(connector: Box<dyn SourceConnector>, decoder: Arc<dyn RecordDecoder>) -> Self {
+        let connector_id = connector.id().to_string();
+        Self {
+            connector_id,
+            inner: std::sync::Mutex::new(Some((connector, decoder))),
+        }
+    }
+}
+
+impl SharedStreamConnectorFactory for OneShotConnectorFactory {
+    fn connector_id(&self) -> String {
+        self.connector_id.clone()
+    }
+
+    fn build(
+        &self,
+    ) -> Result<(Box<dyn SourceConnector>, Arc<dyn RecordDecoder>), SharedStreamError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| SharedStreamError::Internal("connector factory lock poisoned".into()))?;
+        guard.take().ok_or_else(|| {
+            SharedStreamError::Internal(
+                "shared stream connector factory cannot rebuild connector/decoder".into(),
+            )
+        })
+    }
+}
+
 /// Accessor for the global shared stream registry.
 pub fn registry() -> &'static SharedStreamRegistry {
     static REGISTRY: Lazy<SharedStreamRegistry> = Lazy::new(SharedStreamRegistry::new);
@@ -39,7 +85,7 @@ impl SharedStreamRegistry {
     ) -> Result<SharedStreamInfo, SharedStreamError> {
         if config.connector.is_none() {
             return Err(SharedStreamError::Internal(
-                "shared stream requires exactly one connector".into(),
+                "shared stream requires a connector factory or instance".into(),
             ));
         }
         let mut streams = self.streams.write().await;
@@ -47,9 +93,9 @@ impl SharedStreamRegistry {
             return Err(SharedStreamError::AlreadyExists(config.stream_name));
         }
 
-        let inner = SharedStreamInner::start(config)?;
+        let inner = SharedStreamInner::new(config)?;
         let info = inner.snapshot().await;
-        streams.insert(info.name.clone(), Arc::new(inner));
+        streams.insert(info.name.clone(), inner);
         Ok(info)
     }
 
@@ -97,7 +143,7 @@ impl SharedStreamRegistry {
 
         let stream_name = entry.name().to_string();
         tokio::spawn(async move {
-            if let Err(err) = entry.shutdown().await {
+            if let Err(err) = entry.stop_runtime().await {
                 println!("[SharedStream:{stream_name}] shutdown error: {err}");
             }
         });
@@ -118,6 +164,7 @@ impl SharedStreamRegistry {
                 .cloned()
                 .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
         };
+        entry.ensure_started().await?;
         entry.register_consumer(consumer_id.into()).await
     }
 
@@ -187,11 +234,19 @@ pub struct SharedSourceConnectorConfig {
     pub decoder: Arc<dyn RecordDecoder>,
 }
 
+/// Connector specification for creating a shared stream.
+pub enum SharedStreamConnectorSpec {
+    /// Use the provided connector/decoder instance (cannot be restarted once stopped).
+    Instance(SharedSourceConnectorConfig),
+    /// Use a restartable factory that can build fresh connector/decoder instances on demand.
+    Factory(Arc<dyn SharedStreamConnectorFactory>),
+}
+
 /// Configuration used to create a shared stream instance.
 pub struct SharedStreamConfig {
     pub stream_name: String,
     pub schema: Arc<Schema>,
-    pub connector: Option<SharedSourceConnectorConfig>,
+    pub connector: Option<SharedStreamConnectorSpec>,
     pub channel_capacity: usize,
 }
 
@@ -215,7 +270,10 @@ impl SharedStreamConfig {
         connector: Box<dyn SourceConnector>,
         decoder: Arc<dyn RecordDecoder>,
     ) -> Self {
-        self.connector = Some(SharedSourceConnectorConfig { connector, decoder });
+        self.connector = Some(SharedStreamConnectorSpec::Instance(SharedSourceConnectorConfig {
+            connector,
+            decoder,
+        }));
         self
     }
 
@@ -224,7 +282,19 @@ impl SharedStreamConfig {
         connector: Box<dyn SourceConnector>,
         decoder: Arc<dyn RecordDecoder>,
     ) {
-        self.connector = Some(SharedSourceConnectorConfig { connector, decoder });
+        self.connector = Some(SharedStreamConnectorSpec::Instance(SharedSourceConnectorConfig {
+            connector,
+            decoder,
+        }));
+    }
+
+    pub fn with_connector_factory(mut self, factory: Arc<dyn SharedStreamConnectorFactory>) -> Self {
+        self.connector = Some(SharedStreamConnectorSpec::Factory(factory));
+        self
+    }
+
+    pub fn set_connector_factory(&mut self, factory: Arc<dyn SharedStreamConnectorFactory>) {
+        self.connector = Some(SharedStreamConnectorSpec::Factory(factory));
     }
 }
 
@@ -310,6 +380,8 @@ struct SharedStreamInner {
     schema: Arc<Schema>,
     created_at: SystemTime,
     connector_id: String,
+    connector_factory: Arc<dyn SharedStreamConnectorFactory>,
+    runtime_lock: Mutex<()>,
     decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
     data_sender: broadcast::Sender<StreamData>,
     control_sender: broadcast::Sender<ControlSignal>,
@@ -337,7 +409,7 @@ struct SharedStreamState {
 }
 
 impl SharedStreamInner {
-    fn start(config: SharedStreamConfig) -> Result<Self, SharedStreamError> {
+    fn new(config: SharedStreamConfig) -> Result<Arc<Self>, SharedStreamError> {
         let SharedStreamConfig {
             stream_name,
             schema,
@@ -345,20 +417,89 @@ impl SharedStreamInner {
             channel_capacity,
         } = config;
 
-        let SharedSourceConnectorConfig { connector, decoder } = connector.ok_or_else(|| {
-            SharedStreamError::Internal(
-                "shared stream requires exactly one source connector".into(),
-            )
-        })?;
-        let datasource_id = format!("shared:{}/PhysicalDataSource_0", stream_name);
-        let decoder_id = format!("shared:{}/PhysicalDecoder_1", stream_name);
+        let connector_factory: Arc<dyn SharedStreamConnectorFactory> = match connector {
+            Some(SharedStreamConnectorSpec::Factory(factory)) => factory,
+            Some(SharedStreamConnectorSpec::Instance(SharedSourceConnectorConfig {
+                connector,
+                decoder,
+            })) => Arc::new(OneShotConnectorFactory::new(connector, decoder)),
+            None => {
+                return Err(SharedStreamError::Internal(
+                    "shared stream requires a connector factory or instance".into(),
+                ))
+            }
+        };
+        let connector_id = connector_factory.connector_id();
+
+        let (control_input_tx, _control_input_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let initial_decoding_columns: Vec<String> = schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
+        let decoding_columns = Arc::new(std::sync::RwLock::new(initial_decoding_columns));
+
+        let (data_sender, _) = broadcast::channel(channel_capacity);
+        let (control_sender, _) = broadcast::channel(channel_capacity);
+
+        let data_anchor = data_sender.subscribe();
+        let control_anchor = control_sender.subscribe();
+
+        Ok(Arc::new(Self {
+            name: stream_name,
+            schema,
+            created_at: SystemTime::now(),
+            connector_id,
+            connector_factory,
+            runtime_lock: Mutex::new(()),
+            decoding_columns: Arc::clone(&decoding_columns),
+            data_sender,
+            control_sender,
+            control_input: control_input_tx,
+            handles: Mutex::new(SharedStreamHandles {
+                datasource: None,
+                decoder: None,
+                forward: None,
+                control_forward: None,
+                data_anchor: Some(data_anchor),
+                control_anchor: Some(control_anchor),
+            }),
+            state: Mutex::new(SharedStreamState {
+                status: SharedStreamStatus::Stopped,
+                subscribers: HashSet::new(),
+                consumer_required_columns: HashMap::new(),
+                union_required_columns: Vec::new(),
+            }),
+        }))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn ensure_started(self: &Arc<Self>) -> Result<(), SharedStreamError> {
+        let _guard = self.runtime_lock.lock().await;
+        {
+            let state = self.state.lock().await;
+            if matches!(state.status, SharedStreamStatus::Running) {
+                return Ok(());
+            }
+        }
+        self.start_runtime().await
+    }
+
+    async fn start_runtime(self: &Arc<Self>) -> Result<(), SharedStreamError> {
+        let (connector, decoder) = self.connector_factory.build()?;
+
+        let datasource_id = format!("shared:{}/PhysicalDataSource_0", self.name);
+        let decoder_id = format!("shared:{}/PhysicalDecoder_1", self.name);
+
         let mut datasource = DataSourceProcessor::with_custom_id(
             None,
             datasource_id,
-            stream_name.clone(),
-            Arc::clone(&schema),
+            self.name.clone(),
+            Arc::clone(&self.schema),
         );
-        let connector_id = connector.id().to_string();
         datasource.add_connector(connector);
 
         let datasource_data_rx = datasource
@@ -368,20 +509,20 @@ impl SharedStreamInner {
             SharedStreamError::Internal("datasource control output unavailable".into())
         })?;
 
-        let (control_input_tx, control_input_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        datasource.add_control_input(control_input_rx);
+        datasource.add_control_input(self.control_input.subscribe());
 
-        let initial_decoding_columns: Vec<String> = schema
-            .column_schemas()
-            .iter()
-            .map(|col| col.name.clone())
-            .collect();
-        let decoding_columns = Arc::new(std::sync::RwLock::new(initial_decoding_columns));
+        {
+            let applied = self.current_decoding_columns().await;
+            *self
+                .decoding_columns
+                .write()
+                .expect("shared stream decoding columns lock poisoned") = applied;
+        }
 
         let mut decoder_processor = DecoderProcessor::with_custom_id(decoder_id, decoder)
-            .with_projection(Arc::clone(&decoding_columns));
+            .with_projection(Arc::clone(&self.decoding_columns));
         decoder_processor.add_input(datasource_data_rx);
-        decoder_processor.add_control_input(control_input_tx.subscribe());
+        decoder_processor.add_control_input(self.control_input.subscribe());
         let mut data_rx = decoder_processor
             .subscribe_output()
             .ok_or_else(|| SharedStreamError::Internal("decoder output unavailable".into()))?;
@@ -389,11 +530,8 @@ impl SharedStreamInner {
         let datasource_handle = datasource.start();
         let decoder_handle = decoder_processor.start();
 
-        let (data_sender, _) = broadcast::channel(channel_capacity);
-        let (control_sender, _) = broadcast::channel(channel_capacity);
-
-        let name_for_data = stream_name.clone();
-        let data_tx = data_sender.clone();
+        let name_for_data = self.name.clone();
+        let data_tx = self.data_sender.clone();
         let forward = tokio::spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
             loop {
@@ -413,8 +551,8 @@ impl SharedStreamInner {
             }
         });
 
-        let name_for_control = stream_name.clone();
-        let control_tx = control_sender.clone();
+        let name_for_control = self.name.clone();
+        let control_tx = self.control_sender.clone();
         let control_forward = tokio::spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
             loop {
@@ -434,37 +572,35 @@ impl SharedStreamInner {
             }
         });
 
-        let data_anchor = data_sender.subscribe();
-        let control_anchor = control_sender.subscribe();
+        let mut handles = self.handles.lock().await;
+        if handles.datasource.is_some() || handles.decoder.is_some() {
+            return Err(SharedStreamError::Internal(format!(
+                "shared stream {} runtime already started",
+                self.name
+            )));
+        }
+        handles.datasource = Some(datasource_handle);
+        handles.decoder = Some(decoder_handle);
+        handles.forward = Some(forward);
+        handles.control_forward = Some(control_forward);
+        drop(handles);
 
-        Ok(Self {
-            name: stream_name,
-            schema,
-            created_at: SystemTime::now(),
-            connector_id,
-            decoding_columns: Arc::clone(&decoding_columns),
-            data_sender,
-            control_sender,
-            control_input: control_input_tx,
-            handles: Mutex::new(SharedStreamHandles {
-                datasource: Some(datasource_handle),
-                decoder: Some(decoder_handle),
-                forward: Some(forward),
-                control_forward: Some(control_forward),
-                data_anchor: Some(data_anchor),
-                control_anchor: Some(control_anchor),
-            }),
-            state: Mutex::new(SharedStreamState {
-                status: SharedStreamStatus::Running,
-                subscribers: HashSet::new(),
-                consumer_required_columns: HashMap::new(),
-                union_required_columns: Vec::new(),
-            }),
-        })
+        let mut state = self.state.lock().await;
+        state.status = SharedStreamStatus::Running;
+        Ok(())
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    async fn current_decoding_columns(&self) -> Vec<String> {
+        let state = self.state.lock().await;
+        if state.union_required_columns.is_empty() {
+            self.schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect()
+        } else {
+            state.union_required_columns.clone()
+        }
     }
 
     async fn snapshot(&self) -> SharedStreamInfo {
@@ -573,7 +709,7 @@ impl SharedStreamInner {
         state.union_required_columns.clone()
     }
 
-    async fn unregister_consumer(&self, consumer_id: &str) {
+    async fn unregister_consumer(self: &Arc<Self>, consumer_id: &str) {
         let mut state = self.state.lock().await;
         state.subscribers.remove(consumer_id);
         state.consumer_required_columns.remove(consumer_id);
@@ -606,16 +742,36 @@ impl SharedStreamInner {
             .decoding_columns
             .write()
             .expect("shared stream decoding columns lock poisoned") = applied;
+
+        let should_stop = state.subscribers.is_empty();
+        drop(state);
+        if should_stop {
+            if let Err(err) = Arc::clone(self).stop_runtime().await {
+                println!("[SharedStream:{}] shutdown error: {err}", self.name());
+            }
+        }
     }
 
-    async fn shutdown(self: Arc<Self>) -> Result<(), SharedStreamError> {
+    async fn stop_runtime(self: Arc<Self>) -> Result<(), SharedStreamError> {
+        let _guard = self.runtime_lock.lock().await;
         {
             let mut state = self.state.lock().await;
-            state.status = SharedStreamStatus::Stopped;
-            state.subscribers.clear();
-            state.consumer_required_columns.clear();
+            if !state.subscribers.is_empty() {
+                return Ok(());
+            }
             state.union_required_columns.clear();
+            state.consumer_required_columns.clear();
+            state.status = SharedStreamStatus::Stopped;
         }
+        *self
+            .decoding_columns
+            .write()
+            .expect("shared stream decoding columns lock poisoned") = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
 
         let _ = self.control_input.send(ControlSignal::StreamQuickEnd);
 
