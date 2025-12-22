@@ -216,3 +216,154 @@ pub async fn load_from_storage(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::CreatePipelineRequest;
+    use crate::stream::CreateStreamRequest;
+    use flow::FlowInstance;
+    use serde_json::{json, Map as JsonMap, Value as JsonValue};
+    use tempfile::tempdir;
+
+    fn sample_stream_request(name: &str) -> CreateStreamRequest {
+        let schema_props: JsonMap<String, JsonValue> = json!({
+            "columns": [
+                {"name":"value","data_type":"int64"}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        CreateStreamRequest {
+            name: name.to_string(),
+            stream_type: "mqtt".to_string(),
+            schema: crate::stream::SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: schema_props,
+            },
+            props: crate::stream::StreamPropsRequest::default(),
+            shared: false,
+            decoder: crate::stream::DecoderConfigRequest::default(),
+        }
+    }
+
+    fn sample_pipeline_request(id: &str, sql: &str, plan_cache_enabled: bool) -> CreatePipelineRequest {
+        serde_json::from_value(json!({
+            "id": id,
+            "sql": sql,
+            "sinks": [{
+                "type": "mqtt",
+                "props": {
+                    "broker_url": "mqtt://localhost:1883",
+                    "topic": "out",
+                    "qos": 0
+                }
+            }],
+            "options": {
+                "plan_cache": {"enabled": plan_cache_enabled}
+            }
+        }))
+        .expect("pipeline request json")
+    }
+
+    async fn install_stream_into_instance(
+        instance: &FlowInstance,
+        stream_req: &CreateStreamRequest,
+    ) -> StoredStream {
+        let stored = stored_stream_from_request(stream_req).expect("stored stream");
+        let def = stream_definition_from_stored(
+            &stored,
+            instance.decoder_registry().as_ref(),
+        )
+        .expect("stream definition");
+        instance
+            .create_stream(def, stream_req.shared)
+            .await
+            .expect("create stream");
+        stored
+    }
+
+    #[tokio::test]
+    async fn plan_cache_hit_skips_sql_parse() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let instance = FlowInstance::new();
+
+        let stream_req = sample_stream_request("s1");
+        let stored_stream = stored_stream_from_request(&stream_req).unwrap();
+        storage.create_stream(stored_stream.clone()).unwrap();
+
+        // Create a pipeline with invalid SQL but plan cache enabled.
+        let pipe_req = sample_pipeline_request("p1", "SELECT FROM", true);
+        let stored_pipeline = stored_pipeline_from_request(&pipe_req).unwrap();
+        storage.create_pipeline(stored_pipeline.clone()).unwrap();
+
+        // Prepare a valid logical plan IR from a separate instance; this IR will be used to create
+        // the pipeline without parsing stored_pipeline.sql.
+        let ir_instance = FlowInstance::new();
+        let _ = install_stream_into_instance(&ir_instance, &stream_req).await;
+        let valid_req = sample_pipeline_request("p_tmp", "SELECT value FROM s1", true);
+        let valid_def = crate::pipeline::build_pipeline_definition(
+            &valid_req,
+            ir_instance.encoder_registry().as_ref(),
+        )
+        .unwrap();
+        let (_snapshot, logical_ir) = ir_instance.create_pipeline_with_logical_ir(valid_def).unwrap();
+
+        // Sanity: the cached IR must be sufficient to build a pipeline without parsing SQL.
+        let check_instance = FlowInstance::new();
+        let _ = install_stream_into_instance(&check_instance, &stream_req).await;
+        let check_def = pipeline_definition_from_stored(&stored_pipeline, check_instance.encoder_registry().as_ref()).unwrap();
+        check_instance
+            .create_pipeline_from_logical_ir(check_def, &logical_ir)
+            .expect("rehydrate pipeline from logical IR");
+
+        let cached = build_plan_snapshot(
+            &storage,
+            &stored_pipeline.id,
+            &stored_pipeline.raw_json,
+            &vec!["s1".to_string()],
+            logical_ir,
+        )
+        .unwrap();
+        storage.put_plan_snapshot(cached).unwrap();
+
+        // This should succeed even though the stored SQL is invalid, proving we did not parse it.
+        load_from_storage(&storage, &instance).await.unwrap();
+        assert!(instance
+            .list_pipelines()
+            .iter()
+            .any(|p| p.definition.id() == "p1"));
+    }
+
+    #[tokio::test]
+    async fn plan_cache_miss_writes_snapshot() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let instance = FlowInstance::new();
+
+        let stream_req = sample_stream_request("s1");
+        let stored_stream = stored_stream_from_request(&stream_req).unwrap();
+        storage.create_stream(stored_stream.clone()).unwrap();
+
+        let pipe_req = sample_pipeline_request("p1", "SELECT value FROM s1", true);
+        let stored_pipeline = stored_pipeline_from_request(&pipe_req).unwrap();
+        storage.create_pipeline(stored_pipeline.clone()).unwrap();
+
+        assert!(storage.get_plan_snapshot("p1").unwrap().is_none());
+
+        load_from_storage(&storage, &instance).await.unwrap();
+
+        let snapshot = storage.get_plan_snapshot("p1").unwrap().expect("snapshot written");
+        assert_eq!(snapshot.pipeline_id, "p1");
+        assert_eq!(snapshot.pipeline_json_hash, fnv1a_64_hex(&stored_pipeline.raw_json));
+        assert!(!snapshot.logical_plan_ir.is_empty());
+        assert!(instance
+            .list_pipelines()
+            .iter()
+            .any(|p| p.definition.id() == "p1"));
+    }
+}

@@ -13,5 +13,8 @@ parser = { path = "../parser" }
 storage = { path = "../storage" }
 build_info = { path = "../build_info" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lib]
 path = "src/lib.rs"

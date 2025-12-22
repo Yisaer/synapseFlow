@@ -527,4 +527,21 @@ mod tests {
 
         assert!(manager.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
     }
+
+    #[test]
+    fn delete_pipeline_cascades_plan_snapshot() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let pipeline = sample_pipeline();
+        storage.create_pipeline(pipeline.clone()).unwrap();
+
+        let snapshot = sample_plan_snapshot();
+        storage.put_plan_snapshot(snapshot.clone()).unwrap();
+        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_some());
+
+        storage.delete_pipeline(&pipeline.id).unwrap();
+        assert!(storage.get_pipeline(&pipeline.id).unwrap().is_none());
+        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
+    }
 }

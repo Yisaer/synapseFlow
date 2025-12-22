@@ -162,11 +162,11 @@ impl PlanSnapshotBytes {
 }
 
 fn encode_ir<T: Serialize>(value: &T) -> Result<Vec<u8>, PlanCacheCodecError> {
-    bincode::serialize(value).map_err(|err| PlanCacheCodecError::Serialize(err.to_string()))
+    serde_json::to_vec(value).map_err(|err| PlanCacheCodecError::Serialize(err.to_string()))
 }
 
 fn decode_ir<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, PlanCacheCodecError> {
-    bincode::deserialize(raw).map_err(|err| PlanCacheCodecError::Deserialize(err.to_string()))
+    serde_json::from_slice(raw).map_err(|err| PlanCacheCodecError::Deserialize(err.to_string()))
 }
 
 pub fn logical_plan_from_ir(
