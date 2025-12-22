@@ -59,8 +59,7 @@ Notes:
 The snapshot stores serialized plan IR, not live runtime objects:
 
 - Optimized logical plan (logical plan IR)
-- Optimized physical plan (physical plan IR)
-- Metadata required for validation (fingerprint, flow build id, format version)
+- Metadata required for validation (fingerprint, flow build id)
 
 At startup, the system **rehydrates** the IR by rebinding it into runtime processors and
 injecting runtime dependencies (connectors, codecs, schema registry, state backends).
@@ -77,7 +76,6 @@ This feature stores snapshots in the existing metadata storage (`redb`) by addin
 - `fingerprint`
 - `flow_build_id`
 - `logical_plan_ir_bytes`
-- `physical_plan_ir_bytes`
 - optional metadata: `created_at`, size, etc.
 
 ## Startup Flow

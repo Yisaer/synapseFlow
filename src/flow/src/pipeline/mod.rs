@@ -5,13 +5,17 @@ use crate::connector::{
     register_mock_source_handle, ConnectorRegistry, MockSourceConnector, MqttClientManager,
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
+use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
+use crate::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
+use crate::processor::create_processor_pipeline;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::Processor;
 use crate::shared_stream::SharedStreamRegistry;
 use crate::{
-    create_pipeline, explain_pipeline, PipelineExplain, PipelineRegistries, PipelineSink,
-    PipelineSinkConnector, SinkConnectorConfig,
+    create_physical_plan, create_pipeline, explain_pipeline, optimize_logical_plan,
+    optimize_physical_plan, PipelineExplain, PipelineRegistries, PipelineSink, PipelineSinkConnector,
+    SinkConnectorConfig,
 };
 use parser::parse_sql_with_registry;
 use std::collections::HashMap;
@@ -249,6 +253,49 @@ impl PipelineManager {
         Ok(snapshot)
     }
 
+    pub fn create_pipeline_from_logical_ir(
+        &self,
+        definition: PipelineDefinition,
+        logical_plan_ir: &[u8],
+    ) -> Result<PipelineSnapshot, PipelineError> {
+        let pipeline_id = definition.id().to_string();
+
+        {
+            let guard = self.pipelines.read().expect("pipeline manager poisoned");
+            if guard.contains_key(&pipeline_id) {
+                return Err(PipelineError::AlreadyExists(pipeline_id));
+            }
+        }
+
+        let registries = PipelineRegistries::new(
+            Arc::clone(&self.connector_registry),
+            Arc::clone(&self.encoder_registry),
+            Arc::clone(&self.decoder_registry),
+            Arc::clone(&self.aggregate_registry),
+        );
+
+        let (pipeline, streams) = build_pipeline_runtime_from_logical_ir(
+            &definition,
+            logical_plan_ir,
+            &self.catalog,
+            self.shared_stream_registry,
+            &self.mqtt_client_manager,
+            &registries,
+        )
+        .map_err(PipelineError::BuildFailure)?;
+
+        let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+        let entry = ManagedPipeline {
+            definition: Arc::new(definition),
+            pipeline,
+            streams,
+            status: PipelineStatus::Created,
+        };
+        let snapshot = entry.snapshot();
+        guard.insert(pipeline_id, entry);
+        Ok(snapshot)
+    }
+
     /// Retrieve a snapshot for a specific pipeline.
     pub fn get(&self, pipeline_id: &str) -> Option<PipelineSnapshot> {
         let guard = self.pipelines.read().expect("pipeline manager poisoned");
@@ -367,6 +414,74 @@ fn build_pipeline_runtime(
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
     attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
+    Ok((pipeline, streams))
+}
+
+fn build_pipeline_runtime_from_logical_ir(
+    definition: &PipelineDefinition,
+    logical_plan_ir: &[u8],
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
+    mqtt_client_manager: &MqttClientManager,
+    registries: &PipelineRegistries,
+) -> Result<(ProcessorPipeline, Vec<String>), String> {
+    let logical_ir = LogicalPlanIR::decode(logical_plan_ir).map_err(|e| e.to_string())?;
+
+    let sources = sources_from_logical_ir(&logical_ir);
+    let mut streams: Vec<String> = sources.iter().map(|(s, _)| s.clone()).collect();
+    streams.sort();
+    streams.dedup();
+
+    let mut stream_definitions = HashMap::new();
+    let mut binding_entries = Vec::new();
+    let mut datasource_inputs = HashMap::new();
+
+    for (stream, alias) in sources {
+        let definition = catalog
+            .get(&stream)
+            .ok_or_else(|| format!("stream {stream} not found in catalog"))?;
+        let schema = definition.schema();
+        let kind = if futures::executor::block_on(shared_stream_registry.is_registered(&stream)) {
+            SourceBindingKind::Shared
+        } else {
+            SourceBindingKind::Regular
+        };
+        binding_entries.push(SchemaBindingEntry {
+            source_name: stream.clone(),
+            alias,
+            schema: Arc::clone(&schema),
+            kind,
+        });
+        stream_definitions.insert(stream.clone(), Arc::clone(&definition));
+        datasource_inputs.insert(stream, (definition.decoder().clone(), schema));
+    }
+
+    let schema_binding = SchemaBinding::new(binding_entries);
+    let logical_plan =
+        logical_plan_from_ir(&logical_ir, &datasource_inputs).map_err(|e| e.to_string())?;
+    let (logical_plan, pruned_binding) = optimize_logical_plan(logical_plan, &schema_binding);
+
+    let physical_plan = create_physical_plan(Arc::clone(&logical_plan), &pruned_binding, registries)
+        .map_err(|err| err.to_string())?;
+    let optimized_plan = optimize_physical_plan(
+        Arc::clone(&physical_plan),
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+
+    let mut pipeline = create_processor_pipeline(
+        optimized_plan,
+        mqtt_client_manager.clone(),
+        registries.connector_registry(),
+        registries.encoder_registry(),
+        registries.decoder_registry(),
+        registries.aggregate_registry(),
+    )
+    .map_err(|err| err.to_string())?;
+
+    pipeline.set_pipeline_id(definition.id().to_string());
+    attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
+
     Ok((pipeline, streams))
 }
 

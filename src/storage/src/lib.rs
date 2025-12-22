@@ -67,12 +67,16 @@ pub struct StoredPlanSnapshot {
     pub pipeline_id: String,
     /// Fingerprint over pipeline/streams/build-id used for cache validation.
     pub fingerprint: String,
+    /// Hash of the pipeline creation JSON (`StoredPipeline.raw_json`).
+    pub pipeline_json_hash: String,
+    /// Hash of each referenced stream creation JSON (`StoredStream.raw_json`).
+    ///
+    /// Stored as `(stream_id, stream_json_hash)` pairs.
+    pub stream_json_hashes: Vec<(String, String)>,
     /// Flow build identifier (e.g. commit id + git tag).
     pub flow_build_id: String,
     /// Serialized optimized logical plan IR.
     pub logical_plan_ir: Vec<u8>,
-    /// Serialized optimized physical plan IR.
-    pub physical_plan_ir: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -406,9 +410,10 @@ mod tests {
         StoredPlanSnapshot {
             pipeline_id: "pipe_1".to_string(),
             fingerprint: "fp_a".to_string(),
+            pipeline_json_hash: "pipe_json_a".to_string(),
+            stream_json_hashes: vec![("stream_1".to_string(), "stream_json_a".to_string())],
             flow_build_id: "sha:deadbeef tag:v0.0.0".to_string(),
             logical_plan_ir: vec![1, 2, 3],
-            physical_plan_ir: vec![4, 5, 6],
         }
     }
 

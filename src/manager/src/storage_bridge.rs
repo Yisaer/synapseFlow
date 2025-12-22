@@ -9,6 +9,17 @@ use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
 use storage::{StorageManager, StoredMqttClientConfig, StoredPipeline, StoredStream};
 
+fn fnv1a_64_hex(input: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001B3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 /// Serialize a create-stream request for storage.
 pub fn stored_stream_from_request(req: &CreateStreamRequest) -> Result<StoredStream, String> {
     let raw_json =
@@ -52,9 +63,15 @@ pub fn pipeline_definition_from_stored(
     stored: &StoredPipeline,
     encoder_registry: &EncoderRegistry,
 ) -> Result<PipelineDefinition, String> {
-    let req: CreatePipelineRequest = serde_json::from_str(&stored.raw_json)
-        .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
+    let req = pipeline_request_from_stored(stored)?;
     build_pipeline_definition(&req, encoder_registry)
+}
+
+pub fn pipeline_request_from_stored(
+    stored: &StoredPipeline,
+) -> Result<CreatePipelineRequest, String> {
+    serde_json::from_str(&stored.raw_json)
+        .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))
 }
 
 pub fn mqtt_config_from_stored(stored: &StoredMqttClientConfig) -> SharedMqttClientConfig {
@@ -101,7 +118,54 @@ pub async fn load_from_storage(
     }
 
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
+        let req = pipeline_request_from_stored(&pipeline)?;
         let def = pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref())?;
+        if req.options.plan_cache.enabled {
+            let snapshot = storage
+                .get_plan_snapshot(&pipeline.id)
+                .map_err(|e| e.to_string())?;
+            let hit = match snapshot.as_ref() {
+                Some(snapshot) => {
+                    let current_build_id = flow::flow_build_id();
+                    if snapshot.flow_build_id != current_build_id {
+                        false
+                    } else if snapshot.pipeline_json_hash != fnv1a_64_hex(&pipeline.raw_json) {
+                        false
+                    } else {
+                        let mut ok = true;
+                        for (stream_id, expected_hash) in &snapshot.stream_json_hashes {
+                            let stream = storage
+                                .get_stream(stream_id)
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| {
+                                    format!("stream {stream_id} missing from storage")
+                                })?;
+                            if fnv1a_64_hex(&stream.raw_json) != *expected_hash {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        ok
+                    }
+                }
+                None => false,
+            };
+
+            if hit {
+                println!("[plan_cache] hit pipeline {}", pipeline.id);
+                if let Some(snapshot) = snapshot {
+                    match instance.create_pipeline_from_logical_ir(def.clone(), &snapshot.logical_plan_ir) {
+                        Ok(_) => continue,
+                        Err(_) => {
+                            println!("[plan_cache] miss pipeline {}", pipeline.id);
+                        }
+                    }
+                }
+            } else {
+                println!("[plan_cache] miss pipeline {}", pipeline.id);
+            }
+        }
+
         instance.create_pipeline(def).map_err(|e| e.to_string())?;
     }
     Ok(())

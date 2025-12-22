@@ -184,6 +184,15 @@ impl FlowInstance {
         self.pipeline_manager.create_pipeline(definition)
     }
 
+    pub fn create_pipeline_from_logical_ir(
+        &self,
+        definition: PipelineDefinition,
+        logical_plan_ir: &[u8],
+    ) -> Result<PipelineSnapshot, PipelineError> {
+        self.pipeline_manager
+            .create_pipeline_from_logical_ir(definition, logical_plan_ir)
+    }
+
     /// Start a pipeline by identifier.
     pub fn start_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         self.pipeline_manager.start_pipeline(id)

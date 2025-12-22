@@ -3,11 +3,16 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
+use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::planner::logical::LogicalPlan;
 use crate::planner::physical::PhysicalPlan;
-use crate::planner::sink::{CommonSinkProps, PipelineSink, SinkConnectorConfig};
+use crate::planner::sink::{
+    CommonSinkProps, CustomSinkConnectorConfig, PipelineSink, PipelineSinkConnector,
+    SinkConnectorConfig, SinkEncoderConfig,
+};
 
 #[derive(Debug, Error)]
 pub enum PlanCacheCodecError {
@@ -134,7 +139,6 @@ pub struct PlanSnapshotBytes {
     pub fingerprint: String,
     pub flow_build_id: String,
     pub logical_plan_ir: Vec<u8>,
-    pub physical_plan_ir: Vec<u8>,
 }
 
 impl PlanSnapshotBytes {
@@ -142,22 +146,16 @@ impl PlanSnapshotBytes {
         fingerprint: String,
         flow_build_id: String,
         logical: &LogicalPlanIR,
-        physical: &PhysicalPlanIR,
     ) -> Result<Self, PlanCacheCodecError> {
         Ok(Self {
             fingerprint,
             flow_build_id,
             logical_plan_ir: encode_ir(logical)?,
-            physical_plan_ir: encode_ir(physical)?,
         })
     }
 
     pub fn decode_logical(&self) -> Result<LogicalPlanIR, PlanCacheCodecError> {
         decode_ir(&self.logical_plan_ir)
-    }
-
-    pub fn decode_physical(&self) -> Result<PhysicalPlanIR, PlanCacheCodecError> {
-        decode_ir(&self.physical_plan_ir)
     }
 }
 
@@ -167,6 +165,237 @@ fn encode_ir<T: Serialize>(value: &T) -> Result<Vec<u8>, PlanCacheCodecError> {
 
 fn decode_ir<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, PlanCacheCodecError> {
     bincode::deserialize(raw).map_err(|err| PlanCacheCodecError::Deserialize(err.to_string()))
+}
+
+pub fn logical_plan_from_ir(
+    ir: &LogicalPlanIR,
+    streams: &HashMap<String, (crate::catalog::StreamDecoderConfig, Arc<datatypes::Schema>)>,
+) -> Result<Arc<LogicalPlan>, String> {
+    let nodes: HashMap<i64, &LogicalPlanNodeIR> = ir.nodes.iter().map(|n| (n.index, n)).collect();
+    let mut cache: HashMap<i64, Arc<LogicalPlan>> = HashMap::new();
+    build_logical_plan_node(ir.root, &nodes, &mut cache, streams)
+}
+
+pub fn sources_from_logical_ir(ir: &LogicalPlanIR) -> Vec<(String, Option<String>)> {
+    let mut sources = Vec::new();
+    for node in &ir.nodes {
+        if let LogicalPlanNodeKindIR::DataSource { stream, alias } = &node.kind {
+            sources.push((stream.clone(), alias.clone()));
+        }
+    }
+    sources
+}
+
+fn build_logical_plan_node(
+    index: i64,
+    nodes: &HashMap<i64, &LogicalPlanNodeIR>,
+    cache: &mut HashMap<i64, Arc<LogicalPlan>>,
+    streams: &HashMap<String, (crate::catalog::StreamDecoderConfig, Arc<datatypes::Schema>)>,
+) -> Result<Arc<LogicalPlan>, String> {
+    if let Some(found) = cache.get(&index) {
+        return Ok(Arc::clone(found));
+    }
+    let node = nodes
+        .get(&index)
+        .ok_or_else(|| format!("logical plan IR missing node index {index}"))?;
+
+    let mut children = Vec::with_capacity(node.children.len());
+    for child_index in &node.children {
+        children.push(build_logical_plan_node(*child_index, nodes, cache, streams)?);
+    }
+
+    let plan = match &node.kind {
+        LogicalPlanNodeKindIR::DataSource { stream, alias } => {
+            let (decoder, schema) = streams
+                .get(stream)
+                .ok_or_else(|| format!("missing stream definition for {stream}"))?
+                .clone();
+            let datasource = crate::planner::logical::DataSource::new(
+                stream.clone(),
+                alias.clone(),
+                decoder,
+                node.index,
+                schema,
+            );
+            Arc::new(LogicalPlan::DataSource(datasource))
+        }
+        LogicalPlanNodeKindIR::Window { window } => {
+            let spec = window_ir_to_spec(window)?;
+            let plan = crate::planner::logical::LogicalWindow::new(spec, children, node.index);
+            Arc::new(LogicalPlan::Window(plan))
+        }
+        LogicalPlanNodeKindIR::Aggregation {
+            group_by,
+            aggregates,
+        } => {
+            let aggregate_mappings = aggregates
+                .iter()
+                .map(|agg| (agg.output_name.clone(), agg.expr.clone()))
+                .collect();
+            let plan = crate::planner::logical::Aggregation::new(
+                aggregate_mappings,
+                group_by.clone(),
+                children,
+                node.index,
+            );
+            Arc::new(LogicalPlan::Aggregation(plan))
+        }
+        LogicalPlanNodeKindIR::Filter { predicate } => {
+            let plan = crate::planner::logical::Filter::new(
+                predicate.clone(),
+                children,
+                node.index,
+            );
+            Arc::new(LogicalPlan::Filter(plan))
+        }
+        LogicalPlanNodeKindIR::Project { fields } => {
+            let fields = fields
+                .iter()
+                .map(|f| crate::planner::logical::project::ProjectField {
+                    field_name: f.field_name.clone(),
+                    expr: f.expr.clone(),
+                })
+                .collect();
+            let plan = crate::planner::logical::Project::new(fields, children, node.index);
+            Arc::new(LogicalPlan::Project(plan))
+        }
+        LogicalPlanNodeKindIR::Tail => {
+            let plan = crate::planner::logical::TailPlan::new(children, node.index);
+            Arc::new(LogicalPlan::Tail(plan))
+        }
+        LogicalPlanNodeKindIR::DataSink { sinks } => {
+            let sink = sinks
+                .first()
+                .ok_or_else(|| "DataSink IR requires at least one sink".to_string())?;
+            let sink = sink_ir_to_pipeline_sink(sink)?;
+            let child = children
+                .into_iter()
+                .next()
+                .ok_or_else(|| "DataSink IR requires exactly one child".to_string())?;
+            let plan = crate::planner::logical::DataSinkPlan::new(child, node.index, sink);
+            Arc::new(LogicalPlan::DataSink(plan))
+        }
+        LogicalPlanNodeKindIR::Opaque { plan_type } => {
+            return Err(format!("unsupported logical plan IR node kind: {plan_type}"));
+        }
+    };
+
+    cache.insert(index, Arc::clone(&plan));
+    Ok(plan)
+}
+
+fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
+    let encoder_kind = sink
+        .encoder_kind
+        .as_deref()
+        .ok_or_else(|| "sink IR missing encoder_kind".to_string())?;
+    let encoder_props = sink
+        .encoder_props
+        .as_ref()
+        .ok_or_else(|| "sink IR missing encoder_props".to_string())?;
+    let encoder = SinkEncoderConfig::new(encoder_kind.to_string(), encoder_props.clone());
+
+    let connector = match sink.connector_kind.as_str() {
+        "mqtt" => SinkConnectorConfig::Mqtt(mqtt_sink_from_ir_settings(&sink.connector_settings)?),
+        "nop" => SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig),
+        other => SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
+            kind: other.to_string(),
+            settings: sink.connector_settings.clone(),
+        }),
+    };
+    let connector = PipelineSinkConnector::new(sink.sink_id.clone(), connector, encoder);
+
+    let mut pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+        .with_forward_to_result(sink.forward_to_result);
+    if let Some(common) = &sink.common {
+        pipeline_sink = pipeline_sink.with_common_props(common_sink_props_from_ir(common));
+    }
+    Ok(pipeline_sink)
+}
+
+fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "mqtt sink settings must be an object".to_string())?;
+
+    let sink_name = obj
+        .get("sink_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "mqtt sink settings missing sink_name".to_string())?
+        .to_string();
+    let broker_url = obj
+        .get("broker_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "mqtt sink settings missing broker_url".to_string())?
+        .to_string();
+    let topic = obj
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "mqtt sink settings missing topic".to_string())?
+        .to_string();
+    let qos = obj
+        .get("qos")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "mqtt sink settings missing qos".to_string())? as u8;
+    let retain = obj.get("retain").and_then(|v| v.as_bool()).unwrap_or(false);
+    let client_id = obj.get("client_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let connector_key = obj
+        .get("connector_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut config = MqttSinkConfig::new(sink_name.clone(), broker_url, topic, qos)
+        .with_retain(retain);
+    if let Some(client_id) = client_id {
+        config = config.with_client_id(client_id);
+    }
+    if let Some(connector_key) = connector_key {
+        config = config.with_connector_key(connector_key);
+    }
+    Ok(config)
+}
+
+fn common_sink_props_from_ir(common: &CommonSinkPropsIR) -> CommonSinkProps {
+    CommonSinkProps {
+        batch_count: common.batch_count,
+        batch_duration: common.batch_duration_ms.map(Duration::from_millis),
+    }
+}
+
+fn window_ir_to_spec(window: &WindowIR) -> Result<crate::planner::logical::LogicalWindowSpec, String> {
+    Ok(match window {
+        WindowIR::Tumbling { time_unit, length } => {
+            crate::planner::logical::LogicalWindowSpec::Tumbling {
+                time_unit: time_unit_ir_to_time_unit(*time_unit),
+                length: *length,
+            }
+        }
+        WindowIR::Count { count } => crate::planner::logical::LogicalWindowSpec::Count { count: *count },
+        WindowIR::Sliding {
+            time_unit,
+            lookback,
+            lookahead,
+        } => crate::planner::logical::LogicalWindowSpec::Sliding {
+            time_unit: time_unit_ir_to_time_unit(*time_unit),
+            lookback: *lookback,
+            lookahead: *lookahead,
+        },
+        WindowIR::State {
+            open,
+            emit,
+            partition_by,
+        } => crate::planner::logical::LogicalWindowSpec::State {
+            open: open.clone(),
+            emit: emit.clone(),
+            partition_by: partition_by.clone(),
+        },
+    })
+}
+
+fn time_unit_ir_to_time_unit(unit: TimeUnitIR) -> crate::planner::logical::TimeUnit {
+    match unit {
+        TimeUnitIR::Seconds => crate::planner::logical::TimeUnit::Seconds,
+    }
 }
 
 impl LogicalPlanIR {
@@ -439,24 +668,14 @@ mod tests {
                 children: vec![],
             }],
         };
-        let physical = PhysicalPlanIR {
-            root: 1,
-            nodes: vec![PhysicalPlanNodeIR {
-                index: 1,
-                kind: PhysicalPlanNodeKindIR::ResultCollect,
-                children: vec![],
-            }],
-        };
 
         let snapshot = PlanSnapshotBytes::new(
             "fp".to_string(),
             "sha:deadbeef tag:v0.0.0".to_string(),
             &logical,
-            &physical,
         )
         .unwrap();
 
         assert_eq!(snapshot.decode_logical().unwrap(), logical);
-        assert_eq!(snapshot.decode_physical().unwrap(), physical);
     }
 }

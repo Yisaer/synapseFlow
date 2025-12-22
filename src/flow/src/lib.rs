@@ -6,6 +6,7 @@ pub mod expr;
 pub mod instance;
 pub mod model;
 pub mod plan_cache;
+pub mod build_info;
 pub mod pipeline;
 pub mod planner;
 pub mod processor;
@@ -30,6 +31,7 @@ pub use expr::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,
     ConcatFunc, ConversionError, EvalContext, ScalarExpr, StreamSqlConverter, UnaryFunc,
 };
+pub use build_info::flow_build_id;
 pub use instance::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
