@@ -240,18 +240,16 @@ pub async fn create_pipeline_handler(
     }
 
     let snapshot = build_result.snapshot;
-    match snapshot.status {
-        _ => {
-            println!("[manager] pipeline {} created", snapshot.definition.id());
-            (
-                StatusCode::CREATED,
-                Json(CreatePipelineResponse {
-                    id: snapshot.definition.id().to_string(),
-                    status: status_label(snapshot.status),
-                }),
-            )
-                .into_response()
-        }
+    {
+        println!("[manager] pipeline {} created", snapshot.definition.id());
+        (
+            StatusCode::CREATED,
+            Json(CreatePipelineResponse {
+                id: snapshot.definition.id().to_string(),
+                status: status_label(snapshot.status),
+            }),
+        )
+            .into_response()
     }
 }
 
