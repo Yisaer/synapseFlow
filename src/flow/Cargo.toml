@@ -2,11 +2,11 @@
 name = "flow"
 version = "0.0.1"
 edition = "2021"
-build = "build.rs"
 
 [dependencies]
 datatypes = { path = "../datatypes" }
 parser = { path = "../parser" }
+build_info = { path = "../build_info" }
 serde_json = "1.0"
 serde = { version = "1", features = ["derive"] }
 sqlparser = { version = "0.40", features = ["serde", "visitor"] }

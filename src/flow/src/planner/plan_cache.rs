@@ -1,3 +1,5 @@
+//! Plan cache helpers.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sqlparser::ast::Expr;

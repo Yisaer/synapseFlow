@@ -126,7 +126,7 @@ pub async fn load_from_storage(
                 .map_err(|e| e.to_string())?;
             let hit = match snapshot.as_ref() {
                 Some(snapshot) => {
-                    let current_build_id = flow::flow_build_id();
+                    let current_build_id = build_info::build_id();
                     if snapshot.flow_build_id != current_build_id {
                         false
                     } else if snapshot.pipeline_json_hash != fnv1a_64_hex(&pipeline.raw_json) {

@@ -4,6 +4,7 @@ members = [
     "src/datatypes",
     "src/parser", "src/manager",
     "src/telemetry", "src/storage",
+    "src/build_info",
 ]
 resolver = "2"
 

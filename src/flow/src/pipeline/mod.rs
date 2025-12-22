@@ -6,7 +6,7 @@ use crate::connector::{
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
-use crate::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
+use crate::planner::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::processor::create_processor_pipeline;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};

@@ -11,6 +11,7 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 flow = { path = "../flow" }
 parser = { path = "../parser" }
 storage = { path = "../storage" }
+build_info = { path = "../build_info" }
 
 [lib]
 path = "src/lib.rs"
