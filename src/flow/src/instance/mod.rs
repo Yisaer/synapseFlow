@@ -184,6 +184,15 @@ impl FlowInstance {
         self.pipeline_manager.create_pipeline(definition)
     }
 
+    pub fn create_pipeline_with_plan_cache(
+        &self,
+        definition: PipelineDefinition,
+        inputs: crate::planner::plan_cache::PlanCacheInputs,
+    ) -> Result<crate::planner::plan_cache::PlanCacheBuildResult, PipelineError> {
+        self.pipeline_manager
+            .create_pipeline_with_plan_cache(definition, inputs)
+    }
+
     pub fn create_pipeline_with_logical_ir(
         &self,
         definition: PipelineDefinition,

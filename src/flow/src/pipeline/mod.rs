@@ -136,6 +136,7 @@ pub struct PipelineDefinition {
     id: String,
     sql: String,
     sinks: Vec<SinkDefinition>,
+    options: PipelineOptions,
 }
 
 impl PipelineDefinition {
@@ -144,7 +145,13 @@ impl PipelineDefinition {
             id: id.into(),
             sql: sql.into(),
             sinks,
+            options: PipelineOptions::default(),
         }
+    }
+
+    pub fn with_options(mut self, options: PipelineOptions) -> Self {
+        self.options = options;
+        self
     }
 
     pub fn id(&self) -> &str {
@@ -158,6 +165,20 @@ impl PipelineDefinition {
     pub fn sinks(&self) -> &[SinkDefinition] {
         &self.sinks
     }
+
+    pub fn options(&self) -> &PipelineOptions {
+        &self.options
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipelineOptions {
+    pub plan_cache: PlanCacheOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanCacheOptions {
+    pub enabled: bool,
 }
 
 struct ManagedPipeline {
@@ -286,6 +307,45 @@ impl PipelineManager {
         let snapshot = entry.snapshot();
         guard.insert(pipeline_id, entry);
         Ok((snapshot, logical_ir))
+    }
+
+    pub fn create_pipeline_with_plan_cache(
+        &self,
+        definition: PipelineDefinition,
+        inputs: crate::planner::plan_cache::PlanCacheInputs,
+    ) -> Result<crate::planner::plan_cache::PlanCacheBuildResult, PipelineError> {
+        if !definition.options().plan_cache.enabled {
+            let snapshot = self.create_pipeline(definition)?;
+            return Ok(crate::planner::plan_cache::PlanCacheBuildResult {
+                snapshot,
+                hit: false,
+                logical_plan_ir: None,
+            });
+        }
+
+        if crate::planner::plan_cache::snapshot_matches_inputs(&inputs) {
+            if let Some(snapshot_record) = inputs.snapshot {
+                if let Ok(snapshot) = self.create_pipeline_from_logical_ir(
+                    definition.clone(),
+                    &snapshot_record.logical_plan_ir,
+                ) {
+                    println!("[plan_cache] hit pipeline {}", definition.id());
+                    return Ok(crate::planner::plan_cache::PlanCacheBuildResult {
+                        snapshot,
+                        hit: true,
+                        logical_plan_ir: None,
+                    });
+                }
+            }
+        }
+
+        println!("[plan_cache] miss pipeline {}", definition.id());
+        let (snapshot, logical_ir) = self.create_pipeline_with_logical_ir(definition)?;
+        Ok(crate::planner::plan_cache::PlanCacheBuildResult {
+            snapshot,
+            hit: false,
+            logical_plan_ir: Some(logical_ir),
+        })
     }
 
     pub fn create_pipeline_from_logical_ir(
@@ -505,6 +565,8 @@ fn build_pipeline_runtime_with_logical_ir(
         registries.encoder_registry().as_ref(),
         registries.aggregate_registry(),
     );
+    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
+    println!("[Pipeline Explain]\n{}", explain.to_pretty_string());
 
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
@@ -571,6 +633,8 @@ fn build_pipeline_runtime_from_logical_ir(
         registries.encoder_registry().as_ref(),
         registries.aggregate_registry(),
     );
+    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
+    println!("[Pipeline Explain]\n{}", explain.to_pretty_string());
 
     let mut pipeline = create_processor_pipeline(
         optimized_plan,

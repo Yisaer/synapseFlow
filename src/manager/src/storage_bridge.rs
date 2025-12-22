@@ -149,70 +149,58 @@ pub async fn load_from_storage(
     }
 
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
-        let req = pipeline_request_from_stored(&pipeline)?;
+        let _req = pipeline_request_from_stored(&pipeline)?;
         let def = pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref())?;
-        if req.options.plan_cache.enabled {
-            let snapshot = storage
-                .get_plan_snapshot(&pipeline.id)
-                .map_err(|e| e.to_string())?;
-            let hit = match snapshot.as_ref() {
-                Some(snapshot) => {
-                    let current_build_id = build_info::build_id();
-                    if snapshot.flow_build_id != current_build_id {
-                        false
-                    } else if snapshot.pipeline_json_hash != fnv1a_64_hex(&pipeline.raw_json) {
-                        false
-                    } else {
-                        let mut ok = true;
-                        for (stream_id, expected_hash) in &snapshot.stream_json_hashes {
-                            let stream = storage
-                                .get_stream(stream_id)
-                                .map_err(|e| e.to_string())?
-                                .ok_or_else(|| {
-                                    format!("stream {stream_id} missing from storage")
-                                })?;
-                            if fnv1a_64_hex(&stream.raw_json) != *expected_hash {
-                                ok = false;
-                                break;
-                            }
-                        }
-                        ok
-                    }
-                }
-                None => false,
-            };
 
-            if hit {
-                println!("[plan_cache] hit pipeline {}", pipeline.id);
-                if let Some(snapshot) = snapshot {
-                    match instance.create_pipeline_from_logical_ir(def.clone(), &snapshot.logical_plan_ir) {
-                        Ok(_) => continue,
-                        Err(_) => {
-                            println!("[plan_cache] miss pipeline {}", pipeline.id);
-                        }
-                    }
+        let stored_snapshot = storage
+            .get_plan_snapshot(&pipeline.id)
+            .map_err(|e| e.to_string())?;
+        let (plan_cache_snapshot, streams_raw_json) = match stored_snapshot.as_ref() {
+            Some(snapshot) => {
+                let mut streams_raw_json = Vec::with_capacity(snapshot.stream_json_hashes.len());
+                for (stream_id, _) in &snapshot.stream_json_hashes {
+                    let stream = storage
+                        .get_stream(stream_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("stream {stream_id} missing from storage"))?;
+                    streams_raw_json.push((stream_id.clone(), stream.raw_json));
                 }
-            } else {
-                println!("[plan_cache] miss pipeline {}", pipeline.id);
+                (
+                    Some(flow::planner::plan_cache::PlanSnapshotRecord {
+                        pipeline_json_hash: snapshot.pipeline_json_hash.clone(),
+                        stream_json_hashes: snapshot.stream_json_hashes.clone(),
+                        flow_build_id: snapshot.flow_build_id.clone(),
+                        logical_plan_ir: snapshot.logical_plan_ir.clone(),
+                    }),
+                    streams_raw_json,
+                )
             }
+            None => (None, Vec::new()),
+        };
 
-            let (snapshot, logical_ir) = instance
-                .create_pipeline_with_logical_ir(def)
-                .map_err(|e| e.to_string())?;
+        let result = instance
+            .create_pipeline_with_plan_cache(
+                def,
+                flow::planner::plan_cache::PlanCacheInputs {
+                    pipeline_raw_json: pipeline.raw_json.clone(),
+                    streams_raw_json,
+                    snapshot: plan_cache_snapshot,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(logical_ir) = result.logical_plan_ir {
             let stored_snapshot = build_plan_snapshot(
                 storage,
                 &pipeline.id,
                 &pipeline.raw_json,
-                &snapshot.streams,
+                &result.snapshot.streams,
                 logical_ir,
             )?;
             storage
                 .put_plan_snapshot(stored_snapshot)
                 .map_err(|e| e.to_string())?;
-            continue;
         }
-
-        instance.create_pipeline(def).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -316,9 +304,26 @@ mod tests {
         // Sanity: the cached IR must be sufficient to build a pipeline without parsing SQL.
         let check_instance = FlowInstance::new();
         let _ = install_stream_into_instance(&check_instance, &stream_req).await;
-        let check_def = pipeline_definition_from_stored(&stored_pipeline, check_instance.encoder_registry().as_ref()).unwrap();
+        let check_def =
+            pipeline_definition_from_stored(&stored_pipeline, check_instance.encoder_registry().as_ref())
+                .unwrap();
         check_instance
-            .create_pipeline_from_logical_ir(check_def, &logical_ir)
+            .create_pipeline_with_plan_cache(
+                check_def,
+                flow::planner::plan_cache::PlanCacheInputs {
+                    pipeline_raw_json: stored_pipeline.raw_json.clone(),
+                    streams_raw_json: vec![(stored_stream.id.clone(), stored_stream.raw_json.clone())],
+                    snapshot: Some(flow::planner::plan_cache::PlanSnapshotRecord {
+                        pipeline_json_hash: fnv1a_64_hex(&stored_pipeline.raw_json),
+                        stream_json_hashes: vec![(
+                            stored_stream.id.clone(),
+                            fnv1a_64_hex(&stored_stream.raw_json),
+                        )],
+                        flow_build_id: build_info::build_id(),
+                        logical_plan_ir: logical_ir.clone(),
+                    }),
+                },
+            )
             .expect("rehydrate pipeline from logical IR");
 
         let cached = build_plan_snapshot(

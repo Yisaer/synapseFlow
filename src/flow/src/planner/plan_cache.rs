@@ -24,6 +24,62 @@ pub enum PlanCacheCodecError {
     Deserialize(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct PlanSnapshotRecord {
+    pub pipeline_json_hash: String,
+    pub stream_json_hashes: Vec<(String, String)>,
+    pub flow_build_id: String,
+    pub logical_plan_ir: Vec<u8>,
+}
+
+pub struct PlanCacheInputs {
+    pub pipeline_raw_json: String,
+    pub streams_raw_json: Vec<(String, String)>,
+    pub snapshot: Option<PlanSnapshotRecord>,
+}
+
+pub struct PlanCacheBuildResult {
+    pub snapshot: crate::pipeline::PipelineSnapshot,
+    pub hit: bool,
+    pub logical_plan_ir: Option<Vec<u8>>,
+}
+
+fn fnv1a_64_hex(input: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001B3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+pub fn snapshot_matches_inputs(inputs: &PlanCacheInputs) -> bool {
+    let Some(snapshot) = &inputs.snapshot else {
+        return false;
+    };
+    if snapshot.flow_build_id != build_info::build_id() {
+        return false;
+    }
+    if snapshot.pipeline_json_hash != fnv1a_64_hex(&inputs.pipeline_raw_json) {
+        return false;
+    }
+    let mut stream_map: HashMap<&str, &str> = HashMap::new();
+    for (id, raw) in &inputs.streams_raw_json {
+        stream_map.insert(id.as_str(), raw.as_str());
+    }
+    for (stream_id, expected_hash) in &snapshot.stream_json_hashes {
+        let Some(raw) = stream_map.get(stream_id.as_str()) else {
+            return false;
+        };
+        if fnv1a_64_hex(raw) != *expected_hash {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommonSinkPropsIR {
     pub batch_count: Option<usize>,
