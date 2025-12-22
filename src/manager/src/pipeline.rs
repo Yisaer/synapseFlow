@@ -8,8 +8,8 @@ use axum::{
 use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
-    MqttSinkProps, PipelineDefinition, PipelineError, PipelineStatus, SinkDefinition, SinkProps,
-    SinkType,
+    MqttSinkProps, PipelineDefinition, PipelineError, PipelineOptions, PipelineStatus,
+    PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,21 @@ pub struct CreatePipelineRequest {
     pub sql: String,
     #[serde(default)]
     pub sinks: Vec<CreatePipelineSinkRequest>,
+    #[serde(default)]
+    pub options: PipelineOptionsRequest,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct PipelineOptionsRequest {
+    #[serde(rename = "plan_cache")]
+    pub plan_cache: PlanCacheOptionsRequest,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct PlanCacheOptionsRequest {
+    pub enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -167,34 +182,74 @@ pub async fn create_pipeline_handler(
         }
     }
 
-    match state.instance.create_pipeline(definition) {
-        Ok(snapshot) => {
-            println!("[manager] pipeline {} created", snapshot.definition.id());
-            (
-                StatusCode::CREATED,
-                Json(CreatePipelineResponse {
-                    id: snapshot.definition.id().to_string(),
-                    status: status_label(snapshot.status),
-                }),
-            )
-                .into_response()
-        }
+    let build_result = match state.instance.create_pipeline_with_plan_cache(
+        definition,
+        flow::planner::plan_cache::PlanCacheInputs {
+            pipeline_raw_json: stored.raw_json.clone(),
+            streams_raw_json: Vec::new(),
+            snapshot: None,
+        },
+    ) {
+        Ok(result) => result,
         Err(PipelineError::AlreadyExists(_)) => {
             let _ = state.storage.delete_pipeline(&stored.id);
-            (
+            return (
                 StatusCode::CONFLICT,
                 format!("pipeline {} already exists", req.id),
             )
-                .into_response()
+                .into_response();
         }
         Err(err) => {
             let _ = state.storage.delete_pipeline(&stored.id);
-            (
+            return (
                 StatusCode::BAD_REQUEST,
                 format!("failed to create pipeline {}: {err}", req.id),
             )
-                .into_response()
+                .into_response();
         }
+    };
+
+    if let Some(logical_ir) = build_result.logical_plan_ir {
+        match storage_bridge::build_plan_snapshot(
+            state.storage.as_ref(),
+            &stored.id,
+            &stored.raw_json,
+            &build_result.snapshot.streams,
+            logical_ir,
+        )
+        .and_then(|record| {
+            state
+                .storage
+                .put_plan_snapshot(record)
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(()) => {}
+            Err(err) => {
+                let _ = state.instance.delete_pipeline(&stored.id).await;
+                let _ = state.storage.delete_pipeline(&stored.id);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "pipeline {} created but failed to persist plan cache: {err}",
+                        req.id
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let snapshot = build_result.snapshot;
+    {
+        println!("[manager] pipeline {} created", snapshot.definition.id());
+        (
+            StatusCode::CREATED,
+            Json(CreatePipelineResponse {
+                id: snapshot.definition.id().to_string(),
+                status: status_label(snapshot.status),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -341,11 +396,17 @@ pub(crate) fn build_pipeline_definition(
             .with_common_props(sink_req.common.to_common_props());
         sinks.push(sink_definition);
     }
+    let options = PipelineOptions {
+        plan_cache: PlanCacheOptions {
+            enabled: req.options.plan_cache.enabled,
+        },
+    };
     Ok(PipelineDefinition::new(
         req.id.clone(),
         req.sql.clone(),
         sinks,
-    ))
+    )
+    .with_options(options))
 }
 
 fn status_label(status: PipelineStatus) -> String {

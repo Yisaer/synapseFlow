@@ -44,6 +44,12 @@ impl CliFlags {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!(
+        "[build_info] git_sha={} git_tag={}",
+        build_info::git_sha(),
+        build_info::git_tag()
+    );
+
     let cli_flags = CliFlags::parse();
     let options = ServerOptions {
         profiling_enabled: cli_flags.profiling_override(),

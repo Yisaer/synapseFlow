@@ -4,6 +4,7 @@ members = [
     "src/datatypes",
     "src/parser", "src/manager",
     "src/telemetry", "src/storage",
+    "src/build_info",
 ]
 resolver = "2"
 
@@ -23,6 +24,7 @@ manager = { path = "src/manager" }
 flow = { path = "src/flow" }
 telemetry = { path = "src/telemetry", optional = true }
 storage = { path = "src/storage" }
+build_info = { path = "src/build_info" }
 
 [features]
 default = ["metrics", "profiling"]

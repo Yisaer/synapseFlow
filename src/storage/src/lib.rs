@@ -8,6 +8,7 @@ use thiserror::Error;
 
 const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
+const PLAN_SNAPSHOTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("plan_snapshots");
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
 
@@ -58,6 +59,24 @@ pub struct StoredPipeline {
     pub id: String,
     /// Original create-pipeline request serialized as JSON.
     pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredPlanSnapshot {
+    /// Owning pipeline identifier (also used as the storage key).
+    pub pipeline_id: String,
+    /// Fingerprint over pipeline/streams/build-id used for cache validation.
+    pub fingerprint: String,
+    /// Hash of the pipeline creation JSON (`StoredPipeline.raw_json`).
+    pub pipeline_json_hash: String,
+    /// Hash of each referenced stream creation JSON (`StoredStream.raw_json`).
+    ///
+    /// Stored as `(stream_id, stream_json_hash)` pairs.
+    pub stream_json_hashes: Vec<(String, String)>,
+    /// Flow build identifier (e.g. commit id + git tag).
+    pub flow_build_id: String,
+    /// Serialized optimized logical plan IR.
+    pub logical_plan_ir: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,7 +154,47 @@ impl MetadataStorage {
     }
 
     pub fn delete_pipeline(&self, id: &str) -> Result<(), StorageError> {
-        self.delete_entry(PIPELINES_TABLE, id)
+        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        {
+            let mut pipelines = txn.open_table(PIPELINES_TABLE).map_err(StorageError::backend)?;
+            let removed = pipelines.remove(id).map_err(StorageError::backend)?;
+            if removed.is_none() {
+                return Err(StorageError::NotFound(id.to_string()));
+            }
+
+            let mut snapshots = txn
+                .open_table(PLAN_SNAPSHOTS_TABLE)
+                .map_err(StorageError::backend)?;
+            let _ = snapshots.remove(id).map_err(StorageError::backend)?;
+        }
+        txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
+    pub fn put_plan_snapshot(&self, snapshot: StoredPlanSnapshot) -> Result<(), StorageError> {
+        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        {
+            let mut table = txn
+                .open_table(PLAN_SNAPSHOTS_TABLE)
+                .map_err(StorageError::backend)?;
+            let encoded = encode_record(&snapshot)?;
+            table
+                .insert(snapshot.pipeline_id.as_str(), encoded.as_slice())
+                .map_err(StorageError::backend)?;
+        }
+        txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
+    pub fn get_plan_snapshot(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<StoredPlanSnapshot>, StorageError> {
+        self.get_entry(PLAN_SNAPSHOTS_TABLE, pipeline_id)
+    }
+
+    pub fn delete_plan_snapshot(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        self.delete_entry(PLAN_SNAPSHOTS_TABLE, pipeline_id)
     }
 
     pub fn create_mqtt_config(&self, config: StoredMqttClientConfig) -> Result<(), StorageError> {
@@ -166,6 +225,8 @@ impl MetadataStorage {
         txn.open_table(STREAMS_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(PIPELINES_TABLE)
+            .map_err(StorageError::backend)?;
+        txn.open_table(PLAN_SNAPSHOTS_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(SHARED_MQTT_CONFIGS_TABLE)
             .map_err(StorageError::backend)?;
@@ -297,6 +358,21 @@ impl StorageManager {
         self.metadata.delete_pipeline(id)
     }
 
+    pub fn put_plan_snapshot(&self, snapshot: StoredPlanSnapshot) -> Result<(), StorageError> {
+        self.metadata.put_plan_snapshot(snapshot)
+    }
+
+    pub fn get_plan_snapshot(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<StoredPlanSnapshot>, StorageError> {
+        self.metadata.get_plan_snapshot(pipeline_id)
+    }
+
+    pub fn delete_plan_snapshot(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        self.metadata.delete_plan_snapshot(pipeline_id)
+    }
+
     pub fn create_mqtt_config(&self, config: StoredMqttClientConfig) -> Result<(), StorageError> {
         self.metadata.create_mqtt_config(config)
     }
@@ -344,6 +420,17 @@ mod tests {
         }
     }
 
+    fn sample_plan_snapshot() -> StoredPlanSnapshot {
+        StoredPlanSnapshot {
+            pipeline_id: "pipe_1".to_string(),
+            fingerprint: "fp_a".to_string(),
+            pipeline_json_hash: "pipe_json_a".to_string(),
+            stream_json_hashes: vec![("stream_1".to_string(), "stream_json_a".to_string())],
+            flow_build_id: "sha:deadbeef tag:v0.0.0".to_string(),
+            logical_plan_ir: vec![1, 2, 3],
+        }
+    }
+
     fn sample_mqtt_config() -> StoredMqttClientConfig {
         StoredMqttClientConfig {
         key: "shared_a".to_string(),
@@ -374,6 +461,13 @@ mod tests {
         let pipelines = storage.list_pipelines().unwrap();
         assert_eq!(pipelines.len(), 1);
 
+        let snapshot = sample_plan_snapshot();
+        storage.put_plan_snapshot(snapshot.clone()).unwrap();
+        assert_eq!(
+            storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap(),
+            Some(snapshot.clone())
+        );
+
         let mqtt = sample_mqtt_config();
         storage.create_mqtt_config(mqtt.clone()).unwrap();
         assert_eq!(
@@ -389,6 +483,7 @@ mod tests {
 
         assert!(storage.get_stream(&stream.id).unwrap().is_none());
         assert!(storage.get_pipeline(&pipeline.id).unwrap().is_none());
+        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
         assert!(storage.get_mqtt_config(&mqtt.key).unwrap().is_none());
     }
 
@@ -418,6 +513,10 @@ mod tests {
         manager.create_pipeline(pipeline.clone()).unwrap();
         assert!(manager.get_pipeline(&pipeline.id).unwrap().is_some());
 
+        let snapshot = sample_plan_snapshot();
+        manager.put_plan_snapshot(snapshot.clone()).unwrap();
+        assert!(manager.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_some());
+
         let mqtt = sample_mqtt_config();
         manager.create_mqtt_config(mqtt.clone()).unwrap();
         assert!(manager.get_mqtt_config(&mqtt.key).unwrap().is_some());
@@ -425,5 +524,24 @@ mod tests {
         manager.delete_stream(&stream.id).unwrap();
         manager.delete_pipeline(&pipeline.id).unwrap();
         manager.delete_mqtt_config(&mqtt.key).unwrap();
+
+        assert!(manager.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_pipeline_cascades_plan_snapshot() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let pipeline = sample_pipeline();
+        storage.create_pipeline(pipeline.clone()).unwrap();
+
+        let snapshot = sample_plan_snapshot();
+        storage.put_plan_snapshot(snapshot.clone()).unwrap();
+        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_some());
+
+        storage.delete_pipeline(&pipeline.id).unwrap();
+        assert!(storage.get_pipeline(&pipeline.id).unwrap().is_none());
+        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
     }
 }

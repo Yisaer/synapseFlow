@@ -157,6 +157,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
+name = "build_info"
+version = "0.0.1"
+
+[[package]]
 name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -330,6 +334,7 @@ name = "flow"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "build_info",
  "datatypes",
  "futures",
  "once_cell",
@@ -784,11 +789,13 @@ name = "manager"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "build_info",
  "flow",
  "parser",
  "serde",
  "serde_json",
  "storage",
+ "tempfile",
  "tokio",
 ]
 
@@ -1480,6 +1487,7 @@ dependencies = [
 name = "synapse-flow"
 version = "0.0.1"
 dependencies = [
+ "build_info",
  "flow",
  "manager",
  "pprof",

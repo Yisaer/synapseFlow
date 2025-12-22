@@ -184,6 +184,32 @@ impl FlowInstance {
         self.pipeline_manager.create_pipeline(definition)
     }
 
+    pub fn create_pipeline_with_plan_cache(
+        &self,
+        definition: PipelineDefinition,
+        inputs: crate::planner::plan_cache::PlanCacheInputs,
+    ) -> Result<crate::planner::plan_cache::PlanCacheBuildResult, PipelineError> {
+        self.pipeline_manager
+            .create_pipeline_with_plan_cache(definition, inputs)
+    }
+
+    pub fn create_pipeline_with_logical_ir(
+        &self,
+        definition: PipelineDefinition,
+    ) -> Result<(PipelineSnapshot, Vec<u8>), PipelineError> {
+        self.pipeline_manager
+            .create_pipeline_with_logical_ir(definition)
+    }
+
+    pub fn create_pipeline_from_logical_ir(
+        &self,
+        definition: PipelineDefinition,
+        logical_plan_ir: &[u8],
+    ) -> Result<PipelineSnapshot, PipelineError> {
+        self.pipeline_manager
+            .create_pipeline_from_logical_ir(definition, logical_plan_ir)
+    }
+
     /// Start a pipeline by identifier.
     pub fn start_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         self.pipeline_manager.start_pipeline(id)
