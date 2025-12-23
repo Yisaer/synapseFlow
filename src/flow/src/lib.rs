@@ -9,8 +9,10 @@ pub mod pipeline;
 pub mod planner;
 pub mod processor;
 pub mod shared_stream;
+pub mod stateful;
 
 pub use aggregation::AggregateFunctionRegistry;
+pub use stateful::StatefulFunctionRegistry;
 pub use catalog::{
     Catalog, CatalogError, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
     StreamType,
@@ -73,6 +75,7 @@ pub struct PipelineRegistries {
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    stateful_registry: Arc<StatefulFunctionRegistry>,
 }
 
 impl PipelineRegistries {
@@ -87,6 +90,23 @@ impl PipelineRegistries {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            stateful_registry: StatefulFunctionRegistry::with_builtins(),
+        }
+    }
+
+    pub fn new_with_stateful_registry(
+        connector_registry: Arc<ConnectorRegistry>,
+        encoder_registry: Arc<EncoderRegistry>,
+        decoder_registry: Arc<DecoderRegistry>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        stateful_registry: Arc<StatefulFunctionRegistry>,
+    ) -> Self {
+        Self {
+            connector_registry,
+            encoder_registry,
+            decoder_registry,
+            aggregate_registry,
+            stateful_registry,
         }
     }
 
@@ -104,6 +124,10 @@ impl PipelineRegistries {
 
     pub fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
         Arc::clone(&self.aggregate_registry)
+    }
+
+    pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
+        Arc::clone(&self.stateful_registry)
     }
 }
 

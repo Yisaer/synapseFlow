@@ -13,6 +13,7 @@ use crate::shared_stream::{
     registry as shared_stream_registry, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
     SharedStreamRegistry,
 };
+use crate::stateful::StatefulFunctionRegistry;
 use crate::{create_pipeline, create_pipeline_with_log_sink};
 use crate::{PipelineExplain, PipelineRegistries, PipelineSink};
 
@@ -29,6 +30,7 @@ pub struct FlowInstance {
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    stateful_registry: Arc<StatefulFunctionRegistry>,
 }
 
 impl FlowInstance {
@@ -41,6 +43,7 @@ impl FlowInstance {
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
             shared_stream_registry,
@@ -60,7 +63,12 @@ impl FlowInstance {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            stateful_registry,
         }
+    }
+
+    pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
+        Arc::clone(&self.stateful_registry)
     }
 
     /// Create a stream definition and optionally attach a shared stream runtime.
