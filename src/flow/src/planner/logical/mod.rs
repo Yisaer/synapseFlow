@@ -131,6 +131,7 @@ pub fn create_logical_plan(
     sinks: Vec<PipelineSink>,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
+    validate_group_by_requires_aggregates(&select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
 
     let start_index = 0i64;
@@ -227,6 +228,16 @@ pub fn create_logical_plan(
         let tail_plan = TailPlan::new(sink_children, tail_index);
         Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
     }
+}
+
+fn validate_group_by_requires_aggregates(select_stmt: &SelectStmt) -> Result<(), String> {
+    if select_stmt.aggregate_mappings.is_empty() && !select_stmt.group_by_exprs.is_empty() {
+        return Err(
+            "GROUP BY without aggregate functions is not supported; use aggregates or remove GROUP BY"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_aggregation_projection(select_stmt: &SelectStmt) -> Result<(), String> {
@@ -673,6 +684,20 @@ mod logical_plan_tests {
             }
             other => panic!("Expected State window, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_reject_group_by_without_aggregates() {
+        let sql = "SELECT * FROM users GROUP BY b, c";
+        let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
+
+        let err = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap_err();
+        assert!(
+            err.contains("GROUP BY without aggregate functions is not supported"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]

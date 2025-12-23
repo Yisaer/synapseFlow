@@ -211,7 +211,7 @@ mod tests {
     use crate::pipeline::CreatePipelineRequest;
     use crate::stream::CreateStreamRequest;
     use flow::FlowInstance;
-    use serde_json::{json, Map as JsonMap, Value as JsonValue};
+    use serde_json::{Map as JsonMap, Value as JsonValue, json};
     use tempfile::tempdir;
 
     fn sample_stream_request(name: &str) -> CreateStreamRequest {
@@ -237,7 +237,11 @@ mod tests {
         }
     }
 
-    fn sample_pipeline_request(id: &str, sql: &str, plan_cache_enabled: bool) -> CreatePipelineRequest {
+    fn sample_pipeline_request(
+        id: &str,
+        sql: &str,
+        plan_cache_enabled: bool,
+    ) -> CreatePipelineRequest {
         serde_json::from_value(json!({
             "id": id,
             "sql": sql,
@@ -261,11 +265,8 @@ mod tests {
         stream_req: &CreateStreamRequest,
     ) -> StoredStream {
         let stored = stored_stream_from_request(stream_req).expect("stored stream");
-        let def = stream_definition_from_stored(
-            &stored,
-            instance.decoder_registry().as_ref(),
-        )
-        .expect("stream definition");
+        let def = stream_definition_from_stored(&stored, instance.decoder_registry().as_ref())
+            .expect("stream definition");
         instance
             .create_stream(def, stream_req.shared)
             .await
@@ -299,20 +300,27 @@ mod tests {
             ir_instance.encoder_registry().as_ref(),
         )
         .unwrap();
-        let (_snapshot, logical_ir) = ir_instance.create_pipeline_with_logical_ir(valid_def).unwrap();
+        let (_snapshot, logical_ir) = ir_instance
+            .create_pipeline_with_logical_ir(valid_def)
+            .unwrap();
 
         // Sanity: the cached IR must be sufficient to build a pipeline without parsing SQL.
         let check_instance = FlowInstance::new();
         let _ = install_stream_into_instance(&check_instance, &stream_req).await;
-        let check_def =
-            pipeline_definition_from_stored(&stored_pipeline, check_instance.encoder_registry().as_ref())
-                .unwrap();
+        let check_def = pipeline_definition_from_stored(
+            &stored_pipeline,
+            check_instance.encoder_registry().as_ref(),
+        )
+        .unwrap();
         check_instance
             .create_pipeline_with_plan_cache(
                 check_def,
                 flow::planner::plan_cache::PlanCacheInputs {
                     pipeline_raw_json: stored_pipeline.raw_json.clone(),
-                    streams_raw_json: vec![(stored_stream.id.clone(), stored_stream.raw_json.clone())],
+                    streams_raw_json: vec![(
+                        stored_stream.id.clone(),
+                        stored_stream.raw_json.clone(),
+                    )],
                     snapshot: Some(flow::planner::plan_cache::PlanSnapshotRecord {
                         pipeline_json_hash: fnv1a_64_hex(&stored_pipeline.raw_json),
                         stream_json_hashes: vec![(
@@ -338,10 +346,12 @@ mod tests {
 
         // This should succeed even though the stored SQL is invalid, proving we did not parse it.
         load_from_storage(&storage, &instance).await.unwrap();
-        assert!(instance
-            .list_pipelines()
-            .iter()
-            .any(|p| p.definition.id() == "p1"));
+        assert!(
+            instance
+                .list_pipelines()
+                .iter()
+                .any(|p| p.definition.id() == "p1")
+        );
     }
 
     #[tokio::test]
@@ -362,13 +372,21 @@ mod tests {
 
         load_from_storage(&storage, &instance).await.unwrap();
 
-        let snapshot = storage.get_plan_snapshot("p1").unwrap().expect("snapshot written");
+        let snapshot = storage
+            .get_plan_snapshot("p1")
+            .unwrap()
+            .expect("snapshot written");
         assert_eq!(snapshot.pipeline_id, "p1");
-        assert_eq!(snapshot.pipeline_json_hash, fnv1a_64_hex(&stored_pipeline.raw_json));
+        assert_eq!(
+            snapshot.pipeline_json_hash,
+            fnv1a_64_hex(&stored_pipeline.raw_json)
+        );
         assert!(!snapshot.logical_plan_ir.is_empty());
-        assert!(instance
-            .list_pipelines()
-            .iter()
-            .any(|p| p.definition.id() == "p1"));
+        assert!(
+            instance
+                .list_pipelines()
+                .iter()
+                .any(|p| p.definition.id() == "p1")
+        );
     }
 }

@@ -2,9 +2,9 @@ pub mod explain;
 pub mod logical;
 pub mod logical_optimizer;
 pub mod optimizer;
-pub mod plan_cache;
 pub mod physical;
 pub mod physical_plan_builder;
+pub mod plan_cache;
 pub mod sink;
 
 pub use logical_optimizer::optimize_logical_plan;

@@ -116,8 +116,13 @@ pub enum TimeUnitIR {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WindowIR {
-    Tumbling { time_unit: TimeUnitIR, length: u64 },
-    Count { count: u64 },
+    Tumbling {
+        time_unit: TimeUnitIR,
+        length: u64,
+    },
+    Count {
+        count: u64,
+    },
     Sliding {
         time_unit: TimeUnitIR,
         lookback: u64,
@@ -145,17 +150,30 @@ pub struct LogicalPlanNodeIR {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogicalPlanNodeKindIR {
-    DataSource { stream: String, alias: Option<String> },
-    Window { window: WindowIR },
+    DataSource {
+        stream: String,
+        alias: Option<String>,
+    },
+    Window {
+        window: WindowIR,
+    },
     Aggregation {
         group_by: Vec<Expr>,
         aggregates: Vec<AggregateExprIR>,
     },
-    Filter { predicate: Expr },
-    Project { fields: Vec<ProjectFieldIR> },
+    Filter {
+        predicate: Expr,
+    },
+    Project {
+        fields: Vec<ProjectFieldIR>,
+    },
     Tail,
-    DataSink { sinks: Vec<SinkIR> },
-    Opaque { plan_type: String },
+    DataSink {
+        sinks: Vec<SinkIR>,
+    },
+    Opaque {
+        plan_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,13 +191,20 @@ pub struct PhysicalPlanNodeIR {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PhysicalPlanNodeKindIR {
-    DataSource { stream: String, alias: Option<String> },
+    DataSource {
+        stream: String,
+        alias: Option<String>,
+    },
     Decoder {
         decoder_kind: String,
         decoder_props: JsonMap<String, JsonValue>,
     },
-    Filter { predicate: Expr },
-    Project { fields: Vec<ProjectFieldIR> },
+    Filter {
+        predicate: Expr,
+    },
+    Project {
+        fields: Vec<ProjectFieldIR>,
+    },
     Encoder {
         encoder_kind: String,
         encoder_props: JsonMap<String, JsonValue>,
@@ -189,7 +214,9 @@ pub enum PhysicalPlanNodeKindIR {
         encoder_plan_index: i64,
     },
     ResultCollect,
-    Opaque { plan_type: String },
+    Opaque {
+        plan_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,7 +286,12 @@ fn build_logical_plan_node(
 
     let mut children = Vec::with_capacity(node.children.len());
     for child_index in &node.children {
-        children.push(build_logical_plan_node(*child_index, nodes, cache, streams)?);
+        children.push(build_logical_plan_node(
+            *child_index,
+            nodes,
+            cache,
+            streams,
+        )?);
     }
 
     let plan = match &node.kind {
@@ -299,11 +331,8 @@ fn build_logical_plan_node(
             Arc::new(LogicalPlan::Aggregation(plan))
         }
         LogicalPlanNodeKindIR::Filter { predicate } => {
-            let plan = crate::planner::logical::Filter::new(
-                predicate.clone(),
-                children,
-                node.index,
-            );
+            let plan =
+                crate::planner::logical::Filter::new(predicate.clone(), children, node.index);
             Arc::new(LogicalPlan::Filter(plan))
         }
         LogicalPlanNodeKindIR::Project { fields } => {
@@ -334,7 +363,9 @@ fn build_logical_plan_node(
             Arc::new(LogicalPlan::DataSink(plan))
         }
         LogicalPlanNodeKindIR::Opaque { plan_type } => {
-            return Err(format!("unsupported logical plan IR node kind: {plan_type}"));
+            return Err(format!(
+                "unsupported logical plan IR node kind: {plan_type}"
+            ));
         }
     };
 
@@ -396,14 +427,17 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         .and_then(|v| v.as_u64())
         .ok_or_else(|| "mqtt sink settings missing qos".to_string())? as u8;
     let retain = obj.get("retain").and_then(|v| v.as_bool()).unwrap_or(false);
-    let client_id = obj.get("client_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let client_id = obj
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let connector_key = obj
         .get("connector_key")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let mut config = MqttSinkConfig::new(sink_name.clone(), broker_url, topic, qos)
-        .with_retain(retain);
+    let mut config =
+        MqttSinkConfig::new(sink_name.clone(), broker_url, topic, qos).with_retain(retain);
     if let Some(client_id) = client_id {
         config = config.with_client_id(client_id);
     }
@@ -420,7 +454,9 @@ fn common_sink_props_from_ir(common: &CommonSinkPropsIR) -> CommonSinkProps {
     }
 }
 
-fn window_ir_to_spec(window: &WindowIR) -> Result<crate::planner::logical::LogicalWindowSpec, String> {
+fn window_ir_to_spec(
+    window: &WindowIR,
+) -> Result<crate::planner::logical::LogicalWindowSpec, String> {
     Ok(match window {
         WindowIR::Tumbling { time_unit, length } => {
             crate::planner::logical::LogicalWindowSpec::Tumbling {
@@ -428,7 +464,9 @@ fn window_ir_to_spec(window: &WindowIR) -> Result<crate::planner::logical::Logic
                 length: *length,
             }
         }
-        WindowIR::Count { count } => crate::planner::logical::LogicalWindowSpec::Count { count: *count },
+        WindowIR::Count { count } => {
+            crate::planner::logical::LogicalWindowSpec::Count { count: *count }
+        }
         WindowIR::Sliding {
             time_unit,
             lookback,
@@ -665,10 +703,7 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
             }),
         ),
         SinkConnectorConfig::Nop(_) => ("nop".to_string(), JsonValue::Object(JsonMap::new())),
-        SinkConnectorConfig::Custom(custom) => (
-            custom.kind.clone(),
-            custom.settings.clone(),
-        ),
+        SinkConnectorConfig::Custom(custom) => (custom.kind.clone(), custom.settings.clone()),
     }
 }
 
@@ -682,7 +717,9 @@ fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> Windo
                 length: *length,
             }
         }
-        crate::planner::logical::LogicalWindowSpec::Count { count } => WindowIR::Count { count: *count },
+        crate::planner::logical::LogicalWindowSpec::Count { count } => {
+            WindowIR::Count { count: *count }
+        }
         crate::planner::logical::LogicalWindowSpec::Sliding {
             time_unit,
             lookback,

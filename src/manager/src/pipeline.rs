@@ -401,12 +401,7 @@ pub(crate) fn build_pipeline_definition(
             enabled: req.options.plan_cache.enabled,
         },
     };
-    Ok(PipelineDefinition::new(
-        req.id.clone(),
-        req.sql.clone(),
-        sinks,
-    )
-    .with_options(options))
+    Ok(PipelineDefinition::new(req.id.clone(), req.sql.clone(), sinks).with_options(options))
 }
 
 fn status_label(status: PipelineStatus) -> String {

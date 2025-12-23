@@ -156,7 +156,9 @@ impl MetadataStorage {
     pub fn delete_pipeline(&self, id: &str) -> Result<(), StorageError> {
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         {
-            let mut pipelines = txn.open_table(PIPELINES_TABLE).map_err(StorageError::backend)?;
+            let mut pipelines = txn
+                .open_table(PIPELINES_TABLE)
+                .map_err(StorageError::backend)?;
             let removed = pipelines.remove(id).map_err(StorageError::backend)?;
             if removed.is_none() {
                 return Err(StorageError::NotFound(id.to_string()));
@@ -483,7 +485,10 @@ mod tests {
 
         assert!(storage.get_stream(&stream.id).unwrap().is_none());
         assert!(storage.get_pipeline(&pipeline.id).unwrap().is_none());
-        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
+        assert!(storage
+            .get_plan_snapshot(&snapshot.pipeline_id)
+            .unwrap()
+            .is_none());
         assert!(storage.get_mqtt_config(&mqtt.key).unwrap().is_none());
     }
 
@@ -515,7 +520,10 @@ mod tests {
 
         let snapshot = sample_plan_snapshot();
         manager.put_plan_snapshot(snapshot.clone()).unwrap();
-        assert!(manager.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_some());
+        assert!(manager
+            .get_plan_snapshot(&snapshot.pipeline_id)
+            .unwrap()
+            .is_some());
 
         let mqtt = sample_mqtt_config();
         manager.create_mqtt_config(mqtt.clone()).unwrap();
@@ -525,7 +533,10 @@ mod tests {
         manager.delete_pipeline(&pipeline.id).unwrap();
         manager.delete_mqtt_config(&mqtt.key).unwrap();
 
-        assert!(manager.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
+        assert!(manager
+            .get_plan_snapshot(&snapshot.pipeline_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -538,10 +549,16 @@ mod tests {
 
         let snapshot = sample_plan_snapshot();
         storage.put_plan_snapshot(snapshot.clone()).unwrap();
-        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_some());
+        assert!(storage
+            .get_plan_snapshot(&snapshot.pipeline_id)
+            .unwrap()
+            .is_some());
 
         storage.delete_pipeline(&pipeline.id).unwrap();
         assert!(storage.get_pipeline(&pipeline.id).unwrap().is_none());
-        assert!(storage.get_plan_snapshot(&snapshot.pipeline_id).unwrap().is_none());
+        assert!(storage
+            .get_plan_snapshot(&snapshot.pipeline_id)
+            .unwrap()
+            .is_none());
     }
 }

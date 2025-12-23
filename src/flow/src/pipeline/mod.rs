@@ -15,8 +15,8 @@ use crate::processor::Processor;
 use crate::shared_stream::SharedStreamRegistry;
 use crate::{
     create_physical_plan, create_pipeline, explain_pipeline, optimize_logical_plan,
-    optimize_physical_plan, PipelineExplain, PipelineRegistries, PipelineSink, PipelineSinkConnector,
-    SinkConnectorConfig,
+    optimize_physical_plan, PipelineExplain, PipelineRegistries, PipelineSink,
+    PipelineSinkConnector, SinkConnectorConfig,
 };
 use parser::parse_sql_with_registry;
 use std::collections::HashMap;
@@ -626,8 +626,9 @@ fn build_pipeline_runtime_from_logical_ir(
         logical_plan_from_ir(&logical_ir, &datasource_inputs).map_err(|e| e.to_string())?;
     let (logical_plan, pruned_binding) = optimize_logical_plan(logical_plan, &schema_binding);
 
-    let physical_plan = create_physical_plan(Arc::clone(&logical_plan), &pruned_binding, registries)
-        .map_err(|err| err.to_string())?;
+    let physical_plan =
+        create_physical_plan(Arc::clone(&logical_plan), &pruned_binding, registries)
+            .map_err(|err| err.to_string())?;
     let optimized_plan = optimize_physical_plan(
         Arc::clone(&physical_plan),
         registries.encoder_registry().as_ref(),
