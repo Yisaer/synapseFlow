@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::aggregation::AggregateFunctionRegistry;
+use crate::aggregation::AggregateFunction;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition, StreamProps};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry};
 use crate::connector::{
@@ -14,6 +15,7 @@ use crate::shared_stream::{
     SharedStreamRegistry,
 };
 use crate::stateful::StatefulFunctionRegistry;
+use crate::stateful::{StatefulFunction, StatefulRegistryError};
 use crate::{create_pipeline, create_pipeline_with_log_sink};
 use crate::{PipelineExplain, PipelineRegistries, PipelineSink};
 
@@ -52,6 +54,7 @@ impl FlowInstance {
             Arc::clone(&decoder_registry),
             Arc::clone(&encoder_registry),
             Arc::clone(&aggregate_registry),
+            Arc::clone(&stateful_registry),
         ));
         Self {
             catalog,
@@ -69,6 +72,17 @@ impl FlowInstance {
 
     pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
         Arc::clone(&self.stateful_registry)
+    }
+
+    pub fn register_stateful_function(
+        &self,
+        function: Arc<dyn StatefulFunction>,
+    ) -> Result<(), StatefulRegistryError> {
+        self.stateful_registry.register_function(function)
+    }
+
+    pub fn register_aggregate_function(&self, function: Arc<dyn AggregateFunction>) {
+        self.aggregate_registry.register_function(function);
     }
 
     /// Create a stream definition and optionally attach a shared stream runtime.
@@ -289,11 +303,12 @@ impl FlowInstance {
     }
 
     fn pipeline_registries(&self) -> PipelineRegistries {
-        PipelineRegistries::new(
+        PipelineRegistries::new_with_stateful_registry(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
         )
     }
 

@@ -2,6 +2,7 @@ use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::model::batch_from_columns_simple;
 use flow::processor::StreamData;
+use flow::stateful::{StatefulFunction, StatefulFunctionInstance};
 use flow::FlowInstance;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
@@ -77,6 +78,100 @@ async fn stateful_lag_basic() {
                 values,
                 vec![Value::Null, Value::Int64(1), Value::Int64(2)]
             );
+        }
+        other => panic!("expected collection, got {}", other.description()),
+    }
+
+    pipeline.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn stateful_custom_function_registration() {
+    struct AddOneFn;
+
+    struct AddOneInstance;
+
+    impl StatefulFunctionInstance for AddOneInstance {
+        fn eval(&mut self, args: &[Value]) -> Result<Value, String> {
+            let value = args
+                .first()
+                .ok_or_else(|| "add_one expects 1 argument".to_string())?;
+            match value {
+                Value::Null => Ok(Value::Null),
+                Value::Int64(v) => Ok(Value::Int64(v + 1)),
+                other => Err(format!("add_one expects Int64, got {:?}", other.datatype())),
+            }
+        }
+    }
+
+    impl StatefulFunction for AddOneFn {
+        fn name(&self) -> &str {
+            "add_one"
+        }
+
+        fn return_type(
+            &self,
+            input_types: &[ConcreteDatatype],
+        ) -> Result<ConcreteDatatype, String> {
+            match input_types.first() {
+                Some(ConcreteDatatype::Int64(_)) => Ok(ConcreteDatatype::Int64(
+                    datatypes::types::Int64Type,
+                )),
+                Some(other) => Err(format!("add_one expects Int64, got {other:?}")),
+                None => Err("add_one expects 1 argument".to_string()),
+            }
+        }
+
+        fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
+            Box::new(AddOneInstance)
+        }
+    }
+
+    let instance = FlowInstance::new();
+    install_stream_schema(
+        &instance,
+        &[(
+            "a".to_string(),
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+        )],
+    )
+    .await;
+
+    instance
+        .register_stateful_function(Arc::new(AddOneFn))
+        .expect("register add_one");
+
+    let mut pipeline = instance
+        .build_pipeline_with_log_sink("SELECT add_one(a) AS b FROM stream", true)
+        .expect("create pipeline");
+    pipeline.start();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let batch = batch_from_columns_simple(vec![(
+        "stream".to_string(),
+        "a".to_string(),
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+    )])
+    .expect("create batch");
+    pipeline
+        .send_stream_data("stream", StreamData::collection(Box::new(batch)))
+        .await
+        .expect("send data");
+
+    let mut output = pipeline.take_output().expect("output receiver");
+    let received = timeout(Duration::from_secs(5), output.recv())
+        .await
+        .expect("timeout")
+        .expect("missing output");
+    match received {
+        StreamData::Collection(collection) => {
+            let rows = collection.rows();
+            assert_eq!(rows.len(), 3);
+            let values: Vec<Value> = rows
+                .iter()
+                .map(|row| row.value_by_name("", "b").expect("b").clone())
+                .collect();
+            assert_eq!(values, vec![Value::Int64(2), Value::Int64(3), Value::Int64(4)]);
         }
         other => panic!("expected collection, got {}", other.description()),
     }
@@ -290,4 +385,3 @@ async fn stateful_nested_inside_aggregate_countwindow() {
     // Window 2: a=[50,60,70,80] and lag continues => lag=[40,50,60,70] => last_row=70, sum=260
     assert_window(second, 260, Value::Int64(70));
 }
-

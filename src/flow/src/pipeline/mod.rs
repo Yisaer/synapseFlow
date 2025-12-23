@@ -13,6 +13,7 @@ use crate::processor::create_processor_pipeline;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::Processor;
 use crate::shared_stream::SharedStreamRegistry;
+use crate::stateful::StatefulFunctionRegistry;
 use crate::{
     create_physical_plan, create_pipeline, explain_pipeline, optimize_logical_plan,
     optimize_physical_plan, PipelineExplain, PipelineRegistries, PipelineSink,
@@ -215,6 +216,7 @@ pub struct PipelineManager {
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    stateful_registry: Arc<StatefulFunctionRegistry>,
 }
 
 impl PipelineManager {
@@ -226,6 +228,7 @@ impl PipelineManager {
         decoder_registry: Arc<DecoderRegistry>,
         encoder_registry: Arc<EncoderRegistry>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
+        stateful_registry: Arc<StatefulFunctionRegistry>,
     ) -> Self {
         Self {
             pipelines: RwLock::new(HashMap::new()),
@@ -236,6 +239,7 @@ impl PipelineManager {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            stateful_registry,
         }
     }
 
@@ -245,11 +249,12 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
-        let registries = PipelineRegistries::new(
+        let registries = PipelineRegistries::new_with_stateful_registry(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
         );
         let (pipeline, streams) = build_pipeline_runtime(
             &definition,
@@ -279,11 +284,12 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<(PipelineSnapshot, Vec<u8>), PipelineError> {
         let pipeline_id = definition.id().to_string();
-        let registries = PipelineRegistries::new(
+        let registries = PipelineRegistries::new_with_stateful_registry(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
         );
         let (pipeline, streams, logical_ir) = build_pipeline_runtime_with_logical_ir(
             &definition,
@@ -361,11 +367,12 @@ impl PipelineManager {
             }
         }
 
-        let registries = PipelineRegistries::new(
+        let registries = PipelineRegistries::new_with_stateful_registry(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
         );
 
         let (pipeline, streams) = build_pipeline_runtime_from_logical_ir(
@@ -414,11 +421,12 @@ impl PipelineManager {
 
         let sinks =
             build_sinks_from_definition(&definition).map_err(PipelineError::BuildFailure)?;
-        let registries = PipelineRegistries::new(
+        let registries = PipelineRegistries::new_with_stateful_registry(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
         );
 
         explain_pipeline(
@@ -847,6 +855,7 @@ mod tests {
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let stateful_registry = StatefulFunctionRegistry::with_builtins();
         install_stream(&catalog, "test_stream");
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -856,6 +865,7 @@ mod tests {
             Arc::clone(&decoder_registry),
             Arc::clone(&encoder_registry),
             Arc::clone(&aggregate_registry),
+            Arc::clone(&stateful_registry),
         );
         let snapshot = manager
             .create_pipeline(sample_pipeline("pipe_a", "test_stream"))
@@ -879,6 +889,7 @@ mod tests {
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let stateful_registry = StatefulFunctionRegistry::with_builtins();
         install_stream(&catalog, "dup_stream");
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -888,6 +899,7 @@ mod tests {
             decoder_registry,
             encoder_registry,
             aggregate_registry,
+            stateful_registry,
         );
         manager
             .create_pipeline(sample_pipeline("dup_pipe", "dup_stream"))
@@ -943,11 +955,12 @@ mod tests {
                 .await
                 .expect("create shared stream");
 
-            let registries = PipelineRegistries::new(
+            let registries = PipelineRegistries::new_with_stateful_registry(
                 connector_registry,
                 encoder_registry,
                 decoder_registry,
                 aggregate_registry,
+                StatefulFunctionRegistry::with_builtins(),
             );
 
             let mut pipeline = crate::create_pipeline_with_log_sink(
@@ -1017,11 +1030,12 @@ mod tests {
                 .await
                 .expect("create shared stream");
 
-            let registries = PipelineRegistries::new(
+            let registries = PipelineRegistries::new_with_stateful_registry(
                 connector_registry,
                 encoder_registry,
                 decoder_registry,
                 aggregate_registry,
+                StatefulFunctionRegistry::with_builtins(),
             );
 
             let mut pipeline = crate::create_pipeline_with_log_sink(
