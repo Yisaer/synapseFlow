@@ -1513,6 +1513,7 @@ dependencies = [
  "telemetry",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
+ "time",
  "tokio",
 ]
 
