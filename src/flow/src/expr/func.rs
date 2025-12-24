@@ -403,6 +403,9 @@ impl BinaryFunc {
                     .unwrap_or(false),
             )),
             Self::Add => {
+                if left.is_null() || right.is_null() {
+                    return Ok(Value::Null);
+                }
                 // If types match, handle directly
                 match (&left, &right) {
                     (Value::Int8(a), Value::Int8(b)) => {
@@ -476,6 +479,9 @@ impl BinaryFunc {
                 })
             }
             Self::Sub => {
+                if left.is_null() || right.is_null() {
+                    return Ok(Value::Null);
+                }
                 // If types match, handle directly
                 match (&left, &right) {
                     (Value::Int8(a), Value::Int8(b)) => {
@@ -522,6 +528,9 @@ impl BinaryFunc {
                 }
             }
             Self::Mul => {
+                if left.is_null() || right.is_null() {
+                    return Ok(Value::Null);
+                }
                 // If types match, handle directly
                 match (&left, &right) {
                     (Value::Int8(a), Value::Int8(b)) => {
@@ -568,6 +577,9 @@ impl BinaryFunc {
                 }
             }
             Self::Div => {
+                if left.is_null() || right.is_null() {
+                    return Ok(Value::Null);
+                }
                 // If types match, handle directly
                 match (&left, &right) {
                     (Value::Int8(a), Value::Int8(b)) => {
@@ -652,6 +664,9 @@ impl BinaryFunc {
                 }
             }
             Self::Mod => {
+                if left.is_null() || right.is_null() {
+                    return Ok(Value::Null);
+                }
                 // If types match, handle directly
                 match (&left, &right) {
                     (Value::Int8(a), Value::Int8(b)) => {
@@ -793,6 +808,130 @@ impl BinaryFunc {
                     _ => unreachable!(),
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BinaryFunc;
+    use datatypes::Value;
+
+    #[test]
+    fn arithmetic_ops_propagate_null() {
+        let cases = [
+            BinaryFunc::Add,
+            BinaryFunc::Sub,
+            BinaryFunc::Mul,
+            BinaryFunc::Div,
+            BinaryFunc::Mod,
+        ];
+
+        for func in cases {
+            assert_eq!(
+                func.eval_binary(Value::Null, Value::Int64(1)).unwrap(),
+                Value::Null
+            );
+            assert_eq!(
+                func.eval_binary(Value::Int64(1), Value::Null).unwrap(),
+                Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn null_division_does_not_error() {
+        assert_eq!(
+            BinaryFunc::Div
+                .eval_binary(Value::Null, Value::Int64(0))
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            BinaryFunc::Div
+                .eval_binary(Value::Int64(1), Value::Null)
+                .unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn null_string_concat_returns_null() {
+        assert_eq!(
+            BinaryFunc::Add
+                .eval_binary(Value::Null, Value::String("x".to_string()))
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            BinaryFunc::Add
+                .eval_binary(Value::String("x".to_string()), Value::Null)
+                .unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn null_equality_semantics() {
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Null, Value::Null)
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Null, Value::Int64(1))
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Int64(1), Value::Null)
+                .unwrap(),
+            Value::Bool(false)
+        );
+
+        assert_eq!(
+            BinaryFunc::NotEq
+                .eval_binary(Value::Null, Value::Null)
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            BinaryFunc::NotEq
+                .eval_binary(Value::Null, Value::Int64(1))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::NotEq
+                .eval_binary(Value::Int64(1), Value::Null)
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn null_ordering_comparisons_are_false() {
+        for func in [
+            BinaryFunc::Lt,
+            BinaryFunc::Lte,
+            BinaryFunc::Gt,
+            BinaryFunc::Gte,
+        ] {
+            assert_eq!(
+                func.eval_binary(Value::Null, Value::Int64(1)).unwrap(),
+                Value::Bool(false)
+            );
+            assert_eq!(
+                func.eval_binary(Value::Int64(1), Value::Null).unwrap(),
+                Value::Bool(false)
+            );
+            assert_eq!(
+                func.eval_binary(Value::Null, Value::Null).unwrap(),
+                Value::Bool(false)
+            );
         }
     }
 }
