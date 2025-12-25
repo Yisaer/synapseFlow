@@ -84,7 +84,7 @@ impl Processor for SlidingWindowProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                println!("[SlidingWindowProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                             continue;
@@ -110,7 +110,7 @@ impl Processor for SlidingWindowProcessor {
                                     if is_graceful {
                                         state.flush_all().await?;
                                     }
-                                    println!("[SlidingWindowProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -118,7 +118,7 @@ impl Processor for SlidingWindowProcessor {
                                 let is_terminal = other.is_terminal();
                                 send_with_backpressure(&output, other).await?;
                                 if is_terminal {
-                                    println!("[SlidingWindowProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -130,7 +130,7 @@ impl Processor for SlidingWindowProcessor {
                                 forward_error(&output, &id, message).await?;
                             }
                             None => {
-                                println!("[SlidingWindowProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                         }

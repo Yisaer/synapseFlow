@@ -76,7 +76,7 @@ impl Processor for TumblingWindowProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                println!("[TumblingWindowProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                             continue;
@@ -102,7 +102,7 @@ impl Processor for TumblingWindowProcessor {
                                     if is_graceful {
                                         state.flush_all().await?;
                                     }
-                                    println!("[TumblingWindowProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -111,7 +111,7 @@ impl Processor for TumblingWindowProcessor {
                                 send_with_backpressure(&output, other).await?;
                                 if is_terminal {
                                     // Non-graceful end on data path: drop buffered rows.
-                                    println!("[TumblingWindowProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -124,7 +124,7 @@ impl Processor for TumblingWindowProcessor {
                             }
                             None => {
                                 // Upstream ended without control signal: drop buffered rows.
-                                println!("[TumblingWindowProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                         }

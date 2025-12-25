@@ -85,7 +85,7 @@ impl Processor for StateWindowProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                println!("[StateWindowProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                             continue;
@@ -211,7 +211,7 @@ impl Processor for StateWindowProcessor {
                                             }
                                         }
                                     }
-                                    println!("[StateWindowProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -219,7 +219,7 @@ impl Processor for StateWindowProcessor {
                                 let is_terminal = other.is_terminal();
                                 send_with_backpressure(&output, other).await?;
                                 if is_terminal {
-                                    println!("[StateWindowProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -227,7 +227,7 @@ impl Processor for StateWindowProcessor {
                                 forward_error(&output, &id, format!("StateWindowProcessor input lagged by {skipped} messages")).await?;
                             }
                             None => {
-                                println!("[StateWindowProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                         }

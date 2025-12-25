@@ -63,7 +63,7 @@ impl BatchProcessor {
             .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
         let collection: Box<dyn Collection> = Box::new(batch);
         send_with_backpressure(output, StreamData::collection(collection)).await?;
-        println!("[BatchProcessor:{processor_id}] flushed batch");
+        tracing::info!(processor_id = %processor_id, "flushed batch");
         Ok(())
     }
 
@@ -144,17 +144,17 @@ impl Processor for BatchProcessor {
                 tokio::select! {
                     biased;
                     control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
-                            if is_terminal {
-                                BatchProcessor::flush_all(&processor_id, &mut buffer, &output).await?;
-                                println!("[BatchProcessor:{processor_id}] received StreamEnd (control)");
-                                return Ok(());
-                            }
-                            continue;
-                        } else {
-                            control_active = false;
+                            if let Some(Ok(control_signal)) = control_item {
+                                let is_terminal = control_signal.is_terminal();
+                                send_control_with_backpressure(&control_output, control_signal).await?;
+                                if is_terminal {
+                                    BatchProcessor::flush_all(&processor_id, &mut buffer, &output).await?;
+                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
+                                    return Ok(());
+                                }
+                                continue;
+                            } else {
+                                control_active = false;
                         }
                     }
                     _ = async {
@@ -193,7 +193,7 @@ impl Processor for BatchProcessor {
                                 }
                                 send_with_backpressure(&output, data.clone()).await?;
                                 if is_terminal {
-                                    println!("[BatchProcessor:{processor_id}] received StreamEnd (data)");
+                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                     return Ok(());
                                 }
                                 if let BatchMode::DurationOnly { duration } | BatchMode::Combined { duration, .. } = &mode {
@@ -205,12 +205,12 @@ impl Processor for BatchProcessor {
                                     "BatchProcessor input lagged by {} messages",
                                     skipped
                                 );
-                                println!("[BatchProcessor:{processor_id}] input lagged by {skipped} messages");
+                                tracing::warn!(processor_id = %processor_id, skipped = skipped, "input lagged");
                                 forward_error(&output, &processor_id, message).await?;
                             }
                             None => {
                                 BatchProcessor::flush_all(&processor_id, &mut buffer, &output).await?;
-                                println!("[BatchProcessor:{processor_id}] input streams closed");
+                                tracing::info!(processor_id = %processor_id, "input streams closed");
                                 return Ok(());
                             }
                         }

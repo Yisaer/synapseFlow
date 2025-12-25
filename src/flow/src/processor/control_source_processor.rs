@@ -88,7 +88,7 @@ impl Processor for ControlSourceProcessor {
         let control_inputs = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_inputs);
         let mut control_active = !control_streams.is_empty();
-        println!("[ControlSourceProcessor:{processor_id}] starting");
+        tracing::info!(processor_id = %processor_id, "control source processor starting");
 
         tokio::spawn(async move {
             let input = match input_result {
@@ -114,10 +114,7 @@ impl Processor for ControlSourceProcessor {
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 let message =
                                     format!("Control source input lagged by {} messages", skipped);
-                                println!(
-                                    "[ControlSourceProcessor:{processor_id}] input lagged: {}",
-                                    message
-                                );
+                                tracing::warn!(processor_id = %processor_id, skipped = skipped, "input lagged");
                                 forward_error(&output, &processor_id, message).await?;
                                 continue;
                             }
@@ -139,7 +136,7 @@ impl Processor for ControlSourceProcessor {
                         }
 
                         if is_terminal {
-                            println!("[ControlSourceProcessor:{processor_id}] received StreamEnd");
+                            tracing::info!(processor_id = %processor_id, "received StreamEnd");
                             return Ok(());
                         }
                     }
@@ -147,7 +144,7 @@ impl Processor for ControlSourceProcessor {
             }
 
             // Input closed without explicit StreamEnd, propagate shutdown.
-            println!("[ControlSourceProcessor:{processor_id}] stopping (input closed)");
+            tracing::info!(processor_id = %processor_id, "stopping (input closed)");
             send_with_backpressure(&output, StreamData::stream_end()).await?;
             Ok(())
         })

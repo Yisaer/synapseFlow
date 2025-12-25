@@ -134,7 +134,7 @@ impl Processor for StatefulFunctionProcessor {
         let mut calls = std::mem::take(&mut self.calls);
         let _physical_stateful = Arc::clone(&self.physical_stateful);
 
-        println!("[StatefulFunctionProcessor:{id}] starting");
+        tracing::info!(processor_id = %id, "stateful function processor starting");
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -144,8 +144,8 @@ impl Processor for StatefulFunctionProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                println!("[StatefulFunctionProcessor:{id}] received StreamEnd (control)");
-                                println!("[StatefulFunctionProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "received StreamEnd (control)");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                             continue;
@@ -172,8 +172,8 @@ impl Processor for StatefulFunctionProcessor {
                                 let is_terminal = data.is_terminal();
                                 send_with_backpressure(&output, data).await?;
                                 if is_terminal {
-                                    println!("[StatefulFunctionProcessor:{id}] received StreamEnd (data)");
-                                    println!("[StatefulFunctionProcessor:{id}] stopped");
+                                    tracing::info!(processor_id = %id, "received StreamEnd (data)");
+                                    tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -182,12 +182,12 @@ impl Processor for StatefulFunctionProcessor {
                                     "StatefulFunctionProcessor input lagged by {} messages",
                                     skipped
                                 );
-                                println!("[StatefulFunctionProcessor:{id}] input lagged by {skipped} messages");
+                                tracing::warn!(processor_id = %id, skipped = skipped, "input lagged");
                                 forward_error(&output, &id, message).await?;
                                 continue;
                             }
                             None => {
-                                println!("[StatefulFunctionProcessor:{id}] stopped");
+                                tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
                         }

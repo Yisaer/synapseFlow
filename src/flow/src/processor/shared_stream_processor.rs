@@ -74,8 +74,11 @@ impl Processor for SharedStreamProcessor {
             .clone()
             .unwrap_or_else(|| format!("pipeline-{}", Uuid::new_v4()));
         tokio::spawn(async move {
-            println!(
-                "[SharedStreamProcessor:{processor_id}] subscribing to {stream_name} (pipeline {pipeline_id})"
+            tracing::info!(
+                processor_id = %processor_id,
+                stream = %stream_name,
+                pipeline_id = %pipeline_id,
+                "subscribing to shared stream"
             );
             let registry = shared_stream_registry();
             let consumer_id = format!("{pipeline_id}-{processor_id}");
@@ -164,8 +167,10 @@ impl Processor for SharedStreamProcessor {
                             }
                             Some(Err(err)) => {
                                 let message = format!("shared data lagged: {err}");
-                                println!(
-                                    "[SharedStreamProcessor:{processor_id}] shared data lagged: {err}"
+                                tracing::warn!(
+                                    processor_id = %processor_id,
+                                    error = %err,
+                                    "shared data lagged"
                                 );
                                 forward_error(&output, &processor_id, message).await?;
                                 continue;

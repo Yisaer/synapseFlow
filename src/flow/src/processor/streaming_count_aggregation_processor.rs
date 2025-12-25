@@ -160,10 +160,10 @@ impl Processor for StreamingCountAggregationProcessor {
                                 send_with_backpressure(&output, other).await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                println!("[StreamingCountAggregationProcessor:{id}] lagged by {n} messages");
+                                tracing::warn!(processor_id = %id, skipped = n, "input lagged");
                             }
                             None => {
-                                println!("[StreamingCountAggregationProcessor:{id}] all input streams ended");
+                                tracing::info!(processor_id = %id, "all input streams ended");
                                 break;
                             }
                         }

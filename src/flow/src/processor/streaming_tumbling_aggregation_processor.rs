@@ -126,10 +126,10 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                 send_with_backpressure(&output, other).await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                println!("[StreamingTumblingAggregationProcessor:{id}] lagged by {n} messages");
+                                tracing::warn!(processor_id = %id, skipped = n, "input lagged");
                             }
                             None => {
-                                println!("[StreamingTumblingAggregationProcessor:{id}] all input streams ended");
+                                tracing::info!(processor_id = %id, "all input streams ended");
                                 break;
                             }
                         }

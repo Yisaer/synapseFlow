@@ -152,7 +152,7 @@ impl Processor for SinkProcessor {
             });
         };
         let processor_id = self.id.clone();
-        println!("[SinkProcessor:{processor_id}] starting");
+        tracing::info!(processor_id = %processor_id, "sink processor starting");
 
         tokio::spawn(async move {
             connector.ready().await?;
@@ -164,9 +164,9 @@ impl Processor for SinkProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                println!("[SinkProcessor:{processor_id}] received StreamEnd (control)");
+                                tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
                                 Self::handle_terminal(&mut connector).await?;
-                                println!("[SinkProcessor:{processor_id}] stopped");
+                                tracing::info!(processor_id = %processor_id, "stopped");
                                 return Ok(());
                             }
                             continue;
@@ -182,7 +182,7 @@ impl Processor for SinkProcessor {
                                 if let Err(err) =
                                     Self::handle_payload(&processor_id, &mut connector, &payload, rows).await
                                 {
-                                    println!("[SinkProcessor:{processor_id}] payload handling error: {err}");
+                                    tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
                                     forward_error(&output, &processor_id, err.to_string()).await?;
                                     continue;
                                 }
@@ -200,7 +200,7 @@ impl Processor for SinkProcessor {
                                 if let Err(err) =
                                     Self::handle_payload(&processor_id, &mut connector, &payload, 1).await
                                 {
-                                    println!("[SinkProcessor:{processor_id}] payload handling error: {err}");
+                                    tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
                                     forward_error(&output, &processor_id, err.to_string()).await?;
                                     continue;
                                 }
@@ -217,7 +217,7 @@ impl Processor for SinkProcessor {
                                 log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
                                 let message =
                                     "sink processor received unencoded collection without encoder stage";
-                                println!("[SinkProcessor:{processor_id}] {message}");
+                                tracing::warn!(processor_id = %processor_id, "{}", message);
                                 forward_error(&output, &processor_id, message).await?;
                                 drop(collection);
                                 continue;
@@ -228,9 +228,9 @@ impl Processor for SinkProcessor {
                                 send_with_backpressure(&output, data.clone()).await?;
 
                                 if is_terminal {
-                                    println!("[SinkProcessor:{processor_id}] received StreamEnd (data)");
+                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                     Self::handle_terminal(&mut connector).await?;
-                                    println!("[SinkProcessor:{processor_id}] stopped");
+                                    tracing::info!(processor_id = %processor_id, "stopped");
                                     return Ok(());
                                 }
                             }
@@ -239,13 +239,13 @@ impl Processor for SinkProcessor {
                                     "SinkProcessor input lagged by {} messages",
                                     skipped
                                 );
-                                println!("[SinkProcessor:{processor_id}] input lagged by {skipped} messages");
+                                tracing::warn!(processor_id = %processor_id, skipped = skipped, "input lagged");
                                 forward_error(&output, &processor_id, message.clone()).await?;
                                 continue;
                             }
                             None => {
                                 Self::handle_terminal(&mut connector).await?;
-                                println!("[SinkProcessor:{processor_id}] stopped");
+                                tracing::info!(processor_id = %processor_id, "stopped");
                                 return Ok(());
                             }
                         }

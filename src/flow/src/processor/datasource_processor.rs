@@ -79,9 +79,10 @@ impl ConnectorBinding {
             }
         };
 
-        println!(
-            "[DataSourceProcessor:{processor_id}] connector {} starting",
-            connector_id
+        tracing::info!(
+            processor_id = %processor_id,
+            connector_id = %connector_id,
+            "data source connector starting"
         );
         let sender_clone = sender.clone();
         self.handle = Some(tokio::spawn(async move {
@@ -113,9 +114,10 @@ impl ConnectorBinding {
                     }
                 }
             }
-            println!(
-                "[DataSourceProcessor:{processor_id}] connector {} stopped",
-                connector_id
+            tracing::info!(
+                processor_id = %processor_id,
+                connector_id = %connector_id,
+                "data source connector stopped"
             );
         }));
 
@@ -124,7 +126,7 @@ impl ConnectorBinding {
 
     async fn shutdown(&mut self) -> Result<(), ProcessorError> {
         let connector_id = self.connector.id().to_string();
-        println!("[SourceConnector:{connector_id}] closing");
+        tracing::info!(connector_id = %connector_id, "closing source connector");
         if let Err(err) = self.connector.close() {
             return Err(Self::connector_error(self.connector.id(), err));
         }
@@ -141,7 +143,7 @@ impl ConnectorBinding {
                 }
             };
         }
-        println!("[SourceConnector:{connector_id}] closed");
+        tracing::info!(connector_id = %connector_id, "source connector closed");
         Ok(())
     }
 
@@ -224,8 +226,6 @@ impl Processor for DataSourceProcessor {
             .map(|idx| idx.to_string())
             .unwrap_or_else(|| "global".to_string());
         let stream_name = self.stream_name.clone();
-        let log_prefix =
-            format!("[DataSourceProcessor:{processor_id}#{plan_label}::{stream_name}]");
         let mut base_inputs = std::mem::take(&mut self.inputs);
         let mut connectors = std::mem::take(&mut self.connectors);
         let connector_inputs = Self::activate_connectors(&mut connectors, &processor_id);
@@ -234,7 +234,12 @@ impl Processor for DataSourceProcessor {
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
-        println!("{log_prefix} starting");
+        tracing::info!(
+            processor_id = %processor_id,
+            plan = %plan_label,
+            stream = %stream_name,
+            "data source starting"
+        );
         tokio::spawn(async move {
             let mut connectors = connectors;
             loop {
@@ -245,9 +250,19 @@ impl Processor for DataSourceProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                println!("{log_prefix} received StreamEnd (control)");
+                                tracing::info!(
+                                    processor_id = %processor_id,
+                                    plan = %plan_label,
+                                    stream = %stream_name,
+                                    "received StreamEnd (control)"
+                                );
                                 Self::shutdown_connectors(&mut connectors).await?;
-                                println!("{log_prefix} stopped");
+                                tracing::info!(
+                                    processor_id = %processor_id,
+                                    plan = %plan_label,
+                                    stream = %stream_name,
+                                    "stopped"
+                                );
                                 return Ok(());
                             }
                             continue;
@@ -272,9 +287,19 @@ impl Processor for DataSourceProcessor {
                                 send_with_backpressure(&output, data).await?;
 
                                 if is_terminal {
-                                    println!("{log_prefix} received StreamEnd (data)");
+                                    tracing::info!(
+                                        processor_id = %processor_id,
+                                        plan = %plan_label,
+                                        stream = %stream_name,
+                                        "received StreamEnd (data)"
+                                    );
                                     Self::shutdown_connectors(&mut connectors).await?;
-                                    println!("{log_prefix} stopped");
+                                    tracing::info!(
+                                        processor_id = %processor_id,
+                                        plan = %plan_label,
+                                        stream = %stream_name,
+                                        "stopped"
+                                    );
                                     return Ok(());
                                 }
                             }
@@ -283,13 +308,24 @@ impl Processor for DataSourceProcessor {
                                     "DataSource input lagged by {} messages",
                                     skipped
                                 );
-                                println!("{log_prefix} input lagged by {skipped} messages");
+                                tracing::warn!(
+                                    processor_id = %processor_id,
+                                    plan = %plan_label,
+                                    stream = %stream_name,
+                                    skipped = skipped,
+                                    "input lagged"
+                                );
                                 forward_error(&output, &processor_id, message).await?;
                                 continue;
                             }
                             None => {
                                 Self::shutdown_connectors(&mut connectors).await?;
-                                println!("{log_prefix} stopped");
+                                tracing::info!(
+                                    processor_id = %processor_id,
+                                    plan = %plan_label,
+                                    stream = %stream_name,
+                                    "stopped"
+                                );
                                 return Ok(());
                             }
                         }

@@ -1259,9 +1259,9 @@ mod tests {
             .processor
             .expect("expected processor for physical project node");
         assert_eq!(processor.id(), "PhysicalProject_2");
-        println!(
-            "✅ SUCCESS: PhysicalProject processor created with ID: {}",
-            processor.id()
+        tracing::info!(
+            processor_id = %processor.id(),
+            "PhysicalProject processor created successfully"
         );
     }
 }
