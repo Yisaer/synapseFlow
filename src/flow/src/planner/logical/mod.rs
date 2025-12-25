@@ -297,6 +297,18 @@ fn validate_expr_against_sources(
 ) -> Result<(), String> {
     use sqlparser::ast::{Expr, JsonOperator};
 
+    fn extract_const_int(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Value(sqlparser::ast::Value::Number(num, _)) => num.parse::<i64>().ok(),
+            Expr::UnaryOp {
+                op: sqlparser::ast::UnaryOperator::Minus,
+                expr,
+            } => extract_const_int(expr.as_ref()).map(|v| -v),
+            Expr::Nested(inner) => extract_const_int(inner.as_ref()),
+            _ => None,
+        }
+    }
+
     match expr {
         Expr::JsonAccess {
             left,
@@ -340,6 +352,11 @@ fn validate_expr_against_sources(
             }
             validate_expr_against_sources(column.as_ref(), sources)?;
             for key in keys {
+                if let Some(value) = extract_const_int(key) {
+                    if value < 0 {
+                        return Err(format!("list index must be non-negative, got {}", value));
+                    }
+                }
                 validate_expr_against_sources(key, sources)?;
             }
             Ok(())

@@ -694,6 +694,9 @@ fn create_processor_from_plan_node(
                 )
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let mut processor = DecoderProcessor::new(plan_name.clone(), decoder);
+            if let Some(projection) = decoder_plan.decode_projection().cloned() {
+                processor = processor.with_decode_projection(projection);
+            }
             if let (Some(eventtime_ctx), Some(eventtime_spec)) =
                 (context.eventtime(), decoder_plan.eventtime())
             {
@@ -1203,12 +1206,14 @@ mod tests {
             "test_source".to_string(),
             None,
             Arc::clone(&schema),
+            None,
             0,
         )));
         let decoded_source = Arc::new(PhysicalPlan::Decoder(PhysicalDecoder::new(
             "test_source".to_string(),
             StreamDecoderConfig::json(),
             Arc::clone(&schema),
+            None,
             None,
             vec![data_source],
             1,

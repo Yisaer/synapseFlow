@@ -1,3 +1,4 @@
+use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::physical::BasePhysicalPlan;
 use datatypes::Schema;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ pub struct PhysicalDataSource {
     pub source_name: String,
     pub alias: Option<String>,
     pub schema: Arc<Schema>,
+    decode_projection: Option<DecodeProjection>,
 }
 
 impl PhysicalDataSource {
@@ -20,6 +22,7 @@ impl PhysicalDataSource {
         source_name: String,
         alias: Option<String>,
         schema: Arc<Schema>,
+        decode_projection: Option<DecodeProjection>,
         index: i64,
     ) -> Self {
         let base = BasePhysicalPlan::new_leaf(index);
@@ -28,6 +31,7 @@ impl PhysicalDataSource {
             source_name,
             alias,
             schema,
+            decode_projection,
         }
     }
 
@@ -41,5 +45,9 @@ impl PhysicalDataSource {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    pub fn decode_projection(&self) -> Option<&DecodeProjection> {
+        self.decode_projection.as_ref()
     }
 }

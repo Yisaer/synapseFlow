@@ -2,6 +2,7 @@
 
 use crate::codec::RecordDecoder;
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
+use crate::planner::decode_projection::DecodeProjection;
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
@@ -30,6 +31,7 @@ pub struct DecoderProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     decoder: Arc<dyn RecordDecoder>,
     projection: Option<Arc<std::sync::RwLock<Vec<String>>>>,
+    decode_projection: Option<DecodeProjection>,
     eventtime: Option<EventtimeDecodeConfig>,
 }
 
@@ -50,12 +52,18 @@ impl DecoderProcessor {
             control_output,
             decoder,
             projection: None,
+            decode_projection: None,
             eventtime: None,
         }
     }
 
     pub fn with_projection(mut self, projection: Arc<std::sync::RwLock<Vec<String>>>) -> Self {
         self.projection = Some(projection);
+        self
+    }
+
+    pub fn with_decode_projection(mut self, projection: DecodeProjection) -> Self {
+        self.decode_projection = Some(projection);
         self
     }
 
@@ -75,6 +83,7 @@ impl Processor for DecoderProcessor {
         let control_output = self.control_output.clone();
         let decoder = Arc::clone(&self.decoder);
         let projection = self.projection.clone();
+        let decode_projection = self.decode_projection.clone();
         let eventtime = self.eventtime.clone();
         let processor_id = self.id.clone();
         let base_inputs = std::mem::take(&mut self.inputs);
@@ -106,15 +115,16 @@ impl Processor for DecoderProcessor {
                             Some(Ok(mut data)) => {
                                 log_received_data(&processor_id, &data);
                                 if let StreamData::Bytes(payload) = &data {
-                                    let decoded = match &projection {
-                                        Some(lock) => {
-                                            let cols = lock
-                                                .read()
-                                                .expect("decoder projection lock poisoned")
-                                                .clone();
-                                            decoder.decode_with_projection(payload, Some(&cols))
-                                        }
-                                        None => decoder.decode(payload),
+                                    let decoded = if let Some(proj) = decode_projection.as_ref() {
+                                        decoder.decode_with_decode_projection(payload, Some(proj))
+                                    } else if let Some(lock) = &projection {
+                                        let cols = lock
+                                            .read()
+                                            .expect("decoder projection lock poisoned")
+                                            .clone();
+                                        decoder.decode_with_projection(payload, Some(&cols))
+                                    } else {
+                                        decoder.decode(payload)
                                     };
                                     match decoded {
                                         Ok(batch) => {

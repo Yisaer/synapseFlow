@@ -579,6 +579,7 @@ fn create_physical_data_source_with_builder(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
                 Arc::clone(&schema),
+                logical_ds.decode_projection.clone(),
                 index,
             );
             let datasource_plan = Arc::new(PhysicalPlan::DataSource(physical_ds));
@@ -587,6 +588,7 @@ fn create_physical_data_source_with_builder(
                 logical_ds.source_name.clone(),
                 logical_ds.decoder().clone(),
                 schema,
+                logical_ds.decode_projection.clone(),
                 eventtime,
                 vec![datasource_plan],
                 decoder_index,
@@ -599,6 +601,7 @@ fn create_physical_data_source_with_builder(
                     logical_ds.source_name.clone(),
                     logical_ds.alias.clone(),
                     Arc::clone(&schema),
+                    logical_ds.decode_projection.clone(),
                     0,
                 );
                 let ds_plan = Arc::new(PhysicalPlan::DataSource(ds));
@@ -606,6 +609,7 @@ fn create_physical_data_source_with_builder(
                     logical_ds.source_name.clone(),
                     logical_ds.decoder().clone(),
                     Arc::clone(&schema),
+                    logical_ds.decode_projection.clone(),
                     eventtime.clone(),
                     vec![ds_plan],
                     1,
@@ -853,9 +857,12 @@ fn find_binding_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connector::ConnectorRegistry;
     use crate::planner::logical::create_logical_plan;
     use crate::{
-        optimize_logical_plan, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
+        optimize_logical_plan, AggregateFunctionRegistry, DecoderRegistry, EncoderRegistry,
+        ExplainReport, MqttStreamProps, StatefulFunctionRegistry, StreamDecoderConfig,
+        StreamDefinition, StreamProps,
     };
     use datatypes::{
         ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
@@ -1007,7 +1014,7 @@ mod tests {
         let report = crate::planner::explain::ExplainReport::from_physical(physical);
         let topology = report.topology_string();
         println!("{topology}");
-        assert!(topology.contains("schema=[a, items[struct{c}]]"));
+        assert!(topology.contains("schema=[a, items[0][struct{c}]]"));
     }
 
     #[test]
@@ -1081,5 +1088,139 @@ mod tests {
         let report = crate::planner::explain::ExplainReport::from_physical(physical);
         let topology = report.topology_string();
         println!("{topology}");
+    }
+
+    fn build_registries() -> PipelineRegistries {
+        let encoder_registry = EncoderRegistry::with_builtin_encoders();
+        PipelineRegistries::new_with_stateful_registry(
+            ConnectorRegistry::with_builtin_sinks(),
+            Arc::clone(&encoder_registry),
+            DecoderRegistry::with_builtin_decoders(),
+            AggregateFunctionRegistry::with_builtins(),
+            StatefulFunctionRegistry::with_builtins(),
+        )
+    }
+    #[test]
+    fn explain_reflects_pruned_list_struct_schema() {
+        let element_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+            StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+            StructField::new("d".to_string(), ConcreteDatatype::String(StringType), false),
+        ])));
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "stream_3".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "stream_3".to_string(),
+                "items".to_string(),
+                ConcreteDatatype::List(ListType::new(Arc::new(element_struct))),
+            ),
+        ]));
+
+        let definition = StreamDefinition::new(
+            "stream_3",
+            Arc::clone(&schema),
+            StreamProps::Mqtt(MqttStreamProps::default()),
+            StreamDecoderConfig::json(),
+        );
+        let mut stream_defs = HashMap::new();
+        stream_defs.insert("stream_3".to_string(), Arc::new(definition));
+
+        let sql = "SELECT stream_3.a, stream_3.items[0]->c FROM stream_3";
+        let select_stmt = parse_sql(sql).expect("parse sql");
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
+
+        let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
+            source_name: "stream_3".to_string(),
+            alias: None,
+            schema: Arc::clone(&schema),
+            kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
+        }]);
+
+        let (optimized, pruned_binding) =
+            optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
+        let report = ExplainReport::from_logical(Arc::clone(&optimized));
+        let logical_topology = report.topology_string();
+        println!("{logical_topology}");
+        assert!(logical_topology.contains("schema=[a, items[0][struct{c}]]"));
+
+        let registries = build_registries();
+        let physical =
+            create_physical_plan(optimized, &pruned_binding, &registries).expect("physical plan");
+        let physical_report = ExplainReport::from_physical(physical);
+        let physical_topology = physical_report.topology_string();
+        println!("{sql}");
+        println!("{physical_topology}");
+        assert!(physical_topology.contains("schema=[a, items[0][struct{c}]]"));
+    }
+
+    #[test]
+    fn explain_renders_list_index_projection_compact() {
+        let element_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+            StructField::new("x".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+            StructField::new("y".to_string(), ConcreteDatatype::String(StringType), false),
+        ])));
+
+        let b_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+            StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+            StructField::new(
+                "items".to_string(),
+                ConcreteDatatype::List(ListType::new(Arc::new(element_struct))),
+                false,
+            ),
+        ])));
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "stream_4".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new("stream_4".to_string(), "b".to_string(), b_struct),
+        ]));
+
+        let definition = StreamDefinition::new(
+            "stream_4",
+            Arc::clone(&schema),
+            StreamProps::Mqtt(MqttStreamProps::default()),
+            StreamDecoderConfig::json(),
+        );
+        let mut stream_defs = HashMap::new();
+        stream_defs.insert("stream_4".to_string(), Arc::new(definition));
+
+        let sql =
+            "SELECT stream_4.a, stream_4.b->items[0]->x, stream_4.b->items[3]->x FROM stream_4";
+        let select_stmt = parse_sql(sql).expect("parse sql");
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
+
+        let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
+            source_name: "stream_4".to_string(),
+            alias: None,
+            schema: Arc::clone(&schema),
+            kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
+        }]);
+
+        let (optimized, pruned_binding) =
+            optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
+
+        let report = ExplainReport::from_logical(Arc::clone(&optimized));
+        let logical_topology = report.topology_string();
+        println!("{logical_topology}");
+        assert!(logical_topology.contains("schema=[a, b{items[0,3][struct{x}]}]"));
+
+        let registries = build_registries();
+        let physical =
+            crate::planner::create_physical_plan(optimized, &pruned_binding, &registries)
+                .expect("physical plan");
+        let physical_report = ExplainReport::from_physical(physical);
+        let physical_topology = physical_report.topology_string();
+        println!("{sql}");
+        println!("{physical_topology}");
+        assert!(physical_topology.contains("schema=[a, b{items[0,3][struct{x}]}]"));
     }
 }

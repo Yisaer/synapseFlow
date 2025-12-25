@@ -1,4 +1,5 @@
 use crate::catalog::StreamDecoderConfig;
+use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::physical::BasePhysicalPlan;
 use datatypes::Schema;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub struct PhysicalDecoder {
     source_name: String,
     decoder: StreamDecoderConfig,
     schema: Arc<Schema>,
+    decode_projection: Option<DecodeProjection>,
     eventtime: Option<PhysicalDecoderEventtimeSpec>,
 }
 
@@ -26,6 +28,7 @@ impl PhysicalDecoder {
         source_name: impl Into<String>,
         decoder: StreamDecoderConfig,
         schema: Arc<Schema>,
+        decode_projection: Option<DecodeProjection>,
         eventtime: Option<PhysicalDecoderEventtimeSpec>,
         children: Vec<Arc<crate::planner::physical::PhysicalPlan>>,
         index: i64,
@@ -36,6 +39,7 @@ impl PhysicalDecoder {
             source_name: source_name.into(),
             decoder,
             schema,
+            decode_projection,
             eventtime,
         }
     }
@@ -50,6 +54,10 @@ impl PhysicalDecoder {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    pub fn decode_projection(&self) -> Option<&DecodeProjection> {
+        self.decode_projection.as_ref()
     }
 
     pub fn eventtime(&self) -> Option<&PhysicalDecoderEventtimeSpec> {

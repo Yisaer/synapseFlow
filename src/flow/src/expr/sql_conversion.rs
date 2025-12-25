@@ -442,23 +442,60 @@ fn convert_json_access(
             let struct_expr =
                 convert_expr_to_scalar_internal(left, bindings, custom_func_registry)?;
 
-            // Convert the field name (right side) - should be an identifier
-            let field_name = match right {
-                Expr::Identifier(ident) => ident.value.clone(),
-                _ => {
-                    return Err(ConversionError::UnsupportedExpression(
-                        "Struct field access right side must be an identifier".to_string(),
-                    ))
-                }
-            };
-
-            // Use the proper FieldAccess variant instead of CallDf
-            Ok(ScalarExpr::field_access(struct_expr, field_name))
+            convert_relative_access_expr(struct_expr, right, bindings, custom_func_registry)
         }
         _ => Err(ConversionError::UnsupportedOperator(format!(
             "{:?}",
             operator
         ))),
+    }
+}
+
+fn convert_relative_access_expr(
+    base: ScalarExpr,
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    match expr {
+        Expr::Nested(inner) => {
+            convert_relative_access_expr(base, inner.as_ref(), bindings, custom_func_registry)
+        }
+        Expr::Identifier(ident) => Ok(ScalarExpr::field_access(base, ident.value.clone())),
+        Expr::JsonAccess {
+            left,
+            operator: sqlparser::ast::JsonOperator::Arrow,
+            right,
+        } => {
+            let mid =
+                convert_relative_access_expr(base, left.as_ref(), bindings, custom_func_registry)?;
+            convert_relative_access_expr(mid, right.as_ref(), bindings, custom_func_registry)
+        }
+        Expr::MapAccess { column, keys } => {
+            if keys.is_empty() {
+                return Err(ConversionError::UnsupportedExpression(
+                    "MapAccess requires at least one key".to_string(),
+                ));
+            }
+            if keys.len() > 1 {
+                return Err(ConversionError::UnsupportedExpression(
+                    "Multiple keys in MapAccess not yet supported".to_string(),
+                ));
+            }
+
+            let container = convert_relative_access_expr(
+                base,
+                column.as_ref(),
+                bindings,
+                custom_func_registry,
+            )?;
+            let key_expr =
+                convert_expr_to_scalar_internal(&keys[0], bindings, custom_func_registry)?;
+            Ok(ScalarExpr::list_index(container, key_expr))
+        }
+        _ => Err(ConversionError::UnsupportedExpression(
+            "Struct field access right side must be an identifier".to_string(),
+        )),
     }
 }
 

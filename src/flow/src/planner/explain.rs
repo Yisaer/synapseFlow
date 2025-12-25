@@ -1,4 +1,5 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
+use crate::planner::decode_projection::{DecodeProjection, ListIndexSelection, ProjectionNode};
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
 use crate::planner::physical::{WatermarkConfig, WatermarkStrategy};
 use datatypes::{ConcreteDatatype, ListType, Schema, StructField, StructType};
@@ -212,7 +213,10 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 info.push(format!("alias={}", alias));
             }
             info.push(format!("decoder={}", ds.decoder().kind()));
-            info.push(format_schema(ds.schema.as_ref()));
+            info.push(format_schema_with_decode_projection(
+                ds.schema.as_ref(),
+                ds.decode_projection(),
+            ));
         }
         LogicalPlan::StatefulFunction(stateful) => {
             let mut mappings = stateful
@@ -325,6 +329,22 @@ fn format_schema(schema: &Schema) -> String {
     format!("schema=[{}]", cols.join(", "))
 }
 
+fn format_schema_with_decode_projection(
+    schema: &Schema,
+    decode_projection: Option<&DecodeProjection>,
+) -> String {
+    let Some(decode_projection) = decode_projection else {
+        return format_schema(schema);
+    };
+
+    let cols: Vec<String> = schema
+        .column_schemas()
+        .iter()
+        .map(|col| format_column_projection_with_decode_projection(col, decode_projection))
+        .collect();
+    format!("schema=[{}]", cols.join(", "))
+}
+
 fn format_column_projection(column: &datatypes::ColumnSchema) -> String {
     match &column.data_type {
         ConcreteDatatype::Struct(struct_type) => format!(
@@ -343,6 +363,47 @@ fn format_column_projection(column: &datatypes::ColumnSchema) -> String {
     }
 }
 
+fn format_column_projection_with_decode_projection(
+    column: &datatypes::ColumnSchema,
+    decode_projection: &DecodeProjection,
+) -> String {
+    let projection = decode_projection.column(column.name.as_str());
+    match &column.data_type {
+        ConcreteDatatype::Struct(struct_type) => {
+            let projection_fields = match projection {
+                Some(ProjectionNode::Struct(fields)) => Some(fields),
+                _ => None,
+            };
+            format!(
+                "{}{{{}}}",
+                column.name,
+                format_struct_fields_projection_with_decode_projection(
+                    struct_type,
+                    projection_fields,
+                )
+            )
+        }
+        ConcreteDatatype::List(list_type) => {
+            let list_proj = match projection {
+                Some(ProjectionNode::List { indexes, element }) => {
+                    Some((indexes, element.as_ref()))
+                }
+                _ => None,
+            };
+            format!(
+                "{}{}[{}]",
+                column.name,
+                format_list_index_selection(list_proj.map(|(indexes, _)| indexes)),
+                format_list_item_projection_with_decode_projection(
+                    list_type,
+                    list_proj.map(|(_, element)| element),
+                )
+            )
+        }
+        _ => column.name.clone(),
+    }
+}
+
 fn format_list_item_projection(list_type: &ListType) -> String {
     match list_type.item_type() {
         ConcreteDatatype::Struct(struct_type) => {
@@ -353,11 +414,82 @@ fn format_list_item_projection(list_type: &ListType) -> String {
     }
 }
 
+fn format_list_item_projection_with_decode_projection(
+    list_type: &ListType,
+    projection: Option<&ProjectionNode>,
+) -> String {
+    match list_type.item_type() {
+        ConcreteDatatype::Struct(struct_type) => {
+            let projection_fields = match projection {
+                Some(ProjectionNode::Struct(fields)) => Some(fields),
+                _ => None,
+            };
+            format!(
+                "struct{{{}}}",
+                format_struct_fields_projection_with_decode_projection(
+                    struct_type,
+                    projection_fields,
+                )
+            )
+        }
+        ConcreteDatatype::List(inner) => {
+            let list_proj = match projection {
+                Some(ProjectionNode::List { indexes, element }) => {
+                    Some((indexes, element.as_ref()))
+                }
+                _ => None,
+            };
+            format!(
+                "list{}[{}]",
+                format_list_index_selection(list_proj.map(|(indexes, _)| indexes)),
+                format_list_item_projection_with_decode_projection(
+                    inner,
+                    list_proj.map(|(_, element)| element),
+                )
+            )
+        }
+        other => format!("{:?}", other),
+    }
+}
+
+fn format_list_index_selection(indexes: Option<&ListIndexSelection>) -> String {
+    let Some(indexes) = indexes else {
+        return String::new();
+    };
+
+    match indexes {
+        ListIndexSelection::All => "[*]".to_string(),
+        ListIndexSelection::Indexes(values) => {
+            let joined = values
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{joined}]")
+        }
+    }
+}
+
 fn format_struct_fields_projection(struct_type: &StructType) -> String {
     struct_type
         .fields()
         .iter()
         .map(format_struct_field_projection)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_struct_fields_projection_with_decode_projection(
+    struct_type: &StructType,
+    projection_fields: Option<&std::collections::BTreeMap<String, ProjectionNode>>,
+) -> String {
+    struct_type
+        .fields()
+        .iter()
+        .map(|field| {
+            let projection = projection_fields.and_then(|fields| fields.get(field.name()));
+            format_struct_field_projection_with_decode_projection(field, projection)
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -374,6 +506,46 @@ fn format_struct_field_projection(field: &StructField) -> String {
                 "{}[{}]",
                 field.name(),
                 format_list_item_projection(list_type)
+            )
+        }
+        _ => field.name().to_string(),
+    }
+}
+
+fn format_struct_field_projection_with_decode_projection(
+    field: &StructField,
+    projection: Option<&ProjectionNode>,
+) -> String {
+    match field.data_type() {
+        ConcreteDatatype::Struct(struct_type) => {
+            let projection_fields = match projection {
+                Some(ProjectionNode::Struct(fields)) => Some(fields),
+                _ => None,
+            };
+            format!(
+                "{}{{{}}}",
+                field.name(),
+                format_struct_fields_projection_with_decode_projection(
+                    struct_type,
+                    projection_fields,
+                )
+            )
+        }
+        ConcreteDatatype::List(list_type) => {
+            let list_proj = match projection {
+                Some(ProjectionNode::List { indexes, element }) => {
+                    Some((indexes, element.as_ref()))
+                }
+                _ => None,
+            };
+            format!(
+                "{}{}[{}]",
+                field.name(),
+                format_list_index_selection(list_proj.map(|(indexes, _)| indexes)),
+                format_list_item_projection_with_decode_projection(
+                    list_type,
+                    list_proj.map(|(_, element)| element),
+                )
             )
         }
         _ => field.name().to_string(),
@@ -399,11 +571,17 @@ fn build_physical_node_with_prefix(
             if let Some(alias) = ds.alias() {
                 info.push(format!("alias={}", alias));
             }
-            info.push(format_schema(ds.schema().as_ref()));
+            info.push(format_schema_with_decode_projection(
+                ds.schema().as_ref(),
+                ds.decode_projection(),
+            ));
         }
         PhysicalPlan::Decoder(decoder) => {
             info.push(format!("decoder={}", decoder.decoder().kind()));
-            info.push(format_schema(decoder.schema().as_ref()));
+            info.push(format_schema_with_decode_projection(
+                decoder.schema().as_ref(),
+                decoder.decode_projection(),
+            ));
             if let Some(eventtime) = decoder.eventtime() {
                 info.push(format!("eventtime.column={}", eventtime.column_name));
                 info.push(format!("eventtime.type={}", eventtime.type_key));

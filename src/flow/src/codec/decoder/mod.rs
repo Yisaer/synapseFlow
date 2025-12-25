@@ -1,6 +1,7 @@
 //! Decoder abstractions for turning raw bytes into RecordBatch collections.
 
 use crate::model::{CollectionError, Message, RecordBatch, Tuple};
+use crate::planner::decode_projection::{DecodeProjection, ProjectionNode};
 use datatypes::{
     ConcreteDatatype, ListType, ListValue, Schema, StructField, StructType, StructValue, Value,
 };
@@ -56,6 +57,30 @@ pub trait RecordDecoder: Send + Sync + 'static {
         projection: Option<&[String]>,
     ) -> Result<Tuple, CodecError> {
         let _ = projection;
+        self.decode_tuple(payload)
+    }
+
+    /// Convert raw bytes into a RecordBatch, decoding only the requested nested fields / list indices.
+    ///
+    /// Default implementation falls back to full decode.
+    fn decode_with_decode_projection(
+        &self,
+        payload: &[u8],
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError> {
+        let _ = decode_projection;
+        self.decode(payload)
+    }
+
+    /// Convert raw bytes into a single tuple, decoding only the requested nested fields / list indices.
+    ///
+    /// Default implementation falls back to full decode.
+    fn decode_tuple_with_decode_projection(
+        &self,
+        payload: &[u8],
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<Tuple, CodecError> {
+        let _ = decode_projection;
         self.decode_tuple(payload)
     }
 }
@@ -115,6 +140,24 @@ impl JsonDecoder {
         }
     }
 
+    fn decode_value_with_decode_projection(
+        &self,
+        json: JsonValue,
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError> {
+        match json {
+            JsonValue::Object(map) => {
+                self.build_from_object_rows_with_decode_projection(vec![map], decode_projection)
+            }
+            JsonValue::Array(items) => {
+                self.decode_array_with_decode_projection(items, decode_projection)
+            }
+            other => Err(CodecError::Other(format!(
+                "JSON root must be object or array, got {other:?}"
+            ))),
+        }
+    }
+
     fn decode_array(&self, items: Vec<JsonValue>) -> Result<RecordBatch, CodecError> {
         if items.is_empty() {
             return Ok(RecordBatch::empty());
@@ -159,6 +202,31 @@ impl JsonDecoder {
             })
             .collect();
         self.build_from_object_rows_with_projection(rows, projection)
+    }
+
+    fn decode_array_with_decode_projection(
+        &self,
+        items: Vec<JsonValue>,
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError> {
+        if items.is_empty() {
+            return Ok(RecordBatch::empty());
+        }
+
+        if !items.iter().all(|v| v.is_object()) {
+            return Err(CodecError::Other(
+                "JSON array must contain only objects".to_string(),
+            ));
+        }
+
+        let rows: Vec<JsonMap<String, JsonValue>> = items
+            .into_iter()
+            .map(|v| match v {
+                JsonValue::Object(map) => map,
+                _ => unreachable!("validated object rows"),
+            })
+            .collect();
+        self.build_from_object_rows_with_decode_projection(rows, decode_projection)
     }
 
     pub fn decode_tuple(&self, payload: &[u8]) -> Result<Tuple, CodecError> {
@@ -228,6 +296,20 @@ impl JsonDecoder {
         }
 
         let tuples = self.build_tuples_from_object_rows_with_projection(rows, projection)?;
+        Ok(RecordBatch::new(tuples)?)
+    }
+
+    fn build_from_object_rows_with_decode_projection(
+        &self,
+        rows: Vec<JsonMap<String, JsonValue>>,
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError> {
+        if rows.is_empty() {
+            return Ok(RecordBatch::empty());
+        }
+
+        let tuples =
+            self.build_tuples_from_object_rows_with_decode_projection(rows, decode_projection)?;
         Ok(RecordBatch::new(tuples)?)
     }
 
@@ -308,6 +390,45 @@ impl JsonDecoder {
         }
         Ok(tuples)
     }
+
+    fn build_tuples_from_object_rows_with_decode_projection(
+        &self,
+        rows: Vec<JsonMap<String, JsonValue>>,
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<Vec<Tuple>, CodecError> {
+        let mut tuples = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
+            let mut values = Vec::with_capacity(keys.capacity());
+            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+                let projection_node =
+                    decode_projection.and_then(|p| p.column(column.name.as_str()));
+                let value = row
+                    .remove(&column.name)
+                    .map(|json| {
+                        json_to_value_with_datatype_and_projection(
+                            &json,
+                            &column.data_type,
+                            projection_node,
+                        )
+                    })
+                    .unwrap_or(Value::Null);
+                keys.push(self.schema_keys[idx].clone());
+                values.push(Arc::new(value));
+            }
+            for (key, value) in row {
+                keys.push(Arc::<str>::from(key.as_str()));
+                values.push(Arc::new(json_to_value(&value)));
+            }
+            let message = Arc::new(Message::new(
+                Arc::<str>::from(self.stream_name.as_str()),
+                keys,
+                values,
+            ));
+            tuples.push(Tuple::new(vec![message]));
+        }
+        Ok(tuples)
+    }
 }
 
 impl RecordDecoder for JsonDecoder {
@@ -328,6 +449,15 @@ impl RecordDecoder for JsonDecoder {
     ) -> Result<RecordBatch, CodecError> {
         let json = serde_json::from_slice(payload)?;
         self.decode_value_with_projection(json, projection)
+    }
+
+    fn decode_with_decode_projection(
+        &self,
+        payload: &[u8],
+        decode_projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError> {
+        let json = serde_json::from_slice(payload)?;
+        self.decode_value_with_decode_projection(json, decode_projection)
     }
 }
 
@@ -403,6 +533,43 @@ fn json_to_value_with_datatype(value: &JsonValue, datatype: &ConcreteDatatype) -
     }
 }
 
+fn json_to_value_with_datatype_and_projection(
+    value: &JsonValue,
+    datatype: &ConcreteDatatype,
+    projection: Option<&ProjectionNode>,
+) -> Value {
+    match datatype {
+        ConcreteDatatype::Null => Value::Null,
+        ConcreteDatatype::Bool(_) => match value {
+            JsonValue::Bool(b) => Value::Bool(*b),
+            _ => Value::Null,
+        },
+        ConcreteDatatype::Int64(_) => match value {
+            JsonValue::Number(n) => n.as_i64().map(Value::Int64).unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
+        ConcreteDatatype::Uint64(_) => match value {
+            JsonValue::Number(n) => n.as_u64().map(Value::Uint64).unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
+        ConcreteDatatype::Int8(_)
+        | ConcreteDatatype::Int16(_)
+        | ConcreteDatatype::Int32(_)
+        | ConcreteDatatype::Uint8(_)
+        | ConcreteDatatype::Uint16(_)
+        | ConcreteDatatype::Uint32(_)
+        | ConcreteDatatype::Float32(_)
+        | ConcreteDatatype::Float64(_)
+        | ConcreteDatatype::String(_) => json_to_value(value),
+        ConcreteDatatype::List(list_type) => {
+            json_to_list_value_with_datatype_and_projection(value, list_type, projection)
+        }
+        ConcreteDatatype::Struct(struct_type) => {
+            json_to_struct_value_with_datatype_and_projection(value, struct_type, projection)
+        }
+    }
+}
+
 fn json_to_list_value_with_datatype(value: &JsonValue, list_type: &ListType) -> Value {
     let JsonValue::Array(items) = value else {
         return Value::Null;
@@ -416,6 +583,51 @@ fn json_to_list_value_with_datatype(value: &JsonValue, list_type: &ListType) -> 
     Value::List(ListValue::new(converted, Arc::new(element_type.clone())))
 }
 
+fn json_to_list_value_with_datatype_and_projection(
+    value: &JsonValue,
+    list_type: &ListType,
+    projection: Option<&ProjectionNode>,
+) -> Value {
+    let JsonValue::Array(items) = value else {
+        return Value::Null;
+    };
+
+    let element_type = list_type.item_type();
+    match projection {
+        Some(ProjectionNode::List { indexes, element }) => match indexes {
+            crate::planner::decode_projection::ListIndexSelection::Indexes(required) => {
+                let mut converted = Vec::with_capacity(items.len());
+                for (idx, item) in items.iter().enumerate() {
+                    if required.contains(&idx) {
+                        converted.push(json_to_value_with_datatype_and_projection(
+                            item,
+                            element_type,
+                            Some(element.as_ref()),
+                        ));
+                    } else {
+                        converted.push(Value::Null);
+                    }
+                }
+                Value::List(ListValue::new(converted, Arc::new(element_type.clone())))
+            }
+            crate::planner::decode_projection::ListIndexSelection::All => {
+                let converted: Vec<Value> = items
+                    .iter()
+                    .map(|item| {
+                        json_to_value_with_datatype_and_projection(
+                            item,
+                            element_type,
+                            Some(element.as_ref()),
+                        )
+                    })
+                    .collect();
+                Value::List(ListValue::new(converted, Arc::new(element_type.clone())))
+            }
+        },
+        _ => json_to_list_value_with_datatype(value, list_type),
+    }
+}
+
 fn json_to_struct_value_with_datatype(value: &JsonValue, struct_type: &StructType) -> Value {
     let JsonValue::Object(map) = value else {
         return Value::Null;
@@ -427,6 +639,36 @@ fn json_to_struct_value_with_datatype(value: &JsonValue, struct_type: &StructTyp
         .map(|field| {
             map.get(field.name())
                 .map(|v| json_to_value_with_datatype(v, field.data_type()))
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+
+    Value::Struct(StructValue::new(values, struct_type.clone()))
+}
+
+fn json_to_struct_value_with_datatype_and_projection(
+    value: &JsonValue,
+    struct_type: &StructType,
+    projection: Option<&ProjectionNode>,
+) -> Value {
+    let JsonValue::Object(map) = value else {
+        return Value::Null;
+    };
+
+    let projection_fields = match projection {
+        Some(ProjectionNode::Struct(fields)) => Some(fields),
+        _ => None,
+    };
+
+    let values: Vec<Value> = struct_type
+        .fields()
+        .iter()
+        .map(|field| {
+            let child_proj = projection_fields.and_then(|fields| fields.get(field.name()));
+            map.get(field.name())
+                .map(|v| {
+                    json_to_value_with_datatype_and_projection(v, field.data_type(), child_proj)
+                })
                 .unwrap_or(Value::Null)
         })
         .collect();
@@ -554,5 +796,87 @@ mod tests {
         };
         assert_eq!(first.get_field("c"), Some(&Value::Int64(10)));
         assert_eq!(first.get_field("d"), None);
+    }
+
+    #[test]
+    fn json_decoder_decode_projection_prunes_list_indexes_without_shrinking() {
+        use crate::planner::decode_projection::{
+            DecodeProjection, FieldPath, FieldPathSegment, ListIndex, ListIndexSelection,
+            ProjectionNode,
+        };
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let element_type =
+            ConcreteDatatype::Struct(StructType::new(Arc::new(vec![StructField::new(
+                "x".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+                false,
+            )])));
+
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "orders".to_string(),
+            "items".to_string(),
+            ConcreteDatatype::List(datatypes::ListType::new(Arc::new(element_type))),
+        )]));
+
+        let decoder = JsonDecoder::new("orders", Arc::clone(&schema), JsonMap::new());
+
+        let mut indexes = BTreeSet::new();
+        indexes.insert(0usize);
+        indexes.insert(3usize);
+        let mut fields = BTreeMap::new();
+        fields.insert("x".to_string(), ProjectionNode::All);
+        let element = ProjectionNode::Struct(fields);
+        let list_node = ProjectionNode::List {
+            indexes: ListIndexSelection::Indexes(indexes),
+            element: Box::new(element),
+        };
+        let mut projection = DecodeProjection::default();
+        projection.mark_field_path_used(&FieldPath {
+            column: "items".to_string(),
+            segments: vec![
+                FieldPathSegment::ListIndex(ListIndex::Const(0)),
+                FieldPathSegment::StructField("x".to_string()),
+            ],
+        });
+        projection.mark_field_path_used(&FieldPath {
+            column: "items".to_string(),
+            segments: vec![
+                FieldPathSegment::ListIndex(ListIndex::Const(3)),
+                FieldPathSegment::StructField("x".to_string()),
+            ],
+        });
+        // Ensure the test uses the same semantics as mark_field_path_used.
+        assert_eq!(projection.column("items"), Some(&list_node));
+
+        let payload =
+            br#"{"items":[{"x":10,"y":"ignore"},{"x":20},{"x":30},{"x":40},{"x":50}]}"#.as_ref();
+        let tuple = decoder
+            .decode_with_decode_projection(payload, Some(&projection))
+            .expect("decode batch")
+            .into_rows()
+            .into_iter()
+            .next()
+            .expect("one row");
+
+        let Some(Value::List(list_val)) = tuple.value_by_name("orders", "items") else {
+            panic!("expected list value");
+        };
+        assert_eq!(list_val.len(), 5);
+
+        let Some(Value::Struct(first)) = list_val.get(0) else {
+            panic!("expected struct element at 0");
+        };
+        assert_eq!(first.get_field("x"), Some(&Value::Int64(10)));
+
+        assert_eq!(list_val.get(1), Some(&Value::Null));
+        assert_eq!(list_val.get(2), Some(&Value::Null));
+
+        let Some(Value::Struct(fourth)) = list_val.get(3) else {
+            panic!("expected struct element at 3");
+        };
+        assert_eq!(fourth.get_field("x"), Some(&Value::Int64(40)));
+
+        assert_eq!(list_val.get(4), Some(&Value::Null));
     }
 }

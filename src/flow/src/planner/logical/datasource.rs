@@ -1,5 +1,6 @@
 use crate::catalog::EventtimeDefinition;
 use crate::catalog::StreamDecoderConfig;
+use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::logical::BaseLogicalPlan;
 use datatypes::Schema;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ pub struct DataSource {
     pub alias: Option<String>,
     pub decoder: StreamDecoderConfig,
     pub schema: Arc<Schema>,
+    pub decode_projection: Option<DecodeProjection>,
     pub eventtime: Option<EventtimeDefinition>,
 }
 
@@ -30,6 +32,7 @@ impl DataSource {
             alias,
             decoder,
             schema,
+            decode_projection: None,
             eventtime,
         }
     }
@@ -40,6 +43,10 @@ impl DataSource {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    pub fn decode_projection(&self) -> Option<&DecodeProjection> {
+        self.decode_projection.as_ref()
     }
 
     pub fn eventtime(&self) -> Option<&EventtimeDefinition> {
