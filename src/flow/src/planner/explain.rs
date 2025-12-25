@@ -1,7 +1,7 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
 use crate::planner::physical::{WatermarkConfig, WatermarkStrategy};
-use datatypes::{ConcreteDatatype, Schema, StructField, StructType};
+use datatypes::{ConcreteDatatype, ListType, Schema, StructField, StructType};
 use serde::Serialize;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
@@ -336,7 +336,20 @@ fn format_column_projection(column: &datatypes::ColumnSchema) -> String {
             column.name,
             format_struct_fields_projection(struct_type)
         ),
+        ConcreteDatatype::List(list_type) => {
+            format!("{}[{}]", column.name, format_list_item_projection(list_type))
+        }
         _ => column.name.clone(),
+    }
+}
+
+fn format_list_item_projection(list_type: &ListType) -> String {
+    match list_type.item_type() {
+        ConcreteDatatype::Struct(struct_type) => {
+            format!("struct{{{}}}", format_struct_fields_projection(struct_type))
+        }
+        ConcreteDatatype::List(inner) => format!("list[{}]", format_list_item_projection(inner)),
+        other => format!("{:?}", other),
     }
 }
 
@@ -356,6 +369,9 @@ fn format_struct_field_projection(field: &StructField) -> String {
             field.name(),
             format_struct_fields_projection(struct_type)
         ),
+        ConcreteDatatype::List(list_type) => {
+            format!("{}[{}]", field.name(), format_list_item_projection(list_type))
+        }
         _ => field.name().to_string(),
     }
 }

@@ -183,6 +183,8 @@ impl<'a> ColumnUsageCollector<'a> {
             SqlExpr::JsonAccess { left, right, .. } => {
                 if let Some(access) = extract_struct_field_access(expr) {
                     self.record_struct_field_access(access);
+                } else if let Some(access) = extract_list_element_struct_field_access(expr) {
+                    self.record_struct_field_access(access);
                 } else {
                     self.collect_expr_ast(left);
                     self.collect_expr_ast(right);
@@ -522,6 +524,30 @@ fn extract_json_access_base(expr: &SqlExpr) -> Option<Vec<Ident>> {
     }
 }
 
+fn extract_list_element_struct_field_access(expr: &SqlExpr) -> Option<StructFieldAccess> {
+    let SqlExpr::JsonAccess { left, right, .. } = expr else {
+        return None;
+    };
+
+    let SqlExpr::MapAccess { column, .. } = left.as_ref() else {
+        return None;
+    };
+
+    let base_idents = extract_json_access_base(column.as_ref())?;
+    let (qualifier, column) = split_compound_identifier(&base_idents)?;
+
+    let field_name = match right.as_ref() {
+        SqlExpr::Identifier(ident) => ident.value.clone(),
+        _ => return None,
+    };
+
+    Some(StructFieldAccess {
+        qualifier,
+        column,
+        field_path: vec!["element".to_string(), field_name],
+    })
+}
+
 fn prune_column_schema(column: &datatypes::ColumnSchema, usage: &ColumnUse) -> datatypes::ColumnSchema {
     let data_type = prune_datatype(&column.data_type, usage);
     datatypes::ColumnSchema::new(
@@ -555,6 +581,13 @@ fn prune_datatype(datatype: &datatypes::ConcreteDatatype, usage: &ColumnUse) -> 
                         pruned_fields,
                     )))
                 }
+            }
+            datatypes::ConcreteDatatype::List(list_type) => {
+                let Some(element_usage) = fields.get("element") else {
+                    return datatype.clone();
+                };
+                let item_type = prune_datatype(list_type.item_type(), element_usage);
+                datatypes::ConcreteDatatype::List(datatypes::ListType::new(Arc::new(item_type)))
             }
             _ => datatype.clone(),
         },
@@ -671,7 +704,10 @@ mod tests {
     use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
     use crate::planner::explain::ExplainReport;
     use crate::planner::logical::create_logical_plan;
-    use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField, StructType};
+    use datatypes::{
+        ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
+        StructType,
+    };
     use parser::parse_sql;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -849,5 +885,61 @@ mod tests {
         let topology = report.topology_string();
         println!("{topology}");
         assert!(topology.contains("schema=[a, b{c}]"));
+    }
+
+    #[test]
+    fn logical_explain_reflects_pruned_list_struct_schema() {
+        let element_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+            StructField::new(
+                "c".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+                false,
+            ),
+            StructField::new(
+                "d".to_string(),
+                ConcreteDatatype::String(StringType),
+                false,
+            ),
+        ])));
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "stream_3".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "stream_3".to_string(),
+                "items".to_string(),
+                ConcreteDatatype::List(ListType::new(Arc::new(element_struct))),
+            ),
+        ]));
+
+        let definition = StreamDefinition::new(
+            "stream_3",
+            Arc::clone(&schema),
+            StreamProps::Mqtt(MqttStreamProps::default()),
+            StreamDecoderConfig::json(),
+        );
+        let mut stream_defs = HashMap::new();
+        stream_defs.insert("stream_3".to_string(), Arc::new(definition));
+
+        let select_stmt =
+            parse_sql("SELECT stream_3.a, stream_3.items[0]->c FROM stream_3").expect("parse sql");
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
+
+        let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
+            source_name: "stream_3".to_string(),
+            alias: None,
+            schema: Arc::clone(&schema),
+            kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
+        }]);
+
+        let (optimized, _pruned) = optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
+        let report = ExplainReport::from_logical(optimized);
+        let topology = report.topology_string();
+        println!("{topology}");
+        assert!(topology.contains("schema=[a, items[struct{c}]]"));
     }
 }
