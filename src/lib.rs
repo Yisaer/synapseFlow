@@ -4,6 +4,7 @@
 // - flow: Expression evaluation and SQL conversion
 // - datatypes: Data type definitions
 
+pub mod bootstrap;
 pub mod config;
 pub mod logging;
 pub mod server;
