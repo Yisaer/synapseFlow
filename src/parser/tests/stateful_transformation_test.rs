@@ -1,15 +1,11 @@
 //! Tests for stateful function transformation (SQL -> rewritten Expr placeholders + mappings)
 //! Validates transformation via a JSON view over the parsed SelectStmt.
 
-use parser::{StaticStatefulRegistry, default_aggregate_registry, parse_sql_with_registries};
+use parser::parse_sql;
 use serde_json::{Value, json};
-use std::sync::Arc;
 
 fn parse_to_json(sql: &str) -> Value {
-    let aggregate_registry = default_aggregate_registry();
-    let stateful_registry = Arc::new(StaticStatefulRegistry::new(["lag"]));
-    let select_stmt =
-        parse_sql_with_registries(sql, aggregate_registry, stateful_registry).expect("parse sql");
+    let select_stmt = parse_sql(sql).expect("parse sql");
 
     let mut aggregate_mappings: Vec<_> = select_stmt
         .aggregate_mappings

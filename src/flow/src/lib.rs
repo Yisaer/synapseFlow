@@ -147,6 +147,12 @@ impl PipelineRegistries {
     }
 }
 
+impl Default for PipelineRegistries {
+    fn default() -> Self {
+        Self::new_with_builtin()
+    }
+}
+
 fn build_physical_plan_from_sql(
     sql: &str,
     sinks: Vec<PipelineSink>,
@@ -420,85 +426,6 @@ pub fn create_pipeline_with_attached_sources(
         shared_stream_registry,
         mqtt_client_manager.clone(),
         registries,
-    )?;
-    pipeline::attach_sources_for_pipeline(&mut pipeline, catalog, &mqtt_client_manager)?;
-    Ok(pipeline)
-}
-
-/// Create a processor pipeline from SQL with pipeline options and attach source connectors from the catalog.
-///
-/// Primarily intended for tests that need to exercise option-dependent runtime behavior (e.g. event time).
-pub fn create_pipeline_with_attached_sources_with_options(
-    sql: &str,
-    sinks: Vec<PipelineSink>,
-    catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    mqtt_client_manager: MqttClientManager,
-    registries: &PipelineRegistries,
-    options: &crate::pipeline::PipelineOptions,
-) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql_with_registries(
-        sql,
-        registries.aggregate_registry(),
-        registries.stateful_registry(),
-    )?;
-    let (schema_binding, stream_defs) =
-        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
-    let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
-        Arc::clone(&logical_plan),
-        &schema_binding,
-        &crate::planner::LogicalOptimizerOptions {
-            eventtime_enabled: options.eventtime.enabled,
-        },
-    );
-    if options.eventtime.enabled {
-        validate_eventtime_enabled(&stream_defs, registries)?;
-    }
-
-    let build_options = crate::planner::PhysicalPlanBuildOptions {
-        eventtime_enabled: options.eventtime.enabled,
-        eventtime_late_tolerance: options.eventtime.late_tolerance,
-    };
-    let physical_plan = crate::planner::create_physical_plan_with_build_options(
-        Arc::clone(&logical_plan),
-        &pruned_binding,
-        registries,
-        &build_options,
-    )?;
-    let optimized_plan = optimize_physical_plan(
-        Arc::clone(&physical_plan),
-        registries.encoder_registry().as_ref(),
-        registries.aggregate_registry(),
-    );
-
-    let eventtime = if options.eventtime.enabled {
-        let mut per_source = HashMap::new();
-        for (name, def) in &stream_defs {
-            if let Some(cfg) = def.eventtime() {
-                per_source.insert(name.clone(), cfg.clone());
-            }
-        }
-        Some(crate::processor::EventtimePipelineContext {
-            enabled: true,
-            registry: registries.eventtime_type_registry(),
-            per_source,
-        })
-    } else {
-        None
-    };
-
-    let mut pipeline = create_processor_pipeline(
-        optimized_plan,
-        ProcessorPipelineDependencies::new(
-            mqtt_client_manager.clone(),
-            registries.connector_registry(),
-            registries.encoder_registry(),
-            registries.decoder_registry(),
-            registries.aggregate_registry(),
-            registries.stateful_registry(),
-            eventtime,
-        ),
     )?;
     pipeline::attach_sources_for_pipeline(&mut pipeline, catalog, &mqtt_client_manager)?;
     Ok(pipeline)

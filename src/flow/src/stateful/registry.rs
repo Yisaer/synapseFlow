@@ -74,7 +74,9 @@ impl StatefulFunctionRegistry {
 
 impl Default for StatefulFunctionRegistry {
     fn default() -> Self {
-        Self::new()
+        let registry = Self::new();
+        registry.register_builtin_functions();
+        registry
     }
 }
 

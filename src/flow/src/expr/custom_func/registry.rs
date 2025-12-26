@@ -75,7 +75,9 @@ impl CustomFuncRegistry {
 
 impl Default for CustomFuncRegistry {
     fn default() -> Self {
-        Self::new()
+        let registry = Self::new();
+        registry.register_builtin_functions();
+        registry
     }
 }
 

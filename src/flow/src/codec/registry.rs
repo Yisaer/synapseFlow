@@ -28,7 +28,9 @@ pub struct DecoderRegistry {
 
 impl Default for DecoderRegistry {
     fn default() -> Self {
-        Self::new()
+        let registry = Self::new();
+        registry.register_builtin_decoders();
+        registry
     }
 }
 
@@ -91,7 +93,9 @@ pub struct EncoderRegistry {
 
 impl Default for EncoderRegistry {
     fn default() -> Self {
-        Self::new()
+        let registry = Self::new();
+        registry.register_builtin_encoders();
+        registry
     }
 }
 

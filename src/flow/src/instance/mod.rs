@@ -226,14 +226,6 @@ impl FlowInstance {
             .cloned()
     }
 
-    /// Create a pipeline runtime from definition.
-    pub fn create_pipeline(
-        &self,
-        definition: PipelineDefinition,
-    ) -> Result<PipelineSnapshot, PipelineError> {
-        self.pipeline_manager.create_pipeline(definition)
-    }
-
     pub fn create_pipeline_with_plan_cache(
         &self,
         definition: PipelineDefinition,
@@ -249,15 +241,6 @@ impl FlowInstance {
     ) -> Result<(PipelineSnapshot, Vec<u8>), PipelineError> {
         self.pipeline_manager
             .create_pipeline_with_logical_ir(definition)
-    }
-
-    pub fn create_pipeline_from_logical_ir(
-        &self,
-        definition: PipelineDefinition,
-        logical_plan_ir: &[u8],
-    ) -> Result<PipelineSnapshot, PipelineError> {
-        self.pipeline_manager
-            .create_pipeline_from_logical_ir(definition, logical_plan_ir)
     }
 
     /// Start a pipeline by identifier.

@@ -20,7 +20,7 @@ pub use expression_extractor::{
     ExpressionAnalysis, analyze_sql_expressions, extract_expressions_from_sql,
     extract_select_expressions_simple,
 };
-pub use parser::{StreamSqlParser, parse_sql, parse_sql_with_registries, parse_sql_with_registry};
+pub use parser::{StreamSqlParser, parse_sql, parse_sql_with_registries};
 pub use select_stmt::{SelectField, SelectStmt};
 pub use stateful_registry::{StatefulRegistry, StaticStatefulRegistry, default_stateful_registry};
 pub use stateful_transformer::transform_stateful_functions;

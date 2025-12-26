@@ -163,15 +163,6 @@ pub fn parse_sql(sql: &str) -> Result<SelectStmt, String> {
     parser.parse(sql)
 }
 
-/// Convenience function to parse SQL with an explicit aggregate registry
-pub fn parse_sql_with_registry(
-    sql: &str,
-    aggregate_registry: Arc<dyn AggregateRegistry>,
-) -> Result<SelectStmt, String> {
-    let parser = StreamSqlParser::with_registry(aggregate_registry);
-    parser.parse(sql)
-}
-
 pub fn parse_sql_with_registries(
     sql: &str,
     aggregate_registry: Arc<dyn AggregateRegistry>,

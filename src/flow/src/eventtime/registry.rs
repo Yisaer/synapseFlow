@@ -43,9 +43,16 @@ impl BuiltinEventtimeType {
     }
 }
 
-#[derive(Default)]
 pub struct EventtimeTypeRegistry {
     parsers: RwLock<HashMap<String, Arc<dyn EventtimeTypeParser>>>,
+}
+
+impl Default for EventtimeTypeRegistry {
+    fn default() -> Self {
+        let registry = Self::new();
+        registry.register_builtin_types();
+        registry
+    }
 }
 
 impl EventtimeTypeRegistry {

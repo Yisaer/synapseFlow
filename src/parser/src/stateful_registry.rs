@@ -4,6 +4,8 @@ pub trait StatefulRegistry: Send + Sync {
     fn is_stateful_function(&self, name: &str) -> bool;
 }
 
+const BUILTIN_STATEFUL_FUNCTIONS: [&str; 1] = ["lag"];
+
 #[derive(Default)]
 pub struct StaticStatefulRegistry {
     names: std::collections::HashSet<String>,
@@ -23,15 +25,19 @@ impl StatefulRegistry for StaticStatefulRegistry {
     }
 }
 
-#[derive(Default)]
-struct EmptyStatefulRegistry;
-
-impl StatefulRegistry for EmptyStatefulRegistry {
-    fn is_stateful_function(&self, _name: &str) -> bool {
-        false
-    }
+pub fn default_stateful_registry() -> Arc<dyn StatefulRegistry> {
+    Arc::new(StaticStatefulRegistry::new(BUILTIN_STATEFUL_FUNCTIONS))
 }
 
-pub fn default_stateful_registry() -> Arc<dyn StatefulRegistry> {
-    Arc::new(EmptyStatefulRegistry)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_registry_includes_builtin_stateful_functions() {
+        let registry = default_stateful_registry();
+        assert!(registry.is_stateful_function("lag"));
+        assert!(registry.is_stateful_function("LAG"));
+        assert!(!registry.is_stateful_function("missing"));
+    }
 }

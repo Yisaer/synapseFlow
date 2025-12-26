@@ -24,7 +24,9 @@ pub struct ConnectorRegistry {
 
 impl Default for ConnectorRegistry {
     fn default() -> Self {
-        Self::new()
+        let registry = Self::new();
+        registry.register_builtin_sinks();
+        registry
     }
 }
 
