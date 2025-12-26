@@ -84,7 +84,7 @@ impl LogicalOptRule for TopLevelColumnPruning {
     }
 }
 
-/// Rule: prune unused struct fields referenced via JsonAccess (->).
+/// Rule: prune unused struct fields (including list element structs) referenced via nested access.
 struct StructFieldPruning;
 
 impl LogicalOptRule for StructFieldPruning {
@@ -106,7 +106,7 @@ impl LogicalOptRule for StructFieldPruning {
     }
 }
 
-/// Rule: prune list element fields and collect list index requirements.
+/// Rule: collect list index requirements for decode projection.
 struct ListElementPruning;
 
 impl LogicalOptRule for ListElementPruning {
@@ -121,11 +121,10 @@ impl LogicalOptRule for ListElementPruning {
     ) -> (Arc<LogicalPlan>, SchemaBinding) {
         let mut collector = ListElementUsageCollector::new(bindings);
         collector.collect_from_plan(plan.as_ref());
-        let pruned = collector.build_pruned_binding();
         let decode_projections = collector.build_decode_projections();
         let updated_plan =
-            apply_pruned_schemas_to_logical(plan, &pruned, &decode_projections, &HashMap::new());
-        (updated_plan, pruned)
+            apply_pruned_schemas_to_logical(plan, bindings, &decode_projections, &HashMap::new());
+        (updated_plan, bindings.clone())
     }
 }
 
@@ -630,14 +629,28 @@ impl<'a> StructFieldUsageCollector<'a> {
             SqlExpr::Nested(expr) => self.collect_expr_ast(expr),
             SqlExpr::Cast { expr, .. } => self.collect_expr_ast(expr),
             SqlExpr::JsonAccess { left, right, .. } => {
+                if let Some(access) = extract_decode_field_path_access(expr) {
+                    self.record_decode_field_path_access(access);
+                    return;
+                }
+
                 if let Some(access) = extract_struct_field_access(expr) {
                     self.record_struct_field_access(access);
-                } else {
-                    self.collect_expr_ast(left);
-                    self.collect_expr_ast(right);
+                    return;
                 }
+
+                self.collect_expr_ast(left);
+                self.collect_expr_ast(right);
             }
             SqlExpr::MapAccess { column, keys } => {
+                if let Some(access) = extract_decode_field_path_access(expr) {
+                    self.record_decode_field_path_access(access);
+                    for key in keys {
+                        self.collect_expr_ast(key);
+                    }
+                    return;
+                }
+
                 self.collect_expr_ast(column);
                 for key in keys {
                     self.collect_expr_ast(key);
@@ -689,6 +702,21 @@ impl<'a> StructFieldUsageCollector<'a> {
         };
 
         self.mark_field_path_used(&source_name, access.column.as_str(), &access.field_path);
+    }
+
+    fn record_decode_field_path_access(&mut self, access: DecodeFieldPathAccess) {
+        if access.segments.is_empty() {
+            return;
+        }
+
+        let Some(source_name) =
+            self.resolve_source_for_column(access.qualifier.as_deref(), access.column.as_str())
+        else {
+            return;
+        };
+
+        let schema_path = decode_segments_to_schema_path(access.segments.as_slice());
+        self.mark_field_path_used(&source_name, access.column.as_str(), &schema_path);
     }
 
     fn resolve_source_for_column(
@@ -789,10 +817,9 @@ impl<'a> StructFieldUsageCollector<'a> {
     }
 }
 
-/// Collects list element usage and list index requirements for pruning decisions.
+/// Collects list index requirements for decode projection.
 struct ListElementUsageCollector<'a> {
     bindings: &'a SchemaBinding,
-    used_columns: HashMap<String, UsedColumnTree>,
     decode_projections: HashMap<String, DecodeProjection>,
     prune_disabled: HashSet<String>,
 }
@@ -801,7 +828,6 @@ impl<'a> ListElementUsageCollector<'a> {
     fn new(bindings: &'a SchemaBinding) -> Self {
         Self {
             bindings,
-            used_columns: HashMap::new(),
             decode_projections: HashMap::new(),
             prune_disabled: HashSet::new(),
         }
@@ -942,14 +968,6 @@ impl<'a> ListElementUsageCollector<'a> {
             return;
         };
 
-        let schema_path = decode_segments_to_schema_path(access.segments.as_slice());
-        mark_field_path_used_in_tree(
-            &mut self.used_columns,
-            source_name.as_str(),
-            access.column.as_str(),
-            &schema_path,
-        );
-
         let projection = self
             .decode_projections
             .entry(source_name.to_string())
@@ -1017,50 +1035,13 @@ impl<'a> ListElementUsageCollector<'a> {
         }
     }
 
-    fn build_pruned_binding(&self) -> SchemaBinding {
-        let mut entries = Vec::new();
-        for entry in self.bindings.entries() {
-            let should_keep_full = matches!(
-                entry.kind,
-                crate::expr::sql_conversion::SourceBindingKind::Shared
-            ) || self.prune_disabled.contains(&entry.source_name)
-                || !self.used_columns.contains_key(&entry.source_name);
-
-            let schema = if should_keep_full {
-                Arc::clone(&entry.schema)
-            } else {
-                let required = &self.used_columns[&entry.source_name];
-                let cols: Vec<_> = entry
-                    .schema
-                    .column_schemas()
-                    .iter()
-                    .map(|col| match required.columns.get(col.name.as_str()) {
-                        Some(usage) => prune_list_elements_column_schema(col, usage),
-                        None => col.clone(),
-                    })
-                    .collect();
-                Arc::new(Schema::new(cols))
-            };
-
-            entries.push(SchemaBindingEntry {
-                source_name: entry.source_name.clone(),
-                alias: entry.alias.clone(),
-                schema,
-                kind: entry.kind.clone(),
-            });
-        }
-
-        SchemaBinding::new(entries)
-    }
-
     fn build_decode_projections(&self) -> HashMap<String, DecodeProjection> {
         let mut projections = HashMap::new();
         for entry in self.bindings.entries() {
             let should_keep_full = matches!(
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
-            ) || self.prune_disabled.contains(&entry.source_name)
-                || !self.used_columns.contains_key(&entry.source_name);
+            ) || self.prune_disabled.contains(&entry.source_name);
 
             if should_keep_full {
                 continue;
@@ -1201,92 +1182,8 @@ fn prune_struct_fields_column_schema(
     column: &datatypes::ColumnSchema,
     usage: &ColumnUse,
 ) -> datatypes::ColumnSchema {
-    let data_type = prune_struct_fields_datatype(&column.data_type, usage);
+    let data_type = prune_nested_datatype_for_usage(&column.data_type, usage);
     datatypes::ColumnSchema::new(column.source_name.clone(), column.name.clone(), data_type)
-}
-
-fn prune_struct_fields_datatype(
-    datatype: &datatypes::ConcreteDatatype,
-    usage: &ColumnUse,
-) -> datatypes::ConcreteDatatype {
-    match usage {
-        ColumnUse::All => datatype.clone(),
-        ColumnUse::Fields(fields) => match datatype {
-            datatypes::ConcreteDatatype::Struct(struct_type) => {
-                let mut pruned_fields = Vec::new();
-                for field in struct_type.fields().iter() {
-                    let Some(field_usage) = fields.get(field.name()) else {
-                        continue;
-                    };
-                    let pruned = prune_struct_fields_datatype(field.data_type(), field_usage);
-                    pruned_fields.push(datatypes::StructField::new(
-                        field.name().to_string(),
-                        pruned,
-                        field.is_nullable(),
-                    ));
-                }
-                if pruned_fields.is_empty() {
-                    datatype.clone()
-                } else {
-                    datatypes::ConcreteDatatype::Struct(datatypes::StructType::new(Arc::new(
-                        pruned_fields,
-                    )))
-                }
-            }
-            // Struct-field pruning does not rewrite list element types.
-            datatypes::ConcreteDatatype::List(_) => datatype.clone(),
-            _ => datatype.clone(),
-        },
-    }
-}
-
-fn prune_list_elements_column_schema(
-    column: &datatypes::ColumnSchema,
-    usage: &ColumnUse,
-) -> datatypes::ColumnSchema {
-    let data_type = prune_list_elements_datatype(&column.data_type, usage);
-    datatypes::ColumnSchema::new(column.source_name.clone(), column.name.clone(), data_type)
-}
-
-fn prune_list_elements_datatype(
-    datatype: &datatypes::ConcreteDatatype,
-    usage: &ColumnUse,
-) -> datatypes::ConcreteDatatype {
-    match usage {
-        ColumnUse::All => datatype.clone(),
-        ColumnUse::Fields(fields) => match datatype {
-            // For list-element pruning, keep the struct's field set unchanged, but rewrite the
-            // datatypes of fields that contain lists needing element pruning.
-            datatypes::ConcreteDatatype::Struct(struct_type) => {
-                let mut out_fields = Vec::new();
-                for field in struct_type.fields().iter() {
-                    let new_type = match fields.get(field.name()) {
-                        Some(field_usage) => {
-                            prune_list_elements_datatype(field.data_type(), field_usage)
-                        }
-                        None => field.data_type().clone(),
-                    };
-                    out_fields.push(datatypes::StructField::new(
-                        field.name().to_string(),
-                        new_type,
-                        field.is_nullable(),
-                    ));
-                }
-                datatypes::ConcreteDatatype::Struct(datatypes::StructType::new(Arc::new(
-                    out_fields,
-                )))
-            }
-            datatypes::ConcreteDatatype::List(list_type) => {
-                let Some(element_usage) = fields.get("element") else {
-                    return datatype.clone();
-                };
-                let item_type =
-                    prune_nested_datatype_for_usage(list_type.item_type(), element_usage);
-                datatypes::ConcreteDatatype::List(datatypes::ListType::new(Arc::new(item_type)))
-            }
-            _ => datatype.clone(),
-        },
-    }
 }
 
 fn prune_nested_datatype_for_usage(

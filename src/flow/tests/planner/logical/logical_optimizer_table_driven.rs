@@ -228,6 +228,16 @@ fn logical_optimizer_table_driven() {
             sql: "SELECT stream_struct.a, stream_struct.b->c FROM stream_struct",
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_struct","decoder=json","schema=[a, b{c}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_struct.a; stream_struct.b -> c]"],"operator":"Project"}"##,
         },
+        Case {
+            name: "logical_optimizer_keeps_dynamic_list_index_and_prunes_element_struct_fields",
+            sql: "SELECT stream_3.items[a]->c FROM stream_3",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"] -> c]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_keeps_dynamic_list_index_and_keeps_full_element_struct",
+            sql: "SELECT stream_3.items[a] FROM stream_3",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"]]"],"operator":"Project"}"##,
+        },
     ];
 
     for case in cases {
