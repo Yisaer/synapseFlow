@@ -1,5 +1,6 @@
 use datatypes::{
-    ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField, StructType,
+    ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
+    StructType,
 };
 use flow::planner::logical::create_logical_plan;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -75,11 +76,63 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::json(),
     );
 
+    let element_struct_cd = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+        StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+        StructField::new("d".to_string(), ConcreteDatatype::String(StringType), false),
+    ])));
+    let stream_3_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "stream_3".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream_3".to_string(),
+            "items".to_string(),
+            ConcreteDatatype::List(ListType::new(Arc::new(element_struct_cd))),
+        ),
+    ]));
+    let stream_3_def = StreamDefinition::new(
+        "stream_3",
+        Arc::clone(&stream_3_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
+    let element_xy_struct_cd = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+        StructField::new("x".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+        StructField::new("y".to_string(), ConcreteDatatype::String(StringType), false),
+    ])));
+    let b_struct_cd = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+        StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+        StructField::new(
+            "items".to_string(),
+            ConcreteDatatype::List(ListType::new(Arc::new(element_xy_struct_cd))),
+            false,
+        ),
+    ])));
+    let stream_4_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "stream_4".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new("stream_4".to_string(), "b".to_string(), b_struct_cd),
+    ]));
+    let stream_4_def = StreamDefinition::new(
+        "stream_4",
+        Arc::clone(&stream_4_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_2".to_string(), Arc::new(stream_2_def));
     stream_defs.insert("stream_enc".to_string(), Arc::new(stream_enc_def));
     stream_defs.insert("stream_ab".to_string(), Arc::new(stream_ab_def));
+    stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
+    stream_defs.insert("stream_4".to_string(), Arc::new(stream_4_def));
 
     stream_defs
 }
@@ -185,6 +238,21 @@ fn plan_explain_table_driven() {
             name: "physical_explain_reflects_pruned_struct_schema",
             sql: "SELECT stream_2.a, stream_2.b->c FROM stream_2",
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_2","decoder=json","schema=[a, b{c}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_2.a; stream_2.b -> c]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_2","schema=[a, b{c}]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b{c}]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_2.a; stream_2.b -> c]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "explain_reflects_pruned_list_struct_schema",
+            sql: "SELECT stream_3.a, stream_3.items[0]->c FROM stream_3",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[a, items[0][struct{c}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.a; stream_3.items[0] -> c]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_3","schema=[a, items[0][struct{c}]]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, items[0][struct{c}]]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_3.a; stream_3.items[0] -> c]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "physical_plan_supports_parenthesized_struct_field_list_index",
+            sql: "SELECT a, (b->items)[0] FROM stream_4",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_4","decoder=json","schema=[a, b{items[struct{x, y}]}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; (b -> items)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_4","schema=[a, b{items[struct{x, y}]}]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b{items[struct{x, y}]}]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; (b -> items)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "explain_renders_list_index_projection_compact",
+            sql: "SELECT stream_4.a, stream_4.b->items[0]->x, stream_4.b->items[3]->x FROM stream_4",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_4","decoder=json","schema=[a, b{items[0,3][struct{x}]}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_4.a; stream_4.b -> items[0] -> x; stream_4.b -> items[3] -> x]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_4","schema=[a, b{items[0,3][struct{x}]}]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b{items[0,3][struct{x}]}]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_4.a; stream_4.b -> items[0] -> x; stream_4.b -> items[3] -> x]"],"operator":"PhysicalProject"}}"##,
         },
     ];
 
