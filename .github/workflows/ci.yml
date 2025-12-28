@@ -28,7 +28,6 @@ jobs:
 
   lint:
     name: Lint
-    if: github.event.action != 'edited'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +56,6 @@ jobs:
 
   test:
     name: Test
-    if: github.event.action != 'edited'
     needs: lint
     runs-on: ubuntu-latest
     services:
@@ -90,7 +88,6 @@ jobs:
 
   coverage:
     name: Coverage
-    if: github.event.action != 'edited'
     needs: lint
     runs-on: ubuntu-latest
     services:
