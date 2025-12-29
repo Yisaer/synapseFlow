@@ -1,3 +1,4 @@
+mod capabilities;
 mod function;
 mod pipeline;
 pub mod storage_bridge;
@@ -49,6 +50,10 @@ pub async fn start_server(
         .route(
             "/functions/describe/:name",
             axum::routing::get(function::describe_function_handler),
+        )
+        .route(
+            "/capabilities/syntax",
+            axum::routing::get(capabilities::get_syntax_capabilities_handler),
         )
         .route("/streams/:name", delete(stream::delete_stream_handler))
         .with_state(state);
