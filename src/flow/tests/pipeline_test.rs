@@ -22,15 +22,30 @@ async fn test_create_pipeline_aggregation_with_group_by_window_and_expr() {
     let input_data = vec![
         (
             "a".to_string(),
-            vec![Value::Int64(1), Value::Int64(1), Value::Int64(1), Value::Int64(1)],
+            vec![
+                Value::Int64(1),
+                Value::Int64(1),
+                Value::Int64(1),
+                Value::Int64(1),
+            ],
         ),
         (
             "b".to_string(),
-            vec![Value::Int64(1), Value::Int64(1), Value::Int64(2), Value::Int64(2)],
+            vec![
+                Value::Int64(1),
+                Value::Int64(1),
+                Value::Int64(2),
+                Value::Int64(2),
+            ],
         ),
         (
             "c".to_string(),
-            vec![Value::Int64(1), Value::Int64(2), Value::Int64(1), Value::Int64(2)],
+            vec![
+                Value::Int64(1),
+                Value::Int64(2),
+                Value::Int64(1),
+                Value::Int64(2),
+            ],
         ),
     ];
 
@@ -77,7 +92,12 @@ async fn test_create_pipeline_aggregation_with_group_by_window_and_expr() {
                 format!("{:?}", av).cmp(&format!("{:?}", bv))
             });
 
-            assert_eq!(rows.len(), 2, "Wrong number of rows for test: {}", test_name);
+            assert_eq!(
+                rows.len(),
+                2,
+                "Wrong number of rows for test: {}",
+                test_name
+            );
             for row in &rows {
                 assert_eq!(
                     row.len(),

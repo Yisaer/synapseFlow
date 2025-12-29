@@ -237,4 +237,3 @@ async fn stateful_function_table_driven() {
         run_stateful_case(case).await;
     }
 }
-
