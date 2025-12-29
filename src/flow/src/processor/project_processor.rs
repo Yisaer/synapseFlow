@@ -107,29 +107,37 @@ impl Processor for ProjectProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&id, &StreamData::Collection(collection.clone()));
-                                match apply_projection(collection.as_ref(), &fields) {
-                                    Ok(projected_collection) => {
-                                        let projected_data = StreamData::collection(projected_collection);
-                                        send_with_backpressure(&output, projected_data).await?;
-                                    }
-                                    Err(e) => {
-                                        let error_data = StreamData::error(
-                                            StreamError::new(e.to_string()).with_source(id.clone()),
-                                        );
-                                        send_with_backpressure(&output, error_data).await?;
-                                    }
-                                }
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&output, data).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        match apply_projection(collection.as_ref(), &fields) {
+                                            Ok(projected_collection) => {
+                                                let projected_data = StreamData::collection(
+                                                    projected_collection,
+                                                );
+                                                send_with_backpressure(&output, projected_data)
+                                                    .await?;
+                                            }
+                                            Err(e) => {
+                                                let error_data = StreamData::error(
+                                                    StreamError::new(e.to_string())
+                                                        .with_source(id.clone()),
+                                                );
+                                                send_with_backpressure(&output, error_data)
+                                                    .await?;
+                                            }
+                                        }
+                                    }
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        send_with_backpressure(&output, data).await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
+                                            tracing::info!(processor_id = %id, "stopped");
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {

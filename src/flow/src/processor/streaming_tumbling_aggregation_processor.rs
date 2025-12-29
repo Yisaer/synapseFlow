@@ -100,30 +100,44 @@ impl Processor for StreamingTumblingAggregationProcessor {
                     }
                     data_item = input_streams.next() => {
                         match data_item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&id, &StreamData::Collection(collection.clone()));
-                                for row in collection.rows() {
-                                    window_state.add_row(row).map_err(|e| ProcessorError::ProcessingError(format!("Failed to update window state: {e}")))?;
-                                }
-                            }
-                            Some(Ok(StreamData::Watermark(ts))) => {
-                                window_state.flush_until(ts, &output).await?;
-                            }
-                            Some(Ok(StreamData::Control(control_signal))) => {
-                                let is_terminal = control_signal.is_terminal();
-                                let is_graceful = matches!(control_signal, ControlSignal::StreamGracefulEnd);
-                                send_with_backpressure(&output, StreamData::control(control_signal)).await?;
-                                if is_terminal {
-                                    if is_graceful {
-                                        window_state.flush_all(&output).await?;
+                            Some(Ok(data)) => {
+                                log_received_data(&id, &data);
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        for row in collection.rows() {
+                                            window_state.add_row(row).map_err(|e| {
+                                                ProcessorError::ProcessingError(format!(
+                                                    "Failed to update window state: {e}"
+                                                ))
+                                            })?;
+                                        }
                                     }
-                                    stream_ended = true;
-                                    break;
+                                    StreamData::Watermark(ts) => {
+                                        window_state.flush_until(ts, &output).await?;
+                                    }
+                                    StreamData::Control(control_signal) => {
+                                        let is_terminal = control_signal.is_terminal();
+                                        let is_graceful = matches!(
+                                            control_signal,
+                                            ControlSignal::StreamGracefulEnd
+                                        );
+                                        send_with_backpressure(
+                                            &output,
+                                            StreamData::control(control_signal),
+                                        )
+                                        .await?;
+                                        if is_terminal {
+                                            if is_graceful {
+                                                window_state.flush_all(&output).await?;
+                                            }
+                                            stream_ended = true;
+                                            break;
+                                        }
+                                    }
+                                    other => {
+                                        send_with_backpressure(&output, other).await?;
+                                    }
                                 }
-                            }
-                            Some(Ok(other)) => {
-                                log_received_data(&id, &other);
-                                send_with_backpressure(&output, other).await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 tracing::warn!(processor_id = %id, skipped = n, "input lagged");

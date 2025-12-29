@@ -155,26 +155,38 @@ impl Processor for StatefulFunctionProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&id, &StreamData::Collection(collection.clone()));
-                                match Self::apply_stateful(collection, &mut calls) {
-                                    Ok(out_collection) => {
-                                        send_with_backpressure(&output, StreamData::collection(out_collection)).await?;
-                                    }
-                                    Err(e) => {
-                                        let error = StreamError::new(e.to_string()).with_source(id.clone());
-                                        send_with_backpressure(&output, StreamData::error(error)).await?;
-                                    }
-                                }
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&output, data).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        match Self::apply_stateful(collection, &mut calls) {
+                                            Ok(out_collection) => {
+                                                send_with_backpressure(
+                                                    &output,
+                                                    StreamData::collection(out_collection),
+                                                )
+                                                .await?;
+                                            }
+                                            Err(e) => {
+                                                let error = StreamError::new(e.to_string())
+                                                    .with_source(id.clone());
+                                                send_with_backpressure(
+                                                    &output,
+                                                    StreamData::error(error),
+                                                )
+                                                .await?;
+                                            }
+                                        }
+                                    }
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        send_with_backpressure(&output, data).await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
+                                            tracing::info!(processor_id = %id, "stopped");
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {

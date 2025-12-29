@@ -4,14 +4,11 @@ use datatypes::Value;
 use flow::model::batch_from_columns_simple;
 use flow::processor::StreamData;
 use flow::FlowInstance;
+use serde_json::Value as JsonValue;
 use tokio::time::Duration;
 
-use super::common::{install_stream_schema, recv_next_collection};
-
-struct ColumnCheck {
-    expected_name: String,
-    expected_values: Vec<Value>,
-}
+use super::common::ColumnCheck;
+use super::common::{build_expected_json, install_stream_schema, normalize_json, recv_next_json};
 
 struct ExpectedCollection {
     expected_rows: usize,
@@ -69,41 +66,21 @@ async fn run_stateful_case(case: StatefulCase) {
 
     let timeout_duration = Duration::from_secs(5);
     for expected in case.expected_outputs {
-        let collection = recv_next_collection(&mut output, timeout_duration).await;
-        let rows = collection.rows();
-
+        let actual: JsonValue = recv_next_json(&mut output, timeout_duration).await;
         assert_eq!(
-            rows.len(),
-            expected.expected_rows,
-            "Wrong number of rows for test: {}",
+            expected.expected_columns,
+            expected.column_checks.len(),
+            "expected_columns should match column_checks for JSON comparison (test: {})",
             case.name
         );
-        if expected.expected_rows > 0 {
-            for row in rows {
-                assert_eq!(
-                    row.len(),
-                    expected.expected_columns,
-                    "Wrong number of columns for test: {}",
-                    case.name
-                );
-            }
-
-            for check in expected.column_checks {
-                let mut values = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let value = row
-                        .value_by_name("stream", &check.expected_name)
-                        .or_else(|| row.value_by_name("", &check.expected_name))
-                        .unwrap_or_else(|| panic!("column {} missing", check.expected_name));
-                    values.push(value.clone());
-                }
-                assert_eq!(
-                    values, check.expected_values,
-                    "Wrong values in column {} for test: {}",
-                    check.expected_name, case.name
-                );
-            }
-        }
+        let expected_json: JsonValue =
+            build_expected_json(expected.expected_rows, &expected.column_checks);
+        assert_eq!(
+            normalize_json(actual),
+            normalize_json(expected_json),
+            "Wrong output JSON for test: {}",
+            case.name
+        );
     }
 
     if !case.close_before_read {

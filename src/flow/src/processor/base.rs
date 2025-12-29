@@ -36,13 +36,10 @@ pub fn log_received_data(processor_id: &str, data: &StreamData) {
                 );
             }
         }
-        StreamData::Encoded {
-            payload,
-            collection,
-        } => {
+        StreamData::EncodedBytes { payload, num_rows } => {
             tracing::debug!(
                 processor_id = %processor_id,
-                rows = collection.num_rows(),
+                rows = num_rows,
                 bytes = payload.len(),
                 "received encoded"
             );

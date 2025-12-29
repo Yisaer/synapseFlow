@@ -2,9 +2,7 @@
 //!
 //! This processor sits between the physical plan root and sink processors.
 //! It transforms [`StreamData::Collection`] items using the configured
-//! [`CollectionEncoder`] and produces [`StreamData::Encoded`] records that
-//! carry both the encoded payload and the original collection for downstream
-//! consumers such as tests/result collectors.
+//! [`CollectionEncoder`] and produces [`StreamData::EncodedBytes`] records.
 
 use crate::codec::encoder::CollectionEncoder;
 use crate::processor::base::{
@@ -79,32 +77,36 @@ impl Processor for EncoderProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
-                                match encoder.encode(collection.as_ref()) {
-                                    Ok(payload) => {
-                                        send_with_backpressure(
-                                            &output,
-                                            StreamData::encoded(collection, payload),
-                                        )
-                                        .await?;
-                                    }
-                                    Err(err) => {
-                                        let message = format!("encode error: {err}");
-                                        tracing::error!(processor_id = %processor_id, error = %err, "encode error");
-                                        forward_error(&output, &processor_id, message).await?;
-                                        continue;
-                                    }
-                                }
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&output, data).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                    tracing::info!(processor_id = %processor_id, "stopped");
-                                    return Ok(());
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        let rows = collection.num_rows() as u64;
+                                        match encoder.encode(collection.as_ref()) {
+                                            Ok(payload) => {
+                                                send_with_backpressure(
+                                                    &output,
+                                                    StreamData::encoded_bytes(payload, rows),
+                                                )
+                                                .await?;
+                                            }
+                                            Err(err) => {
+                                                let message = format!("encode error: {err}");
+                                                tracing::error!(processor_id = %processor_id, error = %err, "encode error");
+                                                forward_error(&output, &processor_id, message).await?;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        send_with_backpressure(&output, data).await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                                            tracing::info!(processor_id = %processor_id, "stopped");
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {

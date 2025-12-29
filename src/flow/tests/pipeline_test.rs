@@ -12,8 +12,76 @@ use flow::planner::sink::{
 };
 use flow::processor::StreamData;
 use flow::FlowInstance;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
+
+async fn recv_next_json(
+    output: &mut tokio::sync::mpsc::Receiver<StreamData>,
+    timeout_duration: Duration,
+) -> JsonValue {
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let item = timeout(remaining, output.recv())
+            .await
+            .expect("timeout waiting for pipeline output")
+            .expect("pipeline output channel closed");
+        match item {
+            StreamData::EncodedBytes { payload, .. } => {
+                return serde_json::from_slice(&payload).expect("invalid JSON payload")
+            }
+            StreamData::Control(_) => continue,
+            StreamData::Watermark(_) => continue,
+            StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
+            other => panic!("unexpected stream data: {}", other.description()),
+        }
+    }
+}
+
+fn normalize_json(value: JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Array(items) => {
+            JsonValue::Array(items.into_iter().map(normalize_json).collect())
+        }
+        JsonValue::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let mut out = serde_json::Map::with_capacity(entries.len());
+            for (k, v) in entries {
+                out.insert(k, normalize_json(v));
+            }
+            JsonValue::Object(out)
+        }
+        other => other,
+    }
+}
+
+fn sort_json_array_by_key(mut value: JsonValue, key: &str) -> JsonValue {
+    let JsonValue::Array(items) = &mut value else {
+        panic!("expected JSON array");
+    };
+    items.sort_by(|a, b| {
+        let JsonValue::Object(a_obj) = a else {
+            return std::cmp::Ordering::Equal;
+        };
+        let JsonValue::Object(b_obj) = b else {
+            return std::cmp::Ordering::Equal;
+        };
+        let a_val = a_obj.get(key);
+        let b_val = b_obj.get(key);
+        match (a_val, b_val) {
+            (Some(JsonValue::Number(a_num)), Some(JsonValue::Number(b_num))) => {
+                a_num.as_i64().cmp(&b_num.as_i64())
+            }
+            (Some(a), Some(b)) => format!("{a:?}").cmp(&format!("{b:?}")),
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    value
+}
 
 #[tokio::test]
 async fn test_create_pipeline_aggregation_with_group_by_window_and_expr() {
@@ -74,69 +142,18 @@ async fn test_create_pipeline_aggregation_with_group_by_window_and_expr() {
     let mut output = pipeline
         .take_output()
         .expect("pipeline should expose an output receiver");
-    let received_data = timeout(Duration::from_secs(5), output.recv())
-        .await
-        .unwrap_or_else(|_| panic!("Timeout waiting for output for: {}", test_name))
-        .unwrap_or_else(|| panic!("Failed to receive output for: {}", test_name));
-
-    match received_data {
-        StreamData::Collection(result_collection) => {
-            let mut rows = result_collection.rows().to_vec();
-            rows.sort_by(|a, b| {
-                let av = a
-                    .value_by_name("stream", "b + 1")
-                    .or_else(|| a.value_by_name("", "b + 1"));
-                let bv = b
-                    .value_by_name("stream", "b + 1")
-                    .or_else(|| b.value_by_name("", "b + 1"));
-                format!("{:?}", av).cmp(&format!("{:?}", bv))
-            });
-
-            assert_eq!(
-                rows.len(),
-                2,
-                "Wrong number of rows for test: {}",
-                test_name
-            );
-            for row in &rows {
-                assert_eq!(
-                    row.len(),
-                    2,
-                    "Wrong number of columns for test: {}",
-                    test_name
-                );
-            }
-
-            let read_col = |name: &str| -> Vec<Value> {
-                rows.iter()
-                    .map(|row| {
-                        row.value_by_name("stream", name)
-                            .or_else(|| row.value_by_name("", name))
-                            .unwrap_or_else(|| panic!("column {} missing", name))
-                            .clone()
-                    })
-                    .collect()
-            };
-
-            assert_eq!(
-                read_col("sum(a) + 1"),
-                vec![Value::Int64(3), Value::Int64(3)],
-                "Wrong values in column sum(a) + 1 for test: {}",
-                test_name
-            );
-            assert_eq!(
-                read_col("b + 1"),
-                vec![Value::Int64(2), Value::Int64(3)],
-                "Wrong values in column b + 1 for test: {}",
-                test_name
-            );
-        }
-        other => panic!(
-            "Expected Collection data, but received {} for test: {}",
-            other.description(),
-            test_name
-        ),
-    }
+    let actual = recv_next_json(&mut output, Duration::from_secs(5)).await;
+    let expected = serde_json::json!([
+        {"sum(a) + 1": 3, "b + 1": 2},
+        {"sum(a) + 1": 3, "b + 1": 3}
+    ]);
+    let actual_sorted = sort_json_array_by_key(normalize_json(actual), "b + 1");
+    let expected_sorted = sort_json_array_by_key(normalize_json(expected), "b + 1");
+    assert_eq!(
+        actual_sorted, expected_sorted,
+        "Wrong output JSON for test: {}",
+        test_name
+    );
 
     pipeline
         .close()
@@ -172,22 +189,11 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     let mut output = pipeline
         .take_output()
         .expect("pipeline should expose an output receiver");
-    let received = timeout(Duration::from_secs(1), output.recv())
-        .await
-        .expect("pipeline output timeout")
-        .expect("pipeline output missing");
-    match received {
-        StreamData::Collection(collection) => {
-            let rows = collection.rows();
-            assert_eq!(rows.len(), 1);
-            let value = rows[0]
-                .value_by_name("stream", "a")
-                .or_else(|| rows[0].value_by_name("", "a"))
-                .expect("missing column a");
-            assert_eq!(value, &Value::Int64(10));
-        }
-        other => panic!("expected collection data, got {:?}", other.description()),
-    }
+    let actual = recv_next_json(&mut output, Duration::from_secs(1)).await;
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(serde_json::json!([{"a": 10}]))
+    );
 
     pipeline.close().await.expect("close pipeline");
 }
@@ -242,12 +248,8 @@ async fn test_batch_processor_flushes_on_count() {
         .expect("first batch timeout")
         .expect("first batch missing");
     match first {
-        StreamData::Collection(collection) => {
-            assert_eq!(
-                collection.num_rows(),
-                2,
-                "first batch should contain 2 rows"
-            );
+        StreamData::EncodedBytes { num_rows, .. } => {
+            assert_eq!(num_rows, 2, "first batch should contain 2 rows");
         }
         other => panic!(
             "expected first batch collection, got {}",
@@ -262,12 +264,8 @@ async fn test_batch_processor_flushes_on_count() {
         .expect("second batch timeout")
         .expect("second batch missing");
     match second {
-        StreamData::Collection(collection) => {
-            assert_eq!(
-                collection.num_rows(),
-                1,
-                "leftover batch should contain 1 row"
-            );
+        StreamData::EncodedBytes { num_rows, .. } => {
+            assert_eq!(num_rows, 1, "leftover batch should contain 1 row");
         }
         other => panic!("expected leftover collection, got {}", other.description()),
     }
@@ -390,39 +388,28 @@ async fn test_aggregation_with_countwindow() {
     // Verify results
     assert_eq!(results.len(), 2, "Expected 2 complete window results");
 
-    // Verify first window: sum(10, 20) = 30
-    match &results[0] {
-        StreamData::Collection(collection) => {
-            assert_eq!(collection.num_rows(), 1, "Each window should produce 1 row");
-            let rows = collection.rows();
-            let sum_value = rows[0]
-                .value_by_name("", "sum(a)") // aggregate result in affiliate column
-                .expect("missing sum(a) column");
-            assert_eq!(sum_value, &Value::Int64(30));
-            println!("✓ First window: sum(10, 20) = 30");
-        }
+    let first = match &results[0] {
+        StreamData::EncodedBytes { payload, .. } => serde_json::from_slice(payload).expect("json"),
         other => panic!(
-            "Expected collection data for first window, got {:?}",
+            "Expected EncodedBytes for first window, got {}",
             other.description()
         ),
-    }
-
-    // Verify second window: sum(30, 40) = 70
-    match &results[1] {
-        StreamData::Collection(collection) => {
-            assert_eq!(collection.num_rows(), 1, "Each window should produce 1 row");
-            let rows = collection.rows();
-            let sum_value = rows[0]
-                .value_by_name("", "sum(a)")
-                .expect("missing sum(a) column");
-            assert_eq!(sum_value, &Value::Int64(70));
-            println!("✓ Second window: sum(30, 40) = 70");
-        }
+    };
+    let second = match &results[1] {
+        StreamData::EncodedBytes { payload, .. } => serde_json::from_slice(payload).expect("json"),
         other => panic!(
-            "Expected collection data for second window, got {:?}",
+            "Expected EncodedBytes for second window, got {}",
             other.description()
         ),
-    }
+    };
+    assert_eq!(
+        normalize_json(first),
+        normalize_json(serde_json::json!([{"sum(a)": 30}]))
+    );
+    assert_eq!(
+        normalize_json(second),
+        normalize_json(serde_json::json!([{"sum(a)": 70}]))
+    );
 
     println!("✓ All aggregation with countwindow tests passed!");
 }
@@ -494,25 +481,20 @@ async fn test_last_row_with_countwindow() {
         .expect("second window timeout")
         .expect("second window missing");
 
-    match first {
-        StreamData::Collection(collection) => {
-            assert_eq!(collection.num_rows(), 1);
-            let value = collection.rows()[0]
-                .value_by_name("", "last_row(a)")
-                .expect("missing last_row(a)");
-            assert_eq!(value, &Value::Int64(20));
-        }
-        other => panic!("expected collection, got {}", other.description()),
-    }
-
-    match second {
-        StreamData::Collection(collection) => {
-            assert_eq!(collection.num_rows(), 1);
-            let value = collection.rows()[0]
-                .value_by_name("", "last_row(a)")
-                .expect("missing last_row(a)");
-            assert_eq!(value, &Value::Int64(40));
-        }
-        other => panic!("expected collection, got {}", other.description()),
-    }
+    let first = match first {
+        StreamData::EncodedBytes { payload, .. } => serde_json::from_slice(&payload).expect("json"),
+        other => panic!("expected EncodedBytes, got {}", other.description()),
+    };
+    let second = match second {
+        StreamData::EncodedBytes { payload, .. } => serde_json::from_slice(&payload).expect("json"),
+        other => panic!("expected EncodedBytes, got {}", other.description()),
+    };
+    assert_eq!(
+        normalize_json(first),
+        normalize_json(serde_json::json!([{"last_row(a)": 20}]))
+    );
+    assert_eq!(
+        normalize_json(second),
+        normalize_json(serde_json::json!([{"last_row(a)": 40}]))
+    );
 }
