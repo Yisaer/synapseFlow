@@ -77,33 +77,36 @@ impl Processor for EncoderProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
-                                let rows = collection.num_rows() as u64;
-                                match encoder.encode(collection.as_ref()) {
-                                    Ok(payload) => {
-                                        send_with_backpressure(
-                                            &output,
-                                            StreamData::encoded_bytes(payload, rows),
-                                        )
-                                        .await?;
-                                    }
-                                    Err(err) => {
-                                        let message = format!("encode error: {err}");
-                                        tracing::error!(processor_id = %processor_id, error = %err, "encode error");
-                                        forward_error(&output, &processor_id, message).await?;
-                                        continue;
-                                    }
-                                }
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&output, data).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                    tracing::info!(processor_id = %processor_id, "stopped");
-                                    return Ok(());
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        let rows = collection.num_rows() as u64;
+                                        match encoder.encode(collection.as_ref()) {
+                                            Ok(payload) => {
+                                                send_with_backpressure(
+                                                    &output,
+                                                    StreamData::encoded_bytes(payload, rows),
+                                                )
+                                                .await?;
+                                            }
+                                            Err(err) => {
+                                                let message = format!("encode error: {err}");
+                                                tracing::error!(processor_id = %processor_id, error = %err, "encode error");
+                                                forward_error(&output, &processor_id, message).await?;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        send_with_backpressure(&output, data).await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                                            tracing::info!(processor_id = %processor_id, "stopped");
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {

@@ -176,62 +176,74 @@ impl Processor for SinkProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::EncodedBytes { payload, num_rows })) => {
-                                log_received_data(&processor_id, &StreamData::EncodedBytes { payload: payload.clone(), num_rows });
-                                let rows = num_rows;
-                                if let Err(err) =
-                                    Self::handle_payload(&processor_id, &mut connector, &payload, rows).await
-                                {
-                                    tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
-                                    forward_error(&output, &processor_id, err.to_string()).await?;
-                                    continue;
-                                }
-
-                                if forward_data {
-                                    send_with_backpressure(
-                                        &output,
-                                        StreamData::EncodedBytes { payload, num_rows },
-                                    )
-                                    .await?;
-                                }
-                            }
-                            Some(Ok(StreamData::Bytes(payload))) => {
-                                log_received_data(&processor_id, &StreamData::Bytes(payload.clone()));
-                                if let Err(err) =
-                                    Self::handle_payload(&processor_id, &mut connector, &payload, 1).await
-                                {
-                                    tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
-                                    forward_error(&output, &processor_id, err.to_string()).await?;
-                                    continue;
-                                }
-
-                                if forward_data {
-                                    send_with_backpressure(
-                                        &output,
-                                        StreamData::Bytes(payload),
-                                    )
-                                    .await?;
-                                }
-                            }
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
-                                let message =
-                                    "sink processor received unencoded collection without encoder stage";
-                                tracing::warn!(processor_id = %processor_id, "{}", message);
-                                forward_error(&output, &processor_id, message).await?;
-                                drop(collection);
-                                continue;
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&output, data.clone()).await?;
+                                match data {
+                                    StreamData::EncodedBytes { payload, num_rows } => {
+                                        let rows = num_rows;
+                                        if let Err(err) = Self::handle_payload(
+                                            &processor_id,
+                                            &mut connector,
+                                            &payload,
+                                            rows,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
+                                            forward_error(&output, &processor_id, err.to_string())
+                                                .await?;
+                                            continue;
+                                        }
 
-                                if is_terminal {
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                    Self::handle_terminal(&mut connector).await?;
-                                    tracing::info!(processor_id = %processor_id, "stopped");
-                                    return Ok(());
+                                        if forward_data {
+                                            send_with_backpressure(
+                                                &output,
+                                                StreamData::EncodedBytes { payload, num_rows },
+                                            )
+                                            .await?;
+                                        }
+                                    }
+                                    StreamData::Bytes(payload) => {
+                                        if let Err(err) = Self::handle_payload(
+                                            &processor_id,
+                                            &mut connector,
+                                            &payload,
+                                            1,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
+                                            forward_error(&output, &processor_id, err.to_string())
+                                                .await?;
+                                            continue;
+                                        }
+
+                                        if forward_data {
+                                            send_with_backpressure(
+                                                &output,
+                                                StreamData::Bytes(payload),
+                                            )
+                                            .await?;
+                                        }
+                                    }
+                                    StreamData::Collection(collection) => {
+                                        let message = "sink processor received unencoded collection without encoder stage";
+                                        tracing::warn!(processor_id = %processor_id, "{}", message);
+                                        forward_error(&output, &processor_id, message).await?;
+                                        drop(collection);
+                                        continue;
+                                    }
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        send_with_backpressure(&output, data).await?;
+
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                                            Self::handle_terminal(&mut connector).await?;
+                                            tracing::info!(processor_id = %processor_id, "stopped");
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {

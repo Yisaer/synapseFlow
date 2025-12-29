@@ -133,31 +133,46 @@ impl Processor for StreamingCountAggregationProcessor {
                     }
                     data_item = input_streams.next() => {
                         match data_item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&id, &StreamData::Collection(collection.clone()));
-                                match StreamingCountAggregationProcessor::process_collection(&mut worker, &mut window_state, collection.as_ref()) {
-                                    Ok(outputs) => {
-                                        for out in outputs {
-                                            let data = StreamData::Collection(out);
-                                            send_with_backpressure(&output, data).await?
+                            Some(Ok(data)) => {
+                                log_received_data(&id, &data);
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        match StreamingCountAggregationProcessor::process_collection(
+                                            &mut worker,
+                                            &mut window_state,
+                                            collection.as_ref(),
+                                        ) {
+                                            Ok(outputs) => {
+                                                for out in outputs {
+                                                    let data = StreamData::Collection(out);
+                                                    send_with_backpressure(&output, data).await?
+                                                }
+                                            }
+                                            Err(e) => {
+                                                return Err(ProcessorError::ProcessingError(
+                                                    format!(
+                                                        "Failed to process streaming count aggregation: {e}"
+                                                    ),
+                                                ));
+                                            }
                                         }
                                     }
-                                    Err(e) => {
-                                        return Err(ProcessorError::ProcessingError(format!("Failed to process streaming count aggregation: {e}")));
+                                    StreamData::Control(control_signal) => {
+                                        let is_terminal = control_signal.is_terminal();
+                                        send_with_backpressure(
+                                            &output,
+                                            StreamData::control(control_signal),
+                                        )
+                                        .await?;
+                                        if is_terminal {
+                                            stream_ended = true;
+                                            break;
+                                        }
+                                    }
+                                    other => {
+                                        send_with_backpressure(&output, other).await?;
                                     }
                                 }
-                            }
-                            Some(Ok(StreamData::Control(control_signal))) => {
-                                let is_terminal = control_signal.is_terminal();
-                                send_with_backpressure(&output, StreamData::control(control_signal)).await?;
-                                if is_terminal {
-                                    stream_ended = true;
-                                    break;
-                                }
-                            }
-                            Some(Ok(other)) => {
-                                log_received_data(&id, &other);
-                                send_with_backpressure(&output, other).await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 tracing::warn!(processor_id = %id, skipped = n, "input lagged");
