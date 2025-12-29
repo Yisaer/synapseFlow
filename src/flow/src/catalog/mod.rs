@@ -3,6 +3,13 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+mod function_catalog;
+
+pub use function_catalog::{
+    AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
+    FunctionRequirement, FunctionSignatureSpec, StatefulFunctionSpec, StructFieldSpec, TypeSpec,
+};
+
 /// Errors that can occur when mutating the catalog.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CatalogError {
