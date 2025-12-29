@@ -2,7 +2,7 @@
 //! supports incremental streaming.
 
 use crate::codec::{CollectionEncoder, CollectionEncoderStream};
-use crate::model::{Collection, RecordBatch, Tuple};
+use crate::model::Collection;
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
@@ -102,28 +102,25 @@ impl StreamingEncoderProcessor {
         processor_id: &str,
         collection: Box<dyn Collection>,
         encoder: &Arc<dyn CollectionEncoder>,
-        buffer: &mut Vec<Tuple>,
+        row_count: &mut usize,
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
         mode: &StreamingBatchMode,
         output: &broadcast::Sender<StreamData>,
         timer: &mut Option<Pin<Box<Sleep>>>,
     ) -> Result<(), ProcessorError> {
-        let rows = collection
-            .into_rows()
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-        for tuple in rows {
+        for tuple in collection.rows().iter() {
             let stream = Self::ensure_stream(encoder, stream_state)?;
-            stream.append(&tuple).map_err(|err| {
+            stream.append(tuple).map_err(|err| {
                 ProcessorError::ProcessingError(format!("stream append error: {err}"))
             })?;
-            buffer.push(tuple);
+            *row_count += 1;
             if let Some(count) = mode.count_threshold() {
-                if buffer.len() >= count {
-                    Self::flush_buffer(processor_id, buffer, stream_state, output).await?;
+                if *row_count >= count {
+                    Self::flush_buffer(processor_id, row_count, stream_state, output).await?;
                 }
             }
             if let Some(duration) = mode.duration() {
-                Self::schedule_timer(timer, duration, !buffer.is_empty());
+                Self::schedule_timer(timer, duration, *row_count > 0);
             }
         }
         Ok(())
@@ -131,17 +128,15 @@ impl StreamingEncoderProcessor {
 
     async fn flush_buffer(
         processor_id: &str,
-        buffer: &mut Vec<Tuple>,
+        row_count: &mut usize,
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
         output: &broadcast::Sender<StreamData>,
     ) -> Result<(), ProcessorError> {
-        if buffer.is_empty() {
+        if *row_count == 0 {
             *stream_state = None;
             return Ok(());
         }
-        let rows = std::mem::take(buffer);
-        let batch = RecordBatch::new(rows)
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+        let flushed_rows = std::mem::take(row_count);
         let stream = stream_state.take().ok_or_else(|| {
             ProcessorError::ProcessingError(
                 "encoder stream missing when attempting to flush".to_string(),
@@ -150,7 +145,11 @@ impl StreamingEncoderProcessor {
         let payload = stream.finish().map_err(|err| {
             ProcessorError::ProcessingError(format!("stream finish error: {err}"))
         })?;
-        send_with_backpressure(output, StreamData::encoded(Box::new(batch), payload)).await?;
+        send_with_backpressure(
+            output,
+            StreamData::encoded_bytes(payload, flushed_rows as u64),
+        )
+        .await?;
         tracing::debug!(processor_id = %processor_id, "flushed batch");
         Ok(())
     }
@@ -184,7 +183,7 @@ impl Processor for StreamingEncoderProcessor {
         tracing::info!(processor_id = %processor_id, "streaming encoder processor starting");
 
         tokio::spawn(async move {
-            let mut buffer: Vec<Tuple> = Vec::new();
+            let mut row_count: usize = 0;
             let mut stream_state: Option<Box<dyn CollectionEncoderStream>> = None;
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             loop {
@@ -195,7 +194,7 @@ impl Processor for StreamingEncoderProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut buffer, &mut stream_state, &output).await {
+                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                                     forward_error(&output, &processor_id, err.to_string()).await?;
                                 }
@@ -212,52 +211,80 @@ impl Processor for StreamingEncoderProcessor {
                             timer.as_mut().await;
                         }
                     }, if timer.is_some() => {
-                        if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut buffer, &mut stream_state, &output).await {
+                        if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
                             tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                             forward_error(&output, &processor_id, err.to_string()).await?;
                         }
                         if let Some(duration) = mode.duration() {
-                            StreamingEncoderProcessor::schedule_timer(&mut timer, duration, !buffer.is_empty());
+                            StreamingEncoderProcessor::schedule_timer(&mut timer, duration, row_count > 0);
                         }
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
-                                if let Err(err) = StreamingEncoderProcessor::handle_collection(
-                                    &processor_id,
-                                    collection,
-                                    &encoder,
-                                    &mut buffer,
-                                    &mut stream_state,
-                                    &mode,
-                                    &output,
-                                    &mut timer,
-                                ).await {
-                                    tracing::error!(
-                                        processor_id = %processor_id,
-                                        error = %err,
-                                        "handle collection error"
-                                    );
-                                    forward_error(&output, &processor_id, err.to_string()).await?;
-                                }
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                let is_terminal = data.is_terminal();
-                                if is_terminal {
-                                    if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut buffer, &mut stream_state, &output).await {
-                                        tracing::error!(processor_id = %processor_id, error = %err, "flush error");
-                                        forward_error(&output, &processor_id, err.to_string()).await?;
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        if let Err(err) =
+                                            StreamingEncoderProcessor::handle_collection(
+                                                &processor_id,
+                                                collection,
+                                                &encoder,
+                                                &mut row_count,
+                                                &mut stream_state,
+                                                &mode,
+                                                &output,
+                                                &mut timer,
+                                            )
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                processor_id = %processor_id,
+                                                error = %err,
+                                                "handle collection error"
+                                            );
+                                            forward_error(
+                                                &output,
+                                                &processor_id,
+                                                err.to_string(),
+                                            )
+                                            .await?;
+                                        }
                                     }
-                                }
-                                send_with_backpressure(&output, data.clone()).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                    return Ok(());
-                                }
-                                if let Some(duration) = mode.duration() {
-                                    StreamingEncoderProcessor::schedule_timer(&mut timer, duration, !buffer.is_empty());
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        if is_terminal {
+                                            if let Err(err) =
+                                                StreamingEncoderProcessor::flush_buffer(
+                                                    &processor_id,
+                                                    &mut row_count,
+                                                    &mut stream_state,
+                                                    &output,
+                                                )
+                                                .await
+                                            {
+                                                tracing::error!(processor_id = %processor_id, error = %err, "flush error");
+                                                forward_error(
+                                                    &output,
+                                                    &processor_id,
+                                                    err.to_string(),
+                                                )
+                                                .await?;
+                                            }
+                                        }
+                                        send_with_backpressure(&output, data).await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                                            return Ok(());
+                                        }
+                                        if let Some(duration) = mode.duration() {
+                                            StreamingEncoderProcessor::schedule_timer(
+                                                &mut timer,
+                                                duration,
+                                                row_count > 0,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
@@ -273,7 +300,7 @@ impl Processor for StreamingEncoderProcessor {
                                 forward_error(&output, &processor_id, message).await?;
                             }
                             None => {
-                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut buffer, &mut stream_state, &output).await {
+                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                                     forward_error(&output, &processor_id, err.to_string()).await?;
                                 }

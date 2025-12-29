@@ -244,36 +244,55 @@ impl Processor for AggregationProcessor {
                     }
                     data_item = input_streams.next() => {
                         match data_item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&id, &StreamData::Collection(collection.clone()));
-
-                                match Self::process_batch_with_grouping(&physical_aggregation, &aggregate_registry, collection.as_ref()) {
-                                    Ok(result_collection) => {
-                                        let result_data = StreamData::Collection(result_collection);
-                                        if let Err(e) = send_with_backpressure(&output, result_data).await {
-                                            tracing::error!(processor_id = %id, error = %e, "failed to send result");
-                                            return Err(e);
+                            Some(Ok(data)) => {
+                                log_received_data(&id, &data);
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        match Self::process_batch_with_grouping(
+                                            &physical_aggregation,
+                                            &aggregate_registry,
+                                            collection.as_ref(),
+                                        ) {
+                                            Ok(result_collection) => {
+                                                let result_data =
+                                                    StreamData::Collection(result_collection);
+                                                if let Err(e) =
+                                                    send_with_backpressure(&output, result_data)
+                                                        .await
+                                                {
+                                                    tracing::error!(processor_id = %id, error = %e, "failed to send result");
+                                                    return Err(e);
+                                                }
+                                                tracing::debug!(processor_id = %id, "processed batch and sent grouped results");
+                                            }
+                                            Err(e) => {
+                                                return Err(ProcessorError::ProcessingError(
+                                                    format!(
+                                                        "Failed to process aggregation: {}",
+                                                        e
+                                                    ),
+                                                ));
+                                            }
                                         }
-                                        tracing::debug!(processor_id = %id, "processed batch and sent grouped results");
                                     }
-                                    Err(e) => {
-                                        return Err(ProcessorError::ProcessingError(format!("Failed to process aggregation: {}", e)));
+                                    StreamData::Control(control_signal) => {
+                                        let is_terminal = control_signal.is_terminal();
+                                        send_control_with_backpressure(
+                                            &control_output,
+                                            control_signal,
+                                        )
+                                        .await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
+                                            stream_ended = true;
+                                            break;
+                                        }
+                                    }
+                                    other_data => {
+                                        // Forward non-collection data (like Encoded, Bytes) as-is
+                                        send_with_backpressure(&output, other_data).await?;
                                     }
                                 }
-                            }
-                            Some(Ok(StreamData::Control(control_signal))) => {
-                                let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(&control_output, control_signal).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                    stream_ended = true;
-                                    break;
-                                }
-                            }
-                            Some(Ok(other_data)) => {
-                                // Forward non-collection data (like Encoded, Bytes) as-is
-                                log_received_data(&id, &other_data);
-                                send_with_backpressure(&output, other_data).await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 tracing::warn!(processor_id = %id, skipped = n, "input lagged");

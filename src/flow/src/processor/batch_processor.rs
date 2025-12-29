@@ -169,35 +169,72 @@ impl Processor for BatchProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
-                                BatchProcessor::append_collection(&mut buffer, collection.as_ref());
-                                match &mode {
-                                    BatchMode::CountOnly { count } => {
-                                        BatchProcessor::drain_by_count(&processor_id, &mut buffer, &output, *count).await?;
-                                    }
-                                    BatchMode::DurationOnly { duration } => {
-                                        BatchProcessor::schedule_timer(&mut timer, *duration, !buffer.is_empty());
-                                    }
-                                    BatchMode::Combined { count, duration } => {
-                                        BatchProcessor::drain_by_count(&processor_id, &mut buffer, &output, *count).await?;
-                                        BatchProcessor::schedule_timer(&mut timer, *duration, !buffer.is_empty());
-                                    }
-                                }
-                            }
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                let is_terminal = data.is_terminal();
-                                if is_terminal {
-                                    BatchProcessor::flush_all(&processor_id, &mut buffer, &output).await?;
-                                }
-                                send_with_backpressure(&output, data.clone()).await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                    return Ok(());
-                                }
-                                if let BatchMode::DurationOnly { duration } | BatchMode::Combined { duration, .. } = &mode {
-                                    BatchProcessor::schedule_timer(&mut timer, *duration, !buffer.is_empty());
+                                match data {
+                                    StreamData::Collection(collection) => {
+                                        BatchProcessor::append_collection(
+                                            &mut buffer,
+                                            collection.as_ref(),
+                                        );
+                                        match &mode {
+                                            BatchMode::CountOnly { count } => {
+                                                BatchProcessor::drain_by_count(
+                                                    &processor_id,
+                                                    &mut buffer,
+                                                    &output,
+                                                    *count,
+                                                )
+                                                .await?;
+                                            }
+                                            BatchMode::DurationOnly { duration } => {
+                                                BatchProcessor::schedule_timer(
+                                                    &mut timer,
+                                                    *duration,
+                                                    !buffer.is_empty(),
+                                                );
+                                            }
+                                            BatchMode::Combined { count, duration } => {
+                                                BatchProcessor::drain_by_count(
+                                                    &processor_id,
+                                                    &mut buffer,
+                                                    &output,
+                                                    *count,
+                                                )
+                                                .await?;
+                                                BatchProcessor::schedule_timer(
+                                                    &mut timer,
+                                                    *duration,
+                                                    !buffer.is_empty(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    data => {
+                                        let is_terminal = data.is_terminal();
+                                        if is_terminal {
+                                            BatchProcessor::flush_all(
+                                                &processor_id,
+                                                &mut buffer,
+                                                &output,
+                                            )
+                                            .await?;
+                                        }
+                                        send_with_backpressure(&output, data).await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                                            return Ok(());
+                                        }
+                                        if let BatchMode::DurationOnly { duration }
+                                        | BatchMode::Combined { duration, .. } = &mode
+                                        {
+                                            BatchProcessor::schedule_timer(
+                                                &mut timer,
+                                                *duration,
+                                                !buffer.is_empty(),
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {

@@ -39,11 +39,8 @@ impl ControlSignal {
 pub enum StreamData {
     /// Data payload - Collection (owned)
     Collection(Box<dyn Collection>),
-    /// Collection paired with encoded bytes for sink connectors
-    Encoded {
-        collection: Box<dyn Collection>,
-        payload: Vec<u8>,
-    },
+    /// Encoded bytes for sink connectors
+    EncodedBytes { payload: Vec<u8>, num_rows: u64 },
     /// Raw bytes that still need to be decoded into a collection
     Bytes(Vec<u8>),
     /// Control signal for flow management
@@ -114,12 +111,9 @@ impl StreamData {
         StreamData::Bytes(payload)
     }
 
-    /// Create encoded collection payload
-    pub fn encoded(collection: Box<dyn Collection>, payload: Vec<u8>) -> Self {
-        StreamData::Encoded {
-            collection,
-            payload,
-        }
+    /// Create encoded payload
+    pub fn encoded_bytes(payload: Vec<u8>, num_rows: u64) -> Self {
+        StreamData::EncodedBytes { payload, num_rows }
     }
 
     /// Create control signal
@@ -141,7 +135,7 @@ impl StreamData {
     pub fn is_data(&self) -> bool {
         matches!(
             self,
-            StreamData::Collection(_) | StreamData::Bytes(_) | StreamData::Encoded { .. }
+            StreamData::Collection(_) | StreamData::Bytes(_) | StreamData::EncodedBytes { .. }
         )
     }
 
@@ -172,7 +166,6 @@ impl StreamData {
     pub fn as_collection(&self) -> Option<&dyn Collection> {
         match self {
             StreamData::Collection(collection) => Some(collection.as_ref()),
-            StreamData::Encoded { collection, .. } => Some(collection.as_ref()),
             _ => None,
         }
     }
@@ -181,7 +174,6 @@ impl StreamData {
     pub fn as_collection_mut(&mut self) -> Option<&mut dyn Collection> {
         match self {
             StreamData::Collection(collection) => Some(collection.as_mut()),
-            StreamData::Encoded { collection, .. } => Some(collection.as_mut()),
             _ => None,
         }
     }
@@ -190,7 +182,6 @@ impl StreamData {
     pub fn into_collection(self) -> Option<Box<dyn Collection>> {
         match self {
             StreamData::Collection(collection) => Some(collection),
-            StreamData::Encoded { collection, .. } => Some(collection),
             _ => None,
         }
     }
@@ -217,8 +208,12 @@ impl StreamData {
             StreamData::Collection(collection) => {
                 format!("Collection with {} rows", collection.num_rows())
             }
-            StreamData::Encoded { payload, .. } => {
-                format!("Encoded payload ({} bytes)", payload.len())
+            StreamData::EncodedBytes { payload, num_rows } => {
+                format!(
+                    "Encoded payload ({} bytes, {} rows)",
+                    payload.len(),
+                    num_rows
+                )
             }
             StreamData::Bytes(payload) => format!("Bytes payload ({} bytes)", payload.len()),
             StreamData::Control(signal) => format!("Control signal: {:?}", signal),
