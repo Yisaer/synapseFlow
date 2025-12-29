@@ -44,11 +44,25 @@ If any of these checks fail:
 - ask a clarifying question, or
 - propose a fix with suggestions (e.g. closest column names), but do not guess.
 
+## Syntax Workflow
+
+Before generating SQL (and when fixing validation errors):
+
+1) Fetch `GET /capabilities/syntax`.
+2) Treat the returned `constructs` tree as the source of truth for supported syntax.
+3) Treat constructs not present in the catalog as unsupported by default.
+4) Use agent-friendly fields to guide generation:
+   - `purpose` / `semantics` to decide when to use a construct
+   - `placement` to decide where it can appear (e.g. windows declared in `GROUP BY`)
+   - `syntax` / `examples` as templates
+   - `constraints` / `workarounds` to stay within the supported subset
+
 ## SQL Generation Workflow (Recommended)
 
 1) Build an intent sketch (project/filter/aggregate/sort/limit…).
-2) Fetch function metadata via `GET /functions` (and `GET /functions/describe/:name` when needed).
-3) Render SQL using only supported syntax/features/functions.
+2) Fetch syntax metadata via `GET /capabilities/syntax`.
+3) Fetch function metadata via `GET /functions` (and `GET /functions/describe/:name` when needed).
+4) Render SQL using only supported syntax constructs and functions.
 4) Run `validate_sql(sql)` and iterate until it passes.
 5) Run `explain_sql(sql)` and verify the plan matches intent (node kinds and ordering).
 6) Output:

@@ -1,5 +1,6 @@
 pub mod aggregate_registry;
 pub mod aggregate_transformer;
+pub mod capabilities;
 pub mod col_placeholder_allocator;
 pub mod dialect;
 pub mod expression_extractor;
@@ -29,3 +30,8 @@ pub use visitor::{
     extract_aggregates_with_visitor,
 };
 pub use window::Window;
+
+pub use capabilities::{
+    SyntaxCapabilities, SyntaxConstruct, SyntaxConstructKind, SyntaxFeatureStatus, SyntaxPlacement,
+    syntax_capabilities, syntax_capabilities_owned,
+};
