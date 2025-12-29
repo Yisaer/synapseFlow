@@ -2,7 +2,7 @@
 
 This document describes stream metadata and schema introspection from a **SQL and schema** perspective.
 
-For agent-specific guidance (workflow, validation loop, do/don’t), see `docs/agents_readme.md`.
+For agent implementation guidance (workflow, validation loop, do/don’t), see `docs/agents_readme.md`.
 
 ## Manager API
 
@@ -12,7 +12,7 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 `GET /streams`
 
-Returns a list of known streams with their schemas.
+Returns a list of known streams with their schemas (a lightweight summary).
 
 Example:
 
@@ -22,9 +22,9 @@ curl -s http://127.0.0.1:8080/streams | jq .
 
 ### Describe Stream
 
-`GET /streams/describe/{stream_name}`
+`GET /streams/describe/:name`
 
-Returns one stream’s schema and metadata. Agents should prefer this endpoint when they already know (or have resolved) the stream name.
+Returns a single stream’s schema and definition spec.
 
 Example:
 
@@ -34,18 +34,32 @@ curl -s http://127.0.0.1:8080/streams/describe/user | jq .
 
 If the stream does not exist, the API should return `404` with a descriptive message.
 
-## Response Shape (Recommended Contract)
+## Response Shapes
 
-Agents should treat field names as stable API contract. Optional fields may be absent.
+Clients should treat field names as stable API contract. Optional fields may be absent.
 
-### Stream
+### `GET /streams` → `StreamInfo[]`
 
-- `name: string` (the identifier used in SQL)
-- `shared: boolean` (whether the stream is shared)
+- `name: string` (identifier used in SQL)
+- `shared: boolean`
 - `schema: { columns: Column[] }`
-- Optional: `eventtime`, `decoder`, `stream_type`, `props`, `shared_stream` (implementation-defined)
 
-### Column
+### `GET /streams/describe/:name` → `DescribeStreamResponse`
+
+- `stream: string` (identifier used in SQL)
+- `spec_version: number` (currently `1`)
+- `spec: StreamDefinitionSpec`
+
+### `StreamDefinitionSpec`
+
+- `type: string` (stream type label, e.g. `mqtt`)
+- `shared: boolean`
+- `schema: { columns: Column[] }`
+- `decoder: { type: string, props: object }`
+- `props: object` (connector-specific stream properties)
+- Optional: `eventtime: { column: string, type: string }`
+
+### `Column`
 
 - `name: string`
 - `data_type: string`
@@ -55,7 +69,7 @@ Agents should treat field names as stable API contract. Optional fields may be a
 
 ## Type Strings
 
-The schema uses a compact set of type strings. Agents must not assume other names.
+The schema uses a compact set of type strings. Clients must not assume other names.
 
 Common scalars:
 
@@ -77,11 +91,11 @@ Streams may contain nested types (struct/list). The introspection schema represe
 - Struct columns provide `fields[]`.
 - List columns provide an `element` column (its `name` may be `"element"` in responses).
 
-Important: nested types in schema do not automatically imply that SQL supports nested field access syntax. Agents should rely on `validate_sql` and `explain_sql` to confirm supported expressions.
+Important: nested types in schema do not automatically imply that SQL supports nested field access syntax. Use SQL validation and explain outputs to confirm supported expressions.
 
 ## Column Order and Stability
 
-Agents should preserve the column order as returned by the schema when:
+Clients should preserve the column order as returned by the schema when:
 
 - Displaying schemas to users
 - Reasoning about index-based semantics in execution/explain output (if applicable)

@@ -1,6 +1,6 @@
-# SynapseFlow Agent Runtime Playbook
+# SynapseFlow Agent Runtime Playbook (Developer-Facing)
 
-This document is agent-facing operational guidance: how to use SynapseFlow’s introspection and validation tools to produce **SynapseFlow-valid SQL** from natural language.
+This document is developer-facing operational guidance: what rules and workflow should be embedded into the agent implementation. The runtime agent (CLI process) should not depend on reading repository docs; it should obtain all facts via runtime APIs/tools.
 
 Design/background details live in `docs/agents.md`.
 
@@ -20,7 +20,7 @@ All of the above must be grounded via runtime catalog introspection and capabili
 When a user request references a stream (e.g. “user stream”) or columns (e.g. “column `a`”):
 
 1) `GET /streams` to resolve/confirm the stream name (and handle ambiguity).
-2) `GET /streams/describe/{stream_name}` to fetch the authoritative schema.
+2) `GET /streams/describe/:name` to fetch the authoritative schema.
 3) Verify:
    - required columns exist
    - column types support requested operations (or that an explicit cast is supported)
@@ -52,7 +52,7 @@ Stop and clarify when:
 
 Do:
 
-- Treat `GET /streams/describe/{stream_name}` as the source of truth for schema.
+- Treat `GET /streams/describe/:name` as the source of truth for schema.
 - Prefer stable SQL patterns and the supported syntax subset.
 - Use `validate_sql` errors as structured feedback to self-correct.
 
@@ -61,4 +61,3 @@ Don’t:
 - Assume nested field access syntax exists just because the schema contains `struct`/`list`.
 - “Make up” a function or a stream/column name that isn’t in the catalogs.
 - Provide unverified SQL when `validate_sql` or `explain_sql` is available.
-
