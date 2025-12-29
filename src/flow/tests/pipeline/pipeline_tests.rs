@@ -4,9 +4,11 @@ use datatypes::Value;
 use flow::model::batch_from_columns_simple;
 use flow::processor::StreamData;
 use flow::FlowInstance;
+use serde_json::Value as JsonValue;
 use tokio::time::Duration;
 
-use super::common::{install_stream_schema, recv_next_collection};
+use super::common::ColumnCheck;
+use super::common::{build_expected_json, install_stream_schema, normalize_json, recv_next_json};
 
 struct TestCase {
     name: &'static str,
@@ -15,11 +17,6 @@ struct TestCase {
     expected_rows: usize,
     expected_columns: usize,
     column_checks: Vec<ColumnCheck>, // checks for specific columns by name
-}
-
-struct ColumnCheck {
-    expected_name: String,
-    expected_values: Vec<Value>,
 }
 
 async fn run_test_case(test_case: TestCase) {
@@ -53,48 +50,21 @@ async fn run_test_case(test_case: TestCase) {
         .take_output()
         .expect("pipeline should expose an output receiver");
     let timeout_duration = Duration::from_secs(5);
-    let collection = recv_next_collection(&mut output, timeout_duration).await;
-    let rows = collection.rows();
-
+    let actual = recv_next_json(&mut output, timeout_duration).await;
     assert_eq!(
-        rows.len(),
-        test_case.expected_rows,
-        "Wrong number of rows for test: {}",
+        test_case.expected_columns,
+        test_case.column_checks.len(),
+        "expected_columns should match column_checks for JSON comparison (test: {})",
         test_case.name
     );
-
-    if test_case.expected_rows == 0 {
-        assert!(
-            rows.is_empty(),
-            "Row-less batches should have no rows for test: {}",
-            test_case.name
-        );
-    } else {
-        for row in rows {
-            assert_eq!(
-                row.len(),
-                test_case.expected_columns,
-                "Wrong number of columns for test: {}",
-                test_case.name
-            );
-        }
-
-        for check in test_case.column_checks {
-            let mut values = Vec::with_capacity(rows.len());
-            for row in rows {
-                let value = row
-                    .value_by_name("stream", &check.expected_name)
-                    .or_else(|| row.value_by_name("", &check.expected_name))
-                    .unwrap_or_else(|| panic!("column {} missing", check.expected_name));
-                values.push(value.clone());
-            }
-            assert_eq!(
-                values, check.expected_values,
-                "Wrong values in column {} for test: {}",
-                check.expected_name, test_case.name
-            );
-        }
-    }
+    let expected: JsonValue =
+        build_expected_json(test_case.expected_rows, &test_case.column_checks);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong output JSON for test: {}",
+        test_case.name
+    );
 
     pipeline
         .close()
@@ -132,6 +102,14 @@ async fn pipeline_table_driven_queries() {
                 ColumnCheck {
                     expected_name: "b".to_string(),
                     expected_values: vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+                },
+                ColumnCheck {
+                    expected_name: "c".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1000),
+                        Value::Int64(2000),
+                        Value::Int64(3000),
+                    ],
                 },
             ],
         },

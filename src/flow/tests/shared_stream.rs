@@ -1,18 +1,19 @@
-use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, Value};
+use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{Catalog, MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::codec::JsonDecoder;
 use flow::connector::{MockSourceConnector, MqttClientManager};
 use flow::processor::StreamData;
 use flow::{shared_stream_registry, PipelineRegistries, SharedStreamConfig};
 use serde_json::Map as JsonMap;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-async fn recv_next_collection(
+async fn recv_next_json(
     output: &mut tokio::sync::mpsc::Receiver<StreamData>,
     timeout_duration: Duration,
-) -> Box<dyn flow::model::Collection> {
+) -> JsonValue {
     let deadline = tokio::time::Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -21,12 +22,13 @@ async fn recv_next_collection(
             .expect("timeout waiting for pipeline output")
             .expect("pipeline output channel closed");
         match item {
-            StreamData::Collection(collection) => return collection,
+            StreamData::EncodedBytes { payload, .. } => {
+                return serde_json::from_slice(&payload).expect("invalid JSON payload")
+            }
             StreamData::Control(_) => continue,
             StreamData::Watermark(_) => continue,
             StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
-            StreamData::EncodedBytes { .. } => panic!("unexpected stream data: EncodedBytes"),
-            StreamData::Bytes(_) => panic!("unexpected stream data: Bytes"),
+            other => panic!("unexpected stream data: {}", other.description()),
         }
     }
 }
@@ -123,34 +125,11 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         .expect("send mock payload");
 
     let timeout_duration = Duration::from_secs(5);
-    let col_ab = recv_next_collection(&mut out_ab, timeout_duration).await;
-    let col_bc = recv_next_collection(&mut out_bc, timeout_duration).await;
+    let json_ab = recv_next_json(&mut out_ab, timeout_duration).await;
+    let json_bc = recv_next_json(&mut out_bc, timeout_duration).await;
 
-    assert_eq!(col_ab.num_rows(), 1);
-    assert_eq!(col_bc.num_rows(), 1);
-
-    let row_ab = &col_ab.rows()[0];
-    let row_bc = &col_bc.rows()[0];
-
-    assert_eq!(
-        row_ab.value_by_name(&stream_name, "a"),
-        Some(&Value::Int64(1))
-    );
-    assert_eq!(
-        row_ab.value_by_name(&stream_name, "b"),
-        Some(&Value::Int64(2))
-    );
-    assert_eq!(row_ab.value_by_name(&stream_name, "c"), None);
-
-    assert_eq!(
-        row_bc.value_by_name(&stream_name, "b"),
-        Some(&Value::Int64(2))
-    );
-    assert_eq!(
-        row_bc.value_by_name(&stream_name, "c"),
-        Some(&Value::Int64(3))
-    );
-    assert_eq!(row_bc.value_by_name(&stream_name, "a"), None);
+    assert_eq!(json_ab, serde_json::json!([{"a": 1, "b": 2}]));
+    assert_eq!(json_bc, serde_json::json!([{"b": 2, "c": 3}]));
 
     let info = registry
         .get_stream(&stream_name)
