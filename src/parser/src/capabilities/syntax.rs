@@ -80,6 +80,7 @@ fn group(id: &str, title: &str, children: Vec<SyntaxConstruct>) -> SyntaxConstru
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn feature(
     id: &str,
     title: &str,
