@@ -8,7 +8,9 @@ use axum::{
     response::IntoResponse,
 };
 use flow::DecoderRegistry;
-use flow::catalog::{CatalogError, EventtimeDefinition, MqttStreamProps, StreamDecoderConfig};
+use flow::catalog::{
+    CatalogError, EventtimeDefinition, HistoryStreamProps, MqttStreamProps, StreamDecoderConfig,
+};
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
@@ -189,6 +191,17 @@ pub struct MqttStreamPropsRequest {
     pub qos: Option<u8>,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct HistoryStreamPropsRequest {
+    pub datasource: Option<String>,
+    pub topic: Option<String>,
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    pub batch_size: Option<usize>,
+    pub send_interval_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -625,6 +638,26 @@ pub(crate) fn build_stream_props(
                 qos,
                 client_id: mqtt_props.client_id,
                 connector_key: mqtt_props.connector_key,
+            }))
+        }
+        "history" => {
+            let history_props: HistoryStreamPropsRequest = serde_json::from_value(props.to_value())
+                .map_err(|err| format!("invalid history props: {}", err))?;
+            let datasource = history_props
+                .datasource
+                .ok_or("history stream requires datasource")?;
+            let topic = history_props.topic.ok_or("history stream requires topic")?;
+            Ok(StreamProps::History(HistoryStreamProps {
+                datasource,
+                topic,
+                start: history_props.start,
+                end: history_props.end,
+                batch_size: history_props.batch_size,
+                send_interval: history_props
+                    .send_interval_ms
+                    .map(std::time::Duration::from_millis),
+                decrypt_method: None,
+                decrypt_props: None,
             }))
         }
         other => Err(format!("unsupported stream type: {other}")),

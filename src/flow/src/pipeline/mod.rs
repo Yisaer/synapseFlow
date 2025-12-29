@@ -1,7 +1,7 @@
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
-    register_mock_source_handle, MockSourceConnector, MqttClientManager, MqttSinkConfig,
-    MqttSourceConfig, MqttSourceConnector,
+    register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, MockSourceConnector,
+    MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
@@ -810,6 +810,18 @@ fn attach_sources_from_catalog(
                         config,
                         mqtt_client_manager.clone(),
                     );
+                    ds.add_connector(Box::new(connector));
+                }
+                StreamProps::History(props) => {
+                    let mut config = HistorySourceConfig::new(&props.datasource, &props.topic);
+                    config.start = props.start;
+                    config.end = props.end;
+                    if let Some(bs) = props.batch_size {
+                        config.batch_size = bs;
+                    }
+                    config.send_interval = props.send_interval;
+
+                    let connector = HistorySourceConnector::new(processor_id.clone(), config);
                     ds.add_connector(Box::new(connector));
                 }
                 StreamProps::Mock(_) => {

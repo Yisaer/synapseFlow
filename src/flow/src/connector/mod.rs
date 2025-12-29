@@ -67,6 +67,8 @@ pub use registry::ConnectorRegistry;
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
+/// History source connector implementation.
+pub use source::history::{HistorySourceConfig, HistorySourceConnector};
 pub use source::mock::{
     get_mock_source_handle, register_mock_source_handle, take_mock_source_handle,
 };

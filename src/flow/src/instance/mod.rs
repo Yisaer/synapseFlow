@@ -410,6 +410,9 @@ impl FlowInstance {
             StreamProps::Mock(_) => Err(FlowInstanceError::Invalid(
                 "mock stream props cannot be used to create shared streams".to_string(),
             )),
+            StreamProps::History(_) => Err(FlowInstanceError::Invalid(
+                "history stream props cannot be used to create shared streams".to_string(),
+            )),
         }
     }
 }

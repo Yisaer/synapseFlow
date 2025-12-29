@@ -21,3 +21,9 @@ url = "2"
 prometheus = "0.13"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
+parquet = "53.0.0"
+arrow = "53.0.0"
+
+[dev-dependencies]
+tempfile = "3"
+

@@ -28,6 +28,8 @@ pub enum StreamProps {
     Mqtt(MqttStreamProps),
     /// Stream is backed by an in-memory mock connector (tests only).
     Mock(MockStreamProps),
+    /// Stream is backed by a History source (Parquet files).
+    History(HistoryStreamProps),
 }
 
 /// Supported stream types recognized by the catalog.
@@ -37,6 +39,8 @@ pub enum StreamType {
     Mqtt,
     /// Stream backed by a mock source.
     Mock,
+    /// Stream backed by a history source.
+    History,
 }
 
 /// Properties for MQTT-backed streams.
@@ -74,6 +78,19 @@ impl MqttStreamProps {
 /// Properties for mock-backed streams.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MockStreamProps {}
+
+/// Properties for history-backed streams.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HistoryStreamProps {
+    pub datasource: String,
+    pub topic: String,
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    pub batch_size: Option<usize>,
+    pub send_interval: Option<std::time::Duration>,
+    pub decrypt_method: Option<String>,
+    pub decrypt_props: Option<JsonMap<String, JsonValue>>,
+}
 
 /// Complete definition for a stream tracked by the catalog.
 #[derive(Debug, Clone)]
@@ -120,6 +137,7 @@ impl StreamDefinition {
         let stream_type = match props {
             StreamProps::Mqtt(_) => StreamType::Mqtt,
             StreamProps::Mock(_) => StreamType::Mock,
+            StreamProps::History(_) => StreamType::History,
         };
         Self {
             id: id.into(),
