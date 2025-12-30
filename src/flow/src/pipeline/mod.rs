@@ -82,8 +82,8 @@ pub enum SinkType {
 pub enum SinkProps {
     /// MQTT sink configuration.
     Mqtt(MqttSinkProps),
-    /// No-op sink config (empty).
-    Nop,
+    /// No-op sink config.
+    Nop(NopSinkProps),
 }
 
 /// Runtime state for pipeline execution.
@@ -102,6 +102,12 @@ pub struct MqttSinkProps {
     pub retain: bool,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+}
+
+/// Concrete Nop sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NopSinkProps {
+    pub log: bool,
 }
 
 impl MqttSinkProps {
@@ -783,15 +789,20 @@ fn build_sinks_from_definition(
                 sinks.push(pipeline_sink);
             }
             SinkType::Nop => {
-                if !matches!(&sink.props, SinkProps::Nop) {
-                    return Err(format!(
-                        "sink {} expected nop props but received different variant",
-                        sink.sink_id
-                    ));
-                }
+                let props = match &sink.props {
+                    SinkProps::Nop(props) => props,
+                    _ => {
+                        return Err(format!(
+                            "sink {} expected nop props but received different variant",
+                            sink.sink_id
+                        ));
+                    }
+                };
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
-                    SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig),
+                    SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig {
+                        log: props.log,
+                    }),
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)

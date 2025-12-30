@@ -198,7 +198,7 @@ fn logical_plan_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
 fn build_nop_json_sink(sink_id: &'static str, connector_id: &'static str) -> PipelineSink {
     let connector = PipelineSinkConnector::new(
         connector_id,
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
         SinkEncoderConfig::json(),
     );
     PipelineSink::new(sink_id, connector)

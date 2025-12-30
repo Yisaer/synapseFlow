@@ -408,7 +408,15 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
 
     let connector = match sink.connector_kind.as_str() {
         "mqtt" => SinkConnectorConfig::Mqtt(mqtt_sink_from_ir_settings(&sink.connector_settings)?),
-        "nop" => SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig),
+        "nop" => {
+            let log = sink
+                .connector_settings
+                .as_object()
+                .and_then(|obj| obj.get("log"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig { log })
+        }
         other => SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
             kind: other.to_string(),
             settings: sink.connector_settings.clone(),
@@ -735,7 +743,13 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "connector_key": cfg.connector_key,
             }),
         ),
-        SinkConnectorConfig::Nop(_) => ("nop".to_string(), JsonValue::Object(JsonMap::new())),
+        SinkConnectorConfig::Nop(cfg) => {
+            if cfg.log {
+                ("nop".to_string(), serde_json::json!({ "log": true }))
+            } else {
+                ("nop".to_string(), JsonValue::Object(JsonMap::new()))
+            }
+        }
         SinkConnectorConfig::Custom(custom) => (custom.kind.clone(), custom.settings.clone()),
     }
 }

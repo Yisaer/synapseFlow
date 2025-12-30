@@ -86,9 +86,10 @@ impl ConnectorRegistry {
         self.register_sink_factory(
             "nop",
             Arc::new(|sink_id, config, _| match config {
-                SinkConnectorConfig::Nop(_) => {
-                    Ok(Box::new(NopSinkConnector::new(sink_id.to_string())))
-                }
+                SinkConnectorConfig::Nop(cfg) => Ok(Box::new(NopSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Nop config but received {:?}",
                     other.kind()

@@ -200,7 +200,7 @@ fn bindings_for_select(
 fn build_nop_json_sink(sink_id: &'static str, batch_count: Option<usize>) -> PipelineSink {
     let connector = PipelineSinkConnector::new(
         "test_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new(sink_id, connector);

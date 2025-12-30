@@ -13,7 +13,7 @@ fn individual_registry_defaults_include_builtins() {
         .instantiate_sink(
             "nop",
             "sink_1",
-            &SinkConnectorConfig::Nop(NopSinkConfig),
+            &SinkConnectorConfig::Nop(NopSinkConfig::default()),
             &mqtt_clients,
         )
         .expect("nop sink should be registered by default");
@@ -48,7 +48,7 @@ fn pipeline_registries_default_uses_builtins() {
         .instantiate_sink(
             "nop",
             "sink_1",
-            &SinkConnectorConfig::Nop(NopSinkConfig),
+            &SinkConnectorConfig::Nop(NopSinkConfig::default()),
             &mqtt_clients,
         )
         .expect("nop sink should be registered by default");

@@ -237,7 +237,7 @@ fn build_schema_binding(
 /// let registries = PipelineRegistries::new_with_builtin();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
-///     SinkConnectorConfig::Nop(NopSinkConfig),
+///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),
 ///     SinkEncoderConfig::json(),
 /// );
 /// let sink = PipelineSink::new("custom_sink", connector);
@@ -393,7 +393,7 @@ pub fn create_pipeline_with_log_sink(
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     let connector = PipelineSinkConnector::new(
         "log_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig { log: true }),
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);

@@ -103,7 +103,12 @@ def create_pipeline_body(pipeline_id: str, sql: str) -> Dict[str, Any]:
     return {
         "id": pipeline_id,
         "sql": sql,
-        "sinks": [{"type": "nop"}],
+        "sinks": [
+            {
+                "type": "nop",
+                "commonSinkProps": {"batchDuration": 100, "batchCount": 50},
+            }
+        ],
         "options": {"plan_cache": {"enabled": False}, "eventtime": {"enabled": False}},
     }
 
@@ -131,6 +136,12 @@ def cmd_provision(args: argparse.Namespace) -> int:
         cmd_cleanup(args)
 
     client.request_json("POST", "/streams", stream_req)
+    _ignore_not_found(
+        lambda: client.request_text(
+            "DELETE",
+            f"/pipelines/{urllib.parse.quote(args.pipeline_id)}",
+        )
+    )
     client.request_json("POST", "/pipelines", pipeline_req)
     if not args.no_start:
         client.request_text("POST", f"/pipelines/{urllib.parse.quote(args.pipeline_id)}/start")
@@ -156,6 +167,28 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recreate_pipeline(args: argparse.Namespace) -> int:
+    client = Client(args.base_url, args.timeout_secs)
+    sql = build_select_sql(args.stream_name, args.columns)
+    pipeline_req = create_pipeline_body(args.pipeline_id, sql)
+
+    if args.dry_run:
+        print(f"sql bytes: {len(sql.encode('utf-8'))}", file=sys.stderr)
+        print(json.dumps(pipeline_req)[:512] + " ...", file=sys.stderr)
+        return 0
+
+    _ignore_not_found(
+        lambda: client.request_text(
+            "DELETE",
+            f"/pipelines/{urllib.parse.quote(args.pipeline_id)}",
+        )
+    )
+    client.request_json("POST", "/pipelines", pipeline_req)
+    if not args.no_start:
+        client.request_text("POST", f"/pipelines/{urllib.parse.quote(args.pipeline_id)}/start")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="SynapseFlow REST helper: create/start/delete a 15k-column MQTT stream and a nop-sink pipeline.",
@@ -175,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("provision")
     sub.add_parser("cleanup")
+    sub.add_parser("recreate-pipeline")
     return p
 
 
@@ -189,6 +223,8 @@ def main(argv: List[str]) -> int:
         return cmd_provision(args)
     if args.command == "cleanup":
         return cmd_cleanup(args)
+    if args.command == "recreate-pipeline":
+        return cmd_recreate_pipeline(args)
 
     raise ApiError(f"unknown command: {args.command}")
 

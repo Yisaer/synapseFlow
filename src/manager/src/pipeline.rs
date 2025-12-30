@@ -8,8 +8,8 @@ use axum::{
 use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
-    MqttSinkProps, PipelineDefinition, PipelineError, PipelineOptions, PipelineStatus,
-    PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+    MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
+    PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
@@ -147,6 +147,12 @@ pub struct MqttSinkPropsRequest {
     pub retain: Option<bool>,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct NopSinkPropsRequest {
+    pub log: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -394,7 +400,18 @@ pub(crate) fn build_pipeline_definition(
                 }
                 SinkDefinition::new(sink_id.clone(), SinkType::Mqtt, SinkProps::Mqtt(props))
             }
-            "nop" => SinkDefinition::new(sink_id.clone(), SinkType::Nop, SinkProps::Nop),
+            "nop" => {
+                let nop_props: NopSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid nop sink props: {err}"))?;
+                SinkDefinition::new(
+                    sink_id.clone(),
+                    SinkType::Nop,
+                    SinkProps::Nop(NopSinkProps {
+                        log: nop_props.log.unwrap_or(false),
+                    }),
+                )
+            }
             other => return Err(format!("unsupported sink type: {other}")),
         };
         let encoder_kind = sink_req.encoder.encode_type.clone();

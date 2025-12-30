@@ -112,7 +112,9 @@ pub struct CustomSinkConnectorConfig {
 
 /// Configuration for a no-op sink connector.
 #[derive(Clone, Debug, Default)]
-pub struct NopSinkConfig;
+pub struct NopSinkConfig {
+    pub log: bool,
+}
 
 /// Configuration for supported sink encoders.
 #[derive(Clone, Debug, PartialEq)]

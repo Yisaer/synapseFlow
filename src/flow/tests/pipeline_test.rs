@@ -168,7 +168,7 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
 
     let connector = PipelineSinkConnector::new(
         "custom_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("custom_sink", connector).with_forward_to_result(true);
@@ -212,7 +212,7 @@ async fn test_batch_processor_flushes_on_count() {
 
     let connector = PipelineSinkConnector::new(
         "batch_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("batch_sink", connector)
@@ -318,7 +318,7 @@ async fn test_aggregation_with_countwindow() {
 
     let connector = PipelineSinkConnector::new(
         "aggregation_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("aggregation_sink", connector).with_forward_to_result(true);
@@ -434,7 +434,7 @@ async fn test_last_row_with_countwindow() {
 
     let connector = PipelineSinkConnector::new(
         "last_row_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("last_row_sink", connector).with_forward_to_result(true);
