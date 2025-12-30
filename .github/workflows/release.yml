@@ -41,6 +41,10 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-latest
+            asset_suffix: linux-x86_64-debug
+            build_cmd: make build
+            bin_path: target/debug/synapse-flow
+          - runner: ubuntu-latest
             asset_suffix: linux-x86_64
             build_cmd: make release
             bin_path: target/release/synapse-flow
