@@ -295,7 +295,7 @@ fn capture_heap_profile() -> Result<Vec<u8>, String> {
     // Ensure profiling is active; if jemalloc lacks profiling support, return a clear error.
     if let Err(err) = unsafe { raw::write(b"prof.active\0", true) } {
         return Err(format!(
-            "jemalloc heap profiling 未开启或不支持（需要带 profiling 的 tikv-jemallocator，且启动时设置 MALLOC_CONF=\"prof:true,prof_active:true\"）。错误: {}",
+            "jemalloc heap profiling not enabled（need _RJEM_MALLOC_CONF='prof:true,prof_active:true' with tikv-jemallocator profiling）。error: {}",
             err
         ));
     }
