@@ -469,6 +469,46 @@ mod tests {
     }
 
     #[test]
+    fn json_decoder_ignores_unknown_fields() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "orders".to_string(),
+                "amount".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "orders".to_string(),
+                "status".to_string(),
+                ConcreteDatatype::String(StringType),
+            ),
+        ]));
+        let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
+        let payload = br#"{"amount":10,"status":"ok","extra":42,"extra2":"ignored"}"#.as_ref();
+
+        let batch = decoder.decode(payload).expect("decode batch");
+        let tuples = batch.into_rows();
+        assert_eq!(tuples.len(), 1);
+        let tuple = &tuples[0];
+
+        let mut columns: Vec<_> = tuple
+            .entries()
+            .into_iter()
+            .map(|((src, col), _)| (src.to_string(), col.to_string()))
+            .collect();
+        columns.sort();
+        assert_eq!(
+            columns,
+            vec![
+                ("orders".to_string(), "amount".to_string()),
+                ("orders".to_string(), "status".to_string())
+            ]
+        );
+
+        assert_eq!(tuple.value_by_name("orders", "extra"), None);
+        assert_eq!(tuple.value_by_name("orders", "extra2"), None);
+    }
+
+    #[test]
     fn json_decoder_decodes_multiple_rows() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "orders".to_string(),
