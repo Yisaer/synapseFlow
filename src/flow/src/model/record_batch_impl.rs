@@ -4,41 +4,42 @@ use crate::expr::ScalarExpr;
 use crate::model::{Collection, CollectionError, Tuple};
 use crate::planner::physical::PhysicalProjectField;
 use datatypes::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[allow(clippy::type_complexity)]
-enum PartialMessages<'a> {
+enum PartialMessages {
     Single {
         keys: Vec<Arc<str>>,
         values: Vec<Arc<Value>>,
     },
-    Multi {
-        map: HashMap<&'a str, (Vec<Arc<str>>, Vec<Arc<Value>>)>,
+    Buckets {
+        buckets: Vec<(Vec<Arc<str>>, Vec<Arc<Value>>)>,
     },
 }
 
-impl<'a> PartialMessages<'a> {
+impl PartialMessages {
     fn push(
         &mut self,
-        source: &'a str,
+        message_index: usize,
         key: Arc<str>,
         value: Arc<Value>,
     ) -> Result<(), CollectionError> {
         match self {
             PartialMessages::Single { keys, values } => {
-                let _ = source;
+                let _ = message_index;
                 keys.push(key);
                 values.push(value);
                 Ok(())
             }
-            PartialMessages::Multi { map } => {
-                let entry = if let Some(existing) = map.get_mut(source) {
-                    existing
-                } else {
-                    map.entry(source)
-                        .or_insert_with(|| (Vec::new(), Vec::new()))
-                };
+            PartialMessages::Buckets { buckets } => {
+                if message_index >= buckets.len() {
+                    return Err(CollectionError::Other(format!(
+                        "Failed to apply projection: message index {} out of bounds (len={})",
+                        message_index,
+                        buckets.len()
+                    )));
+                }
+                let entry = &mut buckets[message_index];
                 entry.0.push(key);
                 entry.1.push(value);
                 Ok(())
@@ -48,19 +49,31 @@ impl<'a> PartialMessages<'a> {
 
     fn append_to_messages(
         self,
-        single_source: Option<&str>,
+        tuple: &Tuple,
         projected_messages: &mut Vec<Arc<crate::model::Message>>,
     ) {
         match self {
             PartialMessages::Single { keys, values } => {
                 if !keys.is_empty() {
-                    let source = single_source.unwrap_or_default();
+                    let source = tuple
+                        .messages()
+                        .first()
+                        .map(|message| message.source())
+                        .unwrap_or_default();
                     let msg = Arc::new(crate::model::Message::new(source, keys, values));
                     projected_messages.push(msg);
                 }
             }
-            PartialMessages::Multi { map } => {
-                for (source, (keys, values)) in map {
+            PartialMessages::Buckets { buckets } => {
+                for (idx, (keys, values)) in buckets.into_iter().enumerate() {
+                    if keys.is_empty() {
+                        continue;
+                    }
+                    let source = tuple
+                        .messages()
+                        .get(idx)
+                        .map(|message| message.source())
+                        .unwrap_or_default();
                     let msg = Arc::new(crate::model::Message::new(source, keys, values));
                     projected_messages.push(msg);
                 }
@@ -69,14 +82,24 @@ impl<'a> PartialMessages<'a> {
     }
 }
 
-fn apply_projection_for_tuple<'a>(
+fn message_index_for_source(tuple: &Tuple, source: &str) -> Option<usize> {
+    if source.is_empty() && tuple.messages().len() == 1 {
+        return Some(0);
+    }
+
+    tuple
+        .messages()
+        .iter()
+        .position(|message| message.source() == source)
+}
+
+fn apply_projection_for_tuple(
     tuple: &Tuple,
-    fields: &'a [PhysicalProjectField],
-    mut partial_messages: PartialMessages<'a>,
+    fields: &[PhysicalProjectField],
+    mut partial_messages: PartialMessages,
 ) -> Result<Tuple, CollectionError> {
     let mut projected_tuple = Tuple::with_timestamp(Tuple::empty_messages(), tuple.timestamp);
     let mut projected_messages = Vec::with_capacity(tuple.messages().len().saturating_add(1));
-    let single_source = (tuple.messages().len() == 1).then(|| tuple.messages()[0].source());
 
     for field in fields {
         match &field.compiled_expr {
@@ -105,12 +128,14 @@ fn apply_projection_for_tuple<'a>(
                 source_name,
                 column_index,
             }) => {
-                let message = tuple.message_by_source(source_name).ok_or_else(|| {
-                    CollectionError::Other(format!(
-                        "Failed to evaluate expression for field '{}': Column not found: {}",
-                        field.field_name, source_name
-                    ))
-                })?;
+                let message_index =
+                    message_index_for_source(tuple, source_name).ok_or_else(|| {
+                        CollectionError::Other(format!(
+                            "Failed to evaluate expression for field '{}': Column not found: {}",
+                            field.field_name, source_name
+                        ))
+                    })?;
+                let message = &tuple.messages()[message_index];
                 let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
                     CollectionError::Other(format!(
                         "Failed to evaluate expression for field '{}': Column not found: {}#{}",
@@ -118,7 +143,7 @@ fn apply_projection_for_tuple<'a>(
                     ))
                 })?;
 
-                partial_messages.push(source_name.as_str(), col_name.clone(), value.clone())?;
+                partial_messages.push(message_index, col_name.clone(), value.clone())?;
             }
             _ => {
                 let value = field
@@ -136,7 +161,7 @@ fn apply_projection_for_tuple<'a>(
         }
     }
 
-    partial_messages.append_to_messages(single_source, &mut projected_messages);
+    partial_messages.append_to_messages(tuple, &mut projected_messages);
     projected_tuple.messages = Arc::from(projected_messages);
 
     Ok(projected_tuple)
@@ -207,8 +232,8 @@ impl Collection for RecordBatch {
                     values: Vec::with_capacity(by_index_count),
                 }
             } else {
-                PartialMessages::Multi {
-                    map: HashMap::new(),
+                PartialMessages::Buckets {
+                    buckets: vec![(Vec::new(), Vec::new()); tuple.messages().len()],
                 }
             };
 
