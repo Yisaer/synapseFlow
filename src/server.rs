@@ -263,13 +263,13 @@ fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::e
 
 #[cfg(feature = "profiling")]
 fn generate_profile(duration: u64) -> Result<Vec<u8>, String> {
-    let guard = ProfilerGuard::new(100).map_err(|err| err.to_string())?;
-    thread::sleep(StdDuration::from_secs(duration));
-
-    // While jemalloc heap profiling is active, generating CPU pprof can itself allocate heavily,
-    // polluting `/debug/pprof/heap` inuse samples. Suspend heap profiling only for the short
-    // finalize/encode section, not for the whole profiling window.
+    // When jemalloc heap profiling is active, generating CPU pprof can allocate heavily and
+    // pollute `/debug/pprof/heap` inuse samples. Disable heap profiling for the entire CPU profile
+    // request; heap dumps will block until profiling finishes.
     suspend_jemalloc_heap_profiling(|| {
+        let guard = ProfilerGuard::new(100).map_err(|err| err.to_string())?;
+        thread::sleep(std::time::Duration::from_secs(duration));
+
         let report = guard.report().build().map_err(|err| err.to_string())?;
         let profile = report.pprof().map_err(|err| err.to_string())?;
         let mut body = Vec::new();
@@ -406,10 +406,9 @@ fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> 
 
     let result = f();
 
-    if let Some(prev_active) = prev_active {
-        if let Err(err) = unsafe { raw::write(b"prof.active\0", prev_active) } {
-            tracing::warn!(error = %err, "failed to restore jemalloc prof.active");
-        }
+    let restore_active = prev_active.unwrap_or(true);
+    if let Err(err) = unsafe { raw::write(b"prof.active\0", restore_active) } {
+        tracing::warn!(error = %err, "failed to restore jemalloc prof.active");
     }
 
     result
