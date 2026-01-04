@@ -1,4 +1,5 @@
 use crate::connector::sink::mqtt::MqttSinkConfig;
+use crate::connector::sink::kuksa::KuksaSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::time::Duration;
@@ -83,6 +84,7 @@ impl fmt::Debug for PipelineSinkConnector {
 pub enum SinkConnectorConfig {
     Mqtt(MqttSinkConfig),
     Nop(NopSinkConfig),
+    Kuksa(KuksaSinkConfig),
     Custom(CustomSinkConnectorConfig),
 }
 
@@ -91,6 +93,7 @@ impl SinkConnectorConfig {
         match self {
             SinkConnectorConfig::Mqtt(_) => "mqtt",
             SinkConnectorConfig::Nop(_) => "nop",
+            SinkConnectorConfig::Kuksa(_) => "kuksa",
             SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),
         }
     }

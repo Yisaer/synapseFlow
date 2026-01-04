@@ -1,5 +1,6 @@
 use super::sink::mqtt::MqttSinkConnector;
 use super::sink::nop::NopSinkConnector;
+use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::SinkConnector;
 use super::ConnectorError;
 use crate::connector::MqttClientManager;
@@ -92,6 +93,20 @@ impl ConnectorRegistry {
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Nop config but received {:?}",
+                    other.kind()
+                ))),
+            }),
+        );
+
+        self.register_sink_factory(
+            "kuksa",
+            Arc::new(|sink_id, config, _| match config {
+                SinkConnectorConfig::Kuksa(cfg) => Ok(Box::new(KuksaSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                ))),
+                other => Err(ConnectorError::Other(format!(
+                    "connector `{sink_id}` expected Kuksa config but received {:?}",
                     other.kind()
                 ))),
             }),

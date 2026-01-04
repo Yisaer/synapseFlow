@@ -8,7 +8,7 @@ use axum::{
 use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
-    MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
+    KuksaSinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
     PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
@@ -162,6 +162,13 @@ pub struct CommonSinkPropsRequest {
     pub batch_count: Option<usize>,
     #[serde(rename = "batchDuration")]
     pub batch_duration_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct KuksaSinkPropsRequest {
+    pub addr: Option<String>,
+    #[serde(rename = "vssPath")]
+    pub vss_path: Option<String>,
 }
 
 pub async fn create_pipeline_handler(
@@ -412,16 +419,44 @@ pub(crate) fn build_pipeline_definition(
                     }),
                 )
             }
+            "kuksa" => {
+                let kuksa_props: KuksaSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid kuksa sink props: {err}"))?;
+                let addr = kuksa_props
+                    .addr
+                    .ok_or_else(|| "kuksa sink props missing addr".to_string())?;
+                let vss_path = kuksa_props
+                    .vss_path
+                    .ok_or_else(|| "kuksa sink props missing vssPath".to_string())?;
+                SinkDefinition::new(
+                    sink_id.clone(),
+                    SinkType::Kuksa,
+                    SinkProps::Kuksa(KuksaSinkProps {
+                        addr,
+                        vss_path,
+                    }),
+                )
+            }
             other => return Err(format!("unsupported sink type: {other}")),
         };
-        let encoder_kind = sink_req.encoder.encode_type.clone();
-        if !encoder_registry.is_registered(&encoder_kind) {
-            return Err(format!("encoder kind `{encoder_kind}` not registered"));
+
+        let sink_definition = match sink_definition.sink_type {
+            SinkType::Kuksa => {
+                let encoder_config = SinkEncoderConfig::new("none", JsonMap::new());
+                sink_definition.with_encoder(encoder_config)
+            }
+            _ => {
+                let encoder_kind = sink_req.encoder.encode_type.clone();
+                if !encoder_registry.is_registered(&encoder_kind) {
+                    return Err(format!("encoder kind `{encoder_kind}` not registered"));
+                }
+                let encoder_config =
+                    SinkEncoderConfig::new(encoder_kind, sink_req.encoder.props.clone());
+                sink_definition.with_encoder(encoder_config)
+            }
         }
-        let encoder_config = SinkEncoderConfig::new(encoder_kind, sink_req.encoder.props.clone());
-        let sink_definition = sink_definition
-            .with_encoder(encoder_config)
-            .with_common_props(sink_req.common.to_common_props());
+        .with_common_props(sink_req.common.to_common_props());
         sinks.push(sink_definition);
     }
     let options = PipelineOptions {

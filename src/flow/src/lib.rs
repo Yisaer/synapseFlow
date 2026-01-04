@@ -38,8 +38,9 @@ pub use expr::{
 pub use instance::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
-    MqttSinkProps, PipelineDefinition, PipelineError, PipelineManager, PipelineOptions,
-    PipelineSnapshot, PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+    KuksaSinkProps, MqttSinkProps, PipelineDefinition, PipelineError, PipelineManager,
+    PipelineOptions, PipelineSnapshot, PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps,
+    SinkType,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain};

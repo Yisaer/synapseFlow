@@ -1,12 +1,13 @@
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
     register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, MockSourceConnector,
-    MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    KuksaSinkConfig, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
 use crate::planner::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
+use crate::planner::sink::SinkEncoderKind;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::Processor;
@@ -75,6 +76,8 @@ pub enum SinkType {
     Mqtt,
     /// No-op sink that discards payloads.
     Nop,
+    /// Kuksa sink that updates VSS paths via kuksa.val.v2.
+    Kuksa,
 }
 
 /// Sink configuration payload.
@@ -84,6 +87,8 @@ pub enum SinkProps {
     Mqtt(MqttSinkProps),
     /// No-op sink config.
     Nop(NopSinkProps),
+    /// Kuksa sink config.
+    Kuksa(KuksaSinkProps),
 }
 
 /// Runtime state for pipeline execution.
@@ -108,6 +113,13 @@ pub struct MqttSinkProps {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NopSinkProps {
     pub log: bool,
+}
+
+/// Concrete Kuksa sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KuksaSinkProps {
+    pub addr: String,
+    pub vss_path: String,
 }
 
 impl MqttSinkProps {
@@ -802,6 +814,36 @@ fn build_sinks_from_definition(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig {
                         log: props.log,
+                    }),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone());
+                sinks.push(pipeline_sink);
+            }
+            SinkType::Kuksa => {
+                let props = match &sink.props {
+                    SinkProps::Kuksa(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected kuksa props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                if !matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    return Err(format!(
+                        "sink {} expected encoder `none` for kuksa but received {}",
+                        sink.sink_id,
+                        sink.encoder.kind_str()
+                    ));
+                }
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Kuksa(KuksaSinkConfig {
+                        sink_name: sink.sink_id.clone(),
+                        addr: props.addr.clone(),
+                        vss_path: props.vss_path.clone(),
                     }),
                     sink.encoder.clone(),
                 );
