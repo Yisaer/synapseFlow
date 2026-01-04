@@ -10,10 +10,11 @@ use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
-    AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
-    DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor, Processor,
-    ProcessorError, ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
+    AggregationProcessor, BarrierControlSignalKind, BatchProcessor, ControlSignal,
+    ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor,
+    InstantControlSignal, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
+    SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor, StateWindowProcessor,
+    StatefulFunctionProcessor, StreamData,
     StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
     WatermarkProcessor,
 };
@@ -357,6 +358,35 @@ impl ProcessorPipeline {
             .map_err(|_| ProcessorError::ChannelClosed)
     }
 
+    /// Broadcast a barrier control signal into the pipeline via the control channel.
+    ///
+    /// The returned `barrier_id` is globally unique within the pipeline instance.
+    pub fn broadcast_barrier_via_control(
+        &self,
+        kind: BarrierControlSignalKind,
+    ) -> Result<u64, ProcessorError> {
+        let barrier_id = self.control_source.allocate_barrier_id();
+        self.broadcast_control_signal(ControlSignal::Barrier(kind.with_id(barrier_id)))?;
+        Ok(barrier_id)
+    }
+
+    /// Send a barrier control signal into the pipeline via the data channel.
+    ///
+    /// The returned `barrier_id` is globally unique within the pipeline instance.
+    pub async fn send_barrier_via_data(
+        &mut self,
+        kind: BarrierControlSignalKind,
+    ) -> Result<u64, ProcessorError> {
+        let barrier_id = self.control_source.allocate_barrier_id();
+        self.input
+            .send(StreamData::control(ControlSignal::Barrier(
+                kind.with_id(barrier_id),
+            )))
+            .await
+            .map_err(|_| ProcessorError::ChannelClosed)?;
+        Ok(barrier_id)
+    }
+
     pub fn set_pipeline_id(&mut self, id: impl Into<String>) {
         let id = id.into();
         self.pipeline_id = id.clone();
@@ -382,16 +412,15 @@ impl ProcessorPipeline {
 
     /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
     pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        self.broadcast_control_signal(ControlSignal::StreamQuickEnd)?;
+        self.broadcast_control_signal(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))?;
         self.replace_input_sender();
         self.await_all_handles().await
     }
 
     async fn send_stream_end_via_data(&mut self) -> Result<(), ProcessorError> {
-        self.input
-            .send(StreamData::stream_end())
-            .await
-            .map_err(|_| ProcessorError::ChannelClosed)?;
+        let _ = self
+            .send_barrier_via_data(BarrierControlSignalKind::StreamGracefulEnd)
+            .await?;
         self.replace_input_sender();
         Ok(())
     }
