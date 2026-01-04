@@ -135,7 +135,7 @@ impl EncoderRegistry {
         config: &SinkEncoderConfig,
     ) -> Result<Arc<dyn CollectionEncoder>, CodecError> {
         let guard = self.factories.read().expect("encoder registry poisoned");
-        let kind = config.kind();
+        let kind = config.kind_str();
         let factory = guard
             .get(kind)
             .ok_or_else(|| CodecError::Other(format!("encoder kind `{kind}` not registered")))?;
@@ -160,7 +160,7 @@ impl EncoderRegistry {
             "json",
             Arc::new(|config| {
                 Ok(Arc::new(JsonEncoder::new(
-                    config.kind().to_string(),
+                    config.kind_str().to_string(),
                     config.props().clone(),
                 )) as Arc<_>)
             }),

@@ -220,7 +220,8 @@ pub enum PhysicalPlanNodeKindIR {
     },
     DataSink {
         sink: SinkIR,
-        encoder_plan_index: i64,
+        #[serde(default)]
+        encoder_plan_index: Option<i64>,
     },
     ResultCollect,
     Opaque {
@@ -676,7 +677,7 @@ fn build_physical_ir(
                 .collect(),
         },
         PhysicalPlan::Encoder(plan) => PhysicalPlanNodeKindIR::Encoder {
-            encoder_kind: plan.encoder.kind().to_string(),
+            encoder_kind: plan.encoder.kind_str().to_string(),
             encoder_props: plan.encoder.props().clone(),
         },
         PhysicalPlan::DataSink(plan) => PhysicalPlanNodeKindIR::DataSink {
@@ -704,7 +705,7 @@ fn sink_to_ir(sink: &PipelineSink) -> SinkIR {
         common: Some(common_sink_props_to_ir(&sink.common)),
         connector_kind,
         connector_settings,
-        encoder_kind: Some(sink.connector.encoder.kind().to_string()),
+        encoder_kind: Some(sink.connector.encoder.kind_str().to_string()),
         encoder_props: Some(sink.connector.encoder.props().clone()),
     }
 }

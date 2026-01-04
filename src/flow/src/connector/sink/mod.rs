@@ -2,6 +2,8 @@
 
 use async_trait::async_trait;
 
+use crate::model::Collection;
+
 /// Trait implemented by all sink connectors.
 #[async_trait]
 pub trait SinkConnector: Send + Sync + 'static {
@@ -10,6 +12,20 @@ pub trait SinkConnector: Send + Sync + 'static {
 
     /// Send a single payload downstream.
     async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError>;
+
+    /// Send a `Collection` downstream without going through an encoder.
+    ///
+    /// By default connectors reject collection payloads. Connectors that operate on decoded
+    /// data (e.g. Kuksa sink) should override this method.
+    async fn send_collection(
+        &mut self,
+        _collection: &dyn Collection,
+    ) -> Result<(), SinkConnectorError> {
+        Err(SinkConnectorError::Other(format!(
+            "connector `{}` does not support collection payloads",
+            self.id()
+        )))
+    }
 
     /// Prepare the connector for sending (e.g. establish network connections).
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {

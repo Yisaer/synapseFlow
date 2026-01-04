@@ -232,7 +232,7 @@ impl StreamingEncoderRewrite {
             _ => return None,
         };
 
-        if !encoder_registry.supports_streaming(encoder.encoder.kind()) {
+        if !encoder_registry.supports_streaming(encoder.encoder.kind_str()) {
             return None;
         }
 
@@ -255,7 +255,7 @@ impl StreamingEncoderRewrite {
         );
 
         let mut connector = sink.connector.clone();
-        connector.encoder_plan_index = streaming_index;
+        connector.encoder_plan_index = Some(streaming_index);
 
         Some((
             Arc::new(PhysicalPlan::StreamingEncoder(streaming_encoder)),

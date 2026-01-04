@@ -763,8 +763,6 @@ fn build_sink_chain_with_builder(
     input_child: &Arc<PhysicalPlan>,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
-    let mut encoder_children = Vec::new();
-    let mut connectors = Vec::new();
     let batch_processor = create_batch_processor_if_needed_with_builder(sink, input_child, builder);
 
     let connector = &sink.connector;
@@ -772,24 +770,7 @@ fn build_sink_chain_with_builder(
         .as_ref()
         .map(Arc::clone)
         .unwrap_or_else(|| Arc::clone(input_child));
-    add_regular_encoder_with_builder(
-        sink,
-        connector,
-        0,
-        encoder_input,
-        builder,
-        &mut encoder_children,
-        &mut connectors,
-    );
-
-    if encoder_children.len() != 1 || connectors.len() != 1 {
-        return Err(format!(
-            "Sink {} must define exactly one connector",
-            sink.sink_id
-        ));
-    }
-
-    Ok((encoder_children.remove(0), connectors.remove(0)))
+    add_regular_encoder_with_builder(sink, connector, encoder_input, builder)
 }
 
 /// Create batch processor if needed using centralized index management
@@ -818,26 +799,37 @@ fn create_batch_processor_if_needed_with_builder(
 fn add_regular_encoder_with_builder(
     sink: &PipelineSink,
     connector: &PipelineSinkConnector,
-    _connector_idx: usize,
     encoder_input: Arc<PhysicalPlan>,
     builder: &mut PhysicalPlanBuilder,
-    encoder_children: &mut Vec<Arc<PhysicalPlan>>,
-    connectors: &mut Vec<PhysicalSinkConnector>,
-) {
-    let encoder_index = builder.allocate_index();
-    let encoder = PhysicalEncoder::new(
-        vec![encoder_input],
-        encoder_index,
-        sink.sink_id.clone(),
-        connector.encoder.clone(),
-    );
-    encoder_children.push(Arc::new(PhysicalPlan::Encoder(encoder)));
-    connectors.push(PhysicalSinkConnector::new(
-        sink.sink_id.clone(),
-        sink.forward_to_result, // Always forward if sink is configured to do so (single connector)
-        connector.connector.clone(),
-        encoder_index,
-    ));
+) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
+    if matches!(connector.encoder.kind(), crate::planner::sink::SinkEncoderKind::None) {
+        Ok((
+            encoder_input,
+            PhysicalSinkConnector::new(
+                sink.sink_id.clone(),
+                sink.forward_to_result,
+                connector.connector.clone(),
+                None,
+            ),
+        ))
+    } else {
+        let encoder_index = builder.allocate_index();
+        let encoder = PhysicalEncoder::new(
+            vec![encoder_input],
+            encoder_index,
+            sink.sink_id.clone(),
+            connector.encoder.clone(),
+        );
+        Ok((
+            Arc::new(PhysicalPlan::Encoder(encoder)),
+            PhysicalSinkConnector::new(
+                sink.sink_id.clone(),
+                sink.forward_to_result,
+                connector.connector.clone(),
+                Some(encoder_index),
+            ),
+        ))
+    }
 }
 
 fn find_binding_entry<'a>(

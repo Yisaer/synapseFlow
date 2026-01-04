@@ -39,7 +39,7 @@ pub struct PhysicalSinkConnector {
     pub sink_id: String,
     pub forward_to_result: bool,
     pub connector: SinkConnectorConfig,
-    pub encoder_plan_index: i64,
+    pub encoder_plan_index: Option<i64>,
 }
 
 impl PhysicalSinkConnector {
@@ -47,7 +47,7 @@ impl PhysicalSinkConnector {
         sink_id: String,
         forward_to_result: bool,
         connector: SinkConnectorConfig,
-        encoder_plan_index: i64,
+        encoder_plan_index: Option<i64>,
     ) -> Self {
         Self {
             sink_id,

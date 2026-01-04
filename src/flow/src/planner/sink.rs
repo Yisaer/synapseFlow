@@ -119,12 +119,50 @@ pub struct NopSinkConfig {
 /// Configuration for supported sink encoders.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SinkEncoderConfig {
-    kind: String,
+    kind: SinkEncoderKind,
     props: JsonMap<String, JsonValue>,
 }
 
+/// Supported encoder kinds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SinkEncoderKind {
+    Json,
+    None,
+    Custom(String),
+}
+
+impl SinkEncoderKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            SinkEncoderKind::Json => "json",
+            SinkEncoderKind::None => "none",
+            SinkEncoderKind::Custom(kind) => kind.as_str(),
+        }
+    }
+}
+
+impl From<String> for SinkEncoderKind {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "json" => SinkEncoderKind::Json,
+            "none" => SinkEncoderKind::None,
+            other => SinkEncoderKind::Custom(other.to_string()),
+        }
+    }
+}
+
+impl From<&str> for SinkEncoderKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "json" => SinkEncoderKind::Json,
+            "none" => SinkEncoderKind::None,
+            other => SinkEncoderKind::Custom(other.to_string()),
+        }
+    }
+}
+
 impl SinkEncoderConfig {
-    pub fn new(kind: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
+    pub fn new(kind: impl Into<SinkEncoderKind>, props: JsonMap<String, JsonValue>) -> Self {
         Self {
             kind: kind.into(),
             props,
@@ -132,11 +170,15 @@ impl SinkEncoderConfig {
     }
 
     pub fn json() -> Self {
-        Self::new("json", JsonMap::new())
+        Self::new(SinkEncoderKind::Json, JsonMap::new())
     }
 
-    pub fn kind(&self) -> &str {
+    pub fn kind(&self) -> &SinkEncoderKind {
         &self.kind
+    }
+
+    pub fn kind_str(&self) -> &str {
+        self.kind.as_str()
     }
 
     pub fn props(&self) -> &JsonMap<String, JsonValue> {

@@ -261,7 +261,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
         LogicalPlan::DataSink(DataSinkPlan { sink, .. }) => {
             info.push(format!("sink_id={}", sink.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
-            info.push(format!("encoder={}", sink.connector.encoder.kind()));
+            info.push(format!("encoder={}", sink.connector.encoder.kind_str()));
             if sink.common.is_batching_enabled() {
                 info.push("batching=true".to_string());
             }
@@ -706,11 +706,11 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::Encoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
-            info.push(format!("encoder={}", encoder.encoder.kind()));
+            info.push(format!("encoder={}", encoder.encoder.kind_str()));
         }
         PhysicalPlan::StreamingEncoder(streaming) => {
             info.push(format!("sink_id={}", streaming.sink_id));
-            info.push(format!("encoder={}", streaming.encoder.kind()));
+            info.push(format!("encoder={}", streaming.encoder.kind_str()));
             if streaming.common.is_batching_enabled() {
                 info.push("batching=true".to_string());
             }

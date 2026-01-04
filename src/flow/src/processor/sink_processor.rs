@@ -1,5 +1,6 @@
 //! SinkProcessor - routes collections to SinkConnectors and forwards results.
 use crate::connector::SinkConnector;
+use crate::model::Collection;
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
@@ -34,6 +35,13 @@ impl ConnectorBinding {
             .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
 
         Ok(())
+    }
+
+    async fn publish_collection(&mut self, collection: &dyn Collection) -> Result<(), ProcessorError> {
+        self.connector
+            .send_collection(collection)
+            .await
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
     }
 
     async fn close(&mut self) -> Result<(), ProcessorError> {
@@ -119,6 +127,22 @@ impl SinkProcessor {
             .inc_by(row_count);
         connector.publish(payload).await?;
 
+        SINK_RECORDS_OUT
+            .with_label_values(&[processor_id])
+            .inc_by(row_count);
+        Ok(())
+    }
+
+    async fn handle_collection(
+        processor_id: &str,
+        connector: &mut ConnectorBinding,
+        collection: &dyn Collection,
+    ) -> Result<(), ProcessorError> {
+        let row_count = collection.num_rows() as u64;
+        SINK_RECORDS_IN
+            .with_label_values(&[processor_id])
+            .inc_by(row_count);
+        connector.publish_collection(collection).await?;
         SINK_RECORDS_OUT
             .with_label_values(&[processor_id])
             .inc_by(row_count);
@@ -227,11 +251,26 @@ impl Processor for SinkProcessor {
                                         }
                                     }
                                     StreamData::Collection(collection) => {
-                                        let message = "sink processor received unencoded collection without encoder stage";
-                                        tracing::warn!(processor_id = %processor_id, "{}", message);
-                                        forward_error(&output, &processor_id, message).await?;
-                                        drop(collection);
-                                        continue;
+                                        if let Err(err) = Self::handle_collection(
+                                            &processor_id,
+                                            &mut connector,
+                                            collection.as_ref(),
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(processor_id = %processor_id, error = %err, "collection handling error");
+                                            forward_error(&output, &processor_id, err.to_string())
+                                                .await?;
+                                            continue;
+                                        }
+
+                                        if forward_data {
+                                            send_with_backpressure(
+                                                &output,
+                                                StreamData::Collection(collection),
+                                            )
+                                            .await?;
+                                        }
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
