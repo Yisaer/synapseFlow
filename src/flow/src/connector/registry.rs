@@ -1,6 +1,6 @@
+use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::mqtt::MqttSinkConnector;
 use super::sink::nop::NopSinkConnector;
-use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::SinkConnector;
 use super::ConnectorError;
 use crate::connector::MqttClientManager;

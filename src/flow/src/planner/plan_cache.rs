@@ -409,9 +409,9 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
 
     let connector = match sink.connector_kind.as_str() {
         "mqtt" => SinkConnectorConfig::Mqtt(mqtt_sink_from_ir_settings(&sink.connector_settings)?),
-        "kuksa" => SinkConnectorConfig::Kuksa(kuksa_sink_from_ir_settings(
-            &sink.connector_settings,
-        )?),
+        "kuksa" => {
+            SinkConnectorConfig::Kuksa(kuksa_sink_from_ir_settings(&sink.connector_settings)?)
+        }
         "nop" => {
             let log = sink
                 .connector_settings

@@ -8,8 +8,8 @@ use axum::{
 use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
-    KuksaSinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
-    PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+    KuksaSinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
+    PipelineOptions, PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
@@ -432,10 +432,7 @@ pub(crate) fn build_pipeline_definition(
                 SinkDefinition::new(
                     sink_id.clone(),
                     SinkType::Kuksa,
-                    SinkProps::Kuksa(KuksaSinkProps {
-                        addr,
-                        vss_path,
-                    }),
+                    SinkProps::Kuksa(KuksaSinkProps { addr, vss_path }),
                 )
             }
             other => return Err(format!("unsupported sink type: {other}")),

@@ -802,7 +802,10 @@ fn add_regular_encoder_with_builder(
     encoder_input: Arc<PhysicalPlan>,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
-    if matches!(connector.encoder.kind(), crate::planner::sink::SinkEncoderKind::None) {
+    if matches!(
+        connector.encoder.kind(),
+        crate::planner::sink::SinkEncoderKind::None
+    ) {
         Ok((
             encoder_input,
             PhysicalSinkConnector::new(

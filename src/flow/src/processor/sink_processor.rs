@@ -37,7 +37,10 @@ impl ConnectorBinding {
         Ok(())
     }
 
-    async fn publish_collection(&mut self, collection: &dyn Collection) -> Result<(), ProcessorError> {
+    async fn publish_collection(
+        &mut self,
+        collection: &dyn Collection,
+    ) -> Result<(), ProcessorError> {
         self.connector
             .send_collection(collection)
             .await

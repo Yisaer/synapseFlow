@@ -1,13 +1,13 @@
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
-    register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, MockSourceConnector,
-    KuksaSinkConfig, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
+    MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
 use crate::planner::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
-use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::planner::sink::SinkEncoderKind;
+use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::Processor;

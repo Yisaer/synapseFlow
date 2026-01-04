@@ -1,5 +1,5 @@
-use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::connector::sink::kuksa::KuksaSinkConfig;
+use crate::connector::sink::mqtt::MqttSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::time::Duration;

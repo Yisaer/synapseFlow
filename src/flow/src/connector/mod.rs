@@ -64,8 +64,8 @@ pub use mqtt_client::{
     MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
 };
 pub use registry::ConnectorRegistry;
-pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::kuksa::{KuksaSinkConfig, KuksaSinkConnector};
+pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
