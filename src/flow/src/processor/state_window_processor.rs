@@ -192,7 +192,7 @@ impl Processor for StateWindowProcessor {
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
-                                let is_graceful = matches!(signal, ControlSignal::StreamGracefulEnd);
+                                let is_graceful = signal.is_graceful_end();
                                 send_with_backpressure(&output, StreamData::control(signal)).await?;
                                 if is_terminal {
                                     if is_graceful {
@@ -435,7 +435,9 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(input
-            .send(StreamData::control(ControlSignal::StreamGracefulEnd))
+            .send(StreamData::control(ControlSignal::Barrier(
+                crate::processor::BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
             .is_ok());
 
         let mut collections = Vec::new();

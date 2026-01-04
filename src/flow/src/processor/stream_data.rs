@@ -6,30 +6,86 @@ use crate::model::Collection;
 use std::time::SystemTime;
 
 /// Control signals for stream processing
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ControlSignal {
-    /// Graceful stream end propagated via the data channel
+    /// Barrier-style control signal that must be aligned across upstreams
+    /// before being processed by some join processors.
+    Barrier(BarrierControlSignal),
+    /// Immediate control signal that does not require upstream alignment.
+    Instant(InstantControlSignal),
+}
+
+/// Kinds of barrier control signals without an attached barrier id.
+///
+/// The pipeline head is responsible for assigning monotonically increasing
+/// `barrier_id` values and constructing the corresponding [`BarrierControlSignal`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BarrierControlSignalKind {
     StreamGracefulEnd,
-    /// Immediate stream end propagated via the control channel
+    SyncTest,
+}
+
+impl BarrierControlSignalKind {
+    pub fn with_id(self, barrier_id: u64) -> BarrierControlSignal {
+        match self {
+            BarrierControlSignalKind::StreamGracefulEnd => {
+                BarrierControlSignal::StreamGracefulEnd { barrier_id }
+            }
+            BarrierControlSignalKind::SyncTest => BarrierControlSignal::SyncTest { barrier_id },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BarrierControlSignal {
+    StreamGracefulEnd {
+        barrier_id: u64,
+    },
+    /// A no-op barrier signal used by tests to validate barrier alignment.
+    ///
+    /// This signal has no semantic meaning beyond "wait until all upstreams
+    /// deliver the same `(barrier_id, kind)` pair".
+    SyncTest {
+        barrier_id: u64,
+    },
+}
+
+impl BarrierControlSignal {
+    pub fn barrier_id(&self) -> u64 {
+        match self {
+            BarrierControlSignal::StreamGracefulEnd { barrier_id } => *barrier_id,
+            BarrierControlSignal::SyncTest { barrier_id } => *barrier_id,
+        }
+    }
+
+    pub fn kind(&self) -> BarrierControlSignalKind {
+        match self {
+            BarrierControlSignal::StreamGracefulEnd { .. } => {
+                BarrierControlSignalKind::StreamGracefulEnd
+            }
+            BarrierControlSignal::SyncTest { .. } => BarrierControlSignalKind::SyncTest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum InstantControlSignal {
     StreamQuickEnd,
 }
 
 impl ControlSignal {
-    /// Whether this signal should propagate via the control channel
-    pub fn routes_via_control(&self) -> bool {
-        !matches!(self, ControlSignal::StreamGracefulEnd)
-    }
-
-    /// Whether this signal should propagate via the data channel
-    pub fn routes_via_data(&self) -> bool {
-        matches!(self, ControlSignal::StreamGracefulEnd)
-    }
-
-    /// Whether this signal indicates stream termination
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            ControlSignal::StreamGracefulEnd | ControlSignal::StreamQuickEnd
+            ControlSignal::Barrier(BarrierControlSignal::StreamGracefulEnd { .. })
+                | ControlSignal::Instant(InstantControlSignal::StreamQuickEnd)
+        )
+    }
+
+    pub fn is_graceful_end(&self) -> bool {
+        matches!(
+            self,
+            ControlSignal::Barrier(BarrierControlSignal::StreamGracefulEnd { .. })
         )
     }
 }
@@ -227,12 +283,14 @@ impl StreamData {
 impl StreamData {
     /// Create stream end signal
     pub fn stream_end() -> Self {
-        StreamData::control(ControlSignal::StreamGracefulEnd)
+        StreamData::control(ControlSignal::Barrier(
+            BarrierControlSignal::StreamGracefulEnd { barrier_id: 0 },
+        ))
     }
 
     /// Create quick stream end signal
     pub fn quick_end() -> Self {
-        StreamData::control(ControlSignal::StreamQuickEnd)
+        StreamData::control(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))
     }
 
     /// Create watermark signal

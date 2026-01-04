@@ -277,9 +277,9 @@ impl Processor for AggregationProcessor {
                                     }
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
-                                        send_control_with_backpressure(
-                                            &control_output,
-                                            control_signal,
+                                        send_with_backpressure(
+                                            &output,
+                                            StreamData::control(control_signal),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -306,13 +306,7 @@ impl Processor for AggregationProcessor {
                 }
             }
 
-            // Stream has ended, just forward the end signal as results were already sent for each batch
             if stream_ended {
-                tracing::info!(processor_id = %id, "stream ended, forwarding end signal");
-
-                // Send StreamGracefulEnd signal downstream
-                send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd)
-                    .await?;
                 tracing::info!(processor_id = %id, "aggregation processing completed");
             }
 

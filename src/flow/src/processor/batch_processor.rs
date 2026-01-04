@@ -320,8 +320,12 @@ mod tests {
             1,
             "remaining row should flush on close"
         );
-        let _ = control_tx.send(ControlSignal::StreamQuickEnd);
-        let _ = control_tx.send(ControlSignal::StreamQuickEnd);
+        let _ = control_tx.send(ControlSignal::Instant(
+            crate::processor::InstantControlSignal::StreamQuickEnd,
+        ));
+        let _ = control_tx.send(ControlSignal::Instant(
+            crate::processor::InstantControlSignal::StreamQuickEnd,
+        ));
     }
 
     #[tokio::test]
@@ -352,6 +356,8 @@ mod tests {
             1,
             "duration-only should flush after timeout"
         );
-        let _ = control_tx.send(ControlSignal::StreamQuickEnd);
+        let _ = control_tx.send(ControlSignal::Instant(
+            crate::processor::InstantControlSignal::StreamQuickEnd,
+        ));
     }
 }

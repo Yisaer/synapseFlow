@@ -8,6 +8,7 @@
 //! - All processors communicate via StreamData through tokio mspc channels
 
 pub mod aggregation_processor;
+pub mod barrier;
 pub mod base;
 pub mod batch_processor;
 pub mod control_source_processor;
@@ -49,7 +50,10 @@ pub use sink_processor::SinkProcessor;
 pub use sliding_window_processor::SlidingWindowProcessor;
 pub use state_window_processor::StateWindowProcessor;
 pub use stateful_function_processor::StatefulFunctionProcessor;
-pub use stream_data::{ControlSignal, StreamData, StreamError};
+pub use stream_data::{
+    BarrierControlSignal, BarrierControlSignalKind, ControlSignal, InstantControlSignal,
+    StreamData, StreamError,
+};
 pub use streaming_aggregation_processor::{
     StreamingAggregationProcessor, StreamingCountAggregationProcessor,
     StreamingTumblingAggregationProcessor,

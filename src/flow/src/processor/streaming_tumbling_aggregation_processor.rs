@@ -83,7 +83,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
                 Arc::clone(&aggregate_registry),
                 group_by_meta.clone(),
             );
-            let mut stream_ended = false;
 
             loop {
                 tokio::select! {
@@ -93,7 +92,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                stream_ended = true;
                                 break;
                             }
                         }
@@ -117,10 +115,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                     }
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
-                                        let is_graceful = matches!(
-                                            control_signal,
-                                            ControlSignal::StreamGracefulEnd
-                                        );
+                                        let is_graceful = control_signal.is_graceful_end();
                                         send_with_backpressure(
                                             &output,
                                             StreamData::control(control_signal),
@@ -130,7 +125,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                             if is_graceful {
                                                 window_state.flush_all(&output).await?;
                                             }
-                                            stream_ended = true;
                                             break;
                                         }
                                     }
@@ -151,10 +145,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
                 }
             }
 
-            if stream_ended {
-                send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd)
-                    .await?;
-            }
             Ok(())
         })
     }

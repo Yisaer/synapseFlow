@@ -7,8 +7,12 @@ use crate::processor::base::{
     fan_in_control_streams, forward_error, send_control_with_backpressure, send_with_backpressure,
     DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{
+    BarrierControlSignal, ControlSignal, Processor, ProcessorError, StreamData,
+};
 use futures::stream::StreamExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
@@ -29,6 +33,8 @@ pub struct ControlSourceProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     /// Upstream control-signal inputs
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
+    /// Monotonically increasing barrier id allocator (shared across control/data channels).
+    next_barrier_id: Arc<AtomicU64>,
 }
 
 impl ControlSourceProcessor {
@@ -42,19 +48,16 @@ impl ControlSourceProcessor {
             output,
             control_output,
             control_inputs: Vec::new(),
+            next_barrier_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    pub fn allocate_barrier_id(&self) -> u64 {
+        self.next_barrier_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
-        if let StreamData::Control(signal) = &data {
-            if signal.routes_via_control() {
-                send_control_with_backpressure(&self.control_output, signal.clone()).await?;
-            }
-            if !signal.routes_via_data() {
-                return Ok(());
-            }
-        }
         send_with_backpressure(&self.output, data).await
     }
 
@@ -85,6 +88,7 @@ impl Processor for ControlSourceProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
+        let barrier_id_allocator = Arc::clone(&self.next_barrier_id);
         let control_inputs = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_inputs);
         let mut control_active = !control_streams.is_empty();
@@ -102,7 +106,12 @@ impl Processor for ControlSourceProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
-                            handle_control_signal(&output, &control_output, control_signal).await?;
+                            let is_terminal = control_signal.is_terminal();
+                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            if is_terminal {
+                                tracing::info!(processor_id = %processor_id, "received terminal control signal (control)");
+                                return Ok(());
+                            }
                             continue;
                         } else {
                             control_active = false;
@@ -122,19 +131,7 @@ impl Processor for ControlSourceProcessor {
                         };
 
                         let is_terminal = data.is_terminal();
-                        let mut deliver_to_data = true;
-
-                        if let StreamData::Control(signal) = &data {
-                            handle_control_signal(&output, &control_output, signal.clone()).await?;
-                            if !signal.routes_via_data() {
-                                deliver_to_data = false;
-                            }
-                        }
-
-                        if deliver_to_data {
-                            send_with_backpressure(&output, data).await?;
-                        }
-
+                        send_with_backpressure(&output, data).await?;
                         if is_terminal {
                             tracing::info!(processor_id = %processor_id, "received StreamEnd");
                             return Ok(());
@@ -145,7 +142,14 @@ impl Processor for ControlSourceProcessor {
 
             // Input closed without explicit StreamEnd, propagate shutdown.
             tracing::info!(processor_id = %processor_id, "stopping (input closed)");
-            send_with_backpressure(&output, StreamData::stream_end()).await?;
+            let barrier_id = barrier_id_allocator.fetch_add(1, Ordering::Relaxed);
+            send_with_backpressure(
+                &output,
+                StreamData::control(ControlSignal::Barrier(
+                    BarrierControlSignal::StreamGracefulEnd { barrier_id },
+                )),
+            )
+            .await?;
             Ok(())
         })
     }
@@ -165,18 +169,4 @@ impl Processor for ControlSourceProcessor {
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
-}
-
-async fn handle_control_signal(
-    data_output: &broadcast::Sender<StreamData>,
-    control_output: &broadcast::Sender<ControlSignal>,
-    signal: ControlSignal,
-) -> Result<(), ProcessorError> {
-    if signal.routes_via_control() {
-        send_control_with_backpressure(control_output, signal.clone()).await?;
-    }
-    if signal.routes_via_data() {
-        send_with_backpressure(data_output, StreamData::control(signal)).await?;
-    }
-    Ok(())
 }

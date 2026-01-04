@@ -138,7 +138,6 @@ impl Processor for StreamingSlidingAggregationProcessor {
 
         tokio::spawn(async move {
             let mut windows: VecDeque<IncAggWindow> = VecDeque::new();
-            let mut stream_ended = false;
 
             fn to_epoch_secs(ts: SystemTime) -> Result<u64, ProcessorError> {
                 Ok(ts
@@ -292,7 +291,6 @@ impl Processor for StreamingSlidingAggregationProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                stream_ended = true;
                                 break;
                             }
                         }
@@ -352,14 +350,13 @@ impl Processor for StreamingSlidingAggregationProcessor {
                             }
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
-                                let is_graceful = matches!(control_signal, ControlSignal::StreamGracefulEnd);
+                                let is_graceful = control_signal.is_graceful_end();
                                 send_with_backpressure(&output, StreamData::control(control_signal)).await?;
                                 if is_terminal {
                                     if is_graceful {
                                         emit_oldest_window(&output, &physical, &group_by_meta, &windows)
                                             .await?;
                                     }
-                                    stream_ended = true;
                                     break;
                                 }
                             }
@@ -378,10 +375,6 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 }
             }
 
-            if stream_ended {
-                send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd)
-                    .await?;
-            }
             Ok(())
         })
     }

@@ -2,7 +2,8 @@ use crate::codec::RecordDecoder;
 use crate::connector::SourceConnector;
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
 use crate::processor::{
-    ControlSignal, DataSourceProcessor, DecoderProcessor, Processor, ProcessorError, StreamData,
+    ControlSignal, DataSourceProcessor, DecoderProcessor, InstantControlSignal, Processor,
+    ProcessorError, StreamData,
 };
 use datatypes::Schema;
 use once_cell::sync::Lazy;
@@ -768,7 +769,9 @@ impl SharedStreamInner {
             .map(|col| col.name.clone())
             .collect();
 
-        let _ = self.control_input.send(ControlSignal::StreamQuickEnd);
+        let _ = self
+            .control_input
+            .send(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd));
 
         let mut handles = self.handles.lock().await;
 

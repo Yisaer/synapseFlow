@@ -232,7 +232,7 @@ impl Processor for StreamingStateAggregationProcessor {
                             }
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
-                                let is_graceful = matches!(control_signal, ControlSignal::StreamGracefulEnd);
+                                let is_graceful = control_signal.is_graceful_end();
                                 send_with_backpressure(&output, StreamData::control(control_signal)).await?;
                                 if is_terminal {
                                     if is_graceful {
@@ -272,8 +272,6 @@ impl Processor for StreamingStateAggregationProcessor {
                 }
             }
 
-            send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd)
-                .await?;
             Ok(())
         })
     }

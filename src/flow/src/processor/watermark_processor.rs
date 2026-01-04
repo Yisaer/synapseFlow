@@ -623,7 +623,7 @@ impl Processor for EventtimeWatermarkProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            if matches!(control_signal, ControlSignal::StreamGracefulEnd) {
+                            if control_signal.is_graceful_end() {
                                 match state.on_graceful_end() {
                                     Ok(step) => {
                                         for err in step.errors {
@@ -683,7 +683,7 @@ impl Processor for EventtimeWatermarkProcessor {
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
-                                if matches!(signal, ControlSignal::StreamGracefulEnd) {
+                                if signal.is_graceful_end() {
                                     match state.on_graceful_end() {
                                         Ok(step) => {
                                             for err in step.errors {

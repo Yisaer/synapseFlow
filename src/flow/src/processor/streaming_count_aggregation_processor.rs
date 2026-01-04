@@ -115,7 +115,6 @@ impl Processor for StreamingCountAggregationProcessor {
         tokio::spawn(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
             let mut window_state = CountWindowState::new(target);
-            let mut stream_ended = false;
 
             loop {
                 tokio::select! {
@@ -126,7 +125,6 @@ impl Processor for StreamingCountAggregationProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                stream_ended = true;
                                 break;
                             }
                         }
@@ -163,9 +161,8 @@ impl Processor for StreamingCountAggregationProcessor {
                                             &output,
                                             StreamData::control(control_signal),
                                         )
-                                        .await?;
+                                    .await?;
                                         if is_terminal {
-                                            stream_ended = true;
                                             break;
                                         }
                                     }
@@ -186,10 +183,6 @@ impl Processor for StreamingCountAggregationProcessor {
                 }
             }
 
-            if stream_ended {
-                send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd)
-                    .await?;
-            }
             Ok(())
         })
     }

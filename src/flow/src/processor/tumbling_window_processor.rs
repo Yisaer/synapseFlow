@@ -96,7 +96,7 @@ impl Processor for TumblingWindowProcessor {
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
-                                let is_graceful = matches!(signal, ControlSignal::StreamGracefulEnd);
+                                let is_graceful = signal.is_graceful_end();
                                 send_with_backpressure(&output, StreamData::control(signal)).await?;
                                 if is_terminal {
                                     if is_graceful {
