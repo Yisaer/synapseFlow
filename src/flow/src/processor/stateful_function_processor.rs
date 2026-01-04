@@ -3,7 +3,7 @@
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{PhysicalPlan, PhysicalStatefulFunction, StatefulCall};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
@@ -190,12 +190,11 @@ impl Processor for StatefulFunctionProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "StatefulFunctionProcessor input lagged by {} messages",
-                                    skipped
+                                log_broadcast_lagged(
+                                    &id,
+                                    skipped,
+                                    "stateful function data input",
                                 );
-                                tracing::warn!(processor_id = %id, skipped = skipped, "input lagged");
-                                forward_error(&output, &id, message).await?;
                                 continue;
                             }
                             None => {

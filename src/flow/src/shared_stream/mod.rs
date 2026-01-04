@@ -533,15 +533,18 @@ impl SharedStreamInner {
             loop {
                 match data_rx.recv().await {
                     Ok(data) => {
-                        if data_tx.send(data).is_err() {
+                        if crate::processor::base::send_with_backpressure(&data_tx, data)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
                     Err(RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            stream_name = %name_for_data,
-                            skipped = skipped,
-                            "datasource output lagged"
+                        crate::processor::base::log_broadcast_lagged(
+                            &name_for_data,
+                            skipped,
+                            "shared stream datasource output",
                         );
                     }
                     Err(RecvError::Closed) => break,
@@ -556,15 +559,21 @@ impl SharedStreamInner {
             loop {
                 match control_rx.recv().await {
                     Ok(signal) => {
-                        if control_tx.send(signal).is_err() {
+                        if crate::processor::base::send_control_with_backpressure(
+                            &control_tx,
+                            signal,
+                        )
+                        .await
+                        .is_err()
+                        {
                             break;
                         }
                     }
                     Err(RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            stream_name = %name_for_control,
-                            skipped = skipped,
-                            "control channel lagged"
+                        crate::processor::base::log_broadcast_lagged(
+                            &name_for_control,
+                            skipped,
+                            "shared stream control output",
                         );
                     }
                     Err(RecvError::Closed) => break,

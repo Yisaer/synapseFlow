@@ -4,8 +4,8 @@
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalTumblingWindow};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use std::collections::VecDeque;
@@ -116,11 +116,8 @@ impl Processor for TumblingWindowProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "TumblingWindowProcessor input lagged by {} messages",
-                                    skipped
-                                );
-                                forward_error(&output, &id, message).await?;
+                                log_broadcast_lagged(&id, skipped, "tumbling window data input");
+                                continue;
                             }
                             None => {
                                 // Upstream ended without control signal: drop buffered rows.

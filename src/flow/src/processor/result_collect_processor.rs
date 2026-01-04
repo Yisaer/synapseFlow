@@ -3,7 +3,9 @@
 //! This processor receives data from upstream processors and forwards it to a single output.
 
 use crate::processor::barrier::{align_control_signal, BarrierAligner};
-use crate::processor::base::{fan_in_control_streams, fan_in_streams, log_received_data};
+use crate::processor::base::{
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
+};
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
@@ -113,7 +115,7 @@ impl Processor for ResultCollectProcessor {
                                 continue;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                tracing::warn!(processor_id = %processor_id, skipped = skipped, "control channel lagged");
+                                log_broadcast_lagged(&processor_id, skipped, "control input");
                                 continue;
                             }
                             None => return Err(ProcessorError::ChannelClosed),
@@ -162,11 +164,7 @@ impl Processor for ResultCollectProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                tracing::warn!(
-                                    processor_id = %processor_id,
-                                    skipped = skipped,
-                                    "input lagged"
-                                );
+                                log_broadcast_lagged(&processor_id, skipped, "data input");
                                 continue;
                             }
                             None => return Err(ProcessorError::ChannelClosed),

@@ -5,8 +5,8 @@ use crate::planner::physical::{
     WatermarkStrategy,
 };
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
@@ -248,12 +248,8 @@ impl Processor for TumblingWatermarkProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "WatermarkProcessor input lagged by {} messages",
-                                    skipped
-                                );
-                                tracing::warn!(processor_id = %id, skipped = skipped, "input lagged");
-                                forward_error(&output, &id, message).await?;
+                                log_broadcast_lagged(&id, skipped, "watermark data input");
+                                continue;
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "stopped");
@@ -482,12 +478,8 @@ impl Processor for SlidingWatermarkProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "WatermarkProcessor input lagged by {} messages",
-                                    skipped
-                                );
-                                tracing::warn!(processor_id = %id, skipped = skipped, "input lagged");
-                                forward_error(&output, &id, message).await?;
+                                log_broadcast_lagged(&id, skipped, "watermark data input");
+                                continue;
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "stopped");
@@ -715,12 +707,8 @@ impl Processor for EventtimeWatermarkProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "EventtimeWatermarkProcessor input lagged by {} messages",
-                                    skipped
-                                );
-                                tracing::warn!(processor_id = %id, skipped = skipped, "input lagged");
-                                forward_error(&output, &id, message).await?;
+                                log_broadcast_lagged(&id, skipped, "eventtime watermark data input");
+                                continue;
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "stopped");

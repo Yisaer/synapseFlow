@@ -3,8 +3,8 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::{AffiliateRow, RecordBatch};
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, send_control_with_backpressure, send_with_backpressure,
-    DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use datatypes::Value;
@@ -364,7 +364,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 send_with_backpressure(&output, other).await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                tracing::warn!(processor_id = %id, skipped = n, "input lagged");
+                                log_broadcast_lagged(&id, n, "data input");
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "all input streams ended");

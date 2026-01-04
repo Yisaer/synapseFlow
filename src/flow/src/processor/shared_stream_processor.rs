@@ -1,5 +1,5 @@
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
     send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
@@ -8,6 +8,7 @@ use futures::stream::StreamExt;
 use std::collections::HashSet;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
@@ -165,14 +166,8 @@ impl Processor for SharedStreamProcessor {
                                     return Ok(());
                                 }
                             }
-                            Some(Err(err)) => {
-                                let message = format!("shared data lagged: {err}");
-                                tracing::warn!(
-                                    processor_id = %processor_id,
-                                    error = %err,
-                                    "shared data lagged"
-                                );
-                                forward_error(&output, &processor_id, message).await?;
+                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
+                                log_broadcast_lagged(&processor_id, skipped, "shared stream data");
                                 continue;
                             }
                             None => return Ok(()),

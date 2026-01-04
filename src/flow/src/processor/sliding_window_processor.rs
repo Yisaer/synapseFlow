@@ -6,8 +6,8 @@
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use std::collections::VecDeque;
@@ -123,11 +123,8 @@ impl Processor for SlidingWindowProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "SlidingWindowProcessor input lagged by {} messages",
-                                    skipped
-                                );
-                                forward_error(&output, &id, message).await?;
+                                log_broadcast_lagged(&id, skipped, "sliding window data input");
+                                continue;
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "stopped");

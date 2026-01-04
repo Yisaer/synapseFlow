@@ -6,7 +6,7 @@ use crate::model::Collection;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
 use crate::processor::barrier::{align_control_signal, BarrierAligner};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
@@ -117,7 +117,7 @@ impl Processor for FilterProcessor {
                                 continue;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                tracing::warn!(processor_id = %id, skipped = skipped, "control input lagged");
+                                log_broadcast_lagged(&id, skipped, "filter control input");
                                 continue;
                             }
                             None => {
@@ -178,12 +178,7 @@ impl Processor for FilterProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "FilterProcessor input lagged by {} messages",
-                                    skipped
-                                );
-                                tracing::warn!(processor_id = %id, skipped = skipped, "input lagged");
-                                forward_error(&output, &id, message).await?;
+                                log_broadcast_lagged(&id, skipped, "filter data input");
                                 continue;
                             }
                             None => return Err(ProcessorError::ChannelClosed),

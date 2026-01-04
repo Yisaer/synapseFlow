@@ -2,8 +2,8 @@ use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_received_data, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
@@ -134,7 +134,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                tracing::warn!(processor_id = %id, skipped = n, "input lagged");
+                                log_broadcast_lagged(&id, n, "data input");
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "all input streams ended");

@@ -34,7 +34,7 @@ pub mod watermark_processor;
 pub use aggregation_processor::AggregationProcessor;
 pub use base::{Processor, ProcessorError};
 pub use batch_processor::BatchProcessor;
-pub use control_source_processor::ControlSourceProcessor;
+pub use control_source_processor::{ControlSourceProcessor, Ingress, IngressTarget};
 pub use datasource_processor::DataSourceProcessor;
 pub use decoder_processor::DecoderProcessor;
 pub use encoder_processor::EncoderProcessor;
