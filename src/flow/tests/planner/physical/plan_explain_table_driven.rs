@@ -4,6 +4,7 @@ use datatypes::{
 };
 use flow::catalog::MockStreamProps;
 use flow::planner::logical::create_logical_plan;
+use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::Catalog;
 use flow::EventtimeDefinition;
@@ -13,6 +14,7 @@ use flow::{
     StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use parser::parse_sql;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -260,6 +262,38 @@ fn explain_eventtime_json_string(sql: &str, options: &PipelineOptions) -> String
     println!("{sql}");
     println!("{}", explain.to_pretty_string());
     explain.to_json().to_string()
+}
+
+#[test]
+fn plan_explain_with_sinks_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sinks: Vec<PipelineSink>,
+        expected: &'static str,
+    }
+
+    let cases = vec![Case {
+        name: "select_star_with_kuksa_sink",
+        sql: "SELECT * FROM stream",
+        sinks: vec![PipelineSink::new(
+            "test_sink",
+            PipelineSinkConnector::new(
+                "test_connector",
+                SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
+                    kind: "kuksa".to_string(),
+                    settings: json!({}),
+                }),
+                SinkEncoderConfig::new("none", serde_json::Map::new()),
+            ),
+        )],
+        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":["sink_count=1"],"operator":"PhysicalResultCollect"}}"##,
+    }];
+
+    for case in cases {
+        let got = explain_json(case.sql, case.sinks);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
 }
 
 #[test]

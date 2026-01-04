@@ -3,12 +3,14 @@ use datatypes::{
     StructType,
 };
 use flow::planner::logical::create_logical_plan;
+use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::{
     ExplainReport, MqttStreamProps, NopSinkConfig, PipelineSink, PipelineSinkConnector,
     SinkConnectorConfig, SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use parser::parse_sql;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -137,12 +139,25 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::json(),
     );
 
+    let stream_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "stream".to_string(),
+        "a".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]));
+    let stream_def = StreamDefinition::new(
+        "stream",
+        Arc::clone(&stream_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("users".to_string(), Arc::new(users_def));
     stream_defs.insert("stream_prune".to_string(), Arc::new(stream_prune_def));
     stream_defs.insert("stream_window".to_string(), Arc::new(stream_window_def));
     stream_defs.insert("stream_struct".to_string(), Arc::new(stream_struct_def));
     stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
+    stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs
 }
 
@@ -323,6 +338,22 @@ fn create_logical_plan_with_sinks_table_driven() {
                 build_nop_json_sink("sink2", "conn2"),
             ],
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=sink1","connector=nop","encoder=json"],"operator":"DataSink"},{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=sink2","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=2"],"operator":"Tail"}"##,
+        },
+        Case {
+            name: "select_star_with_kuksa_sink",
+            sql: "SELECT * FROM stream",
+            sinks: vec![PipelineSink::new(
+                "test_sink",
+                PipelineSinkConnector::new(
+                    "test_conn",
+                    SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
+                        kind: "kuksa".to_string(),
+                        settings: json!({}),
+                    }),
+                    SinkEncoderConfig::new("none", serde_json::Map::new()),
+                ),
+            )],
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"}"##,
         },
     ];
 
