@@ -1,7 +1,7 @@
 use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SINK_TOPIC, storage_bridge};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -9,7 +9,8 @@ use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
     KuksaSinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
-    PipelineOptions, PipelineStatus, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+    PipelineOptions, PipelineStatus, PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps,
+    SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use storage::{StorageError, StorageManager};
+use storage::{StorageError, StorageManager, StoredPipelineDesiredState, StoredPipelineRunState};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -77,6 +78,30 @@ pub struct CreatePipelineResponse {
 pub struct ListPipelineItem {
     pub id: String,
     pub status: String,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+pub(crate) struct StopPipelineQuery {
+    mode: String,
+    timeout_ms: u64,
+}
+
+impl Default for StopPipelineQuery {
+    fn default() -> Self {
+        Self {
+            mode: "quick".to_string(),
+            timeout_ms: 5_000,
+        }
+    }
+}
+
+fn parse_stop_mode(mode: &str) -> Result<PipelineStopMode, String> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "" | "quick" => Ok(PipelineStopMode::Quick),
+        "graceful" => Ok(PipelineStopMode::Graceful),
+        other => Err(format!("unsupported stop mode: {other}")),
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -280,17 +305,119 @@ pub async fn start_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    match state.storage.get_pipeline(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    }
+
+    if let Err(err) = state
+        .storage
+        .put_pipeline_run_state(StoredPipelineRunState {
+            pipeline_id: id.clone(),
+            desired_state: StoredPipelineDesiredState::Running,
+        })
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist pipeline {id} desired state: {err}"),
+        )
+            .into_response();
+    }
+
     match state.instance.start_pipeline(&id) {
         Ok(_) => {
             tracing::info!(pipeline_id = %id, "pipeline started");
             (StatusCode::OK, format!("pipeline {id} started")).into_response()
         }
         Err(PipelineError::NotFound(_)) => {
+            let _ = state
+                .storage
+                .put_pipeline_run_state(StoredPipelineRunState {
+                    pipeline_id: id.clone(),
+                    desired_state: StoredPipelineDesiredState::Stopped,
+                });
+            (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
+        }
+        Err(err) => {
+            let _ = state
+                .storage
+                .put_pipeline_run_state(StoredPipelineRunState {
+                    pipeline_id: id.clone(),
+                    desired_state: StoredPipelineDesiredState::Stopped,
+                });
+            (
+                StatusCode::BAD_REQUEST,
+                format!("failed to start pipeline {id}: {err}"),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn stop_pipeline_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<StopPipelineQuery>,
+) -> impl IntoResponse {
+    match state.storage.get_pipeline(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    }
+
+    let mode = match parse_stop_mode(&query.mode) {
+        Ok(mode) => mode,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let timeout = Duration::from_millis(query.timeout_ms);
+
+    if let Err(err) = state
+        .storage
+        .put_pipeline_run_state(StoredPipelineRunState {
+            pipeline_id: id.clone(),
+            desired_state: StoredPipelineDesiredState::Stopped,
+        })
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist pipeline {id} desired state: {err}"),
+        )
+            .into_response();
+    }
+
+    match state.instance.stop_pipeline(&id, mode, timeout).await {
+        Ok(_) => {
+            tracing::info!(
+                pipeline_id = %id,
+                mode = %query.mode,
+                timeout_ms = query.timeout_ms,
+                "pipeline stopped"
+            );
+            (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
+        }
+        Err(PipelineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
         Err(err) => (
             StatusCode::BAD_REQUEST,
-            format!("failed to start pipeline {id}: {err}"),
+            format!("failed to stop pipeline {id}: {err}"),
         )
             .into_response(),
     }

@@ -204,6 +204,27 @@ pub async fn load_from_storage(
                 .put_plan_snapshot(stored_snapshot)
                 .map_err(|e| e.to_string())?;
         }
+
+        match storage
+            .get_pipeline_run_state(&pipeline.id)
+            .map_err(|e| e.to_string())?
+        {
+            Some(state)
+                if matches!(
+                    state.desired_state,
+                    storage::StoredPipelineDesiredState::Running
+                ) =>
+            {
+                if let Err(err) = instance.start_pipeline(&pipeline.id) {
+                    tracing::error!(
+                        pipeline_id = %pipeline.id,
+                        error = %err,
+                        "failed to auto-start pipeline"
+                    );
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
