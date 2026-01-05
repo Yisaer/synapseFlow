@@ -67,7 +67,7 @@ async fn run_test_case(test_case: TestCase) {
     );
 
     pipeline
-        .close()
+        .close(timeout_duration)
         .await
         .unwrap_or_else(|_| panic!("Failed to close pipeline for test: {}", test_case.name));
 }

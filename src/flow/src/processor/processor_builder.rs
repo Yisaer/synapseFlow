@@ -474,33 +474,38 @@ impl ProcessorPipeline {
     }
 
     /// Close the pipeline gracefully using the data path.
-    pub async fn close(&mut self) -> Result<(), ProcessorError> {
-        self.graceful_close().await
+    pub async fn close(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<(), ProcessorError> {
+        self.graceful_close(timeout_duration).await
     }
 
     /// Gracefully close the pipeline by sending StreamEnd via the data channel.
-    pub async fn graceful_close(&mut self) -> Result<(), ProcessorError> {
-        self.send_stream_end_via_data().await?;
+    pub async fn graceful_close(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<(), ProcessorError> {
+        let _ = self
+            .send_barrier_via_data_with_ack(
+                BarrierControlSignalKind::StreamGracefulEnd,
+                timeout_duration,
+            )
+            .await?;
+        self.replace_ingress_sender();
         self.await_all_handles().await
     }
 
     /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
-    pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        let signal_id = self.control_source.allocate_control_signal_id();
-        self.send_control_signal(ControlSignal::Instant(
-            InstantControlSignal::StreamQuickEnd { signal_id },
-        ))
-        .await?;
-        self.replace_ingress_sender();
-        self.await_all_handles().await
-    }
-
-    async fn send_stream_end_via_data(&mut self) -> Result<(), ProcessorError> {
+    pub async fn quick_close(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<(), ProcessorError> {
         let _ = self
-            .send_barrier_via_data(BarrierControlSignalKind::StreamGracefulEnd)
+            .send_quick_end_via_control_with_ack(timeout_duration)
             .await?;
         self.replace_ingress_sender();
-        Ok(())
+        self.await_all_handles().await
     }
 
     fn replace_ingress_sender(&mut self) {

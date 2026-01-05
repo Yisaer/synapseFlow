@@ -137,8 +137,14 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         .expect("shared stream info");
     assert_eq!(info.decoding_columns, vec!["a", "b", "c"]);
 
-    pipeline_ab.close().await.expect("close pipeline_ab");
-    pipeline_bc.close().await.expect("close pipeline_bc");
+    pipeline_ab
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close pipeline_ab");
+    pipeline_bc
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close pipeline_bc");
 
     registry
         .drop_stream(&stream_name)

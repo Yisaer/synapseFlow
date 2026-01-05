@@ -59,7 +59,7 @@ async fn run_stateful_case(case: StatefulCase) {
 
     if case.close_before_read {
         pipeline
-            .close()
+            .close(Duration::from_secs(5))
             .await
             .unwrap_or_else(|_| panic!("Failed to close pipeline for test: {}", case.name));
     }
@@ -85,7 +85,7 @@ async fn run_stateful_case(case: StatefulCase) {
 
     if !case.close_before_read {
         pipeline
-            .close()
+            .close(Duration::from_secs(5))
             .await
             .unwrap_or_else(|_| panic!("Failed to close pipeline for test: {}", case.name));
     }

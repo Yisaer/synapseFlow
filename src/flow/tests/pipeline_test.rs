@@ -156,7 +156,7 @@ async fn test_create_pipeline_aggregation_with_group_by_window_and_expr() {
     );
 
     pipeline
-        .close()
+        .close(Duration::from_secs(5))
         .await
         .unwrap_or_else(|_| panic!("Failed to close pipeline for test: {}", test_name));
 }
@@ -195,7 +195,10 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
         normalize_json(serde_json::json!([{"a": 10}]))
     );
 
-    pipeline.close().await.expect("close pipeline");
+    pipeline
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close pipeline");
 }
 
 #[tokio::test]
@@ -257,7 +260,10 @@ async fn test_batch_processor_flushes_on_count() {
         ),
     }
 
-    pipeline.close().await.expect("close pipeline");
+    pipeline
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close pipeline");
 
     let second = timeout(Duration::from_secs(1), output.recv())
         .await
@@ -357,7 +363,10 @@ async fn test_aggregation_with_countwindow() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Close pipeline to trigger final aggregation
-    pipeline.close().await.expect("close pipeline");
+    pipeline
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close pipeline");
 
     // Collect output results
     let mut output = pipeline
@@ -466,7 +475,10 @@ async fn test_last_row_with_countwindow() {
         .expect("send data");
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    pipeline.close().await.expect("close pipeline");
+    pipeline
+        .close(Duration::from_secs(5))
+        .await
+        .expect("close pipeline");
 
     let mut output = pipeline
         .take_output()

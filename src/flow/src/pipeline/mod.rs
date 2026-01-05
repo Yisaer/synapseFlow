@@ -507,7 +507,7 @@ impl PipelineManager {
 
 async fn close_pipeline(mut pipeline: ProcessorPipeline) -> Result<(), PipelineError> {
     pipeline
-        .graceful_close()
+        .graceful_close(Duration::from_secs(5))
         .await
         .map_err(|err| PipelineError::Runtime(err.to_string()))
 }
