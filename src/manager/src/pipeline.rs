@@ -2,7 +2,7 @@ use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SINK_TOPIC, storage_bridge};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
 };
 use flow::EncoderRegistry;
@@ -397,6 +397,44 @@ pub async fn get_pipeline_handler(
         spec,
     })
     .into_response()
+}
+
+pub async fn explain_pipeline_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.storage.get_pipeline(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response(),
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    }
+
+    let explain = match state.instance.explain_pipeline(&id) {
+        Ok(explain) => explain,
+        Err(PipelineError::NotFound(_)) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("failed to explain pipeline {id}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let mut response = explain.to_pretty_string().into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
 }
 
 pub async fn start_pipeline_handler(
