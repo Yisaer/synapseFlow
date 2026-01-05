@@ -2,8 +2,8 @@ use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use datatypes::Value;
@@ -262,7 +262,12 @@ impl Processor for StreamingStateAggregationProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                forward_error(&output, &id, format!("StreamingStateAggregationProcessor input lagged by {skipped} messages")).await?;
+                                log_broadcast_lagged(
+                                    &id,
+                                    skipped,
+                                    "streaming state aggregation data input",
+                                );
+                                continue;
                             }
                             None => {
                                 break;

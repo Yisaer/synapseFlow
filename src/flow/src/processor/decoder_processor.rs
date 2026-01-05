@@ -4,7 +4,7 @@ use crate::codec::RecordDecoder;
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
 use crate::planner::decode_projection::DecodeProjection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
@@ -156,10 +156,7 @@ impl Processor for DecoderProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message =
-                                    format!("Decoder input lagged by {} messages", skipped);
-                                tracing::warn!(processor_id = %processor_id, skipped = skipped, "input lagged");
-                                forward_error(&output, &processor_id, message).await?;
+                                log_broadcast_lagged(&processor_id, skipped, "decoder data input");
                                 continue;
                             }
                             None => {

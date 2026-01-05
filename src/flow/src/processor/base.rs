@@ -71,6 +71,18 @@ pub fn log_received_data(processor_id: &str, data: &StreamData) {
     }
 }
 
+/// Log a broadcast receiver lag event.
+///
+/// This should be rare when all sends are routed through cooperative backpressure helpers.
+pub fn log_broadcast_lagged(processor_id: &str, skipped: u64, context: &str) {
+    tracing::warn!(
+        processor_id = %processor_id,
+        skipped = skipped,
+        context = %context,
+        "broadcast receiver lagged"
+    );
+}
+
 /// Default buffer size for processor broadcast channels
 pub(crate) const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 

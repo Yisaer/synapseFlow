@@ -12,7 +12,7 @@ use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BatchProcessor, ControlSignal,
     ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
-    FilterProcessor, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
+    FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
     ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor,
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
@@ -291,8 +291,8 @@ impl PlanProcessor {
 /// - Middle processors: created from PhysicalPlan nodes (can be various types)
 /// - ResultCollectProcessor: data flow ending point
 pub struct ProcessorPipeline {
-    /// Pipeline input channel (send data into ControlSourceProcessor)
-    pub input: mpsc::Sender<StreamData>,
+    /// Pipeline ingress channel (send data/control into ControlSourceProcessor)
+    pub ingress: mpsc::Sender<Ingress>,
     /// Pipeline output channel (receive data from ResultCollectProcessor)
     pub output: Option<mpsc::Receiver<StreamData>>,
     /// Control source processor (data head)
@@ -301,12 +301,6 @@ pub struct ProcessorPipeline {
     pub middle_processors: Vec<PlanProcessor>,
     /// Result sink processor (data tail) if downstream forwarding is enabled
     pub result_sink: Option<ResultCollectProcessor>,
-    /// Broadcast sender feeding the control source data input
-    data_input_sender: broadcast::Sender<StreamData>,
-    /// Buffered receiver that bridges external input into the data input sender
-    data_input_buffer: Option<mpsc::Receiver<StreamData>>,
-    /// Broadcast sender delivering external control signals
-    control_signal_sender: broadcast::Sender<ControlSignal>,
     /// Join handles for all running processors
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
@@ -335,37 +329,33 @@ impl ProcessorPipeline {
             }
         }
         self.handles.push(self.control_source.start());
-        if let Some(buffer) = self.data_input_buffer.take() {
-            let sender = self.data_input_sender.clone();
-            self.handles.push(tokio::spawn(async move {
-                let mut receiver = buffer;
-                while let Some(data) = receiver.recv().await {
-                    sender
-                        .send(data)
-                        .map_err(|_| ProcessorError::ChannelClosed)?;
-                }
-                Ok(())
-            }));
-        }
     }
 
-    /// Broadcast a control signal into the pipeline, respecting its channel target.
-    pub fn broadcast_control_signal(&self, signal: ControlSignal) -> Result<(), ProcessorError> {
-        self.control_signal_sender
-            .send(signal)
-            .map(|_| ())
+    pub async fn send_ingress(&self, item: Ingress) -> Result<(), ProcessorError> {
+        self.ingress
+            .send(item)
+            .await
             .map_err(|_| ProcessorError::ChannelClosed)
     }
 
-    /// Broadcast a barrier control signal into the pipeline via the control channel.
+    pub async fn send_data(&self, data: StreamData) -> Result<(), ProcessorError> {
+        self.send_ingress(Ingress::data(data)).await
+    }
+
+    pub async fn send_control_signal(&self, signal: ControlSignal) -> Result<(), ProcessorError> {
+        self.send_ingress(Ingress::control(signal)).await
+    }
+
+    /// Send a barrier control signal into the pipeline via the control channel.
     ///
     /// The returned `barrier_id` is globally unique within the pipeline instance.
-    pub fn broadcast_barrier_via_control(
+    pub async fn send_barrier_via_control(
         &self,
         kind: BarrierControlSignalKind,
     ) -> Result<u64, ProcessorError> {
         let barrier_id = self.control_source.allocate_barrier_id();
-        self.broadcast_control_signal(ControlSignal::Barrier(kind.with_id(barrier_id)))?;
+        self.send_control_signal(ControlSignal::Barrier(kind.with_id(barrier_id)))
+            .await?;
         Ok(barrier_id)
     }
 
@@ -373,16 +363,14 @@ impl ProcessorPipeline {
     ///
     /// The returned `barrier_id` is globally unique within the pipeline instance.
     pub async fn send_barrier_via_data(
-        &mut self,
+        &self,
         kind: BarrierControlSignalKind,
     ) -> Result<u64, ProcessorError> {
         let barrier_id = self.control_source.allocate_barrier_id();
-        self.input
-            .send(StreamData::control(ControlSignal::Barrier(
-                kind.with_id(barrier_id),
-            )))
-            .await
-            .map_err(|_| ProcessorError::ChannelClosed)?;
+        self.send_data(StreamData::control(ControlSignal::Barrier(
+            kind.with_id(barrier_id),
+        )))
+        .await?;
         Ok(barrier_id)
     }
 
@@ -411,10 +399,9 @@ impl ProcessorPipeline {
 
     /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
     pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        self.broadcast_control_signal(ControlSignal::Instant(
-            InstantControlSignal::StreamQuickEnd,
-        ))?;
-        self.replace_input_sender();
+        self.send_control_signal(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))
+            .await?;
+        self.replace_ingress_sender();
         self.await_all_handles().await
     }
 
@@ -422,14 +409,14 @@ impl ProcessorPipeline {
         let _ = self
             .send_barrier_via_data(BarrierControlSignalKind::StreamGracefulEnd)
             .await?;
-        self.replace_input_sender();
+        self.replace_ingress_sender();
         Ok(())
     }
 
-    fn replace_input_sender(&mut self) {
+    fn replace_ingress_sender(&mut self) {
         let (dummy_tx, _) = mpsc::channel(1);
-        let old_input = std::mem::replace(&mut self.input, dummy_tx);
-        drop(old_input);
+        let old = std::mem::replace(&mut self.ingress, dummy_tx);
+        drop(old);
     }
 
     async fn await_all_handles(&mut self) -> Result<(), ProcessorError> {
@@ -945,13 +932,8 @@ pub fn create_processor_pipeline(
     dependencies: ProcessorPipelineDependencies,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     let mut control_source = ControlSourceProcessor::new("control_source");
-    let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
-    let (data_input_sender, data_input_receiver) =
-        broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
-    control_source.add_input(data_input_receiver);
-    let (control_signal_sender, control_signal_receiver) =
-        broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
-    control_source.add_control_input(control_signal_receiver);
+    let (ingress_sender, ingress_receiver) = mpsc::channel(100);
+    control_source.set_ingress_input(ingress_receiver);
 
     let mut processor_map = ProcessorMap::new();
     let context = ProcessorBuilderContext {
@@ -997,14 +979,11 @@ pub fn create_processor_pipeline(
     }
 
     Ok(ProcessorPipeline {
-        input: pipeline_input_sender,
+        ingress: ingress_sender,
         output: pipeline_output_receiver,
         control_source,
         middle_processors,
         result_sink,
-        data_input_sender,
-        data_input_buffer: Some(pipeline_input_receiver),
-        control_signal_sender,
         handles: Vec::new(),
         pipeline_id,
     })

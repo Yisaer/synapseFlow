@@ -7,8 +7,8 @@
 
 use crate::planner::physical::{PhysicalPlan, PhysicalStateWindow};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use datatypes::Value;
@@ -224,7 +224,8 @@ impl Processor for StateWindowProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                forward_error(&output, &id, format!("StateWindowProcessor input lagged by {skipped} messages")).await?;
+                                log_broadcast_lagged(&id, skipped, "state window data input");
+                                continue;
                             }
                             None => {
                                 tracing::info!(processor_id = %id, "stopped");

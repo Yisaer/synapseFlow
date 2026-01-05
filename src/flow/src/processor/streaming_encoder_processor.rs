@@ -4,7 +4,7 @@
 use crate::codec::{CollectionEncoder, CollectionEncoderStream};
 use crate::model::Collection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
+    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
@@ -288,16 +288,12 @@ impl Processor for StreamingEncoderProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "StreamingEncoderProcessor input lagged by {} messages",
-                                    skipped
+                                log_broadcast_lagged(
+                                    &processor_id,
+                                    skipped,
+                                    "streaming encoder data input",
                                 );
-                                tracing::warn!(
-                                    processor_id = %processor_id,
-                                    skipped = skipped,
-                                    "input lagged"
-                                );
-                                forward_error(&output, &processor_id, message).await?;
+                                continue;
                             }
                             None => {
                                 if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
