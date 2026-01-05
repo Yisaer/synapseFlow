@@ -5,7 +5,7 @@ pub mod storage_bridge;
 mod stream;
 
 use axum::Router;
-use axum::routing::{delete, post};
+use axum::routing::{delete, get, post};
 use pipeline::AppState;
 use std::net::SocketAddr;
 use storage::StorageManager;
@@ -35,7 +35,10 @@ pub async fn start_server(
             post(pipeline::start_pipeline_handler),
         )
         .route("/pipelines/:id/stop", post(pipeline::stop_pipeline_handler))
-        .route("/pipelines/:id", delete(pipeline::delete_pipeline_handler))
+        .route(
+            "/pipelines/:id",
+            get(pipeline::get_pipeline_handler).delete(pipeline::delete_pipeline_handler),
+        )
         .route(
             "/streams",
             post(stream::create_stream_handler).get(stream::list_streams),

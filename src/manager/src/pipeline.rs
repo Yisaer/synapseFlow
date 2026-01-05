@@ -97,6 +97,13 @@ pub struct ListPipelineItem {
     pub status: String,
 }
 
+#[derive(Serialize)]
+pub struct GetPipelineResponse {
+    pub id: String,
+    pub status: String,
+    pub spec: CreatePipelineRequest,
+}
+
 #[derive(Deserialize)]
 #[serde(default)]
 pub(crate) struct StopPipelineQuery {
@@ -127,6 +134,13 @@ fn busy_response(id: &str) -> axum::response::Response {
         format!("pipeline {id} is busy processing another command"),
     )
         .into_response()
+}
+
+fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
+    match state.map(|s| s.desired_state) {
+        Some(StoredPipelineDesiredState::Running) => "running".to_string(),
+        _ => "stopped".to_string(),
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -335,6 +349,54 @@ pub async fn create_pipeline_handler(
         )
             .into_response()
     }
+}
+
+pub async fn get_pipeline_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let stored = match state.storage.get_pipeline(&id) {
+        Ok(Some(pipeline)) => pipeline,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let spec = match storage_bridge::pipeline_request_from_stored(&stored) {
+        Ok(spec) => spec,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to decode stored pipeline {id}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let run_state = match state.storage.get_pipeline_run_state(&id) {
+        Ok(state) => state,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} run state from storage: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    Json(GetPipelineResponse {
+        id: id.clone(),
+        status: stored_state_label(run_state),
+        spec,
+    })
+    .into_response()
 }
 
 pub async fn start_pipeline_handler(
