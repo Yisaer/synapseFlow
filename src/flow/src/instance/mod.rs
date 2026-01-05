@@ -273,6 +273,15 @@ impl FlowInstance {
         self.pipeline_manager.explain_pipeline(id)
     }
 
+    /// Explain a pipeline definition without registering it.
+    pub fn explain_pipeline_definition(
+        &self,
+        definition: &PipelineDefinition,
+    ) -> Result<PipelineExplain, PipelineError> {
+        self.pipeline_manager
+            .explain_pipeline_definition(definition)
+    }
+
     /// Build a processor pipeline directly without registering it.
     pub fn build_pipeline(
         &self,

@@ -38,6 +38,7 @@ pub async fn start_server(
         .route(
             "/pipelines/:id",
             get(pipeline::get_pipeline_handler)
+                .put(pipeline::upsert_pipeline_handler)
                 .delete(pipeline::delete_pipeline_handler),
         )
         .route(

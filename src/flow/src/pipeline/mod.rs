@@ -460,8 +460,15 @@ impl PipelineManager {
             Arc::clone(&entry.definition)
         };
 
-        let sinks =
-            build_sinks_from_definition(&definition).map_err(PipelineError::BuildFailure)?;
+        self.explain_pipeline_definition(definition.as_ref())
+    }
+
+    /// Explain a pipeline definition without registering it.
+    pub fn explain_pipeline_definition(
+        &self,
+        definition: &PipelineDefinition,
+    ) -> Result<PipelineExplain, PipelineError> {
+        let sinks = build_sinks_from_definition(definition).map_err(PipelineError::BuildFailure)?;
 
         explain_pipeline_with_options(
             definition.sql(),

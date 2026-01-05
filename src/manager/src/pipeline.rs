@@ -62,6 +62,15 @@ pub struct CreatePipelineRequest {
     pub options: PipelineOptionsRequest,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct UpsertPipelineRequest {
+    pub sql: String,
+    #[serde(default)]
+    pub sinks: Vec<CreatePipelineSinkRequest>,
+    #[serde(default)]
+    pub options: PipelineOptionsRequest,
+}
+
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct PipelineOptionsRequest {
@@ -351,6 +360,198 @@ pub async fn create_pipeline_handler(
     }
 }
 
+pub async fn upsert_pipeline_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpsertPipelineRequest>,
+) -> impl IntoResponse {
+    let id = id.trim().to_string();
+    let create_req = CreatePipelineRequest {
+        id: id.clone(),
+        sql: req.sql,
+        sinks: req.sinks,
+        options: req.options,
+    };
+    if let Err(err) = validate_create_request(&create_req) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
+    let _permit = match state.try_acquire_pipeline_op(&id).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return busy_response(&id),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "pipeline operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let old_pipeline = match state.storage.get_pipeline(&id) {
+        Ok(pipeline) => pipeline,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let old_desired_state = match state.storage.get_pipeline_run_state(&id) {
+        Ok(Some(state)) => state.desired_state,
+        Ok(None) => StoredPipelineDesiredState::Stopped,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} run state from storage: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let encoder_registry = state.instance.encoder_registry();
+    let definition = match build_pipeline_definition(&create_req, encoder_registry.as_ref()) {
+        Ok(definition) => definition,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    if let Err(err) = state.instance.explain_pipeline_definition(&definition) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("invalid pipeline spec: {err}"),
+        )
+            .into_response();
+    }
+
+    if old_pipeline.is_some() {
+        match state.instance.delete_pipeline(&id).await {
+            Ok(_) | Err(PipelineError::NotFound(_)) => {}
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("failed to delete pipeline {id} in runtime: {err}"),
+                )
+                    .into_response();
+            }
+        }
+        match state.storage.delete_pipeline(&id) {
+            Ok(_) | Err(StorageError::NotFound(_)) => {}
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to delete pipeline {id} from storage: {err}"),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let stored = match storage_bridge::stored_pipeline_from_request(&create_req) {
+        Ok(stored) => stored,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    match state.storage.create_pipeline(stored.clone()) {
+        Ok(()) => {}
+        Err(StorageError::AlreadyExists(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("pipeline {id} already exists"),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist pipeline {id}: {err}"),
+            )
+                .into_response();
+        }
+    }
+
+    let build_result = match state.instance.create_pipeline_with_plan_cache(
+        definition,
+        flow::planner::plan_cache::PlanCacheInputs {
+            pipeline_raw_json: stored.raw_json.clone(),
+            streams_raw_json: Vec::new(),
+            snapshot: None,
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = state.storage.delete_pipeline(&id);
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("failed to create pipeline {id}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(logical_ir) = build_result.logical_plan_ir {
+        match storage_bridge::build_plan_snapshot(
+            state.storage.as_ref(),
+            &stored.id,
+            &stored.raw_json,
+            &build_result.snapshot.streams,
+            logical_ir,
+        )
+        .and_then(|record| {
+            state
+                .storage
+                .put_plan_snapshot(record)
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(()) => {}
+            Err(err) => {
+                let _ = state.instance.delete_pipeline(&id).await;
+                let _ = state.storage.delete_pipeline(&id);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("pipeline {id} created but failed to persist plan cache: {err}"),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    if matches!(old_desired_state, StoredPipelineDesiredState::Running) {
+        if let Err(err) = state
+            .storage
+            .put_pipeline_run_state(StoredPipelineRunState {
+                pipeline_id: id.clone(),
+                desired_state: StoredPipelineDesiredState::Running,
+            })
+        {
+            let _ = state.instance.delete_pipeline(&id).await;
+            let _ = state.storage.delete_pipeline(&id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist pipeline {id} desired state: {err}"),
+            )
+                .into_response();
+        }
+
+        if let Err(err) = state.instance.start_pipeline(&id) {
+            tracing::error!(
+                pipeline_id = %id,
+                error = %err,
+                "failed to start pipeline after upsert, leaving stopped"
+            );
+            let _ = state
+                .storage
+                .put_pipeline_run_state(StoredPipelineRunState {
+                    pipeline_id: id.clone(),
+                    desired_state: StoredPipelineDesiredState::Stopped,
+                });
+        }
+    }
+
+    let status = stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
+    Json(CreatePipelineResponse { id, status }).into_response()
+}
+
 pub async fn get_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -405,7 +606,9 @@ pub async fn explain_pipeline_handler(
 ) -> impl IntoResponse {
     match state.storage.get_pipeline(&id) {
         Ok(Some(_)) => {}
-        Ok(None) => return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response(),
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
