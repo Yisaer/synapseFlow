@@ -539,26 +539,10 @@ impl PipelineManager {
         };
         let entry = maybe_entry.ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
         if matches!(entry.status, PipelineStatus::Running) {
-            let pipeline_id = entry.definition.id().to_string();
-            tokio::spawn(async move {
-                if let Some(pipeline) = entry.pipeline {
-                    if let Err(err) =
-                        close_pipeline(pipeline, PipelineStopMode::Quick, Duration::from_secs(5))
-                            .await
-                    {
-                        tracing::error!(
-                            pipeline_id = %pipeline_id,
-                            error = %err,
-                            "failed to close pipeline"
-                        );
-                    }
-                } else {
-                    tracing::error!(
-                        pipeline_id = %pipeline_id,
-                        "failed to close pipeline (runtime missing)"
-                    );
-                }
-            });
+            let pipeline = entry.pipeline.ok_or_else(|| {
+                PipelineError::Runtime("pipeline runtime missing for running pipeline".to_string())
+            })?;
+            close_pipeline(pipeline, PipelineStopMode::Quick, Duration::from_secs(5)).await?;
         }
         Ok(())
     }

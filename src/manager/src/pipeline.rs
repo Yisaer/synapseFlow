@@ -19,11 +19,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use storage::{StorageError, StorageManager, StoredPipelineDesiredState, StoredPipelineRunState};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[derive(Clone)]
 pub struct AppState {
     pub instance: Arc<FlowInstance>,
     pub storage: Arc<StorageManager>,
+    pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl AppState {
@@ -31,7 +33,22 @@ impl AppState {
         Self {
             instance: Arc::new(instance),
             storage: Arc::new(storage),
+            pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn try_acquire_pipeline_op(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        let semaphore = {
+            let mut guard = self.pipeline_op_locks.lock().await;
+            guard
+                .entry(pipeline_id.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(1)))
+                .clone()
+        };
+        semaphore.try_acquire_owned()
     }
 }
 
@@ -102,6 +119,14 @@ fn parse_stop_mode(mode: &str) -> Result<PipelineStopMode, String> {
         "graceful" => Ok(PipelineStopMode::Graceful),
         other => Err(format!("unsupported stop mode: {other}")),
     }
+}
+
+fn busy_response(id: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        format!("pipeline {id} is busy processing another command"),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -203,6 +228,17 @@ pub async fn create_pipeline_handler(
     if let Err(err) = validate_create_request(&req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let _permit = match state.try_acquire_pipeline_op(&req.id).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return busy_response(&req.id),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "pipeline operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     let encoder_registry = state.instance.encoder_registry();
     let definition = match build_pipeline_definition(&req, encoder_registry.as_ref()) {
         Ok(def) => def,
@@ -305,6 +341,17 @@ pub async fn start_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let _permit = match state.try_acquire_pipeline_op(&id).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return busy_response(&id),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "pipeline operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     match state.storage.get_pipeline(&id) {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -368,6 +415,17 @@ pub async fn stop_pipeline_handler(
     Path(id): Path<String>,
     Query(query): Query<StopPipelineQuery>,
 ) -> impl IntoResponse {
+    let _permit = match state.try_acquire_pipeline_op(&id).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return busy_response(&id),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "pipeline operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     match state.storage.get_pipeline(&id) {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -427,6 +485,17 @@ pub async fn delete_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let _permit = match state.try_acquire_pipeline_op(&id).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return busy_response(&id),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "pipeline operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     match state.instance.delete_pipeline(&id).await {
         Ok(_) => {
             if let Err(err) = state.storage.delete_pipeline(&id) {
