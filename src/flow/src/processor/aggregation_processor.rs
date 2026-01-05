@@ -385,7 +385,6 @@ impl AggregationProcessor {
         key_values: &[Value],
         group_by_meta: &[GroupByMeta],
     ) -> Result<crate::model::Tuple, String> {
-        use crate::model::AffiliateRow;
         use std::sync::Arc;
 
         // Finalize aggregate values.
@@ -416,14 +415,7 @@ impl AggregationProcessor {
             }
             None => crate::model::Tuple::new(vec![]),
         };
-        let mut affiliate = tuple
-            .affiliate
-            .take()
-            .unwrap_or_else(|| AffiliateRow::new(Vec::new()));
-        for (k, v) in affiliate_entries {
-            affiliate.insert(k, v);
-        }
-        tuple.affiliate = Some(affiliate);
+        tuple.add_affiliate_columns(affiliate_entries);
         Ok(tuple)
     }
 }

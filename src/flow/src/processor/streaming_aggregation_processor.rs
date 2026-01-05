@@ -270,7 +270,6 @@ fn finalize_group(
     last_tuple: &crate::model::Tuple,
     key_values: &[Value],
 ) -> Result<crate::model::Tuple, String> {
-    use crate::model::AffiliateRow;
     use std::sync::Arc;
 
     let mut affiliate_entries = Vec::new();
@@ -288,14 +287,7 @@ fn finalize_group(
 
     let mut tuple =
         crate::model::Tuple::with_timestamp(last_tuple.messages.clone(), last_tuple.timestamp);
-    let mut affiliate = tuple
-        .affiliate
-        .take()
-        .unwrap_or_else(|| AffiliateRow::new(Vec::new()));
-    for (k, v) in affiliate_entries {
-        affiliate.insert(k, v);
-    }
-    tuple.affiliate = Some(affiliate);
+    tuple.add_affiliate_columns(affiliate_entries);
     Ok(tuple)
 }
 

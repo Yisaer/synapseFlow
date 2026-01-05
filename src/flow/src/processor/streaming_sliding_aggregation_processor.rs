@@ -1,6 +1,6 @@
 use super::{build_group_by_meta, create_accumulators_static, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::model::{AffiliateRow, RecordBatch};
+use crate::model::RecordBatch;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
@@ -263,14 +263,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                         state.last_tuple.messages.clone(),
                         state.last_tuple.timestamp,
                     );
-                    let mut affiliate = tuple
-                        .affiliate
-                        .take()
-                        .unwrap_or_else(|| AffiliateRow::new(Vec::new()));
-                    for (k, v) in affiliate_entries {
-                        affiliate.insert(k, v);
-                    }
-                    tuple.affiliate = Some(affiliate);
+                    tuple.add_affiliate_columns(affiliate_entries);
                     out_rows.push(tuple);
                 }
 

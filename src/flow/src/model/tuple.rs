@@ -115,7 +115,7 @@ impl AffiliateRow {
 #[derive(Debug, Clone)]
 pub struct Tuple {
     pub messages: Arc<[Arc<Message>]>,
-    pub affiliate: Option<AffiliateRow>,
+    affiliate: Option<Arc<AffiliateRow>>,
     pub timestamp: SystemTime,
 }
 
@@ -136,16 +136,38 @@ impl Tuple {
         }
     }
 
+    pub fn affiliate(&self) -> Option<&AffiliateRow> {
+        self.affiliate.as_ref().map(|aff| aff.as_ref())
+    }
+
+    pub(crate) fn affiliate_mut(&mut self) -> &mut AffiliateRow {
+        if self.affiliate.is_none() {
+            self.affiliate = Some(Arc::new(AffiliateRow::new(Vec::new())));
+        }
+        Arc::make_mut(
+            self.affiliate
+                .as_mut()
+                .expect("affiliate initialized above"),
+        )
+    }
+
     pub fn add_affiliate_column(&mut self, column: Arc<String>, value: Value) {
-        match &mut self.affiliate {
-            Some(aff) => aff.insert(column, value),
-            None => self.affiliate = Some(AffiliateRow::new(vec![(column, value)])),
+        self.affiliate_mut().insert(column, value);
+    }
+
+    pub fn add_affiliate_columns(
+        &mut self,
+        entries: impl IntoIterator<Item = (Arc<String>, Value)>,
+    ) {
+        let affiliate = self.affiliate_mut();
+        for (column, value) in entries {
+            affiliate.insert(column, value);
         }
     }
 
     pub fn entries(&self) -> Vec<((&str, &str), &Value)> {
         let mut out = Vec::new();
-        if let Some(aff) = &self.affiliate {
+        if let Some(aff) = self.affiliate() {
             for (key, value) in aff.entries() {
                 out.push((("", key.as_str()), value));
             }
@@ -160,7 +182,7 @@ impl Tuple {
 
     pub fn value_by_name(&self, source: &str, column: &str) -> Option<&Value> {
         if source.is_empty() {
-            if let Some(aff) = &self.affiliate {
+            if let Some(aff) = self.affiliate() {
                 return aff.value(column);
             }
             return None;
