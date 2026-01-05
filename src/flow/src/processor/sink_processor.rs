@@ -230,29 +230,6 @@ impl Processor for SinkProcessor {
                                             .await?;
                                         }
                                     }
-                                    StreamData::Bytes(payload) => {
-                                        if let Err(err) = Self::handle_payload(
-                                            &processor_id,
-                                            &mut connector,
-                                            &payload,
-                                            1,
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
-                                            forward_error(&output, &processor_id, err.to_string())
-                                                .await?;
-                                            continue;
-                                        }
-
-                                        if forward_data {
-                                            send_with_backpressure(
-                                                &output,
-                                                StreamData::Bytes(payload),
-                                            )
-                                            .await?;
-                                        }
-                                    }
                                     StreamData::Collection(collection) => {
                                         if let Err(err) = Self::handle_collection(
                                             &processor_id,
