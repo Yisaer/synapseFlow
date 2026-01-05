@@ -8,6 +8,7 @@ use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
+use crate::processor::result_collect_processor::ErrorLoggingHook;
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
@@ -984,6 +985,7 @@ pub fn create_processor_pipeline(
         if let PlanProcessor::ResultCollect(mut collector) = middle_processors.swap_remove(pos) {
             let (result_output_sender, pipeline_output_rx) = mpsc::channel(100);
             collector.set_output(result_output_sender);
+            collector.add_bus_hook(Arc::new(ErrorLoggingHook));
             pipeline_output_receiver = Some(pipeline_output_rx);
             result_sink = Some(collector);
         }
