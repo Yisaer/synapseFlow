@@ -716,7 +716,10 @@ fn build_physical_node_with_prefix(
             }
         }
         PhysicalPlan::ResultCollect(rc) => {
-            info.push(format!("sink_count={}", rc.base.children.len()));
+            let _ = rc;
+        }
+        PhysicalPlan::Barrier(barrier) => {
+            info.push(format!("upstream_count={}", barrier.base.children.len()));
         }
         PhysicalPlan::ProcessTimeWatermark(watermark) => match &watermark.config {
             WatermarkConfig::Tumbling {

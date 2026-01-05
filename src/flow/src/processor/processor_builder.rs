@@ -10,8 +10,8 @@ use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
-    AggregationProcessor, BarrierControlSignalKind, BatchProcessor, ControlSignal,
-    ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
+    AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
+    ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
     FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
     ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor,
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
@@ -62,6 +62,8 @@ pub enum PlanProcessor {
     Sink(SinkProcessor),
     /// ResultCollectProcessor created from PhysicalResultCollect
     ResultCollect(ResultCollectProcessor),
+    /// BarrierProcessor created from PhysicalBarrier
+    Barrier(BarrierProcessor),
 }
 
 #[derive(Clone)]
@@ -159,6 +161,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
+            PlanProcessor::Barrier(p) => p.id(),
         }
     }
 
@@ -188,6 +191,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.start(),
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
+            PlanProcessor::Barrier(p) => p.start(),
         }
     }
 
@@ -211,6 +215,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
+            PlanProcessor::Barrier(p) => p.subscribe_output(),
         }
     }
 
@@ -234,6 +239,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
+            PlanProcessor::Barrier(p) => p.subscribe_control_output(),
         }
     }
 
@@ -257,6 +263,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
+            PlanProcessor::Barrier(p) => p.add_input(receiver),
         }
     }
 
@@ -280,6 +287,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
+            PlanProcessor::Barrier(p) => p.add_control_input(receiver),
         }
     }
 }
@@ -705,6 +713,13 @@ fn create_processor_from_plan_node(
             let processor = ResultCollectProcessor::new(plan_name.clone());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::ResultCollect(processor),
+            ))
+        }
+        PhysicalPlan::Barrier(barrier) => {
+            let expected_upstreams = barrier.base.children.len();
+            let processor = BarrierProcessor::new(plan_name.clone(), expected_upstreams);
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::Barrier(processor),
             ))
         }
     }

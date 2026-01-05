@@ -1,8 +1,8 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::EncoderRegistry;
 use crate::planner::physical::{
-    PhysicalDataSink, PhysicalPlan, PhysicalSinkConnector, PhysicalStreamingAggregation,
-    PhysicalStreamingEncoder, StreamingWindowSpec,
+    PhysicalBarrier, PhysicalDataSink, PhysicalPlan, PhysicalSinkConnector,
+    PhysicalStreamingAggregation, PhysicalStreamingEncoder, StreamingWindowSpec,
 };
 use std::sync::Arc;
 
@@ -27,6 +27,7 @@ pub fn optimize_physical_plan(
             aggregate_registry: Arc::clone(&aggregate_registry),
         }),
         Box::new(StreamingEncoderRewrite),
+        Box::new(InsertBarrierForFanIn),
     ];
     let mut current = physical_plan;
     for rule in rules {
@@ -44,6 +45,14 @@ struct StreamingEncoderRewrite;
 struct StreamingAggregationRewrite {
     aggregate_registry: Arc<AggregateFunctionRegistry>,
 }
+
+/// Rule: insert a barrier node between a fan-in plan and its children.
+///
+/// A node is considered fan-in when it has more than one child. The inserted barrier node keeps
+/// the original children, and the parent is rewritten to have a single barrier child.
+///
+/// This is a topology rewrite rule and is intentionally applied as the last physical optimization.
+struct InsertBarrierForFanIn;
 
 impl PhysicalOptRule for StreamingAggregationRewrite {
     fn name(&self) -> &str {
@@ -264,6 +273,58 @@ impl StreamingEncoderRewrite {
     }
 }
 
+impl PhysicalOptRule for InsertBarrierForFanIn {
+    fn name(&self) -> &str {
+        "insert_barrier_for_fan_in"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        _encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        let mut next_index = max_physical_index(&plan) + 1;
+        insert_barrier_for_fan_in(plan, &mut next_index)
+    }
+}
+
+fn insert_barrier_for_fan_in(plan: Arc<PhysicalPlan>, next_index: &mut i64) -> Arc<PhysicalPlan> {
+    let optimized_children = plan
+        .children()
+        .iter()
+        .map(|child| insert_barrier_for_fan_in(Arc::clone(child), next_index))
+        .collect::<Vec<_>>();
+
+    let rebuilt = rebuild_with_children(plan.as_ref(), optimized_children);
+    if matches!(rebuilt.as_ref(), PhysicalPlan::Barrier(_)) {
+        return rebuilt;
+    }
+
+    if rebuilt.children().len() <= 1 {
+        return rebuilt;
+    }
+
+    let barrier_index = allocate_index(next_index);
+    let barrier_children = rebuilt.children().to_vec();
+    let barrier = PhysicalBarrier::new(barrier_children, barrier_index);
+    let barrier_node = Arc::new(PhysicalPlan::Barrier(barrier));
+    rebuild_with_children(rebuilt.as_ref(), vec![barrier_node])
+}
+
+fn max_physical_index(plan: &Arc<PhysicalPlan>) -> i64 {
+    let mut max_index = plan.get_plan_index();
+    for child in plan.children() {
+        max_index = max_index.max(max_physical_index(child));
+    }
+    max_index
+}
+
+fn allocate_index(next: &mut i64) -> i64 {
+    let index = *next;
+    *next += 1;
+    index
+}
+
 fn rebuild_with_children(
     plan: &PhysicalPlan,
     children: Vec<Arc<PhysicalPlan>>,
@@ -328,6 +389,11 @@ fn rebuild_with_children(
             let mut new = collect.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::ResultCollect(new))
+        }
+        PhysicalPlan::Barrier(barrier) => {
+            let mut new = barrier.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::Barrier(new))
         }
         PhysicalPlan::TumblingWindow(window) => {
             let mut new = window.clone();

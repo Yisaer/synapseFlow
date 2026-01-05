@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 pub mod base_physical;
 pub mod physical_aggregation;
+pub mod physical_barrier;
 pub mod physical_batch;
 pub mod physical_data_sink;
 pub mod physical_data_source;
@@ -21,6 +22,7 @@ pub mod physical_window;
 
 pub use base_physical::BasePhysicalPlan;
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
+pub use physical_barrier::PhysicalBarrier;
 pub use physical_batch::PhysicalBatch;
 pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
@@ -58,6 +60,7 @@ pub enum PhysicalPlan {
     StreamingAggregation(PhysicalStreamingAggregation),
     StreamingEncoder(PhysicalStreamingEncoder),
     ResultCollect(PhysicalResultCollect),
+    Barrier(PhysicalBarrier),
     TumblingWindow(PhysicalTumblingWindow),
     CountWindow(PhysicalCountWindow),
     SlidingWindow(PhysicalSlidingWindow),
@@ -87,6 +90,7 @@ impl PhysicalPlan {
             PhysicalPlan::StreamingAggregation(plan) => plan.base.children(),
             PhysicalPlan::StreamingEncoder(plan) => plan.base.children(),
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
+            PhysicalPlan::Barrier(plan) => plan.base.children(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.children(),
             PhysicalPlan::CountWindow(plan) => plan.base.children(),
             PhysicalPlan::SlidingWindow(plan) => plan.base.children(),
@@ -113,6 +117,7 @@ impl PhysicalPlan {
             PhysicalPlan::StreamingAggregation(_) => "PhysicalStreamingAggregation",
             PhysicalPlan::StreamingEncoder(_) => "PhysicalStreamingEncoder",
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
+            PhysicalPlan::Barrier(_) => "PhysicalBarrier",
             PhysicalPlan::TumblingWindow(_) => "PhysicalTumblingWindow",
             PhysicalPlan::CountWindow(_) => "PhysicalCountWindow",
             PhysicalPlan::SlidingWindow(_) => "PhysicalSlidingWindow",
@@ -139,6 +144,7 @@ impl PhysicalPlan {
             PhysicalPlan::StreamingAggregation(plan) => plan.base.index(),
             PhysicalPlan::StreamingEncoder(plan) => plan.base.index(),
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
+            PhysicalPlan::Barrier(plan) => plan.base.index(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.index(),
             PhysicalPlan::CountWindow(plan) => plan.base.index(),
             PhysicalPlan::SlidingWindow(plan) => plan.base.index(),
@@ -184,6 +190,7 @@ impl PhysicalPlan {
             PhysicalPlan::StreamingAggregation(plan) => &mut plan.base.children,
             PhysicalPlan::StreamingEncoder(plan) => &mut plan.base.children,
             PhysicalPlan::ResultCollect(plan) => &mut plan.base.children,
+            PhysicalPlan::Barrier(plan) => &mut plan.base.children,
             PhysicalPlan::TumblingWindow(plan) => &mut plan.base.children,
             PhysicalPlan::CountWindow(plan) => &mut plan.base.children,
             PhysicalPlan::SlidingWindow(plan) => &mut plan.base.children,

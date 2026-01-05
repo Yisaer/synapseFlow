@@ -4,7 +4,6 @@
 
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
-use crate::processor::barrier::{align_control_signal, BarrierAligner};
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
@@ -80,16 +79,11 @@ impl Processor for FilterProcessor {
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let data_receivers = std::mem::take(&mut self.inputs);
-        let expected_data_upstreams = data_receivers.len();
         let mut input_streams = fan_in_streams(data_receivers);
 
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let expected_control_upstreams = control_receivers.len();
         let mut control_streams = fan_in_control_streams(control_receivers);
         let control_active = !control_streams.is_empty();
-
-        let mut data_barrier = BarrierAligner::new("data", expected_data_upstreams);
-        let mut control_barrier = BarrierAligner::new("control", expected_control_upstreams);
 
         let output = self.output.clone();
         let control_output = self.control_output.clone();
@@ -103,18 +97,13 @@ impl Processor for FilterProcessor {
                     control_item = control_streams.next(), if control_active => {
                         match control_item {
                             Some(Ok(control_signal)) => {
-                                if let Some(signal) =
-                                    align_control_signal(&mut control_barrier, control_signal)?
-                                {
-                                    let is_terminal = signal.is_terminal();
-                                    send_control_with_backpressure(&control_output, signal).await?;
-                                    if is_terminal {
-                                        tracing::info!(processor_id = %id, "received StreamEnd (control)");
-                                        tracing::info!(processor_id = %id, "stopped");
-                                        return Ok(());
-                                    }
+                                let is_terminal = control_signal.is_terminal();
+                                send_control_with_backpressure(&control_output, control_signal).await?;
+                                if is_terminal {
+                                    tracing::info!(processor_id = %id, "received StreamEnd (control)");
+                                    tracing::info!(processor_id = %id, "stopped");
+                                    return Ok(());
                                 }
-                                continue;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 log_broadcast_lagged(&id, skipped, "filter control input");
@@ -150,20 +139,16 @@ impl Processor for FilterProcessor {
                                         }
                                     }
                                     StreamData::Control(control_signal) => {
-                                        if let Some(signal) =
-                                            align_control_signal(&mut data_barrier, control_signal)?
-                                        {
-                                            let is_terminal = signal.is_terminal();
-                                            send_with_backpressure(
-                                                &output,
-                                                StreamData::control(signal),
-                                            )
-                                            .await?;
-                                            if is_terminal {
-                                                tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                                tracing::info!(processor_id = %id, "stopped");
-                                                return Ok(());
-                                            }
+                                        let is_terminal = control_signal.is_terminal();
+                                        send_with_backpressure(
+                                            &output,
+                                            StreamData::control(control_signal),
+                                        )
+                                        .await?;
+                                        if is_terminal {
+                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
+                                            tracing::info!(processor_id = %id, "stopped");
+                                            return Ok(());
                                         }
                                     }
                                     other => {

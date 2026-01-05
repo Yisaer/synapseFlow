@@ -9,6 +9,7 @@
 
 pub mod aggregation_processor;
 pub mod barrier;
+pub mod barrier_processor;
 pub mod base;
 pub mod batch_processor;
 pub mod control_source_processor;
@@ -32,6 +33,7 @@ pub mod tumbling_window_processor;
 pub mod watermark_processor;
 
 pub use aggregation_processor::AggregationProcessor;
+pub use barrier_processor::BarrierProcessor;
 pub use base::{Processor, ProcessorError};
 pub use batch_processor::BatchProcessor;
 pub use control_source_processor::{ControlSourceProcessor, Ingress, IngressTarget};
