@@ -248,6 +248,16 @@ impl FlowInstance {
         self.pipeline_manager.start_pipeline(id)
     }
 
+    /// Stop a pipeline by identifier.
+    pub async fn stop_pipeline(
+        &self,
+        id: &str,
+        mode: crate::pipeline::PipelineStopMode,
+        timeout: std::time::Duration,
+    ) -> Result<(), PipelineError> {
+        self.pipeline_manager.stop_pipeline(id, mode, timeout).await
+    }
+
     /// Stop and delete a pipeline.
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         self.pipeline_manager.delete_pipeline(id).await

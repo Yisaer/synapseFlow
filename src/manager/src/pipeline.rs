@@ -345,7 +345,7 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                     let status = runtime_status
                         .get(&entry.id)
                         .cloned()
-                        .unwrap_or_else(|| "created".to_string());
+                        .unwrap_or_else(|| "stopped".to_string());
                     ListPipelineItem {
                         id: entry.id,
                         status,
@@ -470,7 +470,7 @@ pub(crate) fn build_pipeline_definition(
 
 fn status_label(status: PipelineStatus) -> String {
     match status {
-        PipelineStatus::Created => "created".to_string(),
+        PipelineStatus::Stopped => "stopped".to_string(),
         PipelineStatus::Running => "running".to_string(),
     }
 }
