@@ -94,8 +94,14 @@ pub enum SinkProps {
 /// Runtime state for pipeline execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineStatus {
-    Created,
+    Stopped,
     Running,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineStopMode {
+    Graceful,
+    Quick,
 }
 
 /// Concrete MQTT sink configuration.
@@ -252,7 +258,7 @@ pub struct PlanCacheOptions {
 
 struct ManagedPipeline {
     definition: Arc<PipelineDefinition>,
-    pipeline: ProcessorPipeline,
+    pipeline: Option<ProcessorPipeline>,
     streams: Vec<String>,
     status: PipelineStatus,
 }
@@ -320,9 +326,9 @@ impl PipelineManager {
         }
         let entry = ManagedPipeline {
             definition: Arc::new(definition),
-            pipeline,
+            pipeline: Some(pipeline),
             streams,
-            status: PipelineStatus::Created,
+            status: PipelineStatus::Stopped,
         };
         let snapshot = entry.snapshot();
         guard.insert(pipeline_id, entry);
@@ -348,9 +354,9 @@ impl PipelineManager {
         }
         let entry = ManagedPipeline {
             definition: Arc::new(definition),
-            pipeline,
+            pipeline: Some(pipeline),
             streams,
-            status: PipelineStatus::Created,
+            status: PipelineStatus::Stopped,
         };
         let snapshot = entry.snapshot();
         guard.insert(pipeline_id, entry);
@@ -423,9 +429,9 @@ impl PipelineManager {
         let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
         let entry = ManagedPipeline {
             definition: Arc::new(definition),
-            pipeline,
+            pipeline: Some(pipeline),
             streams,
-            status: PipelineStatus::Created,
+            status: PipelineStatus::Stopped,
         };
         let snapshot = entry.snapshot();
         guard.insert(pipeline_id, entry);
@@ -477,9 +483,52 @@ impl PipelineManager {
         if matches!(entry.status, PipelineStatus::Running) {
             return Ok(());
         }
-        entry.pipeline.start();
+
+        if entry.pipeline.is_none() {
+            let definition = Arc::clone(&entry.definition);
+            let (pipeline, streams) = build_pipeline_runtime(
+                &definition,
+                &self.catalog,
+                self.shared_stream_registry,
+                &self.mqtt_client_manager,
+                &self.registries,
+            )
+            .map_err(PipelineError::BuildFailure)?;
+            entry.pipeline = Some(pipeline);
+            entry.streams = streams;
+        }
+
+        let pipeline = entry
+            .pipeline
+            .as_mut()
+            .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?;
+        pipeline.start();
         entry.status = PipelineStatus::Running;
         Ok(())
+    }
+
+    pub async fn stop_pipeline(
+        &self,
+        pipeline_id: &str,
+        mode: PipelineStopMode,
+        timeout: Duration,
+    ) -> Result<(), PipelineError> {
+        let maybe_pipeline = {
+            let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+            let entry = guard
+                .get_mut(pipeline_id)
+                .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+            if !matches!(entry.status, PipelineStatus::Running) {
+                entry.status = PipelineStatus::Stopped;
+                return Ok(());
+            }
+            entry.status = PipelineStatus::Stopped;
+            entry.pipeline.take()
+        };
+
+        let pipeline = maybe_pipeline
+            .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?;
+        close_pipeline(pipeline, mode, timeout).await
     }
 
     /// Remove a pipeline runtime and close it if running.
@@ -490,26 +539,25 @@ impl PipelineManager {
         };
         let entry = maybe_entry.ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
         if matches!(entry.status, PipelineStatus::Running) {
-            let pipeline_id = entry.definition.id().to_string();
-            tokio::spawn(async move {
-                if let Err(err) = close_pipeline(entry.pipeline).await {
-                    tracing::error!(
-                        pipeline_id = %pipeline_id,
-                        error = %err,
-                        "failed to close pipeline"
-                    );
-                }
-            });
+            let pipeline = entry.pipeline.ok_or_else(|| {
+                PipelineError::Runtime("pipeline runtime missing for running pipeline".to_string())
+            })?;
+            close_pipeline(pipeline, PipelineStopMode::Quick, Duration::from_secs(5)).await?;
         }
         Ok(())
     }
 }
 
-async fn close_pipeline(mut pipeline: ProcessorPipeline) -> Result<(), PipelineError> {
-    pipeline
-        .graceful_close(Duration::from_secs(5))
-        .await
-        .map_err(|err| PipelineError::Runtime(err.to_string()))
+async fn close_pipeline(
+    mut pipeline: ProcessorPipeline,
+    mode: PipelineStopMode,
+    timeout: Duration,
+) -> Result<(), PipelineError> {
+    let result = match mode {
+        PipelineStopMode::Graceful => pipeline.graceful_close(timeout).await,
+        PipelineStopMode::Quick => pipeline.quick_close(timeout).await,
+    };
+    result.map_err(|err| PipelineError::Runtime(err.to_string()))
 }
 
 fn build_pipeline_runtime(
@@ -1018,7 +1066,7 @@ mod tests {
         let snapshot = manager
             .create_pipeline(sample_pipeline("pipe_a", "test_stream"))
             .expect("create pipeline");
-        assert_eq!(snapshot.status, PipelineStatus::Created);
+        assert_eq!(snapshot.status, PipelineStatus::Stopped);
         let list = manager.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].definition.id(), "pipe_a");

@@ -9,6 +9,8 @@ use thiserror::Error;
 const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
 const PLAN_SNAPSHOTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("plan_snapshots");
+const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("pipeline_run_states");
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
 
@@ -77,6 +79,18 @@ pub struct StoredPlanSnapshot {
     pub flow_build_id: String,
     /// Serialized optimized logical plan IR.
     pub logical_plan_ir: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StoredPipelineDesiredState {
+    Stopped,
+    Running,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredPipelineRunState {
+    pub pipeline_id: String,
+    pub desired_state: StoredPipelineDesiredState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,6 +182,11 @@ impl MetadataStorage {
                 .open_table(PLAN_SNAPSHOTS_TABLE)
                 .map_err(StorageError::backend)?;
             let _ = snapshots.remove(id).map_err(StorageError::backend)?;
+
+            let mut run_states = txn
+                .open_table(PIPELINE_RUN_STATES_TABLE)
+                .map_err(StorageError::backend)?;
+            let _ = run_states.remove(id).map_err(StorageError::backend)?;
         }
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -197,6 +216,35 @@ impl MetadataStorage {
 
     pub fn delete_plan_snapshot(&self, pipeline_id: &str) -> Result<(), StorageError> {
         self.delete_entry(PLAN_SNAPSHOTS_TABLE, pipeline_id)
+    }
+
+    pub fn put_pipeline_run_state(
+        &self,
+        state: StoredPipelineRunState,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        {
+            let mut table = txn
+                .open_table(PIPELINE_RUN_STATES_TABLE)
+                .map_err(StorageError::backend)?;
+            let encoded = encode_record(&state)?;
+            table
+                .insert(state.pipeline_id.as_str(), encoded.as_slice())
+                .map_err(StorageError::backend)?;
+        }
+        txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
+    pub fn get_pipeline_run_state(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<StoredPipelineRunState>, StorageError> {
+        self.get_entry(PIPELINE_RUN_STATES_TABLE, pipeline_id)
+    }
+
+    pub fn delete_pipeline_run_state(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        self.delete_entry(PIPELINE_RUN_STATES_TABLE, pipeline_id)
     }
 
     pub fn create_mqtt_config(&self, config: StoredMqttClientConfig) -> Result<(), StorageError> {
@@ -229,6 +277,8 @@ impl MetadataStorage {
         txn.open_table(PIPELINES_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(PLAN_SNAPSHOTS_TABLE)
+            .map_err(StorageError::backend)?;
+        txn.open_table(PIPELINE_RUN_STATES_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(SHARED_MQTT_CONFIGS_TABLE)
             .map_err(StorageError::backend)?;
@@ -373,6 +423,24 @@ impl StorageManager {
 
     pub fn delete_plan_snapshot(&self, pipeline_id: &str) -> Result<(), StorageError> {
         self.metadata.delete_plan_snapshot(pipeline_id)
+    }
+
+    pub fn put_pipeline_run_state(
+        &self,
+        state: StoredPipelineRunState,
+    ) -> Result<(), StorageError> {
+        self.metadata.put_pipeline_run_state(state)
+    }
+
+    pub fn get_pipeline_run_state(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<StoredPipelineRunState>, StorageError> {
+        self.metadata.get_pipeline_run_state(pipeline_id)
+    }
+
+    pub fn delete_pipeline_run_state(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        self.metadata.delete_pipeline_run_state(pipeline_id)
     }
 
     pub fn create_mqtt_config(&self, config: StoredMqttClientConfig) -> Result<(), StorageError> {
