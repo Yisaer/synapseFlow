@@ -313,23 +313,6 @@ fn validate_eventtime_enabled(
     Ok(())
 }
 
-pub fn explain_pipeline(
-    sql: &str,
-    sinks: Vec<PipelineSink>,
-    catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    registries: &PipelineRegistries,
-) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
-    explain_pipeline_with_options(
-        sql,
-        sinks,
-        catalog,
-        shared_stream_registry,
-        registries,
-        &crate::pipeline::PipelineOptions::default(),
-    )
-}
-
 pub fn explain_pipeline_with_options(
     sql: &str,
     sinks: Vec<PipelineSink>,
@@ -406,28 +389,4 @@ pub fn create_pipeline_with_log_sink(
         mqtt_client_manager,
         registries,
     )
-}
-
-/// Create a processor pipeline from SQL and attach source connectors from the catalog.
-///
-/// This is the same flow used by `PipelineManager` (build physical plan + attach sources),
-/// but returns the `ProcessorPipeline` directly for tests/demos.
-pub fn create_pipeline_with_attached_sources(
-    sql: &str,
-    sinks: Vec<PipelineSink>,
-    catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    mqtt_client_manager: MqttClientManager,
-    registries: &PipelineRegistries,
-) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let mut pipeline = create_pipeline(
-        sql,
-        sinks,
-        catalog,
-        shared_stream_registry,
-        mqtt_client_manager.clone(),
-        registries,
-    )?;
-    pipeline::attach_sources_for_pipeline(&mut pipeline, catalog, &mqtt_client_manager)?;
-    Ok(pipeline)
 }

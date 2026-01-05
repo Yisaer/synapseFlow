@@ -37,7 +37,13 @@ pub async fn start_server(
         .route("/pipelines/:id/stop", post(pipeline::stop_pipeline_handler))
         .route(
             "/pipelines/:id",
-            get(pipeline::get_pipeline_handler).delete(pipeline::delete_pipeline_handler),
+            get(pipeline::get_pipeline_handler)
+                .put(pipeline::upsert_pipeline_handler)
+                .delete(pipeline::delete_pipeline_handler),
+        )
+        .route(
+            "/pipelines/:id/explain",
+            get(pipeline::explain_pipeline_handler),
         )
         .route(
             "/streams",
