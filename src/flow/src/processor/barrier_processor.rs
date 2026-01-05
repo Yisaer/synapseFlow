@@ -257,7 +257,9 @@ mod tests {
             .control
             .get(0)
             .expect("upstream 0 control")
-            .send(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))
+            .send(ControlSignal::Instant(
+                InstantControlSignal::StreamQuickEnd { signal_id: 0 },
+            ))
             .expect("send terminal control signal");
 
         let result = timeout(Duration::from_millis(200), handle)
@@ -317,7 +319,7 @@ mod tests {
             .get(0)
             .expect("upstream 0 data")
             .send(StreamData::control(ControlSignal::Instant(
-                InstantControlSignal::StreamQuickEnd,
+                InstantControlSignal::StreamQuickEnd { signal_id: 0 },
             )))
             .unwrap_or_else(|_| panic!("send terminal via data channel"));
 

@@ -778,9 +778,9 @@ impl SharedStreamInner {
             .map(|col| col.name.clone())
             .collect();
 
-        let _ = self
-            .control_input
-            .send(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd));
+        let _ = self.control_input.send(ControlSignal::Instant(
+            InstantControlSignal::StreamQuickEnd { signal_id: 0 },
+        ));
 
         let mut handles = self.handles.lock().await;
 

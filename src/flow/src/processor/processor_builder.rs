@@ -362,7 +362,7 @@ impl ProcessorPipeline {
         &self,
         kind: BarrierControlSignalKind,
     ) -> Result<u64, ProcessorError> {
-        let barrier_id = self.control_source.allocate_barrier_id();
+        let barrier_id = self.control_source.allocate_control_signal_id();
         self.send_control_signal(ControlSignal::Barrier(kind.with_id(barrier_id)))
             .await?;
         Ok(barrier_id)
@@ -375,7 +375,7 @@ impl ProcessorPipeline {
         &self,
         kind: BarrierControlSignalKind,
     ) -> Result<u64, ProcessorError> {
-        let barrier_id = self.control_source.allocate_barrier_id();
+        let barrier_id = self.control_source.allocate_control_signal_id();
         self.send_data(StreamData::control(ControlSignal::Barrier(
             kind.with_id(barrier_id),
         )))
@@ -408,8 +408,11 @@ impl ProcessorPipeline {
 
     /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
     pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        self.send_control_signal(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))
-            .await?;
+        let signal_id = self.control_source.allocate_control_signal_id();
+        self.send_control_signal(ControlSignal::Instant(
+            InstantControlSignal::StreamQuickEnd { signal_id },
+        ))
+        .await?;
         self.replace_ingress_sender();
         self.await_all_handles().await
     }

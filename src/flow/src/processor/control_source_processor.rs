@@ -57,8 +57,8 @@ pub struct ControlSourceProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control channel for urgent control propagation
     control_output: broadcast::Sender<ControlSignal>,
-    /// Monotonically increasing barrier id allocator (shared across control/data channels).
-    next_barrier_id: Arc<AtomicU64>,
+    /// Monotonically increasing control-signal id allocator (shared across control/data channels).
+    next_control_signal_id: Arc<AtomicU64>,
 }
 
 impl ControlSourceProcessor {
@@ -71,7 +71,7 @@ impl ControlSourceProcessor {
             ingress: None,
             output,
             control_output,
-            next_barrier_id: Arc::new(AtomicU64::new(1)),
+            next_control_signal_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -79,8 +79,8 @@ impl ControlSourceProcessor {
         self.ingress = Some(receiver);
     }
 
-    pub fn allocate_barrier_id(&self) -> u64 {
-        self.next_barrier_id.fetch_add(1, Ordering::Relaxed)
+    pub fn allocate_control_signal_id(&self) -> u64 {
+        self.next_control_signal_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Send StreamData to all downstream processors
@@ -115,7 +115,7 @@ impl Processor for ControlSourceProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
-        let barrier_id_allocator = Arc::clone(&self.next_barrier_id);
+        let control_signal_id_allocator = Arc::clone(&self.next_control_signal_id);
         tracing::info!(processor_id = %processor_id, "control source processor starting");
 
         tokio::spawn(async move {
@@ -159,7 +159,7 @@ impl Processor for ControlSourceProcessor {
 
             // Input closed without explicit StreamEnd, propagate shutdown on the data path.
             tracing::info!(processor_id = %processor_id, "stopping (ingress closed)");
-            let barrier_id = barrier_id_allocator.fetch_add(1, Ordering::Relaxed);
+            let barrier_id = control_signal_id_allocator.fetch_add(1, Ordering::Relaxed);
             send_with_backpressure(
                 &output,
                 StreamData::control(ControlSignal::Barrier(

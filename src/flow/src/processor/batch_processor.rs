@@ -317,10 +317,10 @@ mod tests {
             "remaining row should flush on close"
         );
         let _ = control_tx.send(ControlSignal::Instant(
-            crate::processor::InstantControlSignal::StreamQuickEnd,
+            crate::processor::InstantControlSignal::StreamQuickEnd { signal_id: 0 },
         ));
         let _ = control_tx.send(ControlSignal::Instant(
-            crate::processor::InstantControlSignal::StreamQuickEnd,
+            crate::processor::InstantControlSignal::StreamQuickEnd { signal_id: 0 },
         ));
     }
 
@@ -353,7 +353,7 @@ mod tests {
             "duration-only should flush after timeout"
         );
         let _ = control_tx.send(ControlSignal::Instant(
-            crate::processor::InstantControlSignal::StreamQuickEnd,
+            crate::processor::InstantControlSignal::StreamQuickEnd { signal_id: 0 },
         ));
     }
 }
