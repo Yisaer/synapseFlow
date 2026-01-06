@@ -45,10 +45,12 @@ curl -XPOST http://localhost:8080/streams \
     "type": "mqtt",
     "schema": {
       "type": "json",
-      "columns": [
-        {"name": "user_id", "data_type": "int64"},
-        {"name": "score", "data_type": "float64"}
-      ]
+      "props": {
+        "columns": [
+          {"name": "user_id", "data_type": "int64"},
+          {"name": "score", "data_type": "float64"}
+        ]
+      }
     },
     "props": {"broker_url": "tcp://127.0.0.1:1883", "topic": "/yisa/data"},
     "decoder": {"type": "json", "props": {}}
@@ -65,7 +67,7 @@ curl -XPOST http://localhost:8080/pipelines \
     "sinks": [
       {
         "type": "mqtt",
-        "props": {"topic": "/yisa/data2"},
+        "props": {"broker_url": "tcp://127.0.0.1:1883", "topic": "/yisa/data2"},
         "encoder": {"type": "json", "props": {}}
       }
     ]
@@ -79,6 +81,10 @@ curl -XPOST http://localhost:8080/pipelines/demo-pipeline/start
 List and remove resources:
 - `GET /streams` / `DELETE /streams/:name`
 - `GET /pipelines` / `DELETE /pipelines/:id`
+
+REST API docs:
+- Streams: `user_docs/api/stream.md`
+- Pipelines: `user_docs/api/pipeline.md`
 
 ## Project layout
 - `src/flow/` — planner + processors; connector/codec registries; pipeline execution.

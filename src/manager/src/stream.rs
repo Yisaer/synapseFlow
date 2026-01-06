@@ -1,6 +1,6 @@
+use crate::MQTT_QOS;
 use crate::pipeline::AppState;
 use crate::storage_bridge;
-use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SOURCE_TOPIC};
 use axum::{
     Json,
     extract::{Path, State},
@@ -631,8 +631,12 @@ pub(crate) fn build_stream_props(
                 .map_err(|err| format!("invalid mqtt props: {}", err))?;
             let broker = mqtt_props
                 .broker_url
-                .unwrap_or_else(|| DEFAULT_BROKER_URL.to_string());
-            let topic = mqtt_props.topic.unwrap_or_else(|| SOURCE_TOPIC.to_string());
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "mqtt stream requires broker_url".to_string())?;
+            let topic = mqtt_props
+                .topic
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "mqtt stream requires topic".to_string())?;
             let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
             Ok(StreamProps::Mqtt(MqttStreamProps {
                 broker_url: broker,

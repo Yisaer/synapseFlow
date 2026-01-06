@@ -13,9 +13,6 @@ use tokio::net::TcpListener;
 
 pub use stream::{SchemaParser, register_schema, schema_registry};
 
-pub(crate) static DEFAULT_BROKER_URL: &str = "tcp://127.0.0.1:1883";
-pub(crate) static SOURCE_TOPIC: &str = "/yisa/data";
-pub(crate) static SINK_TOPIC: &str = "/yisa/data2";
 pub(crate) static MQTT_QOS: u8 = 0;
 
 pub async fn start_server(

@@ -12,7 +12,7 @@ It is mainly intended for quick local bring-up and basic end-to-end validation.
 
 - `python3`
 - A running SynapseFlow manager API (default `http://127.0.0.1:8080`)
-- An MQTT broker reachable from SynapseFlow (default `tcp://127.0.0.1:1883`)
+- An MQTT broker reachable from SynapseFlow (e.g. `tcp://127.0.0.1:1883`)
 
 ## Quickstart (teaching-friendly: 5 columns)
 
@@ -147,4 +147,3 @@ curl -sS -X POST http://127.0.0.1:8080/pipelines/demo_pipeline/start
 - `HTTP 404` on delete: the tool treats “not found” as OK during cleanup/recreate.
 - Connection errors/timeouts: check `--base-url` and increase `--timeout-secs` if needed.
 - MQTT data not flowing: verify broker reachability from SynapseFlow, and that `topic`/`qos` match your publisher.
-

@@ -1,4 +1,4 @@
-use crate::{DEFAULT_BROKER_URL, MQTT_QOS, SINK_TOPIC, storage_bridge};
+use crate::{MQTT_QOS, storage_bridge};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -954,8 +954,12 @@ pub(crate) fn build_pipeline_definition(
                         .map_err(|err| format!("invalid mqtt sink props: {err}"))?;
                 let broker = mqtt_props
                     .broker_url
-                    .unwrap_or_else(|| DEFAULT_BROKER_URL.to_string());
-                let topic = mqtt_props.topic.unwrap_or_else(|| SINK_TOPIC.to_string());
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "mqtt sink requires broker_url".to_string())?;
+                let topic = mqtt_props
+                    .topic
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "mqtt sink requires topic".to_string())?;
                 let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
                 let retain = mqtt_props.retain.unwrap_or(false);
 
