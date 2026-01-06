@@ -753,7 +753,6 @@ impl Processor for EventtimeWatermarkProcessor {
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
-                                let out_rows = other.num_rows_hint();
                                 send_with_backpressure(&output, other).await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");

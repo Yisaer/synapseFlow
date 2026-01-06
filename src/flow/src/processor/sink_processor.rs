@@ -232,6 +232,7 @@ impl Processor for SinkProcessor {
                                                 .await?;
                                             continue;
                                         }
+                                        stats.record_out(1);
 
                                         if forward_data {
                                             send_with_backpressure(
@@ -255,6 +256,7 @@ impl Processor for SinkProcessor {
                                                 .await?;
                                             continue;
                                         }
+                                        stats.record_out(in_rows);
 
                                         if forward_data {
                                             send_with_backpressure(
