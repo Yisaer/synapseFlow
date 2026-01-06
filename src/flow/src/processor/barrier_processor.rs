@@ -99,11 +99,10 @@ impl Processor for BarrierProcessor {
                     control_item = control_streams.next(), if control_active => {
                         match control_item {
                             Some(Ok(control_signal)) => {
-                                let control_signal =
-                                    attach_stats_to_collect_barrier(control_signal, &id, &stats);
                                 if let Some(signal) =
                                     align_control_signal(&mut control_barrier, control_signal)?
                                 {
+                                    let signal = attach_stats_to_collect_barrier(signal, &id, &stats);
                                     let is_terminal = signal.is_terminal();
                                     send_control_with_backpressure(&control_output, signal).await?;
                                     if is_terminal {
@@ -133,6 +132,7 @@ impl Processor for BarrierProcessor {
                                         if let Some(signal) =
                                             align_control_signal(&mut data_barrier, control_signal)?
                                         {
+                                            let signal = attach_stats_to_collect_barrier(signal, &id, &stats);
                                             let is_terminal = signal.is_terminal();
                                             let out = StreamData::control(signal);
                                             send_with_backpressure(&output, out).await?;

@@ -237,6 +237,16 @@ pub(crate) fn attach_stats_to_collect_barrier(
         return signal;
     };
 
+    if entries
+        .iter()
+        .any(|entry| entry.processor_id == processor_id)
+    {
+        return ControlSignal::Barrier(BarrierControlSignal::CollectStats {
+            barrier_id,
+            stats: entries,
+        });
+    }
+
     entries.push(ProcessorStatsEntry {
         processor_id: processor_id.to_string(),
         stats: stats.snapshot(),
