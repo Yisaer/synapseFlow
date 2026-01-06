@@ -108,6 +108,15 @@ Examples:
 - `expr.case`
 - `window.tumbling`
 
+## Expressions (`expr.*`)
+
+The catalog also includes an `expr.*` subtree to describe which expression forms and operators are
+supported end-to-end (identifiers, literals, function calls, arithmetic/comparison operators, CASE,
+struct field access, list indexing, etc.).
+
+Agents should treat expression forms marked as `unsupported` as disallowed, even if `sqlparser` can
+parse them.
+
 ## Meaning of `partial`
 
 `partial` means the feature is supported only in a restricted subset. Clients must honor
