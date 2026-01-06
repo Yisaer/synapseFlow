@@ -50,7 +50,7 @@ impl ProcessorStats {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessorStatsSnapshot {
     pub records_in: u64,
     pub records_out: u64,
@@ -63,7 +63,7 @@ pub struct ProcessorStatsHandle {
     pub stats: Arc<ProcessorStats>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessorStatsEntry {
     pub processor_id: String,
     pub stats: ProcessorStatsSnapshot,

@@ -5,8 +5,12 @@
 //! - DataSourceProcessor: Processes data from PhysicalDatasource
 //! - ResultCollectProcessor: Final destination, prints received data
 
-use crate::processor::{ControlSignal, StreamData, StreamError};
+use crate::processor::{
+    BarrierControlSignal, ControlSignal, ProcessorStats, ProcessorStatsEntry, StreamData,
+    StreamError,
+};
 use futures::stream::SelectAll;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
@@ -218,4 +222,28 @@ pub(crate) async fn forward_error(
 ) -> Result<(), ProcessorError> {
     let error = StreamError::new(message).with_source(processor_id.to_string());
     send_with_backpressure(sender, StreamData::error(error)).await
+}
+
+pub(crate) fn attach_stats_to_collect_barrier(
+    signal: ControlSignal,
+    processor_id: &str,
+    stats: &Arc<ProcessorStats>,
+) -> ControlSignal {
+    let ControlSignal::Barrier(BarrierControlSignal::CollectStats {
+        barrier_id,
+        stats: mut entries,
+    }) = signal
+    else {
+        return signal;
+    };
+
+    entries.push(ProcessorStatsEntry {
+        processor_id: processor_id.to_string(),
+        stats: stats.snapshot(),
+    });
+
+    ControlSignal::Barrier(BarrierControlSignal::CollectStats {
+        barrier_id,
+        stats: entries,
+    })
 }

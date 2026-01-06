@@ -11,6 +11,7 @@ struct BarrierKey {
 struct BarrierState {
     key: BarrierKey,
     arrived_count: usize,
+    merged: Option<BarrierControlSignal>,
 }
 
 #[derive(Debug)]
@@ -78,6 +79,7 @@ impl BarrierAligner {
                 self.state = Some(BarrierState {
                     key,
                     arrived_count: 1,
+                    merged: Some(signal),
                 });
                 Ok(BarrierOutcome::Pending)
             }
@@ -88,6 +90,14 @@ impl BarrierAligner {
                         self.channel, state.key.barrier_id, key.barrier_id
                     )));
                 }
+                let merged = merge_barrier_signal(
+                    state
+                        .merged
+                        .take()
+                        .expect("barrier aligner missing merged signal"),
+                    signal,
+                )?;
+                state.merged = Some(merged);
                 state.arrived_count = state.arrived_count.saturating_add(1);
                 if state.arrived_count > self.expected_upstreams {
                     return Err(ProcessorError::ProcessingError(format!(
@@ -96,11 +106,50 @@ impl BarrierAligner {
                     )));
                 }
                 if state.arrived_count == self.expected_upstreams {
+                    let merged = state
+                        .merged
+                        .take()
+                        .expect("barrier aligner missing merged signal");
                     self.state = None;
-                    return Ok(BarrierOutcome::Complete(signal));
+                    return Ok(BarrierOutcome::Complete(merged));
                 }
                 Ok(BarrierOutcome::Pending)
             }
         }
+    }
+}
+
+fn merge_barrier_signal(
+    left: BarrierControlSignal,
+    right: BarrierControlSignal,
+) -> Result<BarrierControlSignal, ProcessorError> {
+    match (left, right) {
+        (
+            BarrierControlSignal::CollectStats {
+                barrier_id,
+                mut stats,
+            },
+            BarrierControlSignal::CollectStats {
+                barrier_id: right_id,
+                stats: right_stats,
+            },
+        ) => {
+            if barrier_id != right_id {
+                return Err(ProcessorError::ProcessingError(format!(
+                    "barrier merge mismatch: left barrier_id={barrier_id}, right barrier_id={right_id}"
+                )));
+            }
+            let mut seen = std::collections::HashSet::with_capacity(stats.len());
+            for entry in &stats {
+                seen.insert(entry.processor_id.clone());
+            }
+            for entry in right_stats {
+                if seen.insert(entry.processor_id.clone()) {
+                    stats.push(entry);
+                }
+            }
+            Ok(BarrierControlSignal::CollectStats { barrier_id, stats })
+        }
+        (left, _right) => Ok(left),
     }
 }

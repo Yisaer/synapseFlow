@@ -6,8 +6,9 @@
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use std::collections::VecDeque;
@@ -80,7 +81,8 @@ impl Processor for SlidingWindowProcessor {
         let lookahead = self.lookahead;
 
         let stats = Arc::clone(&self.stats);
-        let mut state = ProcessingState::new(lookback, lookahead, output.clone(), stats);
+        let mut state =
+            ProcessingState::new(lookback, lookahead, output.clone(), Arc::clone(&stats));
 
         tokio::spawn(async move {
             loop {
@@ -88,6 +90,8 @@ impl Processor for SlidingWindowProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {

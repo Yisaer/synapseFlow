@@ -6,8 +6,9 @@
 
 use crate::processor::barrier::{align_control_signal, BarrierAligner};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -98,6 +99,8 @@ impl Processor for BarrierProcessor {
                     control_item = control_streams.next(), if control_active => {
                         match control_item {
                             Some(Ok(control_signal)) => {
+                                let control_signal =
+                                    attach_stats_to_collect_barrier(control_signal, &id, &stats);
                                 if let Some(signal) =
                                     align_control_signal(&mut control_barrier, control_signal)?
                                 {

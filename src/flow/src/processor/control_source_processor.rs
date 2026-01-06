@@ -4,7 +4,8 @@
 //! and it forwards them to downstream processors while preserving channel isolation.
 
 use crate::processor::base::{
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{
     BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData,
@@ -158,6 +159,7 @@ impl Processor for ControlSourceProcessor {
                             continue;
                         };
 
+                        let signal = attach_stats_to_collect_barrier(signal, &processor_id, &stats);
                         let is_terminal = signal.is_terminal();
                         send_control_with_backpressure(&control_output, signal).await?;
                         if is_terminal {

@@ -1,6 +1,6 @@
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::shared_stream_registry;
@@ -134,6 +134,7 @@ impl Processor for SharedStreamProcessor {
                     biased;
                     control_msg = control_inputs.next(), if control_inputs_active => {
                         if let Some(Ok(signal)) = control_msg {
+                            let signal = attach_stats_to_collect_barrier(signal, &processor_id, &stats);
                             let is_terminal = signal.is_terminal();
                             send_control_with_backpressure(&control_output, signal).await?;
                             if is_terminal {
@@ -145,6 +146,7 @@ impl Processor for SharedStreamProcessor {
                     }
                     shared_control_msg = shared_control.next() => {
                         if let Some(Ok(signal)) = shared_control_msg {
+                            let signal = attach_stats_to_collect_barrier(signal, &processor_id, &stats);
                             let is_terminal = signal.is_terminal();
                             send_control_with_backpressure(&control_output, signal).await?;
                             if is_terminal {
