@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineSnapshot, PipelineStopMode};
 use crate::processor::ProcessorPipeline;
+use crate::processor::ProcessorStatsEntry;
 use crate::{create_pipeline, create_pipeline_with_log_sink};
 use crate::{PipelineExplain, PipelineSink};
 
@@ -47,6 +48,14 @@ impl FlowInstance {
     /// Stop and delete a pipeline.
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         self.pipeline_manager.delete_pipeline(id).await
+    }
+
+    pub async fn collect_pipeline_stats(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> Result<Vec<ProcessorStatsEntry>, PipelineError> {
+        self.pipeline_manager.collect_stats(id, timeout).await
     }
 
     /// Retrieve pipeline snapshots.

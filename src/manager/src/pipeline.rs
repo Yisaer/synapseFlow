@@ -115,6 +115,18 @@ pub struct GetPipelineResponse {
 
 #[derive(Deserialize)]
 #[serde(default)]
+pub(crate) struct CollectStatsQuery {
+    timeout_ms: u64,
+}
+
+impl Default for CollectStatsQuery {
+    fn default() -> Self {
+        Self { timeout_ms: 5_000 }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
 pub(crate) struct StopPipelineQuery {
     mode: String,
     timeout_ms: u64,
@@ -638,6 +650,56 @@ pub async fn explain_pipeline_handler(
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
     response
+}
+
+pub async fn collect_pipeline_stats_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<CollectStatsQuery>,
+) -> impl IntoResponse {
+    let _permit = match state.try_acquire_pipeline_op(&id).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return busy_response(&id),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "pipeline operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    match state.storage.get_pipeline(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    }
+
+    let timeout = Duration::from_millis(query.timeout_ms);
+    match state.instance.collect_pipeline_stats(&id, timeout).await {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(PipelineError::NotFound(_)) => {
+            (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
+        }
+        Err(PipelineError::Runtime(err)) if err == flow::ProcessorError::Timeout.to_string() => (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("collect stats timeout for pipeline {id}"),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            format!("failed to collect pipeline {id} stats: {err}"),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn start_pipeline_handler(

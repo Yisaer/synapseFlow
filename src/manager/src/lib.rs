@@ -46,6 +46,10 @@ pub async fn start_server(
             get(pipeline::explain_pipeline_handler),
         )
         .route(
+            "/pipelines/:id/stats",
+            get(pipeline::collect_pipeline_stats_handler),
+        )
+        .route(
             "/streams",
             post(stream::create_stream_handler).get(stream::list_streams),
         )
