@@ -51,6 +51,14 @@ impl ConnectorRegistry {
             .insert(kind.into(), factory);
     }
 
+    pub fn is_registered(&self, kind: &str) -> bool {
+        let guard = self
+            .sink_factories
+            .read()
+            .expect("connector registry poisoned");
+        guard.contains_key(kind)
+    }
+
     pub fn instantiate_sink(
         &self,
         kind: &str,

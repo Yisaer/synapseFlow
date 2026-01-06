@@ -211,7 +211,7 @@ impl Processor for SinkProcessor {
                                         if let Err(err) = Self::handle_payload(
                                             &processor_id,
                                             &mut connector,
-                                            &payload,
+                                            payload.as_ref(),
                                             rows,
                                         )
                                         .await

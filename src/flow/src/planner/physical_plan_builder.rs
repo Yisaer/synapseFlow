@@ -160,6 +160,7 @@ fn create_physical_plan_with_builder_cached_with_options(
                 &logical_plan,
                 index,
                 bindings,
+                registries,
                 options,
                 builder,
             )?
@@ -546,10 +547,18 @@ fn create_physical_data_source_with_builder(
     _logical_plan: &Arc<LogicalPlan>,
     index: i64,
     bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
     options: &PhysicalPlanBuildOptions,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let entry = find_binding_entry(logical_ds, bindings)?;
+    let decoder_kind = logical_ds.decoder().kind();
+    if !registries.decoder_registry().is_registered(decoder_kind) {
+        return Err(format!(
+            "decoder kind `{}` not registered for stream `{}`",
+            decoder_kind, logical_ds.source_name
+        ));
+    }
     let schema = entry.schema.clone();
     let eventtime = if options.eventtime_enabled {
         logical_ds
@@ -752,7 +761,7 @@ fn create_physical_data_sink_with_builder_cached(
     let input_child = Arc::clone(&physical_children[0]);
     let sink_index = builder.allocate_index();
     let (encoded_child, connector) =
-        build_sink_chain_with_builder(&logical_sink.sink, &input_child, builder)?;
+        build_sink_chain_with_builder(&logical_sink.sink, &input_child, registries, builder)?;
     let physical_sink = PhysicalDataSink::new(encoded_child, sink_index, connector);
     Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
 }
@@ -761,16 +770,28 @@ fn create_physical_data_sink_with_builder_cached(
 fn build_sink_chain_with_builder(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     let batch_processor = create_batch_processor_if_needed_with_builder(sink, input_child, builder);
 
     let connector = &sink.connector;
+    let connector_kind = connector.connector.kind();
+    if !registries
+        .connector_registry()
+        .is_registered(connector_kind)
+    {
+        return Err(format!(
+            "sink connector kind `{}` not registered for sink `{}`",
+            connector_kind, sink.sink_id
+        ));
+    }
+
     let encoder_input = batch_processor
         .as_ref()
         .map(Arc::clone)
         .unwrap_or_else(|| Arc::clone(input_child));
-    add_regular_encoder_with_builder(sink, connector, encoder_input, builder)
+    add_regular_encoder_with_builder(sink, connector, encoder_input, registries, builder)
 }
 
 /// Create batch processor if needed using centralized index management
@@ -800,6 +821,7 @@ fn add_regular_encoder_with_builder(
     sink: &PipelineSink,
     connector: &PipelineSinkConnector,
     encoder_input: Arc<PhysicalPlan>,
+    registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     if matches!(
@@ -816,6 +838,13 @@ fn add_regular_encoder_with_builder(
             ),
         ))
     } else {
+        let encoder_kind = connector.encoder.kind_str();
+        if !registries.encoder_registry().is_registered(encoder_kind) {
+            return Err(format!(
+                "encoder kind `{}` not registered for sink `{}`",
+                encoder_kind, sink.sink_id
+            ));
+        }
         let encoder_index = builder.allocate_index();
         let encoder = PhysicalEncoder::new(
             vec![encoder_input],

@@ -3,6 +3,7 @@
 //! Defines the data types that flow between processors in the stream processing pipeline.
 
 use crate::model::Collection;
+use bytes::Bytes;
 use std::time::SystemTime;
 
 /// Control signals for stream processing
@@ -105,9 +106,9 @@ pub enum StreamData {
     /// Data payload - Collection (owned)
     Collection(Box<dyn Collection>),
     /// Encoded bytes for sink connectors
-    EncodedBytes { payload: Vec<u8>, num_rows: u64 },
+    EncodedBytes { payload: Bytes, num_rows: u64 },
     /// Raw bytes that still need to be decoded into a collection
-    Bytes(Vec<u8>),
+    Bytes(Bytes),
     /// Control signal for flow management
     Control(ControlSignal),
     /// Watermark for time progression
@@ -172,13 +173,16 @@ impl StreamData {
     }
 
     /// Create raw byte payload
-    pub fn bytes(payload: Vec<u8>) -> Self {
-        StreamData::Bytes(payload)
+    pub fn bytes(payload: impl Into<Bytes>) -> Self {
+        StreamData::Bytes(payload.into())
     }
 
     /// Create encoded payload
-    pub fn encoded_bytes(payload: Vec<u8>, num_rows: u64) -> Self {
-        StreamData::EncodedBytes { payload, num_rows }
+    pub fn encoded_bytes(payload: impl Into<Bytes>, num_rows: u64) -> Self {
+        StreamData::EncodedBytes {
+            payload: payload.into(),
+            num_rows,
+        }
     }
 
     /// Create control signal

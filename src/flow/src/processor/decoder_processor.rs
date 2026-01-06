@@ -116,7 +116,7 @@ impl Processor for DecoderProcessor {
                                 log_received_data(&processor_id, &data);
                                 if let StreamData::Bytes(payload) = &data {
                                     let decoded = if let Some(proj) = decode_projection.as_ref() {
-                                        decoder.decode_with_projection(payload, Some(proj))
+                                        decoder.decode_with_projection(payload.as_ref(), Some(proj))
                                     } else if let Some(lock) = &projection {
                                         let cols = lock
                                             .read()
@@ -124,9 +124,9 @@ impl Processor for DecoderProcessor {
                                             .clone();
                                         let projection =
                                             DecodeProjection::from_top_level_columns(&cols);
-                                        decoder.decode_with_projection(payload, Some(&projection))
+                                        decoder.decode_with_projection(payload.as_ref(), Some(&projection))
                                     } else {
-                                        decoder.decode(payload)
+                                        decoder.decode(payload.as_ref())
                                     };
                                     match decoded {
                                         Ok(batch) => {
