@@ -236,42 +236,23 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
     let from_constructs = group(
         "from",
         "FROM sources",
-        vec![
-            feature(
-                "from.source",
-                "FROM source",
-                SyntaxFeatureStatus::Supported,
-                Some("Choose which input stream(s) the query reads from."),
-                Some("The source name must match a stream exposed by the runtime stream catalog."),
-                Some(SyntaxPlacement {
-                    clause: "FROM".to_string(),
-                    contexts: vec!["select".to_string()],
-                }),
-                &["at_least_one_source_required"],
-                &[],
-                &["FROM <stream_name>"],
-                &["SELECT * FROM s"],
-                &["DataSource"],
-                vec![],
-            ),
-            feature(
-                "from.alias",
-                "FROM alias",
-                SyntaxFeatureStatus::Supported,
-                Some("Rename the input source for readability and disambiguation."),
-                None,
-                Some(SyntaxPlacement {
-                    clause: "FROM".to_string(),
-                    contexts: vec!["source_item".to_string()],
-                }),
-                &[],
-                &[],
-                &["FROM <stream_name> AS <alias>"],
-                &["SELECT * FROM users AS u"],
-                &[],
-                vec![],
-            ),
-        ],
+        vec![feature(
+            "from.source",
+            "FROM source",
+            SyntaxFeatureStatus::Supported,
+            Some("Choose which input stream(s) the query reads from."),
+            Some("The source name must match a stream exposed by the runtime stream catalog."),
+            Some(SyntaxPlacement {
+                clause: "FROM".to_string(),
+                contexts: vec!["select".to_string()],
+            }),
+            &["at_least_one_source_required"],
+            &[],
+            &["FROM <stream_name>"],
+            &["SELECT * FROM s"],
+            &["DataSource"],
+            vec![],
+        )],
     );
 
     let window_constructs = group(

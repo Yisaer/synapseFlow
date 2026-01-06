@@ -248,6 +248,15 @@ mod tests {
         .unwrap()
         .clone();
 
+        let props_fields: JsonMap<String, JsonValue> = json!({
+            "broker_url": "mqtt://localhost:1883",
+            "topic": "in",
+            "qos": 0
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
         CreateStreamRequest {
             name: name.to_string(),
             stream_type: "mqtt".to_string(),
@@ -255,7 +264,9 @@ mod tests {
                 schema_type: "json".to_string(),
                 props: schema_props,
             },
-            props: crate::stream::StreamPropsRequest::default(),
+            props: crate::stream::StreamPropsRequest {
+                fields: props_fields,
+            },
             shared: false,
             decoder: crate::stream::DecoderConfigRequest::default(),
             eventtime: None,

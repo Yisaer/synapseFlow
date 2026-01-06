@@ -12,8 +12,8 @@ This source reads Parquet files that follow a specific naming convention and fil
 |----------|------|----------|---------|-------------|
 | `datasource` | string | Yes | - | Directory path containing the Parquet files. |
 | `topic` | string | Yes | - | Topic name to filter files (e.g., "can0"). |
-| `start` | int64 | No | - | Start timestamp (Unix milliseconds) for filtering. |
-| `end` | int64 | No | - | End timestamp (Unix milliseconds) for filtering. |
+| `start` | int64 | No | - | Start timestamp integer for filtering (compared against Parquet `ts` as-is; unit depends on your data). |
+| `end` | int64 | No | - | End timestamp integer for filtering (compared against Parquet `ts` as-is; unit depends on your data). |
 | `batch_size` | int | No | 100 | Number of rows to read per batch. |
 | `send_interval_ms` | int | No | - | Interval between batches in milliseconds to control replay speed. |
 
@@ -31,16 +31,29 @@ Example: `nanomq_can0-1700000000~1700001000_42_abc123.parquet`
 
 Create a history stream via the HTTP API:
 
+Note: the History connector replays the raw Parquet `data` bytes as the stream payload. The stream
+`schema` and `decoder` must match the payload format. The example below assumes the payload is JSON.
+
 ```json
 POST /streams
 {
   "name": "history_stream",
   "type": "history",
+  "schema": {
+    "type": "json",
+    "props": {
+      "columns": [
+        { "name": "ts", "data_type": "int64" },
+        { "name": "data", "data_type": "string" }
+      ]
+    }
+  },
+  "decoder": { "type": "json", "props": {} },
   "props": {
     "datasource": "/var/lib/nanomq/history",
     "topic": "can0",
-    "start": 1700000000000,
-    "end": 1700010000000,
+    "start": 1700000000,
+    "end": 1700010000,
     "send_interval_ms": 10
   }
 }

@@ -4,6 +4,8 @@ This document describes stream metadata and schema introspection from a **SQL an
 
 For agent implementation guidance (workflow, validation loop, do/don’t), see `docs/agents_readme.md`.
 
+For stream management (create/delete) REST APIs, see `user_docs/api/stream.md`.
+
 ## Manager API
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
@@ -43,6 +45,9 @@ Clients should treat field names as stable API contract. Optional fields may be 
 - `name: string` (identifier used in SQL)
 - `shared: boolean`
 - `schema: { columns: Column[] }`
+- Optional `shared_stream: SharedStreamItem`
+
+Note: current implementation does not populate `shared_stream` in this endpoint.
 
 ### `GET /streams/describe/:name` → `DescribeStreamResponse`
 
@@ -58,6 +63,15 @@ Clients should treat field names as stable API contract. Optional fields may be 
 - `decoder: { type: string, props: object }`
 - `props: object` (connector-specific stream properties)
 - Optional: `eventtime: { column: string, type: string }`
+
+### `SharedStreamItem`
+
+- `id: string`
+- `status: string` (`starting`, `running`, `stopped`, `failed`)
+- Optional `status_message: string` (present when `status == "failed"`)
+- `connector_id: string`
+- `subscribers: number`
+- `created_at_secs: number` (Unix seconds)
 
 ### `Column`
 
