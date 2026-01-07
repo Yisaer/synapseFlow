@@ -8,9 +8,9 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from ..shared.chat_client import ChatCompletionsClient, LlmError
 from ..shared.catalogs import CapabilitiesDigest
-from ..shared.manager_client import ApiError, ManagerClient
 from ..shared.prompts import default_assistant_instructions
 from ..shared.requests import build_create_pipeline_request, build_create_stream_request
+from ..shared.mcp_client import McpError, SynapseFlowMcpClient
 
 
 class Phase(str, Enum):
@@ -130,7 +130,7 @@ class Workflow:
 
     def __init__(
         self,
-        manager: ManagerClient,
+        synapse: SynapseFlowMcpClient,
         llm: ChatCompletionsClient,
         llm_preview_model: str,
         llm_draft_model: str,
@@ -142,7 +142,7 @@ class Workflow:
         llm_json_mode: bool = True,
         llm_stream: bool = False,
     ) -> None:
-        self.manager = manager
+        self.synapse = synapse
         self.llm = llm
         self.llm_preview_model = llm_preview_model
         self.llm_draft_model = llm_draft_model
@@ -342,8 +342,8 @@ class Workflow:
                 sink_qos=self.sink_qos,
             )
             try:
-                self.manager.create_pipeline(pipeline_req)
-            except ApiError as e:
+                self.synapse.pipelines_create(pipeline_req)
+            except McpError as e:
                 previous_error = str(e)
                 previous_sql = candidate.sql
                 yield WorkflowEvent(
@@ -360,11 +360,11 @@ class Workflow:
             )
 
             try:
-                explain = self.manager.explain_pipeline(temp_id)
+                explain = self.synapse.pipelines_explain(temp_id)
             finally:
                 try:
-                    self.manager.delete_pipeline(temp_id)
-                except ApiError:
+                    self.synapse.pipelines_delete(temp_id)
+                except McpError:
                     pass
 
             result = PipelineCandidate(

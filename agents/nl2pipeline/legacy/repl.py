@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..shared.manager_client import ApiError, ManagerClient
+from ..shared.mcp_client import McpError, SynapseFlowMcpClient
 from .router import Intent, route_intent
 from .workflow import EventKind, PipelineCandidate, TurnContext, TurnInput, Workflow
 
@@ -119,8 +119,8 @@ def _select_stream_interactively(streams: List[Dict[str, Any]]) -> str:
         print("Invalid selection.", file=sys.stderr)
 
 
-def _get_stream_schema(manager: ManagerClient, stream: str) -> Dict[str, Any]:
-    desc = manager.describe_stream(stream)
+def _get_stream_schema(manager: SynapseFlowMcpClient, stream: str) -> Dict[str, Any]:
+    desc = manager.streams_describe(stream)
     return (desc.get("spec") or {}).get("schema") or {}
 
 
@@ -138,15 +138,15 @@ def _render_result(result: PipelineCandidate) -> None:
 
 
 def run_repl(
-    manager: ManagerClient,
+    manager: SynapseFlowMcpClient,
     workflow: Workflow,
     router_model: str,
     initial_stream_name: str,
     check_max_attempts: int,
 ) -> int:
-    streams = manager.list_streams()
+    streams = manager.streams_list()
     if not streams:
-        raise ApiError("no streams found (create one first via Manager)")
+        raise McpError(code="not_found", message="no streams found (create one first via Manager)")
 
     active_stream = initial_stream_name.strip()
 
@@ -182,11 +182,19 @@ def run_repl(
             _print_help()
             continue
         if line == "/streams":
-            _print_streams(manager.list_streams())
+            _print_streams(manager.streams_list())
+            continue
+        if line == "/trace":
+            trace = manager.trace()
+            if not trace:
+                print("(no trace)", file=sys.stderr)
+            else:
+                for t in trace[-30:]:
+                    print(json.dumps(t, ensure_ascii=False), file=sys.stderr)
             continue
         if line.startswith("/use "):
             name = line[len("/use ") :].strip()
-            streams = manager.list_streams()
+            streams = manager.streams_list()
             if not any(s.get("name") == name for s in streams):
                 print(f"stream not found: {name}", file=sys.stderr)
                 continue
@@ -211,7 +219,7 @@ def run_repl(
             continue
 
         user_text = line
-        streams = manager.list_streams()
+        streams = manager.streams_list()
         try:
             decision = route_intent(
                 llm=workflow.llm,

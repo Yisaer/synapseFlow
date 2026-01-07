@@ -22,6 +22,7 @@ def _print_help() -> None:
             [
                 "Commands:",
                 "  /help",
+                "  /trace",
                 "  /exit",
                 "",
                 "Otherwise, type a natural-language message and press Enter.",
@@ -111,6 +112,14 @@ def main(argv: list[str]) -> int:
             break
         if line == "/help":
             _print_help()
+            continue
+        if line == "/trace":
+            trace = engine.synapse.trace()
+            if not trace:
+                print("(no trace)", file=sys.stderr)
+            else:
+                for t in trace[-30:]:
+                    print(json.dumps(t, ensure_ascii=False), file=sys.stderr)
             continue
 
         # Normal user text.

@@ -80,7 +80,7 @@ The agent uses an OpenAI-compatible Chat Completions API. The config must provid
 
 ### REPL commands
 
-- Legacy CLI supports: `/help`, `/streams`, `/use <stream_name>`, `/show ...`, `/exit`.
+- Legacy CLI supports: `/help`, `/streams`, `/use <stream_name>`, `/show ...`, `/trace`, `/exit`.
 - LangGraph CLI currently supports: `/help`, `/exit` (stream/schema selection is handled via interrupts/prompts).
 
 ## Notes

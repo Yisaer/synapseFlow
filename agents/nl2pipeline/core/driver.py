@@ -6,7 +6,9 @@ from typing import Any, Dict, Optional
 
 from ..shared.chat_client import ChatCompletionsClient, LlmError
 from ..shared.config import AppConfig
-from ..shared.manager_client import ApiError, ManagerClient
+from ..shared.manager_client import ManagerClient
+from ..shared.mcp import EmbeddedMcpRuntime, McpRegistry, register_synapseflow_mcp
+from ..shared.mcp_client import McpError, SynapseFlowMcpClient
 from .session_store import InMemorySessionStore
 from .state import State, TurnRequest, TurnResponse
 from .workflow import build_langgraph_workflow
@@ -14,7 +16,7 @@ from .workflow import build_langgraph_workflow
 
 @dataclass
 class LangGraphEngine:
-    manager: ManagerClient
+    synapse: SynapseFlowMcpClient
     llm: ChatCompletionsClient
     cfg: AppConfig
     store: InMemorySessionStore
@@ -23,10 +25,14 @@ class LangGraphEngine:
     @classmethod
     def new(cls, cfg: AppConfig) -> "LangGraphEngine":
         manager = ManagerClient.new(cfg.manager.url, cfg.manager.timeout_secs)
+        registry = McpRegistry()
+        register_synapseflow_mcp(registry, manager)
+        runtime = EmbeddedMcpRuntime.new(registry)
+        synapse = SynapseFlowMcpClient(runtime=runtime)
         llm = ChatCompletionsClient.new(cfg.llm.base_url, cfg.llm.api_key, cfg.llm.timeout_secs)
         store = InMemorySessionStore.new()
         graph = build_langgraph_workflow(
-            manager=manager,
+            synapse=synapse,
             llm=llm,
             llm_router_model=cfg.llm.router_model,
             llm_preview_model=cfg.llm.preview_model,
@@ -37,7 +43,7 @@ class LangGraphEngine:
             sink_qos=cfg.sink.qos,
             default_max_attempts=cfg.repl.check_max_attempts,
         )
-        return cls(manager=manager, llm=llm, cfg=cfg, store=store, graph=graph)
+        return cls(synapse=synapse, llm=llm, cfg=cfg, store=store, graph=graph)
 
     def create_session(self) -> str:
         # Minimal initial state; init_session node will populate catalogs/streams.
@@ -85,7 +91,7 @@ class LangGraphEngine:
             updates = out if isinstance(out, dict) else dict(out)
             next_state.update(updates)
             return next_state
-        except (ApiError, LlmError) as e:
+        except (McpError, LlmError) as e:
             state = dict(state)
             state["interrupt"] = {"type": "need_clarification", "question": str(e)}
             return state

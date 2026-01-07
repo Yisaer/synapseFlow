@@ -9,10 +9,15 @@ if __package__ is None:
 
 from agents.nl2pipeline.legacy.repl import run_repl  # noqa: E402
 from agents.nl2pipeline.legacy.workflow import Workflow  # noqa: E402
-from agents.nl2pipeline.shared.catalogs import build_capabilities_digest  # noqa: E402
+from agents.nl2pipeline.shared.manager_client import ManagerClient  # noqa: E402
 from agents.nl2pipeline.shared.chat_client import ChatCompletionsClient  # noqa: E402
 from agents.nl2pipeline.shared.config import load_config  # noqa: E402
-from agents.nl2pipeline.shared.manager_client import ApiError, ManagerClient  # noqa: E402
+from agents.nl2pipeline.shared.mcp import (  # noqa: E402
+    EmbeddedMcpRuntime,
+    McpRegistry,
+    register_synapseflow_mcp,
+)
+from agents.nl2pipeline.shared.mcp_client import SynapseFlowMcpClient  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,15 +31,16 @@ def main(argv: list[str]) -> int:
     cfg = load_config(args.config)
 
     manager = ManagerClient.new(cfg.manager.url, cfg.manager.timeout_secs)
-
-    functions = manager.list_functions()
-    syntax_caps = manager.get_syntax_capabilities()
-    digest = build_capabilities_digest(functions, syntax_caps)
+    registry = McpRegistry()
+    register_synapseflow_mcp(registry, manager)
+    runtime = EmbeddedMcpRuntime.new(registry)
+    synapse = SynapseFlowMcpClient(runtime=runtime)
+    digest = synapse.build_capabilities_digest()
 
     llm = ChatCompletionsClient.new(cfg.llm.base_url, cfg.llm.api_key, cfg.llm.timeout_secs)
 
     workflow = Workflow(
-        manager=manager,
+        synapse=synapse,
         llm=llm,
         llm_preview_model=cfg.llm.preview_model,
         llm_draft_model=cfg.llm.draft_model,
@@ -47,7 +53,7 @@ def main(argv: list[str]) -> int:
     )
 
     return run_repl(
-        manager=manager,
+        manager=synapse,
         workflow=workflow,
         router_model=cfg.llm.router_model,
         initial_stream_name=cfg.stream.default,
