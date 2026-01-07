@@ -12,6 +12,41 @@ class LlmError(RuntimeError):
     pass
 
 
+def _normalize_messages(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """
+    Some providers reject consecutive messages with the same role (especially assistant).
+    Merge consecutive messages of the same role to keep the history valid.
+    """
+
+    out: List[Dict[str, str]] = []
+    for m in messages:
+        role = str(m.get("role", "") or "")
+        content = str(m.get("content", "") or "")
+        if not role:
+            continue
+        if not out:
+            out.append({"role": role, "content": content})
+            continue
+        if out[-1]["role"] == role:
+            prev = out[-1].get("content", "") or ""
+            if prev and content:
+                out[-1]["content"] = prev + "\n" + content
+            elif content:
+                out[-1]["content"] = content
+            continue
+        out.append({"role": role, "content": content})
+
+    # Drop empty non-system messages.
+    cleaned: List[Dict[str, str]] = []
+    for m in out:
+        role = str(m.get("role", "") or "")
+        content = str(m.get("content", "") or "")
+        if role != "system" and not content.strip():
+            continue
+        cleaned.append({"role": role, "content": content})
+    return cleaned
+
+
 @dataclass
 class ChatCompletionsClient:
     http: HttpJsonClient
@@ -34,6 +69,7 @@ class ChatCompletionsClient:
         messages: List[Dict[str, str]],
         temperature: float = 0.0,
     ) -> str:
+        messages = _normalize_messages(messages)
         body: Dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -54,6 +90,7 @@ class ChatCompletionsClient:
         messages: List[Dict[str, str]],
         temperature: float = 0.0,
     ) -> Iterator[str]:
+        messages = _normalize_messages(messages)
         body: Dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -124,6 +161,7 @@ class ChatCompletionsClient:
         on_stream_delta: Optional[Callable[[str], None]] = None,
         _stream_fallback_used: bool = False,
     ) -> Dict[str, Any]:
+        messages = _normalize_messages(messages)
         body: Dict[str, Any] = {
             "model": model,
             "messages": messages,

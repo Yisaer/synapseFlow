@@ -65,15 +65,12 @@ class HistoryBuffer:
                 }
             )
 
-        if extra_context is not None:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": json.dumps(extra_context, ensure_ascii=False),
-                }
-            )
-
+        # Append conversation tail first, then the current turn's extra context as the last user
+        # message. Some providers require the final message to be user.
         messages.extend(self.tail)
+
+        if extra_context is not None:
+            messages.append({"role": "user", "content": json.dumps(extra_context, ensure_ascii=False)})
         return messages
 
     def _append(self, msg: Message) -> None:

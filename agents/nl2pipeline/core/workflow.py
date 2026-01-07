@@ -161,6 +161,26 @@ def build_langgraph_workflow(
         state["available_streams"] = synapse.streams_list()
 
         interrupt = state.get("interrupt")
+        # New user request: clear per-turn outputs so we never leak stale SQL/EXPLAIN across turns.
+        # If we're currently in an interrupt/resume flow, keep the previous draft/explain intact.
+        if not interrupt:
+            user_text = str(ui.get("text") or "").strip()
+            if user_text:
+                state["draft"] = {"preview_text": None, "sql": None, "assumptions": [], "questions": []}
+                state["explain"] = {"pretty": None, "pipeline_request_json": None}
+                v = state.get("validation") or {}
+                if not isinstance(v, dict):
+                    v = {}
+                v["tmp_pipeline_id"] = None
+                v["error"] = None
+                v["attempt"] = 1
+                v["max_attempts"] = int(v.get("max_attempts") or default_max_attempts)
+                state["validation"] = v  # type: ignore[assignment]
+                state["pending_action"] = None
+                state["intent"] = None
+                state["intent_stream"] = None
+                state["intent_question"] = None
+
         if interrupt and isinstance(interrupt, dict):
             itype = str(interrupt.get("type", "")).strip()
             pending = str(state.get("pending_action") or "").strip()
@@ -216,6 +236,11 @@ def build_langgraph_workflow(
         interrupt = state.get("interrupt")
         ui = state.get("user_input") or {}
         pending = str(state.get("pending_action") or "").strip()
+
+        # If the user is responding to a confirmation prompt (confirm=true), `pre_turn` will clear
+        # the interrupt. Some providers require we avoid routing on this "control-only" turn.
+        if ui.get("confirm") is True and state.get("confirmed") is True:
+            return "end"
 
         if interrupt and isinstance(interrupt, dict):
             itype = str(interrupt.get("type", "")).strip()
@@ -350,7 +375,10 @@ def build_langgraph_workflow(
         state.setdefault("draft", {})
         state["draft"]["preview_text"] = preview  # type: ignore[index]
 
-        history.add_user(json.dumps(payload, ensure_ascii=False))
+        # Keep history small and unambiguous: only store the user's natural-language request.
+        # The structured payload (including `mode` and full schema) is provided as per-turn context.
+        if user_text.strip():
+            history.add_user(user_text)
         history.add_assistant(preview)
         _save_history(state, history)
 

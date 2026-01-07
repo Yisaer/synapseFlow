@@ -166,6 +166,7 @@ def main(argv: list[str]) -> int:
             revision_text = input("What should be changed? ").strip()
             if not revision_text:
                 continue
+            print("[LLM] revising SQL...", file=sys.stderr, flush=True)
             resp = engine.run_turn(session_id, TurnRequest(feedback=revision_text))
             if resp.explain_pretty and resp.pipeline_request_json and resp.sql:
                 _render_pipeline(resp.sql, resp.explain_pretty, resp.pipeline_request_json)
