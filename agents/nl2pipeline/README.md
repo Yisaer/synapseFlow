@@ -52,9 +52,13 @@ The agent uses an OpenAI-compatible Chat Completions API. The config must provid
 
 - `llm.base_url` (e.g. `https://api.openai.com`)
 - `llm.api_key_env` (recommended; reads key from env)
-- `llm.model`
+- `llm.model` (default model)
+- Optional per-stage overrides:
+  - `llm.router_model` (intent routing; fast model recommended)
+  - `llm.preview_model` (streaming SQL preview; fast model recommended)
+  - `llm.draft_model` (structured SQL repair; reasoning model recommended)
 - Optional: `llm.json_mode` (default `true`): requests `response_format={"type":"json_object"}`.
-- Optional: `llm.stream` (default `false`): uses SSE streaming and shows a progress indicator.
+- Optional: `llm.stream` (default `false`): streams the SQL preview via SSE.
 
 ### REPL commands
 

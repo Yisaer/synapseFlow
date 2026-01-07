@@ -15,7 +15,12 @@ class LlmConfig:
     base_url: str
     timeout_secs: float
     api_key: str
+    # Default model. If per-stage models are not set, this is used for all calls.
     model: str
+    # Per-stage models (optional; fall back to `model`).
+    router_model: str
+    preview_model: str
+    draft_model: str
     stream: bool
     json_mode: bool
 
@@ -92,11 +97,19 @@ def load_config(path: str) -> AppConfig:
         timeout_secs=float(manager_section.get("timeout_secs", 10.0)),
     )
 
+    default_model = _require_non_empty(str(llm_section.get("model", "")), "[llm].model")
+    router_model = str(llm_section.get("router_model", "")).strip() or default_model
+    preview_model = str(llm_section.get("preview_model", "")).strip() or router_model
+    draft_model = str(llm_section.get("draft_model", "")).strip() or default_model
+
     llm = LlmConfig(
         base_url=_require_non_empty(str(llm_section.get("base_url", "")), "[llm].base_url"),
         timeout_secs=float(llm_section.get("timeout_secs", 30.0)),
         api_key=_read_api_key(llm_section),
-        model=_require_non_empty(str(llm_section.get("model", "")), "[llm].model"),
+        model=default_model,
+        router_model=_require_non_empty(router_model, "[llm].router_model"),
+        preview_model=_require_non_empty(preview_model, "[llm].preview_model"),
+        draft_model=_require_non_empty(draft_model, "[llm].draft_model"),
         stream=bool(llm_section.get("stream", False)),
         json_mode=bool(llm_section.get("json_mode", True)),
     )

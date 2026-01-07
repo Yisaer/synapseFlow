@@ -140,6 +140,7 @@ def _render_result(result: PipelineCandidate) -> None:
 def run_repl(
     manager: ManagerClient,
     workflow: Workflow,
+    router_model: str,
     initial_stream_name: str,
     check_max_attempts: int,
 ) -> int:
@@ -167,6 +168,9 @@ def run_repl(
         try:
             line = input("nl2pipeline> ").strip()
         except EOFError:
+            print("", file=sys.stderr)
+            break
+        except KeyboardInterrupt:
             print("", file=sys.stderr)
             break
         if not line:
@@ -211,7 +215,7 @@ def run_repl(
         try:
             decision = route_intent(
                 llm=workflow.llm,
-                model=workflow.llm_model,
+                model=router_model,
                 user_text=user_text,
                 streams=streams,
                 active_stream=state.active_stream,
@@ -293,7 +297,7 @@ def run_repl(
                 TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
             )
 
-        print("[LLM] drafting pipeline SQL", file=sys.stderr)
+        original_prompt = user_text
         ctx = TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
         turn = TurnInput(
             prompt=user_text,
@@ -305,13 +309,29 @@ def run_repl(
         needs_user_input: Optional[List[str]] = None
         final_error: Optional[str] = None
 
+        preview_started = False
+        preview_emitted = False
+
         for ev in workflow.run_turn(ctx, turn):
+            if ev.kind == EventKind.PhaseChanged and ev.phase is not None:
+                if ev.phase.value == "draft_sql" and not preview_started:
+                    preview_started = True
+                    print("[LLM] drafting SQL", file=sys.stderr)
+
+            if ev.kind == EventKind.DraftPreviewDelta and ev.text_delta:
+                if not preview_emitted:
+                    print("[LLM] SQL preview:", file=sys.stderr)
+                    preview_emitted = True
+                print(ev.text_delta, end="", file=sys.stderr, flush=True)
+
             if ev.kind == EventKind.NeedUserInput and ev.candidate is not None:
                 needs_user_input = ev.candidate.questions
             if ev.kind == EventKind.Explained and ev.result is not None:
                 last_result = ev.result
             if ev.kind == EventKind.Failed:
                 final_error = ev.error
+            if ev.kind == EventKind.CandidateGenerated and preview_emitted:
+                print("", file=sys.stderr)
 
         if needs_user_input:
             print("Questions:", file=sys.stderr)
@@ -338,9 +358,7 @@ def run_repl(
 
         revision_text = input("What should be changed? ").strip()
         if revision_text:
-            state.last_sql = state.last_sql
-            state.last_explain = state.last_explain
-            revised_prompt = f"{prompt}\nUser feedback: {revision_text}"
+            revised_prompt = f"{original_prompt}\nUser feedback: {revision_text}"
             turn = TurnInput(
                 prompt=revised_prompt,
                 max_attempts=check_max_attempts,

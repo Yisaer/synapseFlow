@@ -60,7 +60,9 @@ Represent state explicitly to make later migration to LangGraph easy:
 
 For each user prompt:
 
-1) `draft_sql` (LLM): produce SQL (plus optional clarification questions).
+1) `draft_sql` (LLM):
+   - First, stream a fast *SQL preview* (plain text) for responsiveness.
+   - If planning fails, run a structured JSON repair loop (bounded attempts) using the planner error.
 2) `validate_pipeline` (Manager planning as validator):
    - Create a temporary pipeline via `POST /pipelines`.
    - On failure, feed the error back to the LLM to repair SQL (bounded attempts).

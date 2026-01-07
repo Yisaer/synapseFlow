@@ -15,9 +15,18 @@ timeout_secs = 120
 api_key_env = "DEEPSEEK_API_KEY"
 
 # Chat-completions model name.
-model = "deepseek-chat"
+model = "deepseek-reasoner"
 
-# Whether to use SSE streaming for chat completions (helps responsiveness and avoids long blocking reads).
+# Optional per-stage models (defaults to `model` if omitted).
+# - `router_model`: used for intent routing (fast/cheap is fine).
+# - `preview_model`: used for streaming SQL preview (fast model recommended).
+# - `draft_model`: used for structured SQL repair (reasoning model recommended).
+router_model = "deepseek-chat"
+preview_model = "deepseek-chat"
+draft_model = "deepseek-reasoner"
+
+# Whether to stream the *SQL preview* via SSE (improves perceived responsiveness).
+# JSON repair steps are executed as non-streaming requests for stability.
 stream = true
 
 # Whether to request JSON mode (response_format={"type":"json_object"}).

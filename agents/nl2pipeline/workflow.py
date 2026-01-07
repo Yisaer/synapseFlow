@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -50,6 +49,7 @@ class TurnInput:
 
 class EventKind(str, Enum):
     PhaseChanged = "phase_changed"
+    DraftPreviewDelta = "draft_preview_delta"
     CandidateGenerated = "candidate_generated"
     PlanningFailed = "planning_failed"
     Explained = "explained"
@@ -62,6 +62,7 @@ class WorkflowEvent:
     kind: EventKind
     phase: Optional[Phase] = None
     attempt: Optional[int] = None
+    text_delta: Optional[str] = None
     candidate: Optional[Candidate] = None
     error: Optional[str] = None
     result: Optional[PipelineCandidate] = None
@@ -75,8 +76,10 @@ def default_assistant_instructions() -> str:
         "- Use only functions present in the provided function catalog.\n"
         "- Use only syntax constructs and expression operators marked supported/partial in the provided syntax catalog.\n"
         "Output rules:\n"
-        "- Return ONLY valid JSON with keys: sql, questions, assumptions.\n"
-        "- If required information is missing, put a question in questions[] instead of guessing.\n"
+        "- The user payload includes `mode`.\n"
+        "  - mode=preview_sql: output either a single SQL statement, OR a single line starting with `QUESTION:`.\n"
+        "  - mode=json_candidate: return ONLY valid JSON with keys: sql, questions, assumptions.\n"
+        "- If required information is missing, ask instead of guessing.\n"
     )
 
 
@@ -135,6 +138,43 @@ def _candidate_from_json(obj: Dict[str, Any]) -> Candidate:
         assumptions=[str(x) for x in assumptions],
     )
 
+def _strip_code_fences(text: str) -> str:
+    raw = text.strip()
+    if raw.startswith("```"):
+        # Drop the first fence line and the last fence if present.
+        lines = raw.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    return raw
+
+
+def _extract_sql_from_preview(text: str) -> str:
+    raw = _strip_code_fences(text).strip()
+    if raw.lower().startswith("sql:"):
+        raw = raw[4:].strip()
+    # Heuristic: take from first SQL keyword if there is leading chatter.
+    lowered = raw.lower()
+    for kw in ("with", "select", "insert", "create", "delete", "update"):
+        idx = lowered.find(kw)
+        if idx != -1:
+            raw = raw[idx:].strip()
+            break
+    return raw.strip().rstrip(";").strip() + ";"
+
+
+def _candidate_from_preview_text(text: str) -> Candidate:
+    raw = _strip_code_fences(text).strip()
+    if raw.lower().startswith("question:"):
+        q = raw[len("question:") :].strip()
+        return Candidate(sql="", questions=[q] if q else ["Which stream/fields should be used?"], assumptions=[])
+    sql = _extract_sql_from_preview(raw)
+    if not sql or sql == ";":
+        raise LlmError(f"LLM preview did not produce SQL: {text}")
+    return Candidate(sql=sql, questions=[], assumptions=[])
+
 
 class Workflow:
     """
@@ -147,7 +187,8 @@ class Workflow:
         self,
         manager: ManagerClient,
         llm: ChatCompletionsClient,
-        llm_model: str,
+        llm_preview_model: str,
+        llm_draft_model: str,
         digest: CapabilitiesDigest,
         sink_broker_url: str,
         sink_topic: str,
@@ -158,7 +199,8 @@ class Workflow:
     ) -> None:
         self.manager = manager
         self.llm = llm
-        self.llm_model = llm_model
+        self.llm_preview_model = llm_preview_model
+        self.llm_draft_model = llm_draft_model
         self.digest = digest
         self.sink_broker_url = sink_broker_url
         self.sink_topic = sink_topic
@@ -236,49 +278,95 @@ class Workflow:
         previous_sql = turn.previous_sql
         explain_summary: Optional[str] = None
 
-        for attempt in range(1, max(1, turn.max_attempts) + 1):
+        max_attempts = max(1, turn.max_attempts)
+        for attempt in range(1, max_attempts + 1):
             yield WorkflowEvent(kind=EventKind.PhaseChanged, phase=Phase.DraftSql, attempt=attempt)
 
-            llm_payload = {
-                "nl": turn.prompt,
-                "active_stream": ctx.active_stream,
-                "stream_schema": ctx.stream_schema,
-                "previous_sql": previous_sql,
-                "previous_error": previous_error,
-                "explain_summary": explain_summary,
-                "output_schema": {
-                    "sql": "string (required)",
-                    "questions": "string[] (optional)",
-                    "assumptions": "string[] (optional)",
-                },
-            }
-            self._append_user_json(llm_payload)
-            try:
-                progress_emitted = False
+            # Attempt 1: fast preview SQL (streamable). Later attempts: structured repair JSON.
+            if attempt == 1:
+                llm_payload = {
+                    "mode": "preview_sql",
+                    "nl": turn.prompt,
+                    "active_stream": ctx.active_stream,
+                    "stream_schema": ctx.stream_schema,
+                    "previous_sql": previous_sql,
+                    "previous_error": previous_error,
+                    "explain_summary": explain_summary,
+                    "output_rules": "Output a single SQL statement OR a single line `QUESTION: ...`. No extra text.",
+                }
+                self._append_user_json(llm_payload)
+                chunks: List[str] = []
+                try:
+                    if self.llm_stream:
+                        for piece in self.llm.iter_text_deltas(
+                            model=self.llm_preview_model,
+                            messages=self._messages,
+                            temperature=0.0,
+                        ):
+                            chunks.append(piece)
+                            yield WorkflowEvent(
+                                kind=EventKind.DraftPreviewDelta,
+                                phase=Phase.DraftSql,
+                                attempt=attempt,
+                                text_delta=piece,
+                            )
+                        full = "".join(chunks).strip()
+                    else:
+                        full = self.llm.complete_text(
+                            model=self.llm_preview_model,
+                            messages=self._messages,
+                            temperature=0.0,
+                        ).strip()
+                        if full:
+                            yield WorkflowEvent(
+                                kind=EventKind.DraftPreviewDelta,
+                                phase=Phase.DraftSql,
+                                attempt=attempt,
+                                text_delta=full,
+                            )
+                except LlmError as e:
+                    yield WorkflowEvent(kind=EventKind.Failed, phase=Phase.Failed, error=str(e))
+                    return
 
-                def _on_delta(_piece: str) -> None:
-                    nonlocal progress_emitted
-                    if not progress_emitted:
-                        progress_emitted = True
-                    # Show minimal progress indicator, not raw JSON.
-                    print(".", end="", file=sys.stderr, flush=True)
+                self._append_assistant_text(full)
+                try:
+                    candidate = _candidate_from_preview_text(full)
+                except LlmError as e:
+                    yield WorkflowEvent(kind=EventKind.Failed, phase=Phase.Failed, error=str(e))
+                    return
+            else:
+                llm_payload = {
+                    "mode": "json_candidate",
+                    "nl": turn.prompt,
+                    "active_stream": ctx.active_stream,
+                    "stream_schema": ctx.stream_schema,
+                    "previous_sql": previous_sql,
+                    "previous_error": previous_error,
+                    "explain_summary": explain_summary,
+                    "output_schema": {
+                        "sql": "string (required)",
+                        "questions": "string[] (optional)",
+                        "assumptions": "string[] (optional)",
+                    },
+                }
+                self._append_user_json(llm_payload)
+                try:
+                    parsed = self.llm.complete_json(
+                        model=self.llm_draft_model,
+                        messages=self._messages,
+                        temperature=0.0,
+                        response_format_json=self.llm_json_mode,
+                        # Streaming is disabled for JSON mode to avoid provider-specific SSE quirks.
+                        stream=False,
+                        on_stream_delta=None,
+                    )
+                except LlmError as e:
+                    yield WorkflowEvent(kind=EventKind.Failed, phase=Phase.Failed, error=str(e))
+                    return
 
-                parsed = self.llm.complete_json(
-                    model=self.llm_model,
-                    messages=self._messages,
-                    temperature=0.0,
-                    response_format_json=self.llm_json_mode,
-                    stream=self.llm_stream,
-                    on_stream_delta=_on_delta if self.llm_stream else None,
-                )
-                if self.llm_stream and progress_emitted:
-                    print("", file=sys.stderr)
-            except LlmError as e:
-                yield WorkflowEvent(kind=EventKind.Failed, phase=Phase.Failed, error=str(e))
-                return
-            # Keep raw output in history (best-effort) for multi-turn consistency.
-            self._append_assistant_text(json.dumps(parsed, ensure_ascii=False))
-            candidate = _candidate_from_json(parsed)
+                # Keep raw output in history (best-effort) for multi-turn consistency.
+                self._append_assistant_text(json.dumps(parsed, ensure_ascii=False))
+                candidate = _candidate_from_json(parsed)
 
             yield WorkflowEvent(
                 kind=EventKind.CandidateGenerated,

@@ -1,7 +1,7 @@
 import json
 import socket
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 import urllib.error
 import urllib.request
 
@@ -27,6 +27,92 @@ class ChatCompletionsClient:
 
     def _v1_path(self, path: str) -> str:
         return path
+
+    def complete_text(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.0,
+    ) -> str:
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        _, resp = self.http.request_json("POST", self._v1_path("/chat/completions"), body)
+        try:
+            content = resp["choices"][0]["message"]["content"]
+        except Exception as e:
+            raise LlmError(f"unexpected chat completion response shape: {resp}") from e
+        if not isinstance(content, str) or not content.strip():
+            raise LlmError(f"empty chat completion content: {resp}")
+        return content
+
+    def iter_text_deltas(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.0,
+    ) -> Iterator[str]:
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+
+        url = join_url(self.http.base_url, self._v1_path("/chat/completions"))
+        data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", errors="replace"
+        )
+        headers = {
+            **self.http.headers,
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        req = urllib.request.Request(url=url, method="POST", data=data, headers=headers)
+        yielded_any = False
+        try:
+            with urllib.request.urlopen(req, timeout=self.http.timeout_secs) as resp:
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if not text or not text.startswith("data:"):
+                        continue
+                    payload = text[len("data:") :].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(payload)
+                    except Exception:
+                        continue
+                    choices = event.get("choices") or []
+                    if not isinstance(choices, list):
+                        continue
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") or {}
+                        if not isinstance(delta, dict):
+                            continue
+                        piece = delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            yielded_any = True
+                            yield piece
+        except (TimeoutError, socket.timeout) as e:
+            raise LlmError(f"LLM request timed out after {self.http.timeout_secs}s") from e
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            message = raw.decode("utf-8", errors="replace") if raw else str(e)
+            raise LlmError(f"LLM request failed: HTTP {e.code}: {message}") from None
+        except urllib.error.URLError as e:
+            raise LlmError(f"LLM request failed: {e}") from None
+
+        if not yielded_any:
+            # Some providers/models do not stream `delta.content`; fall back to non-streaming.
+            yield self.complete_text(model=model, messages=messages, temperature=temperature)
 
     def complete_json(
         self,

@@ -36,7 +36,8 @@ def main(argv: list[str]) -> int:
     workflow = Workflow(
         manager=manager,
         llm=llm,
-        llm_model=cfg.llm.model,
+        llm_preview_model=cfg.llm.preview_model,
+        llm_draft_model=cfg.llm.draft_model,
         digest=digest,
         sink_broker_url=cfg.sink.broker_url,
         sink_topic=cfg.sink.topic,
@@ -48,6 +49,7 @@ def main(argv: list[str]) -> int:
     return run_repl(
         manager=manager,
         workflow=workflow,
+        router_model=cfg.llm.router_model,
         initial_stream_name=cfg.stream.default,
         check_max_attempts=cfg.repl.check_max_attempts,
     )
