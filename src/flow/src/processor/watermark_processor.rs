@@ -5,9 +5,8 @@ use crate::planner::physical::{
     WatermarkStrategy,
 };
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, send_control_with_backpressure, send_with_backpressure,
-    DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -675,14 +674,14 @@ impl Processor for EventtimeWatermarkProcessor {
                                 match state.on_graceful_end() {
                                     Ok(step) => {
                                         for err in step.errors {
-                                            forward_error(&output, &id, err).await?;
+                                            stats.record_error(err);
                                         }
                                         for item in step.outputs {
                                             send_with_backpressure(&output, item).await?;
                                         }
                                     }
                                     Err(err) => {
-                                        forward_error(&output, &id, format!("eventtime flush error: {err}")).await?;
+                                        stats.record_error(format!("eventtime flush error: {err}"));
                                     }
                                 }
                             }
@@ -704,14 +703,16 @@ impl Processor for EventtimeWatermarkProcessor {
                                 let rows = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(err) => {
-                                        forward_error(&output, &id, format!("eventtime collection error: {err}")).await?;
+                                        stats.record_error(format!(
+                                            "eventtime collection error: {err}"
+                                        ));
                                         continue;
                                     }
                                 };
                                 match state.on_rows(rows) {
                                     Ok(step) => {
                                         for err in step.errors {
-                                            forward_error(&output, &id, err).await?;
+                                            stats.record_error(err);
                                         }
                                         for item in step.outputs {
                                             let out_rows = item.num_rows_hint();
@@ -722,17 +723,15 @@ impl Processor for EventtimeWatermarkProcessor {
                                         }
                                     }
                                     Err(err) => {
-                                        forward_error(&output, &id, format!("eventtime ingest error: {err}")).await?;
+                                        stats.record_error(format!("eventtime ingest error: {err}"));
                                     }
                                 }
                             }
                             Some(Ok(StreamData::Watermark(_))) => {
-                                forward_error(
-                                    &output,
-                                    &id,
-                                    "unexpected StreamData::Watermark input in eventtime watermark processor".to_string(),
-                                )
-                                .await?;
+                                stats.record_error(
+                                    "unexpected StreamData::Watermark input in eventtime watermark processor"
+                                        .to_string(),
+                                );
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
@@ -740,14 +739,14 @@ impl Processor for EventtimeWatermarkProcessor {
                                     match state.on_graceful_end() {
                                         Ok(step) => {
                                             for err in step.errors {
-                                                forward_error(&output, &id, err).await?;
+                                                stats.record_error(err);
                                             }
                                             for item in step.outputs {
                                                 send_with_backpressure(&output, item).await?;
                                             }
                                         }
                                         Err(err) => {
-                                            forward_error(&output, &id, format!("eventtime flush error: {err}")).await?;
+                                            stats.record_error(format!("eventtime flush error: {err}"));
                                         }
                                     }
                                 }

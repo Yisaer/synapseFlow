@@ -9,9 +9,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
-};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -145,13 +143,7 @@ impl Processor for FilterProcessor {
                                                 }
                                             }
                                             Err(e) => {
-                                                let error = StreamError::new(e.to_string())
-                                                    .with_source(id.clone());
-                                                send_with_backpressure(
-                                                    &output,
-                                                    StreamData::error(error),
-                                                )
-                                                .await?;
+                                                stats.record_error(e.to_string());
                                             }
                                         }
                                     }

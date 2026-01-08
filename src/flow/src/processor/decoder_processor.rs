@@ -4,9 +4,9 @@ use crate::codec::RecordDecoder;
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
 use crate::planner::decode_projection::DecodeProjection;
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -144,8 +144,11 @@ impl Processor for DecoderProcessor {
                                     match decoded {
                                         Ok(batch) => {
                                             let result = apply_eventtime(batch, &eventtime);
-                                            for err in result.errors {
-                                                forward_error(&output, &processor_id, err).await?;
+                                            if let Some(last) = result.errors.last() {
+                                                stats.record_error_count(
+                                                    result.errors.len() as u64,
+                                                    last.clone(),
+                                                );
                                             }
                                             if let Some(batch) = result.batch {
                                                 data = StreamData::collection(Box::new(batch));
@@ -155,7 +158,7 @@ impl Processor for DecoderProcessor {
                                         }
                                         Err(err) => {
                                             let message = format!("decode error: {}", err);
-                                            forward_error(&output, &processor_id, message).await?;
+                                            stats.record_error(message);
                                             continue;
                                         }
                                     }

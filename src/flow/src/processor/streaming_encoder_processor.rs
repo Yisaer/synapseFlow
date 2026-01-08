@@ -4,9 +4,9 @@
 use crate::codec::{CollectionEncoder, CollectionEncoderStream};
 use crate::model::Collection;
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -215,7 +215,7 @@ impl Processor for StreamingEncoderProcessor {
                                 .await
                                 {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
-                                    forward_error(&output, &processor_id, err.to_string()).await?;
+                                    stats.record_error(err.to_string());
                                 }
                                 tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
                                 return Ok(());
@@ -239,7 +239,7 @@ impl Processor for StreamingEncoderProcessor {
                         .await
                         {
                             tracing::error!(processor_id = %processor_id, error = %err, "flush error");
-                            forward_error(&output, &processor_id, err.to_string()).await?;
+                            stats.record_error(err.to_string());
                         }
                         if let Some(duration) = mode.duration() {
                             StreamingEncoderProcessor::schedule_timer(&mut timer, duration, row_count > 0);
@@ -270,12 +270,7 @@ impl Processor for StreamingEncoderProcessor {
                                                 error = %err,
                                                 "handle collection error"
                                             );
-                                            forward_error(
-                                                &output,
-                                                &processor_id,
-                                                err.to_string(),
-                                            )
-                                            .await?;
+                                            stats.record_error(err.to_string());
                                         }
                                     }
                                     data => {
@@ -290,12 +285,7 @@ impl Processor for StreamingEncoderProcessor {
                                             .await
                                             {
                                                 tracing::error!(processor_id = %processor_id, error = %err, "flush error");
-                                                forward_error(
-                                                    &output,
-                                                    &processor_id,
-                                                    err.to_string(),
-                                                )
-                                                .await?;
+                                                stats.record_error(err.to_string());
                                             }
                                         }
                                         let out_rows = data.num_rows_hint();
@@ -335,7 +325,7 @@ impl Processor for StreamingEncoderProcessor {
                                 .await
                                 {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
-                                    forward_error(&output, &processor_id, err.to_string()).await?;
+                                    stats.record_error(err.to_string());
                                 }
                                 tracing::info!(processor_id = %processor_id, "input streams closed");
                                 return Ok(());

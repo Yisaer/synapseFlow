@@ -2,9 +2,9 @@
 use crate::connector::SinkConnector;
 use crate::model::Collection;
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -231,8 +231,7 @@ impl Processor for SinkProcessor {
                                         .await
                                         {
                                             tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
-                                            forward_error(&output, &processor_id, err.to_string())
-                                                .await?;
+                                            stats.record_error(err.to_string());
                                             continue;
                                         }
                                         stats.record_out(1);
@@ -255,8 +254,7 @@ impl Processor for SinkProcessor {
                                         .await
                                         {
                                             tracing::error!(processor_id = %processor_id, error = %err, "collection handling error");
-                                            forward_error(&output, &processor_id, err.to_string())
-                                                .await?;
+                                            stats.record_error(err.to_string());
                                             continue;
                                         }
                                         stats.record_out(in_rows);

@@ -6,9 +6,9 @@
 
 use crate::codec::encoder::CollectionEncoder;
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -107,7 +107,7 @@ impl Processor for EncoderProcessor {
                                             Err(err) => {
                                                 let message = format!("encode error: {err}");
                                                 tracing::error!(processor_id = %processor_id, error = %err, "encode error");
-                                                forward_error(&output, &processor_id, message).await?;
+                                                stats.record_error(message);
                                                 continue;
                                             }
                                         }

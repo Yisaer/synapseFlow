@@ -7,7 +7,6 @@
 
 use crate::processor::{
     BarrierControlSignal, ControlSignal, ProcessorStats, ProcessorStatsEntry, StreamData,
-    StreamError,
 };
 use futures::stream::SelectAll;
 use std::sync::Arc;
@@ -212,16 +211,6 @@ pub(crate) async fn send_control_with_backpressure(
         }
         sleep(BACKOFF).await;
     }
-}
-
-/// Convenience helper to emit a [`StreamData::Error`] for the given processor.
-pub(crate) async fn forward_error(
-    sender: &broadcast::Sender<StreamData>,
-    processor_id: &str,
-    message: impl Into<String>,
-) -> Result<(), ProcessorError> {
-    let error = StreamError::new(message).with_source(processor_id.to_string());
-    send_with_backpressure(sender, StreamData::error(error)).await
 }
 
 pub(crate) fn attach_stats_to_collect_barrier(

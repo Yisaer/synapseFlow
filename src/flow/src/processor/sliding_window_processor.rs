@@ -6,9 +6,8 @@
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, send_control_with_backpressure, send_with_backpressure,
-    DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use std::collections::VecDeque;
@@ -108,7 +107,7 @@ impl Processor for SlidingWindowProcessor {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 state.record_in(collection.num_rows() as u64);
                                 if let Err(e) = state.add_collection(collection).await {
-                                    forward_error(&output, &id, e.to_string()).await?;
+                                    stats.record_error(e.to_string());
                                 }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {

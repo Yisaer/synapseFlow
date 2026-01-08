@@ -7,9 +7,8 @@
 
 use crate::planner::physical::{PhysicalPlan, PhysicalStateWindow};
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
-    log_broadcast_lagged, send_control_with_backpressure, send_with_backpressure,
-    DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
@@ -110,7 +109,7 @@ impl Processor for StateWindowProcessor {
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
-                                        forward_error(&output, &id, format!("failed to extract rows: {e}")).await?;
+                                        stats.record_error(format!("failed to extract rows: {e}"));
                                         continue;
                                     }
                                 };
@@ -125,14 +124,9 @@ impl Processor for StateWindowProcessor {
                                             match expr.eval_with_tuple(&tuple) {
                                                 Ok(v) => key_values.push(v),
                                                 Err(e) => {
-                                                    forward_error(
-                                                        &output,
-                                                        &id,
-                                                        format!(
-                                                            "failed to evaluate statewindow partition key: {e}"
-                                                        ),
-                                                    )
-                                                    .await?;
+                                                    stats.record_error(format!(
+                                                        "failed to evaluate statewindow partition key: {e}"
+                                                    ));
                                                     key_values.clear();
                                                     break;
                                                 }
@@ -155,11 +149,15 @@ impl Processor for StateWindowProcessor {
                                     let open = match open_expr.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            forward_error(&output, &id, format!("statewindow open must be bool, got {other:?}")).await?;
+                                            stats.record_error(format!(
+                                                "statewindow open must be bool, got {other:?}"
+                                            ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            forward_error(&output, &id, format!("failed to evaluate statewindow open: {e}")).await?;
+                                            stats.record_error(format!(
+                                                "failed to evaluate statewindow open: {e}"
+                                            ));
                                             continue;
                                         }
                                     };
@@ -167,11 +165,15 @@ impl Processor for StateWindowProcessor {
                                     let emit = match emit_expr.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            forward_error(&output, &id, format!("statewindow emit must be bool, got {other:?}")).await?;
+                                            stats.record_error(format!(
+                                                "statewindow emit must be bool, got {other:?}"
+                                            ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            forward_error(&output, &id, format!("failed to evaluate statewindow emit: {e}")).await?;
+                                            stats.record_error(format!(
+                                                "failed to evaluate statewindow emit: {e}"
+                                            ));
                                             continue;
                                         }
                                     };

@@ -7,9 +7,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
-};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::stateful::{StatefulFunctionInstance, StatefulFunctionRegistry};
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -184,13 +182,7 @@ impl Processor for StatefulFunctionProcessor {
                                                 }
                                             }
                                             Err(e) => {
-                                                let error = StreamError::new(e.to_string())
-                                                    .with_source(id.clone());
-                                                send_with_backpressure(
-                                                    &output,
-                                                    StreamData::error(error),
-                                                )
-                                                .await?;
+                                                stats.record_error(e.to_string());
                                             }
                                         }
                                     }

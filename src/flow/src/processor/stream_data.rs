@@ -124,7 +124,10 @@ pub enum StreamData {
     Control(ControlSignal),
     /// Watermark for time progression
     Watermark(SystemTime),
-    /// Error that occurred during processing - wrapped for flow continuation
+    /// Error event emitted through the data channel.
+    ///
+    /// Note: processors typically record runtime errors via [`crate::processor::ProcessorStats`]
+    /// and rely on logs for diagnostics instead of forwarding errors as data.
     Error(StreamError),
 }
 

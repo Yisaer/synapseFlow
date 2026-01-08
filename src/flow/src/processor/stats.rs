@@ -6,7 +6,8 @@ use std::sync::{Arc, RwLock};
 pub struct ProcessorStats {
     records_in: AtomicU64,
     records_out: AtomicU64,
-    error: RwLock<Option<Arc<str>>>,
+    error_count: AtomicU64,
+    last_error: RwLock<Option<Arc<str>>>,
 }
 
 impl ProcessorStats {
@@ -18,26 +19,31 @@ impl ProcessorStats {
         self.records_out.fetch_add(rows, Ordering::Relaxed);
     }
 
-    pub fn set_error(&self, message: impl Into<String>) {
+    pub fn record_error(&self, message: impl Into<String>) {
+        self.record_error_count(1, message);
+    }
+
+    pub fn record_error_count(&self, count: u64, message: impl Into<String>) {
+        self.error_count.fetch_add(count, Ordering::Relaxed);
         let message: String = message.into();
         let mut guard = self
-            .error
+            .last_error
             .write()
             .expect("ProcessorStats error lock poisoned");
         *guard = Some(Arc::<str>::from(message));
     }
 
-    pub fn clear_error(&self) {
+    pub fn clear_last_error(&self) {
         let mut guard = self
-            .error
+            .last_error
             .write()
             .expect("ProcessorStats error lock poisoned");
         *guard = None;
     }
 
     pub fn snapshot(&self) -> ProcessorStatsSnapshot {
-        let error = self
-            .error
+        let last_error = self
+            .last_error
             .read()
             .expect("ProcessorStats error lock poisoned")
             .as_deref()
@@ -45,7 +51,8 @@ impl ProcessorStats {
         ProcessorStatsSnapshot {
             records_in: self.records_in.load(Ordering::Relaxed),
             records_out: self.records_out.load(Ordering::Relaxed),
-            error,
+            error_count: self.error_count.load(Ordering::Relaxed),
+            last_error,
         }
     }
 }
@@ -54,7 +61,8 @@ impl ProcessorStats {
 pub struct ProcessorStatsSnapshot {
     pub records_in: u64,
     pub records_out: u64,
-    pub error: Option<String>,
+    pub error_count: u64,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -9,9 +9,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
-};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Schema;
 use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
@@ -68,17 +66,25 @@ struct ConnectorBinding {
 }
 
 impl ConnectorBinding {
-    fn activate(&mut self, processor_id: &str) -> broadcast::Receiver<StreamData> {
+    fn activate(
+        &mut self,
+        processor_id: &str,
+        stats: Arc<ProcessorStats>,
+    ) -> broadcast::Receiver<StreamData> {
         let (sender, receiver) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let processor_id = processor_id.to_string();
         let connector_id = self.connector.id().to_string();
         let mut stream = match self.connector.subscribe() {
             Ok(stream) => stream,
             Err(err) => {
-                let _ = sender.send(StreamData::error(
-                    StreamError::new(format!("connector subscribe error: {}", err))
-                        .with_source(processor_id.clone()),
-                ));
+                let message = format!("connector subscribe error: {err}");
+                tracing::error!(
+                    processor_id = %processor_id,
+                    connector_id = %connector_id,
+                    error = %err,
+                    "connector subscribe error"
+                );
+                stats.record_error(message);
                 return receiver;
             }
         };
@@ -103,18 +109,14 @@ impl ConnectorBinding {
                     }
                     Ok(ConnectorEvent::EndOfStream) => break,
                     Err(err) => {
-                        if send_with_backpressure(
-                            &sender,
-                            StreamData::error(
-                                StreamError::new(format!("connector error: {}", err))
-                                    .with_source(processor_id.clone()),
-                            ),
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
+                        let message = format!("connector error: {err}");
+                        tracing::error!(
+                            processor_id = %processor_id,
+                            connector_id = %connector_id,
+                            error = %err,
+                            "connector error"
+                        );
+                        stats.record_error(message);
                     }
                 }
             }
@@ -204,10 +206,11 @@ impl DataSourceProcessor {
     fn activate_connectors(
         connectors: &mut [ConnectorBinding],
         processor_id: &str,
+        stats: &Arc<ProcessorStats>,
     ) -> Vec<broadcast::Receiver<StreamData>> {
         connectors
             .iter_mut()
-            .map(|binding| binding.activate(processor_id))
+            .map(|binding| binding.activate(processor_id, Arc::clone(stats)))
             .collect()
     }
 
@@ -238,7 +241,7 @@ impl Processor for DataSourceProcessor {
         let stream_name = self.stream_name.clone();
         let mut base_inputs = std::mem::take(&mut self.inputs);
         let mut connectors = std::mem::take(&mut self.connectors);
-        let connector_inputs = Self::activate_connectors(&mut connectors, &processor_id);
+        let connector_inputs = Self::activate_connectors(&mut connectors, &processor_id, &stats);
         base_inputs.extend(connector_inputs);
         let mut input_streams = fan_in_streams(base_inputs);
         let control_receivers = std::mem::take(&mut self.control_inputs);
