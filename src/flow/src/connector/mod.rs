@@ -6,6 +6,8 @@
 use futures::stream::Stream;
 use std::pin::Pin;
 
+use crate::model::Collection;
+
 pub mod mqtt_client;
 pub mod registry;
 pub mod sink;
@@ -16,12 +18,26 @@ pub type ConnectorStream =
     Pin<Box<dyn Stream<Item = Result<ConnectorEvent, ConnectorError>> + Send>>;
 
 /// Events emitted by an upstream connector.
-#[derive(Debug)]
 pub enum ConnectorEvent {
     /// Binary payload received from the source.
     Payload(Vec<u8>),
+    /// Decoded collection received from the source.
+    Collection(Box<dyn Collection>),
     /// The connector has no more data to produce.
     EndOfStream,
+}
+
+impl std::fmt::Debug for ConnectorEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectorEvent::Payload(payload) => f
+                .debug_tuple("Payload")
+                .field(&format_args!("len={}", payload.len()))
+                .finish(),
+            ConnectorEvent::Collection(_) => f.debug_tuple("Collection").finish(),
+            ConnectorEvent::EndOfStream => f.write_str("EndOfStream"),
+        }
+    }
 }
 
 /// Trait implemented by every data source connector.

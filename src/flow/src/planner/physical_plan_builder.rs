@@ -553,7 +553,7 @@ fn create_physical_data_source_with_builder(
 ) -> Result<Arc<PhysicalPlan>, String> {
     let entry = find_binding_entry(logical_ds, bindings)?;
     let decoder_kind = logical_ds.decoder().kind();
-    if !registries.decoder_registry().is_registered(decoder_kind) {
+    if decoder_kind != "none" && !registries.decoder_registry().is_registered(decoder_kind) {
         return Err(format!(
             "decoder kind `{}` not registered for stream `{}`",
             decoder_kind, logical_ds.source_name
@@ -592,6 +592,9 @@ fn create_physical_data_source_with_builder(
                 index,
             );
             let datasource_plan = Arc::new(PhysicalPlan::DataSource(physical_ds));
+            if decoder_kind == "none" {
+                return Ok(datasource_plan);
+            }
             let decoder_index = builder.allocate_index();
             let decoder = PhysicalDecoder::new(
                 logical_ds.source_name.clone(),
@@ -605,6 +608,12 @@ fn create_physical_data_source_with_builder(
             Ok(Arc::new(PhysicalPlan::Decoder(decoder)))
         }
         SourceBindingKind::Shared => {
+            if decoder_kind == "none" {
+                return Err(format!(
+                    "shared stream `{}` does not support decoder type `none`",
+                    logical_ds.source_name
+                ));
+            }
             let required_columns = logical_ds
                 .shared_required_schema()
                 .map(|cols| cols.to_vec())

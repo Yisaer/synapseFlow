@@ -282,6 +282,9 @@ pub async fn create_stream_handler(
         Ok(config) => config,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    if let Err(err) = validate_shared_stream_decoder(req.shared, &decoder, &req.name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
 
     let stored = match storage_bridge::stored_stream_from_request(&req) {
         Ok(stored) => stored,
@@ -685,6 +688,20 @@ pub(crate) fn build_stream_decoder(
         decoder_config.decode_type,
         decoder_config.props,
     ))
+}
+
+pub(crate) fn validate_shared_stream_decoder(
+    shared: bool,
+    decoder: &StreamDecoderConfig,
+    stream_name: &str,
+) -> Result<(), String> {
+    if shared && decoder.kind() == "none" {
+        return Err(format!(
+            "shared stream `{}` does not support decoder type `none`",
+            stream_name
+        ));
+    }
+    Ok(())
 }
 
 fn column_schema_from_request(

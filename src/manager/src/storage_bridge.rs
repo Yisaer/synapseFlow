@@ -1,6 +1,7 @@
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
+    validate_shared_stream_decoder,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -145,6 +146,7 @@ pub async fn load_from_storage(
         let shared = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
             .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?
             .shared;
+        validate_shared_stream_decoder(shared, def.decoder(), def.id())?;
         instance
             .create_stream(def, shared)
             .await
