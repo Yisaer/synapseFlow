@@ -334,6 +334,13 @@ fn rewrite_by_index_projection_into_encoder(
         if project.fields.is_empty() {
             continue;
         }
+        if project
+            .fields
+            .iter()
+            .any(|field| matches!(&field.compiled_expr, ScalarExpr::Wildcard { .. }))
+        {
+            continue;
+        }
 
         let mut columns = Vec::new();
         let mut remaining_fields = Vec::new();
