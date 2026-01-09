@@ -248,14 +248,18 @@ fn tuple_to_json_maybe_by_index_projection(
 
     for column in by_index_projection.columns().iter() {
         let value = tuple
-            .value_by_index(column.source_name.as_str(), column.column_index)
+            .value_by_index(column.source_name.as_ref(), column.column_index)
             .ok_or_else(|| {
                 EncodeError::Other(format!(
                     "by_index_projection column not found: {}#{}",
-                    column.source_name, column.column_index
+                    column.source_name.as_ref(),
+                    column.column_index
                 ))
             })?;
-        json_row.insert(column.output_name.clone(), value_to_json(value));
+        json_row.insert(
+            column.output_name.as_ref().to_string(),
+            value_to_json(value),
+        );
     }
 
     Ok(JsonValue::Object(json_row))

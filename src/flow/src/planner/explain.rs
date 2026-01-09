@@ -715,7 +715,14 @@ fn build_physical_node_with_prefix(
                     let cols = spec
                         .columns()
                         .iter()
-                        .map(|c| format!("{}#{}->{}", c.source_name, c.column_index, c.output_name))
+                        .map(|c| {
+                            format!(
+                                "{}#{}->{}",
+                                c.source_name.as_ref(),
+                                c.column_index,
+                                c.output_name.as_ref()
+                            )
+                        })
                         .collect::<Vec<_>>();
                     info.push(format!("by_index_projection=[{}]", cols.join("; ")));
                 }
@@ -732,7 +739,14 @@ fn build_physical_node_with_prefix(
                     let cols = spec
                         .columns()
                         .iter()
-                        .map(|c| format!("{}#{}->{}", c.source_name, c.column_index, c.output_name))
+                        .map(|c| {
+                            format!(
+                                "{}#{}->{}",
+                                c.source_name.as_ref(),
+                                c.column_index,
+                                c.output_name.as_ref()
+                            )
+                        })
                         .collect::<Vec<_>>();
                     info.push(format!("by_index_projection=[{}]", cols.join("; ")));
                 }

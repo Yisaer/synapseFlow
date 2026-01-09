@@ -420,9 +420,9 @@ fn by_index_projection_column_from_field(
     };
 
     Some(ByIndexProjectionColumn::new(
-        source_name.clone(),
+        source_name.as_str(),
         *column_index,
-        field.field_name.clone(),
+        field.field_name.as_str(),
     ))
 }
 

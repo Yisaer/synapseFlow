@@ -24,17 +24,21 @@ impl ByIndexProjection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ByIndexProjectionColumn {
-    pub source_name: String,
+    pub source_name: Arc<str>,
     pub column_index: usize,
-    pub output_name: String,
+    pub output_name: Arc<str>,
 }
 
 impl ByIndexProjectionColumn {
-    pub fn new(source_name: String, column_index: usize, output_name: String) -> Self {
+    pub fn new(
+        source_name: impl Into<Arc<str>>,
+        column_index: usize,
+        output_name: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
-            source_name,
+            source_name: source_name.into(),
             column_index,
-            output_name,
+            output_name: output_name.into(),
         }
     }
 }
