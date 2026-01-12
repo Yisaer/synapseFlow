@@ -3,8 +3,7 @@
 //! This processor receives data from upstream processors and forwards it to a single output.
 
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -198,8 +197,6 @@ impl Processor for ResultCollectProcessor {
                     control_item = control_streams.next(), if control_active => {
                         match control_item {
                             Some(Ok(control_signal)) => {
-                                let control_signal =
-                                    attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                                 let out = StreamData::control(control_signal);
                                 let is_terminal = out.is_terminal();
                                 forward_to_output_bus(&output, &processor_id, &bus_hooks, out, &stats)

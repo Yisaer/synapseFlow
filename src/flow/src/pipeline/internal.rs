@@ -353,41 +353,26 @@ impl PipelineManager {
     pub async fn collect_stats(
         &self,
         pipeline_id: &str,
-        timeout: Duration,
+        _timeout: Duration,
     ) -> Result<Vec<ProcessorStatsEntry>, PipelineError> {
-        let pipeline = {
-            let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
-            let entry = guard
-                .get_mut(pipeline_id)
-                .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
-            if !matches!(entry.status, PipelineStatus::Running) {
-                return Err(PipelineError::Runtime(format!(
-                    "pipeline {pipeline_id} is not running"
-                )));
-            }
-            entry
-                .pipeline
-                .take()
-                .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?
-        };
-
-        let result = pipeline
-            .collect_stats_via_control_with_ack(timeout)
-            .await
-            .map_err(|err| PipelineError::Runtime(err.to_string()));
-
-        let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+        let guard = self.pipelines.read().expect("pipeline manager poisoned");
         let entry = guard
-            .get_mut(pipeline_id)
+            .get(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
-        if entry.pipeline.is_some() {
+        if !matches!(entry.status, PipelineStatus::Running) {
             return Err(PipelineError::Runtime(format!(
-                "pipeline {pipeline_id} runtime already restored"
+                "pipeline {pipeline_id} is not running"
             )));
         }
-        entry.pipeline = Some(pipeline);
-
-        result
+        let pipeline = entry
+            .pipeline
+            .as_ref()
+            .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?;
+        Ok(pipeline
+            .processor_stats()
+            .iter()
+            .map(crate::processor::ProcessorStatsHandle::snapshot)
+            .collect())
     }
 }
 

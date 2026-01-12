@@ -6,9 +6,8 @@ use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -206,8 +205,6 @@ impl Processor for ProjectProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
-                            let control_signal =
-                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {

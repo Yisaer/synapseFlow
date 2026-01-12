@@ -10,7 +10,6 @@ use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
-use crate::processor::ProcessorStatsEntry;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
@@ -460,48 +459,6 @@ impl ProcessorPipeline {
             .await_control_ack(barrier_id, rx, timeout_duration)
             .await?;
         Ok(barrier_id)
-    }
-
-    pub async fn collect_stats_via_control_with_ack(
-        &self,
-        timeout_duration: std::time::Duration,
-    ) -> Result<Vec<ProcessorStatsEntry>, ProcessorError> {
-        if self.result_sink.is_none() {
-            return Err(ProcessorError::InvalidConfiguration(
-                "collect_stats requires a ResultCollectProcessor tail".to_string(),
-            ));
-        }
-        let barrier_id = self.control_source.allocate_control_signal_id();
-        let rx = self.ack_manager.register(barrier_id)?;
-        if let Err(err) = self
-            .send_control_signal(ControlSignal::Barrier(
-                BarrierControlSignalKind::CollectStats.with_id(barrier_id),
-            ))
-            .await
-        {
-            self.ack_manager.unregister(barrier_id);
-            return Err(err);
-        }
-
-        let signal = self
-            .await_control_ack(barrier_id, rx, timeout_duration)
-            .await?;
-
-        let ControlSignal::Barrier(crate::processor::BarrierControlSignal::CollectStats {
-            barrier_id: ack_id,
-            stats,
-        }) = signal
-        else {
-            return Err(ProcessorError::ProcessingError(format!(
-                "unexpected stats ack signal: {signal:?}"
-            )));
-        };
-        if ack_id != barrier_id {
-            return Err(ProcessorError::ProcessingError(format!(
-                "unexpected stats ack barrier_id: expected={barrier_id}, got={ack_id}"
-            )));
-        }
-        Ok(stats)
     }
 
     pub async fn send_barrier_via_data_with_ack(
