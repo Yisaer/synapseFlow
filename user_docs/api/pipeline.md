@@ -220,4 +220,6 @@ Response:
 ### `ProcessorStatsEntry`
 
 - `processor_id: string`
-- `stats: { records_in: number, records_out: number, error: string | null }`
+- `stats: object`
+  - Common fields: `records_in`, `records_out`, `error_count`, `last_error`
+  - Custom processor metrics are flattened into this object as additional numeric fields (e.g. `rows_buffered`)
