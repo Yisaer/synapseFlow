@@ -12,8 +12,6 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Schema;
 use futures::stream::StreamExt;
-use once_cell::sync::Lazy;
-use prometheus::{register_int_counter_vec, IntCounterVec};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -41,24 +39,6 @@ pub struct DataSourceProcessor {
     connectors: Vec<ConnectorBinding>,
     stats: Arc<ProcessorStats>,
 }
-
-static DATASOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "datasource_processor_records_in_total",
-        "Rows received by datasource processors",
-        &["processor"]
-    )
-    .expect("create datasource records_in counter vec")
-});
-
-static DATASOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "datasource_processor_records_out_total",
-        "Rows emitted by datasource processors",
-        &["processor"]
-    )
-    .expect("create datasource records_out counter vec")
-});
 
 struct ConnectorBinding {
     connector: Box<dyn SourceConnector>,
@@ -299,16 +279,6 @@ impl Processor for DataSourceProcessor {
                                 log_received_data(&processor_id, &data);
                                 if let Some(rows) = data.num_rows_hint() {
                                     stats.record_in(rows);
-                                }
-                                if let Some(collection) = data.as_collection() {
-                                    // TODO: fix metrics
-                                    let rows = collection.num_rows() as u64;
-                                    DATASOURCE_RECORDS_IN
-                                        .with_label_values(&[processor_id.as_str()])
-                                        .inc_by(rows);
-                                    DATASOURCE_RECORDS_OUT
-                                        .with_label_values(&[processor_id.as_str()])
-                                        .inc_by(rows);
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();

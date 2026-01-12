@@ -8,8 +8,6 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
-use once_cell::sync::Lazy;
-use prometheus::{register_int_counter_vec, IntCounterVec};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -73,24 +71,6 @@ pub struct SinkProcessor {
     stats: Arc<ProcessorStats>,
 }
 
-static SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "sink_processor_records_in_total",
-        "Rows received by sink processors",
-        &["processor"]
-    )
-    .expect("create sink records_in counter vec")
-});
-
-static SINK_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "sink_processor_records_out_total",
-        "Rows forwarded downstream by sink processors",
-        &["processor"]
-    )
-    .expect("create sink records_out counter vec")
-});
-
 impl SinkProcessor {
     /// Create a new sink processor with the provided identifier.
     pub fn new(id: impl Into<String>) -> Self {
@@ -128,35 +108,18 @@ impl SinkProcessor {
     }
 
     async fn handle_payload(
-        processor_id: &str,
         connector: &mut ConnectorBinding,
         payload: &[u8],
-        row_count: u64,
     ) -> Result<(), ProcessorError> {
-        SINK_RECORDS_IN
-            .with_label_values(&[processor_id])
-            .inc_by(row_count);
         connector.publish(payload).await?;
-
-        SINK_RECORDS_OUT
-            .with_label_values(&[processor_id])
-            .inc_by(row_count);
         Ok(())
     }
 
     async fn handle_collection(
-        processor_id: &str,
         connector: &mut ConnectorBinding,
         collection: &dyn Collection,
     ) -> Result<(), ProcessorError> {
-        let row_count = collection.num_rows() as u64;
-        SINK_RECORDS_IN
-            .with_label_values(&[processor_id])
-            .inc_by(row_count);
         connector.publish_collection(collection).await?;
-        SINK_RECORDS_OUT
-            .with_label_values(&[processor_id])
-            .inc_by(row_count);
         Ok(())
     }
 
@@ -221,12 +184,9 @@ impl Processor for SinkProcessor {
                                 }
                                 match data {
                                     StreamData::EncodedBytes { payload, num_rows } => {
-                                        let rows = num_rows;
                                         if let Err(err) = Self::handle_payload(
-                                            &processor_id,
                                             &mut connector,
                                             payload.as_ref(),
-                                            rows,
                                         )
                                         .await
                                         {
@@ -247,7 +207,6 @@ impl Processor for SinkProcessor {
                                     StreamData::Collection(collection) => {
                                         let in_rows = collection.num_rows() as u64;
                                         if let Err(err) = Self::handle_collection(
-                                            &processor_id,
                                             &mut connector,
                                             collection.as_ref(),
                                         )
