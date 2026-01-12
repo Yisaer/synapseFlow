@@ -230,8 +230,8 @@ pub fn create_logical_plan(
     let project = Project::new(project_fields, current_plans, current_index);
     let base = Arc::new(LogicalPlan::Project(project));
 
-    if sinks.is_empty() {
-        Ok(base)
+    let root = if sinks.is_empty() {
+        base
     } else {
         // Always create TailPlan for both single and multiple sinks
         // This ensures consistent PhysicalResultCollect creation in physical plan
@@ -248,8 +248,35 @@ pub fn create_logical_plan(
         // Create TailPlan to hold sink children (1 or more)
         let tail_index = next_index + sink_count as i64;
         let tail_plan = TailPlan::new(sink_children, tail_index);
-        Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
+        Arc::new(LogicalPlan::Tail(tail_plan))
+    };
+
+    verify_logical_plan(root.as_ref())?;
+    Ok(root)
+}
+
+pub fn verify_logical_plan(plan: &LogicalPlan) -> Result<(), String> {
+    fn verify_node(plan: &LogicalPlan) -> Result<(), String> {
+        if let LogicalPlan::Project(project) = plan {
+            let mut seen = std::collections::HashSet::<&str>::with_capacity(project.fields.len());
+            for field in &project.fields {
+                if !seen.insert(field.field_name.as_str()) {
+                    return Err(format!(
+                        "duplicate project field name `{}` in {}",
+                        field.field_name,
+                        plan.get_plan_name()
+                    ));
+                }
+            }
+        }
+
+        for child in plan.children() {
+            verify_node(child.as_ref())?;
+        }
+        Ok(())
     }
+
+    verify_node(plan)
 }
 
 #[derive(Debug, Clone)]
