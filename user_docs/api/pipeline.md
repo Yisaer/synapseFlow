@@ -126,14 +126,13 @@ Collects processor-level stats snapshots from the running pipeline.
 
 Query parameters:
 
-- `timeout_ms` (optional, default `5000`)
+- `timeout_ms` (optional, default `5000`; currently ignored)
 
 Response:
 
 - `200 OK` with `ProcessorStatsEntry[]`
 - `404 Not Found` if pipeline is not present
 - `409 Conflict` if the pipeline is busy processing another command
-- `504 Gateway Timeout` on stats collection timeout
 
 ### Delete Pipeline
 
@@ -221,4 +220,6 @@ Response:
 ### `ProcessorStatsEntry`
 
 - `processor_id: string`
-- `stats: { records_in: number, records_out: number, error: string | null }`
+- `stats: object`
+  - Common fields: `records_in`, `records_out`, `error_count`, `last_error`
+  - Custom processor metrics are flattened into this object as additional numeric fields (e.g. `rows_buffered`)

@@ -5,15 +5,12 @@
 
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Schema;
 use futures::stream::StreamExt;
-use once_cell::sync::Lazy;
-use prometheus::{register_int_counter_vec, IntCounterVec};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -41,24 +38,6 @@ pub struct DataSourceProcessor {
     connectors: Vec<ConnectorBinding>,
     stats: Arc<ProcessorStats>,
 }
-
-static DATASOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "datasource_processor_records_in_total",
-        "Rows received by datasource processors",
-        &["processor"]
-    )
-    .expect("create datasource records_in counter vec")
-});
-
-static DATASOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "datasource_processor_records_out_total",
-        "Rows emitted by datasource processors",
-        &["processor"]
-    )
-    .expect("create datasource records_out counter vec")
-});
 
 struct ConnectorBinding {
     connector: Box<dyn SourceConnector>,
@@ -268,8 +247,6 @@ impl Processor for DataSourceProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
-                            let control_signal =
-                                attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -299,16 +276,6 @@ impl Processor for DataSourceProcessor {
                                 log_received_data(&processor_id, &data);
                                 if let Some(rows) = data.num_rows_hint() {
                                     stats.record_in(rows);
-                                }
-                                if let Some(collection) = data.as_collection() {
-                                    // TODO: fix metrics
-                                    let rows = collection.num_rows() as u64;
-                                    DATASOURCE_RECORDS_IN
-                                        .with_label_values(&[processor_id.as_str()])
-                                        .inc_by(rows);
-                                    DATASOURCE_RECORDS_OUT
-                                        .with_label_values(&[processor_id.as_str()])
-                                        .inc_by(rows);
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();

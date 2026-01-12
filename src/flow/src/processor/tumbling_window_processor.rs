@@ -4,10 +4,13 @@
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalTumblingWindow};
 use crate::processor::base::{
-    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStats,
+    StreamData,
+};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -80,8 +83,6 @@ impl Processor for TumblingWindowProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
-                            let control_signal =
-                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -111,6 +112,8 @@ impl Processor for TumblingWindowProcessor {
                                 if is_terminal {
                                     if is_graceful {
                                         state.flush_all().await?;
+                                    } else {
+                                        state.rows_buffered.set(0);
                                     }
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
@@ -121,6 +124,7 @@ impl Processor for TumblingWindowProcessor {
                                 send_with_backpressure(&output, other).await?;
                                 if is_terminal {
                                     // Non-graceful end on data path: drop buffered rows.
+                                    state.rows_buffered.set(0);
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
@@ -131,6 +135,7 @@ impl Processor for TumblingWindowProcessor {
                             }
                             None => {
                                 // Upstream ended without control signal: drop buffered rows.
+                                state.rows_buffered.set(0);
                                 tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
@@ -164,6 +169,7 @@ struct ProcessingState {
     len_secs: u64,
     output: broadcast::Sender<StreamData>,
     stats: Arc<ProcessorStats>,
+    rows_buffered: GaugeHandle,
 }
 
 impl ProcessingState {
@@ -172,12 +178,23 @@ impl ProcessingState {
         output: broadcast::Sender<StreamData>,
         stats: Arc<ProcessorStats>,
     ) -> Self {
+        let rows_buffered = stats.register_gauge(MetricSpec {
+            id: "window.rows_buffered",
+            flat_name: "rows_buffered",
+            kind: MetricKind::Gauge,
+        });
+        rows_buffered.set(0);
         Self {
             rows: VecDeque::new(),
             len_secs,
             output,
             stats,
+            rows_buffered,
         }
+    }
+
+    fn update_rows_buffered(&self) {
+        self.rows_buffered.set(self.rows.len() as u64);
     }
 
     async fn add_collection(
@@ -190,6 +207,7 @@ impl ProcessingState {
         for tuple in rows {
             self.rows.push_back(tuple);
         }
+        self.update_rows_buffered();
         Ok(())
     }
 
@@ -219,6 +237,7 @@ impl ProcessingState {
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
+            self.update_rows_buffered();
         }
         Ok(())
     }
@@ -240,6 +259,7 @@ impl ProcessingState {
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
+            self.update_rows_buffered();
         }
         Ok(())
     }

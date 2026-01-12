@@ -123,33 +123,6 @@ fn merge_barrier_signal(
     left: BarrierControlSignal,
     right: BarrierControlSignal,
 ) -> Result<BarrierControlSignal, ProcessorError> {
-    match (left, right) {
-        (
-            BarrierControlSignal::CollectStats {
-                barrier_id,
-                mut stats,
-            },
-            BarrierControlSignal::CollectStats {
-                barrier_id: right_id,
-                stats: right_stats,
-            },
-        ) => {
-            if barrier_id != right_id {
-                return Err(ProcessorError::ProcessingError(format!(
-                    "barrier merge mismatch: left barrier_id={barrier_id}, right barrier_id={right_id}"
-                )));
-            }
-            let mut seen = std::collections::HashSet::with_capacity(stats.len());
-            for entry in &stats {
-                seen.insert(entry.processor_id.clone());
-            }
-            for entry in right_stats {
-                if seen.insert(entry.processor_id.clone()) {
-                    stats.push(entry);
-                }
-            }
-            Ok(BarrierControlSignal::CollectStats { barrier_id, stats })
-        }
-        (left, _right) => Ok(left),
-    }
+    let _ = right;
+    Ok(left)
 }

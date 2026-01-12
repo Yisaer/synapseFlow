@@ -24,7 +24,6 @@ pub enum ControlSignal {
 pub enum BarrierControlSignalKind {
     StreamGracefulEnd,
     SyncTest,
-    CollectStats,
 }
 
 impl BarrierControlSignalKind {
@@ -34,10 +33,6 @@ impl BarrierControlSignalKind {
                 BarrierControlSignal::StreamGracefulEnd { barrier_id }
             }
             BarrierControlSignalKind::SyncTest => BarrierControlSignal::SyncTest { barrier_id },
-            BarrierControlSignalKind::CollectStats => BarrierControlSignal::CollectStats {
-                barrier_id,
-                stats: Vec::new(),
-            },
         }
     }
 }
@@ -54,10 +49,6 @@ pub enum BarrierControlSignal {
     SyncTest {
         barrier_id: u64,
     },
-    CollectStats {
-        barrier_id: u64,
-        stats: Vec<crate::processor::ProcessorStatsEntry>,
-    },
 }
 
 impl BarrierControlSignal {
@@ -65,7 +56,6 @@ impl BarrierControlSignal {
         match self {
             BarrierControlSignal::StreamGracefulEnd { barrier_id } => *barrier_id,
             BarrierControlSignal::SyncTest { barrier_id } => *barrier_id,
-            BarrierControlSignal::CollectStats { barrier_id, .. } => *barrier_id,
         }
     }
 
@@ -75,7 +65,6 @@ impl BarrierControlSignal {
                 BarrierControlSignalKind::StreamGracefulEnd
             }
             BarrierControlSignal::SyncTest { .. } => BarrierControlSignalKind::SyncTest,
-            BarrierControlSignal::CollectStats { .. } => BarrierControlSignalKind::CollectStats,
         }
     }
 }

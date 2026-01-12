@@ -54,7 +54,8 @@ pub use sliding_window_processor::SlidingWindowProcessor;
 pub use state_window_processor::StateWindowProcessor;
 pub use stateful_function_processor::StatefulFunctionProcessor;
 pub use stats::{
-    ProcessorStats, ProcessorStatsEntry, ProcessorStatsHandle, ProcessorStatsSnapshot,
+    CounterHandle, GaugeHandle, MetricKind, MetricSpec, ProcessorStats, ProcessorStatsEntry,
+    ProcessorStatsHandle, ProcessorStatsSnapshot,
 };
 pub use stream_data::{
     BarrierControlSignal, BarrierControlSignalKind, ControlSignal, InstantControlSignal,
