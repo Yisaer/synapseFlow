@@ -22,8 +22,6 @@ pub trait CollectionEncoder: Send + Sync + 'static {
     fn id(&self) -> &str;
     /// Convert a collection into a single payload.
     fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError>;
-    /// Convert a tuple into a single payload.
-    fn encode_tuple(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError>;
     /// Whether this encoder supports streaming aggregation.
     fn supports_streaming(&self) -> bool {
         false
@@ -84,19 +82,6 @@ impl JsonEncoder {
     pub fn props(&self) -> &JsonMap<String, JsonValue> {
         &self.props
     }
-
-    /// Encode a tuple as a JSON object payload.
-    pub fn encode_tuple(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
-        self.encode_tuple_impl(tuple)
-    }
-
-    fn encode_tuple_impl(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
-        serde_json::to_vec(&tuple_to_json_maybe_by_index_projection(
-            tuple,
-            self.by_index_projection.as_deref(),
-        )?)
-        .map_err(EncodeError::Serialization)
-    }
 }
 
 impl CollectionEncoder for JsonEncoder {
@@ -120,10 +105,6 @@ impl CollectionEncoder for JsonEncoder {
         }
         .map_err(EncodeError::Serialization)?;
         Ok(payload)
-    }
-
-    fn encode_tuple(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
-        self.encode_tuple_impl(tuple)
     }
 
     fn supports_streaming(&self) -> bool {
@@ -274,9 +255,8 @@ fn number_from_f64(value: f64) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{batch_from_columns_simple, Message, Tuple};
+    use crate::model::batch_from_columns_simple;
     use datatypes::Value;
-    use std::sync::Arc;
 
     #[test]
     fn json_encoder_emits_single_payload() {
@@ -308,22 +288,6 @@ mod tests {
                 {"amount":20, "status":"fail"}
             ])
         );
-    }
-
-    #[test]
-    fn json_encoder_encodes_tuple() {
-        let keys = vec![Arc::<str>::from("amount"), Arc::<str>::from("status")];
-        let values = vec![
-            Arc::new(Value::Int64(5)),
-            Arc::new(Value::String("ok".to_string())),
-        ];
-        let message = Arc::new(Message::new(Arc::<str>::from("orders"), keys, values));
-        let tuple = Tuple::new(vec![message]);
-        let encoder = JsonEncoder::new("json", JsonMap::new());
-        let payload = encoder.encode_tuple(&tuple).expect("encode tuple");
-
-        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(json, serde_json::json!({"amount":5, "status":"ok"}));
     }
 
     #[test]
