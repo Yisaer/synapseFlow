@@ -14,12 +14,12 @@ from agents.nl2pipeline.shared.mcp import (  # noqa: E402
     EmbeddedMcpRuntime,
     McpRegistry,
     StdioMcpServer,
-    register_synapseflow_mcp,
+    register_veloflux_mcp,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="SynapseFlow MCP server (stdio, minimal)")
+    p = argparse.ArgumentParser(description="VeloFlux MCP server (stdio, minimal)")
     p.add_argument(
         "--stdio",
         action="store_true",
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--manager-url",
         default="http://127.0.0.1:8080",
-        help="SynapseFlow Manager base URL (default http://127.0.0.1:8080).",
+        help="VeloFlux Manager base URL (default http://127.0.0.1:8080).",
     )
     p.add_argument(
         "--timeout-secs",
@@ -47,7 +47,7 @@ def main(argv: list[str]) -> int:
 
     registry = McpRegistry()
     manager = ManagerClient.new(args.manager_url, args.timeout_secs)
-    register_synapseflow_mcp(registry, manager)
+    register_veloflux_mcp(registry, manager)
     runtime = EmbeddedMcpRuntime.new(registry)
     server = StdioMcpServer(runtime=runtime)
     return server.serve_forever()

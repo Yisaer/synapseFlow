@@ -37,7 +37,7 @@ def _safe_stream_names(streams: List[Dict[str, Any]], max_items: int = 50) -> Li
 
 def _instructions() -> str:
     return (
-        "You are a router for a SynapseFlow CLI.\n"
+        "You are a router for a VeloFlux CLI.\n"
         "Choose which action to take based on the user's message.\n"
         "\n"
         "Allowed intents:\n"
@@ -98,4 +98,3 @@ def route_intent(
 
 
 __all__ = ["Intent", "RouterDecision", "route_intent"]
-

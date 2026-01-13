@@ -1,7 +1,7 @@
 from .registry import McpRegistry
 from .runtime import EmbeddedMcpRuntime
 from .stdio_server import StdioMcpServer
-from .synapseflow_adapter import register_synapseflow_mcp
+from .veloflux_adapter import register_veloflux_mcp
 from .types import McpError, TraceEntry
 
 __all__ = [
@@ -10,5 +10,5 @@ __all__ = [
     "McpRegistry",
     "StdioMcpServer",
     "TraceEntry",
-    "register_synapseflow_mcp",
+    "register_veloflux_mcp",
 ]

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 def default_assistant_instructions() -> str:
     return (
-        "You convert user requirements into SynapseFlow-valid SQL.\n"
+        "You convert user requirements into VeloFlux-valid SQL.\n"
         "Grounding rules:\n"
         "- Do not invent stream names, column names, column types, or function names.\n"
         "- Use only functions present in the provided function catalog.\n"
@@ -17,4 +17,3 @@ def default_assistant_instructions() -> str:
 
 
 __all__ = ["default_assistant_instructions"]
-

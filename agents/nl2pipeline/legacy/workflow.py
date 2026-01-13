@@ -10,7 +10,7 @@ from ..shared.chat_client import ChatCompletionsClient, LlmError
 from ..shared.catalogs import CapabilitiesDigest
 from ..shared.prompts import default_assistant_instructions
 from ..shared.requests import build_create_pipeline_request, build_create_stream_request
-from ..shared.mcp_client import McpError, SynapseFlowMcpClient
+from ..shared.mcp_client import McpError, VeloFluxMcpClient
 
 
 class Phase(str, Enum):
@@ -130,7 +130,7 @@ class Workflow:
 
     def __init__(
         self,
-        synapse: SynapseFlowMcpClient,
+        veloflux: VeloFluxMcpClient,
         llm: ChatCompletionsClient,
         llm_preview_model: str,
         llm_draft_model: str,
@@ -142,7 +142,7 @@ class Workflow:
         llm_json_mode: bool = True,
         llm_stream: bool = False,
     ) -> None:
-        self.synapse = synapse
+        self.veloflux = veloflux
         self.llm = llm
         self.llm_preview_model = llm_preview_model
         self.llm_draft_model = llm_draft_model
@@ -342,7 +342,7 @@ class Workflow:
                 sink_qos=self.sink_qos,
             )
             try:
-                self.synapse.pipelines_create(pipeline_req)
+                self.veloflux.pipelines_create(pipeline_req)
             except McpError as e:
                 previous_error = str(e)
                 previous_sql = candidate.sql
@@ -360,10 +360,10 @@ class Workflow:
             )
 
             try:
-                explain = self.synapse.pipelines_explain(temp_id)
+                explain = self.veloflux.pipelines_explain(temp_id)
             finally:
                 try:
-                    self.synapse.pipelines_delete(temp_id)
+                    self.veloflux.pipelines_delete(temp_id)
                 except McpError:
                     pass
 

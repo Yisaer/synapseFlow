@@ -21,8 +21,8 @@ class ResourceDef:
     Resource definition. `uri_prefix` is used for prefix matching.
 
     Examples:
-    - Fixed:   uri_prefix="synapseflow://catalog/functions_digest"
-    - Param:   uri_prefix="synapseflow://streams/schema"
+    - Fixed:   uri_prefix="veloflux://catalog/functions_digest"
+    - Param:   uri_prefix="veloflux://streams/schema"
     """
 
     uri_prefix: str
@@ -79,4 +79,3 @@ class McpRegistry:
 
 
 __all__ = ["McpRegistry", "ResourceDef", "ToolDef", "ResourceHandler", "ToolHandler"]
-

@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..shared.catalogs import CapabilitiesDigest
 from ..shared.history import HistoryBuffer
-from ..shared.mcp_client import McpError, SynapseFlowMcpClient
+from ..shared.mcp_client import McpError, VeloFluxMcpClient
 from ..shared.prompts import default_assistant_instructions
 from ..shared.requests import build_create_pipeline_request
 from ..shared.router import Intent, route_intent
@@ -91,7 +91,7 @@ def _traced(node_name: str, fn: Callable[[State], Dict[str, Any] | State]) -> Ca
 
 def build_langgraph_workflow(
     *,
-    synapse: SynapseFlowMcpClient,
+    veloflux: VeloFluxMcpClient,
     llm: Any,
     llm_router_model: str,
     llm_preview_model: str,
@@ -122,16 +122,16 @@ def build_langgraph_workflow(
             return dict(state)
 
         if "catalog_digest" not in state:
-            digest = synapse.build_capabilities_digest()
+            digest = veloflux.build_capabilities_digest()
             state["catalog_digest"] = digest.to_json()
 
-        streams = synapse.streams_list()
+        streams = veloflux.streams_list()
         state["available_streams"] = streams
 
         # If a default stream is set, eagerly fetch schema once.
         if state.get("active_stream") and state.get("stream_schema") is None:
             try:
-                desc = synapse.streams_describe(str(state["active_stream"]))
+                desc = veloflux.streams_describe(str(state["active_stream"]))
                 state["stream_schema"] = (desc.get("spec") or {}).get("schema") or {}
             except McpError:
                 state["active_stream"] = None
@@ -158,7 +158,7 @@ def build_langgraph_workflow(
                 v.setdefault("max_attempts", default_max_attempts)
 
         # Refresh streams every turn for correctness.
-        state["available_streams"] = synapse.streams_list()
+        state["available_streams"] = veloflux.streams_list()
 
         interrupt = state.get("interrupt")
         # New user request: clear per-turn outputs so we never leak stale SQL/EXPLAIN across turns.
@@ -203,7 +203,7 @@ def build_langgraph_workflow(
                 answer = str(ui.get("text") or "").strip()
                 names = [str(s.get("name", "")).strip() for s in state.get("available_streams") or []]
                 if answer and answer in names:
-                    desc = synapse.streams_describe(answer)
+                    desc = veloflux.streams_describe(answer)
                     schema = (desc.get("spec") or {}).get("schema") or {}
                     state["active_stream"] = answer
                     state["stream_schema"] = schema
@@ -294,7 +294,7 @@ def build_langgraph_workflow(
         return "ask_user"
 
     def handle_list_streams(state: State) -> Dict[str, Any]:
-        streams = synapse.streams_list()
+        streams = veloflux.streams_list()
         state["available_streams"] = streams
         history = _get_history(state)
         history.add_note(f"Stream list requested; available streams: {_summarize_stream_names(streams)}.")
@@ -313,7 +313,7 @@ def build_langgraph_workflow(
             }
             state["pending_action"] = "describe_stream"
             return dict(state)
-        desc = synapse.streams_describe(str(target))
+        desc = veloflux.streams_describe(str(target))
         schema = (desc.get("spec") or {}).get("schema") or {}
         state["active_stream"] = str(target)
         state["stream_schema"] = schema
@@ -335,7 +335,7 @@ def build_langgraph_workflow(
             return dict(state)
         candidate = state.get("intent_stream")
         if candidate:
-            desc = synapse.streams_describe(str(candidate))
+            desc = veloflux.streams_describe(str(candidate))
             schema = (desc.get("spec") or {}).get("schema") or {}
             state["active_stream"] = str(candidate)
             state["stream_schema"] = schema
@@ -408,7 +408,7 @@ def build_langgraph_workflow(
                 sink_qos=sink_qos,
             )
             try:
-                synapse.pipelines_create(req)
+                veloflux.pipelines_create(req)
                 return tmp_id
             except McpError as e:
                 if _is_conflict_error(str(e)):
@@ -508,7 +508,7 @@ def build_langgraph_workflow(
         tmp_id = ((state.get("validation") or {}).get("tmp_pipeline_id") or "").strip()
         if not tmp_id:
             raise McpError(code="invalid_state", message="missing tmp_pipeline_id for explain")
-        explain = synapse.pipelines_explain(tmp_id)
+        explain = veloflux.pipelines_explain(tmp_id)
         state["explain"] = {
             "pretty": explain,
             "pipeline_request_json": build_create_pipeline_request(
@@ -525,7 +525,7 @@ def build_langgraph_workflow(
         tmp_id = ((state.get("validation") or {}).get("tmp_pipeline_id") or "").strip()
         if tmp_id:
             try:
-                synapse.pipelines_delete(tmp_id)
+                veloflux.pipelines_delete(tmp_id)
             except McpError:
                 pass
         v = state.get("validation") or {}

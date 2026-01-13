@@ -116,7 +116,7 @@ class StdioMcpServer:
                     req_id,
                     {
                         "protocolVersion": "0.1",
-                        "serverInfo": {"name": "synapseflow-embedded-mcp", "version": "v1"},
+                        "serverInfo": {"name": "veloflux-embedded-mcp", "version": "v1"},
                         "capabilities": {"tools": {}, "resources": {}},
                     },
                 )
@@ -180,4 +180,3 @@ class StdioMcpServer:
 
 
 __all__ = ["StdioMcpServer"]
-

@@ -114,7 +114,7 @@ def main(argv: list[str]) -> int:
             _print_help()
             continue
         if line == "/trace":
-            trace = engine.synapse.trace()
+            trace = engine.veloflux.trace()
             if not trace:
                 print("(no trace)", file=sys.stderr)
             else:
