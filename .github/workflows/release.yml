@@ -43,15 +43,15 @@ jobs:
           - runner: ubuntu-latest
             asset_suffix: linux-x86_64-debug
             build_cmd: make build
-            bin_path: target/debug/synapse-flow
+            bin_path: target/debug/veloFlux
           - runner: ubuntu-latest
             asset_suffix: linux-x86_64
             build_cmd: make release
-            bin_path: target/release/synapse-flow
+            bin_path: target/release/veloFlux
           - runner: ubuntu-latest
             asset_suffix: linux-x86_64-thin
             build_cmd: make release-thin
-            bin_path: target/release-thin/synapse-flow
+            bin_path: target/release-thin/veloFlux
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,7 +61,7 @@ jobs:
       - name: Prepare asset
         run: |
           BIN_PATH="${{ matrix.bin_path }}"
-          ASSET_NAME="synapse-flow-${{ matrix.asset_suffix }}"
+          ASSET_NAME="veloFlux-${{ matrix.asset_suffix }}"
           cp "$BIN_PATH" "$ASSET_NAME"
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
           rm "$ASSET_NAME"
@@ -69,4 +69,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: synapse-flow-${{ matrix.asset_suffix }}.tar.gz
+          files: veloFlux-${{ matrix.asset_suffix }}.tar.gz

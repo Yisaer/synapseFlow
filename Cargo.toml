@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [package]
-name = "synapse-flow"
+name = "veloFlux"
 version = "0.0.1"
 edition = "2021"
 
@@ -38,7 +38,7 @@ metrics = ["dep:prometheus_exporter", "dep:sysinfo", "telemetry"]
 profiling = ["dep:pprof", "dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 [[bin]]
-name = "synapse-flow"
+name = "veloFlux"
 path = "src/main.rs"
 
 [profile.release-thin]

@@ -11,7 +11,7 @@ Prereqs:
   - the Linux binary used to generate the heap profile (ideally not stripped)
 
 Usage:
-  scripts/heap_to_svg.sh --binary /path/to/synapse-flow --heap /path/to/heap.1 --out heap.svg
+  scripts/heap_to_svg.sh --binary /path/to/veloFlux --heap /path/to/heap.1 --out heap.svg
 
 Options:
   --metric bytes|objects   Default: bytes

@@ -14,7 +14,7 @@ Build and test:
 
 Run the server (defaults to metrics + profiling features):
 ```bash
-cargo run --bin synapse-flow -- --data-dir ./tmp/data
+cargo run --bin veloFlux -- --data-dir ./tmp/data
 ```
 Flags:
 - `--data-dir <path>` sets where metadata is stored (default `./tmp`).
