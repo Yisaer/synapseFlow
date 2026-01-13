@@ -2623,29 +2623,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "synapse-flow"
-version = "0.0.1"
-dependencies = [
- "build_info",
- "flow",
- "manager",
- "pprof",
- "prometheus_exporter",
- "serde",
- "serde_yaml",
- "storage",
- "sysinfo",
- "telemetry",
- "tikv-jemalloc-ctl",
- "tikv-jemallocator",
- "time",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "sync_wrapper"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3178,6 +3155,29 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "velo-flux"
+version = "0.0.1"
+dependencies = [
+ "build_info",
+ "flow",
+ "manager",
+ "pprof",
+ "prometheus_exporter",
+ "serde",
+ "serde_yaml",
+ "storage",
+ "sysinfo",
+ "telemetry",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "version_check"

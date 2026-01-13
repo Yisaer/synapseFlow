@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..shared.mcp_client import McpError, SynapseFlowMcpClient
+from ..shared.mcp_client import McpError, VeloFluxMcpClient
 from .router import Intent, route_intent
 from .workflow import EventKind, PipelineCandidate, TurnContext, TurnInput, Workflow
 
@@ -119,7 +119,7 @@ def _select_stream_interactively(streams: List[Dict[str, Any]]) -> str:
         print("Invalid selection.", file=sys.stderr)
 
 
-def _get_stream_schema(manager: SynapseFlowMcpClient, stream: str) -> Dict[str, Any]:
+def _get_stream_schema(manager: VeloFluxMcpClient, stream: str) -> Dict[str, Any]:
     desc = manager.streams_describe(stream)
     return (desc.get("spec") or {}).get("schema") or {}
 
@@ -138,7 +138,7 @@ def _render_result(result: PipelineCandidate) -> None:
 
 
 def run_repl(
-    manager: SynapseFlowMcpClient,
+    manager: VeloFluxMcpClient,
     workflow: Workflow,
     router_model: str,
     initial_stream_name: str,

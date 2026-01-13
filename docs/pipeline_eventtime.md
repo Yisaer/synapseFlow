@@ -1,6 +1,6 @@
 # Pipeline Event Time (Eventtime)
 
-This document describes how synapseFlow adds **event-time** support to the `flow` module and how watermark-driven window operators (e.g. `StreamingTumblingAggregationProcessor`) are advanced by explicit `StreamData::Watermark` messages.
+This document describes how veloFlux adds **event-time** support to the `flow` module and how watermark-driven window operators (e.g. `StreamingTumblingAggregationProcessor`) are advanced by explicit `StreamData::Watermark` messages.
 
 ## Background
 

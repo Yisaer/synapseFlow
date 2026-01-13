@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Categorization of SQL-visible functions in SynapseFlow.
+/// Categorization of SQL-visible functions in veloFlux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionKind {

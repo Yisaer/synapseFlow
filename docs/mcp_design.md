@@ -2,7 +2,7 @@
 
 This document defines a v1 MCP-shaped contract for the `nl2pipeline` agent.
 
-The chosen architecture is **CLI embeds an MCP Server** that adapts SynapseFlow Manager REST APIs
+The chosen architecture is **CLI embeds an MCP Server** that adapts veloFlux Manager REST APIs
 into MCP **resources** and **tools**. The agent workflow uses these resources/tools for grounding
 and verification in the `ask → verify → loop` flow.
 
@@ -21,7 +21,7 @@ and verification in the `ask → verify → loop` flow.
 ## Architecture (v1)
 
 - **Agent/Workflow** (legacy CLI and/or LangGraph CLI) calls MCP tools/resources via an in-process MCP layer.
-- **Embedded MCP Server** executes requests by calling **SynapseFlow Manager REST API**.
+- **Embedded MCP Server** executes requests by calling **veloFlux Manager REST API**.
 - **Manager** remains unchanged; MCP is an agent-side adaptation layer.
 
 ## Deployment modes
@@ -34,24 +34,24 @@ The MCP layer is designed as **reusable core + pluggable transport** so it can r
 
 2) **Standalone server (stdio transport)**
 - A small wrapper exposes the same registry/runtime over JSON-RPC on stdio (LSP framing).
-- This enables launching a `synapseflow-mcp --stdio` subprocess from an MCP client.
+- This enables launching a `veloFlux-mcp --stdio` subprocess from an MCP client.
 
 ## Resources (v1)
 
 All resources are intended to be cacheable inside the embedded MCP server (TTL-based).
 
-1) `synapseflow://catalog/functions_digest`
+1) `veloFlux://catalog/functions_digest`
 - A compact digest of `GET /functions` results.
 - Intended for prompt grounding (short, stable).
 
-2) `synapseflow://catalog/syntax_digest`
+2) `veloFlux://catalog/syntax_digest`
 - A compact digest of `GET /capabilities/syntax` results.
 - Intended for prompt grounding (short, stable).
 
-3) `synapseflow://streams/snapshot`
+3) `veloFlux://streams/snapshot`
 - A snapshot of `GET /streams` including `fetched_at` and a summary (column count / sample columns).
 
-4) `synapseflow://streams/schema?name=<stream_name>`
+4) `veloFlux://streams/schema?name=<stream_name>`
 - The schema for a specific stream, derived from `GET /streams/describe/:name`.
 
 ## Tools (v1)

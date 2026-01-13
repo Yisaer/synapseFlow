@@ -1,6 +1,6 @@
 # Windowing
 
-This document describes the supported window declarations in SynapseFlow SQL.
+This document describes the supported window declarations in veloFlux SQL.
 
 ## Placement rules
 

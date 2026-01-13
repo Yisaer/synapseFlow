@@ -1,7 +1,7 @@
 # NL → Stream + Pipeline Agent (v1)
 
 This folder contains a developer-facing prototype agent that turns natural-language requirements
-into SynapseFlow Manager REST API requests (stream + pipeline).
+into veloFlux Manager REST API requests (stream + pipeline).
 
 - `POST /streams` (MQTT source stream)
 - `POST /pipelines` (MQTT sink pipeline)
@@ -15,7 +15,7 @@ names; always ground on Manager introspection APIs and syntax/function catalogs.
   - `GET /streams`, `GET /streams/describe/:name`
   - `GET /functions`
   - `GET /capabilities/syntax`
-- Uses an LLM to produce SynapseFlow-valid SQL constrained by the catalogs.
+- Uses an LLM to produce veloFlux-valid SQL constrained by the catalogs.
 - Runs a `draft → validate(planning) → explain → user confirm` loop in an interactive REPL.
   - Validation is implemented as a best-effort `POST /pipelines` with a temporary id.
   - Explain is shown via `GET /pipelines/:id/explain`.

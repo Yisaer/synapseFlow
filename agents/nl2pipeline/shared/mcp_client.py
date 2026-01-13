@@ -8,7 +8,7 @@ from .mcp import EmbeddedMcpRuntime, McpError
 
 
 @dataclass
-class SynapseFlowMcpClient:
+class VeloFluxMcpClient:
     """
     Typed wrapper over the embedded MCP runtime.
 
@@ -61,21 +61,21 @@ class SynapseFlowMcpClient:
 
     # Resources
     def read_functions_digest(self) -> List[Dict[str, Any]]:
-        out = self.runtime.read_resource("synapseflow://catalog/functions_digest")
+        out = self.runtime.read_resource("veloflux://catalog/functions_digest")
         funcs = out.get("functions") or []
         return funcs if isinstance(funcs, list) else []
 
     def read_syntax_digest(self) -> Dict[str, Any]:
-        out = self.runtime.read_resource("synapseflow://catalog/syntax_digest")
+        out = self.runtime.read_resource("veloflux://catalog/syntax_digest")
         return out if isinstance(out, dict) else {}
 
     def read_streams_snapshot(self) -> List[Dict[str, Any]]:
-        out = self.runtime.read_resource("synapseflow://streams/snapshot")
+        out = self.runtime.read_resource("veloflux://streams/snapshot")
         streams = out.get("streams") or []
         return streams if isinstance(streams, list) else []
 
     def read_stream_schema(self, name: str) -> Dict[str, Any]:
-        out = self.runtime.read_resource(f"synapseflow://streams/schema?name={name}")
+        out = self.runtime.read_resource(f"veloflux://streams/schema?name={name}")
         schema = out.get("schema") or {}
         return schema if isinstance(schema, dict) else {}
 
@@ -100,5 +100,4 @@ class SynapseFlowMcpClient:
         return list(self.runtime.trace)
 
 
-__all__ = ["McpError", "SynapseFlowMcpClient"]
-
+__all__ = ["McpError", "VeloFluxMcpClient"]

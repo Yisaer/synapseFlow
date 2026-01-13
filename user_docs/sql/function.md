@@ -1,6 +1,6 @@
 # Functions
 
-This document describes the built-in SQL-visible functions in SynapseFlow.
+This document describes the built-in SQL-visible functions in veloFlux.
 
 ## Overview
 

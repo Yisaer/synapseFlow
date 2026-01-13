@@ -1,4 +1,4 @@
-# Contributing to synapseFlow
+# Contributing to veloFlux
 
 Thank you for your interest in contributing! Please follow these guidelines to ensure your contributions pass CI checks.
 

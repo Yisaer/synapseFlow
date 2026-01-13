@@ -1,21 +1,21 @@
 # SQL Syntax Capabilities Catalog (`GET /capabilities/syntax`)
 
 This document defines a runtime capability catalog that tells agents (and other clients) which SQL
-syntax constructs are supported by SynapseFlow.
+syntax constructs are supported by veloFlux.
 
 ## Background
 
-SynapseFlow uses `sqlparser` to parse SQL into an AST. However, "sqlparser can parse it" does not
-mean SynapseFlow supports the feature end-to-end.
+veloFlux uses `sqlparser` to parse SQL into an AST. However, "sqlparser can parse it" does not
+mean veloFlux supports the feature end-to-end.
 
-SynapseFlow’s actual supported SQL subset is defined by the project-owned contract IR
+veloFlux’s actual supported SQL subset is defined by the project-owned contract IR
 `parser::SelectStmt` and by what the planner can lower from it. The capability catalog exists to
 make this boundary explicit and machine-readable so agents can avoid generating unsupported SQL.
 
 ## Goals
 
 - Provide a stable, machine-readable list of supported SQL constructs.
-- Enable agents to generate SQL constrained to SynapseFlow’s supported subset.
+- Enable agents to generate SQL constrained to veloFlux’s supported subset.
 - Provide constraints and examples for partially-supported constructs.
 - Ensure validator errors can reference a construct id that exists in this catalog.
 
@@ -34,7 +34,7 @@ make this boundary explicit and machine-readable so agents can avoid generating 
 
 ### Response shape
 
-The response has no version field. Agents always talk to the SynapseFlow process they are currently
+The response has no version field. Agents always talk to the veloFlux process they are currently
 connected to and must treat the runtime response as the source of truth.
 
 ```json
@@ -144,7 +144,7 @@ This allows agents to:
 
 ## Extensibility
 
-The catalog is expected to grow as SynapseFlow expands its supported SQL subset. Clients should:
+The catalog is expected to grow as veloFlux expands its supported SQL subset. Clients should:
 
 - Treat unknown feature keys as unsupported.
 - Avoid hard-coding assumptions about which keys exist.

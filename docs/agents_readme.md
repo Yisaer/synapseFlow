@@ -1,4 +1,4 @@
-# SynapseFlow Agent Runtime Playbook (Developer-Facing)
+# veloFlux Agent Runtime Playbook (Developer-Facing)
 
 This document is developer-facing operational guidance: what rules and workflow should be embedded into the agent implementation. The runtime agent (CLI process) should not depend on reading repository docs; it should obtain all facts via runtime APIs/tools.
 

@@ -1,6 +1,6 @@
 # Watermarks and Time Progression
 
-synapseFlow uses **watermarks** to drive time progression for time-aware operators. Window
+veloFlux uses **watermarks** to drive time progression for time-aware operators. Window
 processors do not read wall-clock directly; they flush based on incoming watermark messages.
 
 This document focuses on how processing-time and event-time watermark streams are produced and
@@ -17,7 +17,7 @@ See also: `docs/window/tumblingwindow.md` and `docs/window/slidingwindow.md`.
 
 ## Watermark Producers
 
-synapseFlow uses different watermark processors depending on the time mode:
+veloFlux uses different watermark processors depending on the time mode:
 
 ### Processing-time watermark processors
 

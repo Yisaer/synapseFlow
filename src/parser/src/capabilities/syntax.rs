@@ -122,7 +122,7 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
             SyntaxFeatureStatus::Supported,
             Some("Read from one or more streams and compute derived columns."),
             Some(
-                "SynapseFlow treats SQL as a query plan description. The supported surface form is a single SELECT query that the planner lowers into a logical plan.",
+                "veloFlux treats SQL as a query plan description. The supported surface form is a single SELECT query that the planner lowers into a logical plan.",
             ),
             None,
             &["exactly_one_statement", "select_only"],
@@ -214,7 +214,7 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                 SyntaxFeatureStatus::Partial,
                 Some("Group rows for aggregation, optionally with stream windows."),
                 Some(
-                    "GROUP BY defines grouping keys for aggregates. In SynapseFlow, window declarations also live in GROUP BY to define how the stream is segmented over time/count/state.",
+                    "GROUP BY defines grouping keys for aggregates. In veloFlux, window declarations also live in GROUP BY to define how the stream is segmented over time/count/state.",
                 ),
                 Some(SyntaxPlacement {
                     clause: "GROUP BY".to_string(),

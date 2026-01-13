@@ -1,6 +1,6 @@
 # Scripts: Heap Flamegraph Tooling (Ubuntu)
 
-This directory contains helper scripts to capture a jemalloc heap dump from a running SynapseFlow process and convert it into a flamegraph SVG.
+This directory contains helper scripts to capture a jemalloc heap dump from a running veloFlux process and convert it into a flamegraph SVG.
 
 ## Other scripts
 
@@ -25,7 +25,7 @@ curl -sS http://<host>:6060/debug/pprof/heap -o heap.1
 Note: jemalloc heap profiling must be enabled at process start, e.g.:
 
 ```bash
-nohup env _RJEM_MALLOC_CONF='prof:true,prof_active:true' ./synapse-flow-linux-x86_64 --data-dir ./data/ --config ./etc/config.example.yaml > synapse-flow.out 2>&1 &
+nohup env _RJEM_MALLOC_CONF='prof:true,prof_active:true' ./veloFlux-linux-x86_64 --data-dir ./data/ --config ./etc/config.example.yaml > veloFlux.out 2>&1 &
 ```
 
 ## Install tools on Ubuntu
@@ -43,13 +43,13 @@ You need the same Linux binary that produced the heap dump (ideally not stripped
 Bytes (default):
 
 ```bash
-./scripts/heap_to_svg.sh --binary ./synapse-flow-linux-x86_64 --heap ./heap.1 --out ./heap.svg
+./scripts/heap_to_svg.sh --binary ./veloFlux-linux-x86_64 --heap ./heap.1 --out ./heap.svg
 ```
 
 Objects:
 
 ```bash
-./scripts/heap_to_svg.sh --binary ./synapse-flow-linux-x86_64 --heap ./heap.1 --out ./heap.svg --metric objects
+./scripts/heap_to_svg.sh --binary ./veloFlux-linux-x86_64 --heap ./heap.1 --out ./heap.svg --metric objects
 ```
 
 ## Download an SVG from a server via scp

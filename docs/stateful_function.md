@@ -2,7 +2,7 @@
 
 ## Background
 
-synapseFlow currently supports:
+veloFlux currently supports:
 
 - Pure scalar expressions evaluated per row (stateless).
 - Aggregate functions evaluated over windows/batches (stateful across rows within a grouping/window).

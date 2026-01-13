@@ -1,10 +1,10 @@
 # Kuksa Sink
 
-This document describes the background and implementation design of the **Kuksa sink** in SynapseFlow.
+This document describes the background and implementation design of the **Kuksa sink** in veloFlux.
 
 ## Background
 
-Some deployments need to forward streaming signal values into an Eclipse Kuksa DataBroker instance and update Vehicle Signal Specification (VSS) paths. SynapseFlow provides a Kuksa sink that consumes decoded rows (`Collection` / `Tuple`) and publishes updates to the broker using the `kuksa.val.v2` API via the `kuksa-rust-sdk`.
+Some deployments need to forward streaming signal values into an Eclipse Kuksa DataBroker instance and update Vehicle Signal Specification (VSS) paths. veloFlux provides a Kuksa sink that consumes decoded rows (`Collection` / `Tuple`) and publishes updates to the broker using the `kuksa.val.v2` API via the `kuksa-rust-sdk`.
 
 Key requirements:
 
@@ -15,7 +15,7 @@ Key requirements:
 
 ## Data Semantics
 
-SynapseFlow executes sinks over `Collection`s. For the Kuksa sink:
+veloFlux executes sinks over `Collection`s. For the Kuksa sink:
 
 - A `Collection` is treated as a batch of rows.
 - Each **row** is converted into one update operation.
@@ -40,7 +40,7 @@ Manager defaults:
 
 `vssPath` points to a JSON file that defines a mapping from input column keys to VSS paths.
 
-SynapseFlow parses the JSON tree and records entries whenever it encounters:
+veloFlux parses the JSON tree and records entries whenever it encounters:
 
 - `sig2vss.qualifiedName` (string): treated as the input column key.
 - The current JSON traversal path (dot-joined) is treated as the VSS path.

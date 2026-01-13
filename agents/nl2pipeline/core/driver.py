@@ -7,8 +7,8 @@ from typing import Any, Dict, Optional
 from ..shared.chat_client import ChatCompletionsClient, LlmError
 from ..shared.config import AppConfig
 from ..shared.manager_client import ManagerClient
-from ..shared.mcp import EmbeddedMcpRuntime, McpRegistry, register_synapseflow_mcp
-from ..shared.mcp_client import McpError, SynapseFlowMcpClient
+from ..shared.mcp import EmbeddedMcpRuntime, McpRegistry, register_veloflux_mcp
+from ..shared.mcp_client import McpError, VeloFluxMcpClient
 from .session_store import InMemorySessionStore
 from .state import State, TurnRequest, TurnResponse
 from .workflow import build_langgraph_workflow
@@ -16,7 +16,7 @@ from .workflow import build_langgraph_workflow
 
 @dataclass
 class LangGraphEngine:
-    synapse: SynapseFlowMcpClient
+    veloflux: VeloFluxMcpClient
     llm: ChatCompletionsClient
     cfg: AppConfig
     store: InMemorySessionStore
@@ -26,13 +26,13 @@ class LangGraphEngine:
     def new(cls, cfg: AppConfig) -> "LangGraphEngine":
         manager = ManagerClient.new(cfg.manager.url, cfg.manager.timeout_secs)
         registry = McpRegistry()
-        register_synapseflow_mcp(registry, manager)
+        register_veloflux_mcp(registry, manager)
         runtime = EmbeddedMcpRuntime.new(registry)
-        synapse = SynapseFlowMcpClient(runtime=runtime)
+        veloflux = VeloFluxMcpClient(runtime=runtime)
         llm = ChatCompletionsClient.new(cfg.llm.base_url, cfg.llm.api_key, cfg.llm.timeout_secs)
         store = InMemorySessionStore.new()
         graph = build_langgraph_workflow(
-            synapse=synapse,
+            veloflux=veloflux,
             llm=llm,
             llm_router_model=cfg.llm.router_model,
             llm_preview_model=cfg.llm.preview_model,
@@ -43,7 +43,7 @@ class LangGraphEngine:
             sink_qos=cfg.sink.qos,
             default_max_attempts=cfg.repl.check_max_attempts,
         )
-        return cls(synapse=synapse, llm=llm, cfg=cfg, store=store, graph=graph)
+        return cls(veloflux=veloflux, llm=llm, cfg=cfg, store=store, graph=graph)
 
     def create_session(self) -> str:
         # Minimal initial state; init_session node will populate catalogs/streams.

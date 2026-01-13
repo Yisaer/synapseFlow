@@ -1,6 +1,6 @@
 # Expressions
 
-This document describes expression forms that are commonly used in SynapseFlow SQL.
+This document describes expression forms that are commonly used in veloFlux SQL.
 
 Expressions can appear in:
 

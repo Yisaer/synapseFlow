@@ -201,7 +201,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("synapse_flow_test.{}.{}.yaml", name, nanos))
+        std::env::temp_dir().join(format!("velo_flux_test.{}.{}.yaml", name, nanos))
     }
 
     #[test]

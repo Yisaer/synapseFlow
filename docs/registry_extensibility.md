@@ -42,7 +42,7 @@ Key concepts:
 ## Build-Time Extension
 
 1. Create a private crate (e.g. `flow_custom_connectors`).
-2. Add `flow = { path = "../synapseFlow/src/flow", features = ["custom-connectors"] }`.
+2. Add `flow = { path = "../veloFlux/src/flow", features = ["custom-connectors"] }`.
 3. Implement the desired connector and expose a `register()` function:
 
 ```rust

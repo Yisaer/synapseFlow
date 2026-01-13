@@ -15,9 +15,9 @@ from agents.nl2pipeline.shared.config import load_config  # noqa: E402
 from agents.nl2pipeline.shared.mcp import (  # noqa: E402
     EmbeddedMcpRuntime,
     McpRegistry,
-    register_synapseflow_mcp,
+    register_veloflux_mcp,
 )
-from agents.nl2pipeline.shared.mcp_client import SynapseFlowMcpClient  # noqa: E402
+from agents.nl2pipeline.shared.mcp_client import VeloFluxMcpClient  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,15 +32,15 @@ def main(argv: list[str]) -> int:
 
     manager = ManagerClient.new(cfg.manager.url, cfg.manager.timeout_secs)
     registry = McpRegistry()
-    register_synapseflow_mcp(registry, manager)
+    register_veloflux_mcp(registry, manager)
     runtime = EmbeddedMcpRuntime.new(registry)
-    synapse = SynapseFlowMcpClient(runtime=runtime)
-    digest = synapse.build_capabilities_digest()
+    veloflux = VeloFluxMcpClient(runtime=runtime)
+    digest = veloflux.build_capabilities_digest()
 
     llm = ChatCompletionsClient.new(cfg.llm.base_url, cfg.llm.api_key, cfg.llm.timeout_secs)
 
     workflow = Workflow(
-        synapse=synapse,
+        veloflux=veloflux,
         llm=llm,
         llm_preview_model=cfg.llm.preview_model,
         llm_draft_model=cfg.llm.draft_model,
@@ -53,7 +53,7 @@ def main(argv: list[str]) -> int:
     )
 
     return run_repl(
-        manager=synapse,
+        manager=veloflux,
         workflow=workflow,
         router_model=cfg.llm.router_model,
         initial_stream_name=cfg.stream.default,

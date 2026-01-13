@@ -29,4 +29,4 @@ for file in "${CRATES[@]}"; do
 done
 
 echo "Bumped versions to $VERSION. Remember to update Cargo.lock:"
-echo "  cargo update -p synapse-flow -p flow -p parser -p datatypes -p manager -p storage -p telemetry"
+echo "  cargo update -p veloFlux -p flow -p parser -p datatypes -p manager -p storage -p telemetry"

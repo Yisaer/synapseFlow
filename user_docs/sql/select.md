@@ -1,8 +1,8 @@
 # SELECT syntax
 
-This document describes the supported `SELECT` statement syntax in SynapseFlow.
+This document describes the supported `SELECT` statement syntax in veloFlux.
 
-SynapseFlow currently accepts exactly one SQL statement, and it must be a `SELECT`.
+veloFlux currently accepts exactly one SQL statement, and it must be a `SELECT`.
 
 ## Supported grammar (overview)
 

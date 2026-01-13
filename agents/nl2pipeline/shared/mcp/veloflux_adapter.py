@@ -41,7 +41,7 @@ def _summarize_streams(streams: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def register_synapseflow_mcp(registry: McpRegistry, manager: ManagerClient) -> None:
+def register_veloflux_mcp(registry: McpRegistry, manager: ManagerClient) -> None:
     """
     Register the v1 tools/resources defined in `docs/mcp_design.md`.
 
@@ -158,14 +158,14 @@ def register_synapseflow_mcp(registry: McpRegistry, manager: ManagerClient) -> N
         try:
             functions = manager.list_functions()
         except ApiError as e:
-            raise _to_mcp_error(e, tool_or_resource="synapseflow://catalog/functions_digest") from None
+            raise _to_mcp_error(e, tool_or_resource="veloflux://catalog/functions_digest") from None
         return {"functions": [compact_function_def(f) for f in functions]}
 
     def _syntax_digest(_uri: str) -> Dict[str, Any]:
         try:
             caps = manager.get_syntax_capabilities()
         except ApiError as e:
-            raise _to_mcp_error(e, tool_or_resource="synapseflow://catalog/syntax_digest") from None
+            raise _to_mcp_error(e, tool_or_resource="veloflux://catalog/syntax_digest") from None
         constructs = filter_syntax_constructs(caps.get("constructs", []) or [])
         return {
             "dialect": caps.get("dialect", ""),
@@ -177,7 +177,7 @@ def register_synapseflow_mcp(registry: McpRegistry, manager: ManagerClient) -> N
         try:
             streams = manager.list_streams()
         except ApiError as e:
-            raise _to_mcp_error(e, tool_or_resource="synapseflow://streams/snapshot") from None
+            raise _to_mcp_error(e, tool_or_resource="veloflux://streams/snapshot") from None
         return {"streams": _summarize_streams(streams)}
 
     def _stream_schema(uri: str) -> Dict[str, Any]:
@@ -189,31 +189,30 @@ def register_synapseflow_mcp(registry: McpRegistry, manager: ManagerClient) -> N
         try:
             desc = manager.describe_stream(name)
         except ApiError as e:
-            raise _to_mcp_error(e, tool_or_resource="synapseflow://streams/schema") from None
+            raise _to_mcp_error(e, tool_or_resource="veloflux://streams/schema") from None
         schema = (desc.get("spec") or {}).get("schema") or {}
         return {"name": name, "schema": schema}
 
     registry.register_resource(
-        "synapseflow://catalog/functions_digest",
+        "veloflux://catalog/functions_digest",
         "Compact function digest derived from GET /functions.",
         _functions_digest,
     )
     registry.register_resource(
-        "synapseflow://catalog/syntax_digest",
+        "veloflux://catalog/syntax_digest",
         "Compact syntax digest derived from GET /capabilities/syntax.",
         _syntax_digest,
     )
     registry.register_resource(
-        "synapseflow://streams/snapshot",
+        "veloflux://streams/snapshot",
         "Streams snapshot derived from GET /streams.",
         _streams_snapshot,
     )
     registry.register_resource(
-        "synapseflow://streams/schema",
+        "veloflux://streams/schema",
         "Stream schema derived from GET /streams/describe/:name. Use ?name=...",
         _stream_schema,
     )
 
 
-__all__ = ["register_synapseflow_mcp"]
-
+__all__ = ["register_veloflux_mcp"]

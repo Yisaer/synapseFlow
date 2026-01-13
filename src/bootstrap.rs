@@ -1,4 +1,4 @@
-//! Bootstrap utilities for initializing the synapseFlow server.
+//! Bootstrap utilities for initializing the veloFlux server.
 //!
 //! This module provides a default initialization function that handles:
 //! - CLI argument parsing (--config, --data-dir)
@@ -65,7 +65,7 @@ impl CliFlags {
 ///
 /// # Example
 /// ```ignore
-/// let result = synapse_flow::bootstrap::default_init()?;
+/// let result = velo_flux::bootstrap::default_init()?;
 /// // Register custom encoders/decoders on result.instance
 /// let ctx = server::init(result.options, result.instance).await?;
 /// server::start(ctx).await
