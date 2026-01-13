@@ -215,6 +215,10 @@ pub enum BinaryFunc {
     Div,
     /// Modulo
     Mod,
+    /// Logical AND
+    And,
+    /// Logical OR
+    Or,
 }
 
 impl BinaryFunc {
@@ -807,6 +811,52 @@ impl BinaryFunc {
                     }
                     _ => unreachable!(),
                 }
+            }
+            Self::And => {
+                let left_bool = match left {
+                    Value::Bool(v) => v,
+                    Value::Null => false,
+                    other => {
+                        return Err(EvalError::TypeMismatch {
+                            expected: "Bool".to_string(),
+                            actual: format!("{:?}", other),
+                        });
+                    }
+                };
+                let right_bool = match right {
+                    Value::Bool(v) => v,
+                    Value::Null => false,
+                    other => {
+                        return Err(EvalError::TypeMismatch {
+                            expected: "Bool".to_string(),
+                            actual: format!("{:?}", other),
+                        });
+                    }
+                };
+                Ok(Value::Bool(left_bool && right_bool))
+            }
+            Self::Or => {
+                let left_bool = match left {
+                    Value::Bool(v) => v,
+                    Value::Null => false,
+                    other => {
+                        return Err(EvalError::TypeMismatch {
+                            expected: "Bool".to_string(),
+                            actual: format!("{:?}", other),
+                        });
+                    }
+                };
+                let right_bool = match right {
+                    Value::Bool(v) => v,
+                    Value::Null => false,
+                    other => {
+                        return Err(EvalError::TypeMismatch {
+                            expected: "Bool".to_string(),
+                            actual: format!("{:?}", other),
+                        });
+                    }
+                };
+                Ok(Value::Bool(left_bool || right_bool))
             }
         }
     }

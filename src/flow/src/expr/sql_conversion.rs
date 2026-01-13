@@ -154,6 +154,8 @@ fn convert_binary_op(op: &BinaryOperator) -> Result<BinaryFunc, ConversionError>
         BinaryOperator::Multiply => Ok(BinaryFunc::Mul),
         BinaryOperator::Divide => Ok(BinaryFunc::Div),
         BinaryOperator::Modulo => Ok(BinaryFunc::Mod),
+        BinaryOperator::And => Ok(BinaryFunc::And),
+        BinaryOperator::Or => Ok(BinaryFunc::Or),
         BinaryOperator::Eq => Ok(BinaryFunc::Eq),
         BinaryOperator::NotEq => Ok(BinaryFunc::NotEq),
         BinaryOperator::Lt => Ok(BinaryFunc::Lt),

@@ -304,6 +304,58 @@ async fn pipeline_table_driven_queries() {
                 expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
             }],
         },
+        TestCase {
+            name: "having_filters_groups_countwindow",
+            sql: "SELECT sum(a) AS s, b FROM stream GROUP BY countwindow(4), b HAVING sum(a) > 2 AND sum(a) < 10",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(5),
+                        Value::Int64(0),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_rows: 1,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "s".to_string(),
+                    expected_values: vec![Value::Int64(5)],
+                },
+                ColumnCheck {
+                    expected_name: "b".to_string(),
+                    expected_values: vec![Value::Int64(2)],
+                },
+            ],
+        },
+        TestCase {
+            name: "having_filters_all_groups_emits_empty",
+            sql: "SELECT sum(a) AS s FROM stream GROUP BY countwindow(4) HAVING sum(a) > 100",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(1),
+                    Value::Int64(2),
+                    Value::Int64(3),
+                    Value::Int64(4),
+                ],
+            )],
+            expected_rows: 0,
+            expected_columns: 0,
+            column_checks: vec![],
+        },
     ];
 
     for test_case in test_cases {
