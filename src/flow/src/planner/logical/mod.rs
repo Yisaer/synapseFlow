@@ -125,7 +125,8 @@ impl LogicalPlan {
 /// - StatefulFunction (from SelectStmt::stateful_mappings, if present) - takes DataSources as children
 /// - Window (from SelectStmt::window, if present) - takes DataSources as children
 /// - Aggregation (from SelectStmt::aggregate_mappings, if present) - takes Window or DataSources as children
-/// - Filter (from SelectStmt::where_condition, if present) - takes Aggregation, Window, or DataSources as children
+/// - Filter (from SelectStmt::having, if present) - takes Aggregation as children
+/// - Filter (from SelectStmt::where_condition, if present) - takes HAVING/Aggregation/Window/DataSources as children
 /// - Project (from SelectStmt::select_fields) - takes Filter, Aggregation, Window, or DataSources as children
 ///
 /// # Arguments
@@ -142,6 +143,7 @@ pub fn create_logical_plan(
 ) -> Result<Arc<LogicalPlan>, String> {
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
+    validate_having_constraints(&select_stmt)?;
     validate_expression_types(&select_stmt, stream_defs)?;
 
     let start_index = 0i64;
@@ -185,7 +187,7 @@ pub fn create_logical_plan(
     }
 
     // 3. Create Window from window if present
-    if let Some(window) = select_stmt.window {
+    if let Some(window) = select_stmt.window.clone() {
         let spec = convert_window_spec(window)?;
         let window_plan = LogicalWindow::new(spec, current_plans, current_index);
         current_plans = vec![Arc::new(LogicalPlan::Window(window_plan))];
@@ -204,8 +206,15 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 5. Create Filter from where_condition if present
-    if let Some(where_expr) = select_stmt.where_condition {
+    // 5. Create Filter from HAVING if present (post-aggregation)
+    if let Some(having_expr) = select_stmt.having.clone() {
+        let filter = Filter::new(having_expr, current_plans, current_index);
+        current_plans = vec![Arc::new(LogicalPlan::Filter(filter))];
+        current_index += 1;
+    }
+
+    // 6. Create Filter from where_condition if present
+    if let Some(where_expr) = select_stmt.where_condition.clone() {
         // Convert sqlparser Expr to ScalarExpr for the filter predicate
         // For now, we'll keep the original expression in the Filter node
         // In a full implementation, we'd convert this to a ScalarExpr
@@ -214,7 +223,7 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 6. Create Project from select_fields
+    // 7. Create Project from select_fields
     let mut project_fields = Vec::new();
     for select_field in select_stmt.select_fields.iter() {
         let field_name = select_field
@@ -536,6 +545,34 @@ fn validate_group_by_requires_aggregates(select_stmt: &SelectStmt) -> Result<(),
                 .to_string(),
         );
     }
+    Ok(())
+}
+
+fn validate_having_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
+    let Some(having) = &select_stmt.having else {
+        return Ok(());
+    };
+
+    if select_stmt.window.is_none() {
+        return Err("HAVING requires GROUP BY window".to_string());
+    }
+
+    if !expr_contains_aggregate_placeholder(having) {
+        return Err(format!(
+            "HAVING expression '{}' must reference aggregate functions",
+            having
+        ));
+    }
+
+    let referenced_columns = collect_non_placeholder_column_refs(having);
+    if !referenced_columns.is_empty() {
+        return Err(format!(
+            "HAVING expression '{}' must not reference non-aggregate columns: {}",
+            having,
+            referenced_columns.join(", ")
+        ));
+    }
+
     Ok(())
 }
 
