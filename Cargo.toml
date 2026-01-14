@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [package]
-name = "velo-flux"
+name = "veloflux"
 version = "0.0.1"
 edition = "2021"
 
@@ -38,7 +38,7 @@ metrics = ["dep:prometheus_exporter", "dep:sysinfo", "telemetry"]
 profiling = ["dep:pprof", "dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 
 [[bin]]
-name = "velo-flux"
+name = "veloflux"
 path = "src/main.rs"
 
 [profile.release-thin]

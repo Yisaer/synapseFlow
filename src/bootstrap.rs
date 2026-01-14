@@ -65,7 +65,7 @@ impl CliFlags {
 ///
 /// # Example
 /// ```ignore
-/// let result = velo_flux::bootstrap::default_init()?;
+/// let result = veloflux::bootstrap::default_init()?;
 /// // Register custom encoders/decoders on result.instance
 /// let ctx = server::init(result.options, result.instance).await?;
 /// server::start(ctx).await

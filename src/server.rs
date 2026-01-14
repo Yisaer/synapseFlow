@@ -322,7 +322,7 @@ fn capture_heap_profile() -> Result<Vec<u8>, String> {
         ));
     }
 
-    let filename = format!("/tmp/velo_flux.{}.heap", process::id());
+    let filename = format!("/tmp/veloflux.{}.heap", process::id());
     let c_path = CString::new(filename.clone()).map_err(|err| err.to_string())?;
     unsafe {
         raw::write(b"prof.dump\0", c_path.as_ptr()).map_err(|err| err.to_string())?;
