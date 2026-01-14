@@ -43,15 +43,15 @@ jobs:
           - runner: ubuntu-latest
             asset_suffix: linux-x86_64-debug
             build_cmd: make build
-            bin_path: target/debug/velo-flux
+            bin_path: target/debug/veloflux
           - runner: ubuntu-latest
             asset_suffix: linux-x86_64
             build_cmd: make release
-            bin_path: target/release/velo-flux
+            bin_path: target/release/veloflux
           - runner: ubuntu-latest
             asset_suffix: linux-x86_64-thin
             build_cmd: make release-thin
-            bin_path: target/release-thin/velo-flux
+            bin_path: target/release-thin/veloflux
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,7 +61,7 @@ jobs:
       - name: Prepare asset
         run: |
           BIN_PATH="${{ matrix.bin_path }}"
-          ASSET_NAME="velo-flux-${{ matrix.asset_suffix }}"
+          ASSET_NAME="veloflux-${{ matrix.asset_suffix }}"
           cp "$BIN_PATH" "$ASSET_NAME"
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
           rm "$ASSET_NAME"
@@ -69,4 +69,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
-          files: velo-flux-${{ matrix.asset_suffix }}.tar.gz
+          files: veloflux-${{ matrix.asset_suffix }}.tar.gz
