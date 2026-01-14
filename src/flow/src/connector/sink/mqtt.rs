@@ -4,7 +4,9 @@ use super::{SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
-use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, QoS, Transport};
+use rumqttc::{
+    AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, QoS, Transport,
+};
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -150,10 +152,12 @@ impl StandaloneMqttClient {
     }
 
     async fn shutdown(self) -> Result<(), SinkConnectorError> {
-        self.client
-            .disconnect()
-            .await
-            .map_err(|err| SinkConnectorError::Other(format!("mqtt disconnect error: {err}")))?;
+        match self.client.disconnect().await {
+            Ok(()) => {}
+            Err(ClientError::Request(_) | ClientError::TryRequest(_)) => {
+                tracing::debug!("mqtt sink disconnect skipped: eventloop not available");
+            }
+        }
         self.event_loop_handle.abort();
         Ok(())
     }
