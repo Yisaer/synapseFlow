@@ -15,6 +15,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 const SINK_READY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const SINK_READY_TIMEOUT: Duration = Duration::from_secs(2);
+const SINK_READY_FAST_TIMEOUT: Duration = Duration::from_millis(1);
 
 struct ReadyState {
     ready: bool,
@@ -206,13 +207,16 @@ impl SinkProcessor {
         interval
     }
 
-    async fn attempt_ready(connector: &mut ConnectorBinding) -> Result<(), String> {
-        match timeout(SINK_READY_TIMEOUT, connector.ready()).await {
+    async fn attempt_ready_with_timeout(
+        connector: &mut ConnectorBinding,
+        timeout_duration: Duration,
+    ) -> Result<(), String> {
+        match timeout(timeout_duration, connector.ready()).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(err.to_string()),
             Err(_) => Err(format!(
                 "sink connector ready timeout after {:?}",
-                SINK_READY_TIMEOUT
+                timeout_duration
             )),
         }
     }
@@ -252,6 +256,13 @@ impl SinkProcessor {
         }
         match data {
             StreamData::EncodedBytes { payload, num_rows } => {
+                if !ready_state.is_ready()
+                    && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
+                        .await
+                        .is_ok()
+                {
+                    ready_state.mark_ready(processor_id);
+                }
                 if ready_state.should_drop_data(processor_id, stats) {
                     return Ok(false);
                 }
@@ -271,6 +282,13 @@ impl SinkProcessor {
                 }
             }
             StreamData::Collection(collection) => {
+                if !ready_state.is_ready()
+                    && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
+                        .await
+                        .is_ok()
+                {
+                    ready_state.mark_ready(processor_id);
+                }
                 if ready_state.should_drop_data(processor_id, stats) {
                     return Ok(false);
                 }
@@ -350,7 +368,12 @@ impl Processor for SinkProcessor {
                         };
                     }
                     _ = ready_interval.tick(), if !ready_state.is_ready() => {
-                        match Self::attempt_ready(&mut connector).await {
+                        match Self::attempt_ready_with_timeout(
+                            &mut connector,
+                            SINK_READY_TIMEOUT,
+                        )
+                        .await
+                        {
                             Ok(()) => ready_state.mark_ready(&processor_id),
                             Err(message) => {
                                 ready_state.record_ready_error(&processor_id, stats.as_ref(), message);
