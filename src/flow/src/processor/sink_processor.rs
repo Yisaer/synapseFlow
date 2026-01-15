@@ -45,10 +45,7 @@ impl ReadyState {
     }
 
     fn record_ready_error(&mut self, processor_id: &str, stats: &ProcessorStats, message: String) {
-        let should_report = self
-            .last_error
-            .as_ref()
-            .map_or(true, |prev| prev != &message);
+        let should_report = self.last_error.as_ref() != Some(&message);
         if should_report {
             tracing::warn!(
                 processor_id = %processor_id,
