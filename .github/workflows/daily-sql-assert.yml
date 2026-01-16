@@ -1,11 +1,6 @@
 name: Daily SQL Assert
 
 on:
-  # TEMP: enable running this workflow from the PR branch via push.
-  # Remove this after validation and keep only `schedule` + `workflow_dispatch`.
-  push:
-    branches:
-      - fix_action
   schedule:
     # 07:00 (UTC+8) == 23:00 UTC (previous day)
     - cron: "0 23 * * *"
