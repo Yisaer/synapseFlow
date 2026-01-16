@@ -1,0 +1,20 @@
+[sql_gen]
+seed = 42
+queries = 20
+max_recursive = 5
+yy_template = "sql_gen.yy"
+output = "sqls.txt"
+
+[schema]
+int_columns = 1
+bool_columns = 1
+string_columns = 1
+table_name = "stream"
+
+[sqlite]
+path = ":memory:"
+
+[run]
+rows_per_sql = 10
+seed = 42
+timeout_ms = 5000

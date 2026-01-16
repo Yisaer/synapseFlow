@@ -202,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_config_path() -> String {
     let mut args = std::env::args().skip(1);
-    let default_path = "tests/sql_assert/config.toml".to_string();
+    let default_path = "tests/sql_assert/config-test.toml".to_string();
     while let Some(arg) = args.next() {
         if arg == "--config" {
             return args.next().unwrap_or(default_path);
