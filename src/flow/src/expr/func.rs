@@ -7,6 +7,8 @@ use datatypes::{
 pub enum UnaryFunc {
     /// Logical NOT
     Not,
+    /// Arithmetic negation (unary `-`)
+    Neg,
     /// Check if value is null
     IsNull,
     /// Check if value is true
@@ -29,6 +31,23 @@ impl UnaryFunc {
                         expected: "Bool".to_string(),
                         actual: format!("{:?}", arg),
                     })
+                }
+            }
+            Self::Neg => {
+                if arg.is_null() {
+                    return Ok(Value::Null);
+                }
+                match arg {
+                    Value::Int8(v) => Ok(Value::Int8(v.wrapping_neg())),
+                    Value::Int16(v) => Ok(Value::Int16(v.wrapping_neg())),
+                    Value::Int32(v) => Ok(Value::Int32(v.wrapping_neg())),
+                    Value::Int64(v) => Ok(Value::Int64(v.wrapping_neg())),
+                    Value::Float32(v) => Ok(Value::Float32(-v)),
+                    Value::Float64(v) => Ok(Value::Float64(-v)),
+                    other => Err(EvalError::TypeMismatch {
+                        expected: "Int* or Float*".to_string(),
+                        actual: format!("{:?}", other),
+                    }),
                 }
             }
             Self::IsNull => Ok(Value::Bool(arg.is_null())),

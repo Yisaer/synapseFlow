@@ -172,7 +172,7 @@ fn convert_unary_op(op: &UnaryOperator) -> Result<UnaryFunc, ConversionError> {
 
     match op {
         UnaryOperator::Not => Ok(UnaryFunc::Not),
-        UnaryOperator::Minus => Ok(UnaryFunc::Cast(ConcreteDatatype::Int64(Int64Type))),
+        UnaryOperator::Minus => Ok(UnaryFunc::Neg),
         _ => Err(ConversionError::UnsupportedOperator(format!("{:?}", op))),
     }
 }
