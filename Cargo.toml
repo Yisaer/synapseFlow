@@ -16,11 +16,15 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = "0.9"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "time"] }
+toml = "0.8"
+rand = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
 prometheus_exporter = { version = "0.8", optional = true }
 sysinfo = { version = "0.30", optional = true }
 pprof = { version = "0.13.0", features = ["protobuf-codec"], optional = true }
@@ -28,6 +32,7 @@ tikv-jemallocator = { version = "0.6.0", features = ["profiling"], optional = tr
 tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"], optional = true }
 manager = { path = "src/manager" }
 flow = { path = "src/flow" }
+datatypes = { path = "src/datatypes" }
 telemetry = { path = "src/telemetry", optional = true }
 storage = { path = "src/storage" }
 build_info = { path = "src/build_info" }
@@ -40,6 +45,11 @@ profiling = ["dep:pprof", "dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 [[bin]]
 name = "veloflux"
 path = "src/main.rs"
+
+[[bin]]
+name = "flow_sql_assert"
+path = "tests/sql_assert/flow_sql_assert.rs"
+
 
 [profile.release-thin]
 inherits = "release"
