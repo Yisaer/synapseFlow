@@ -32,3 +32,4 @@ AGENTS.md
 tmp
 __PYCACHE__
 config.toml
+sqls.txt

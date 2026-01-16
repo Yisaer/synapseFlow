@@ -1,0 +1,59 @@
+name: Daily SQL Assert
+
+on:
+  schedule:
+    # 07:00 (UTC+8) == 23:00 UTC (previous day)
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sql-assert:
+    name: SQL Gen + Flow Assert
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/sql_assert/sql_gen/go.mod
+          cache: false
+
+      - name: Cache Go build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('tests/sql_assert/sql_gen/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Generate SQL
+        run: go -C tests/sql_assert/sql_gen run . --config ../config-test.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Flow SQL Assert
+        run: cargo run --bin flow_sql_assert -- --config tests/sql_assert/config-test.toml
+
+      - name: Upload debug artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-sql-assert-artifacts
+          if-no-files-found: ignore
+          path: |
+            tests/sql_assert/config-test.toml
+            tests/sql_assert/sqls.txt
