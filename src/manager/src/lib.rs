@@ -15,6 +15,7 @@ mod memory_topic;
 mod mqtt_client;
 mod pipeline;
 mod startup;
+mod status;
 pub mod storage_bridge;
 mod stream;
 #[cfg(feature = "wasm_udf")]
@@ -113,6 +114,7 @@ fn build_app(state: AppState) -> Router {
                 .delete(mqtt_client::delete_shared_mqtt_client_handler),
         )
         .route("/metrics", get(metrics_handler))
+        .route("/status", get(status::status_handler))
         .layer(CorsLayer::permissive());
     add_udf_routes(app).with_state(state)
 }
@@ -181,6 +183,7 @@ where
     if let Some(tx) = startup_tx {
         let _ = tx.send(Ok(()));
     }
+    status::init_uptime();
     let app = build_app(state);
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown)

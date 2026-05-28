@@ -13,4 +13,4 @@ pub use handlers::{
 pub use state::AppState;
 pub use types::CreatePipelineRequest;
 
-pub(crate) use spec::{build_pipeline_definition, validate_create_request};
+pub(crate) use spec::{build_pipeline_definition, status_label, validate_create_request};

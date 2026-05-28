@@ -6,6 +6,7 @@ mod pipeline_build_context;
 mod resource_cleanup;
 mod shared_stream_lifecycle;
 mod shared_stream_stats;
+mod status;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
