@@ -26,6 +26,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
+use tokio::sync::TryAcquireError;
 
 use flow::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type,
@@ -51,6 +52,14 @@ pub struct CreateStreamRequest {
     pub eventtime: Option<EventtimeConfigRequest>,
     #[serde(default)]
     pub sampler: Option<SamplerConfig>,
+}
+
+fn stream_busy_response(name: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        format!("stream {name} is busy processing another command"),
+    )
+        .into_response()
 }
 
 impl CreateStreamRequest {
@@ -363,6 +372,17 @@ pub async fn create_stream_handler(
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let _permit = match state.try_acquire_stream_op(&req.name).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return stream_busy_response(&req.name),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     let schema = match build_schema_from_request(&req) {
         Ok(schema) => schema,
         Err(err) => {
@@ -674,6 +694,17 @@ pub async fn delete_stream_handler(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let audit = ResourceMutationLog::new("stream", "delete", name.as_str(), None);
+    let _permit = match state.try_acquire_stream_op(&name).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return stream_busy_response(&name),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     let mut pipelines_using_stream = Vec::new();
     for (_, instance) in state.instances.instances_snapshot() {
         pipelines_using_stream.extend(
@@ -702,12 +733,22 @@ pub async fn delete_stream_handler(
         }
     }
 
-    if let Err(err) = state.storage.delete_stream(&name) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("stream {name} deleted in runtime but failed to remove from storage: {err}"),
-        )
-            .into_response();
+    match state.storage.delete_stream(&name) {
+        Ok(()) => {}
+        Err(StorageError::NotFound(_)) => {
+            let err = format!("stream {name} not found");
+            audit.log_failure(&err);
+            return (StatusCode::NOT_FOUND, err).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "stream {name} deleted in runtime but failed to remove from storage: {err}"
+                ),
+            )
+                .into_response();
+        }
     }
     audit.log_success();
     (StatusCode::OK, format!("stream {name} deleted")).into_response()

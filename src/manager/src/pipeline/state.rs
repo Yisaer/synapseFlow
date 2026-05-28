@@ -9,6 +9,8 @@ use std::sync::Arc;
 use storage::StorageManager;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
+const STREAM_SHARED_REF_PERMITS: u32 = 1024;
+
 #[derive(Clone)]
 pub struct AppState {
     pub instances: FlowInstances,
@@ -16,6 +18,7 @@ pub struct AppState {
     pub declared_instances: Arc<HashMap<String, ()>>,
     import_export_op_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    stream_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     shared_mqtt_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
@@ -34,6 +37,7 @@ impl AppState {
             declared_instances: Arc::new(HashMap::new()),
             import_export_op_lock: Arc::new(Semaphore::new(1)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
+            stream_op_locks: Arc::new(Mutex::new(HashMap::new())),
             shared_mqtt_op_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -106,6 +110,59 @@ impl AppState {
                 .clone()
         };
         semaphore.try_acquire_owned()
+    }
+
+    pub async fn try_acquire_stream_op(
+        &self,
+        stream_name: &str,
+    ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        let semaphore = {
+            let mut guard = self.stream_op_locks.lock().await;
+            guard
+                .entry(stream_name.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(STREAM_SHARED_REF_PERMITS as usize)))
+                .clone()
+        };
+        semaphore.try_acquire_many_owned(STREAM_SHARED_REF_PERMITS)
+    }
+
+    pub async fn try_acquire_stream_ref_ops<I, S>(
+        &self,
+        stream_names: I,
+    ) -> Result<Vec<OwnedSemaphorePermit>, TryAcquireError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let stream_names = stream_names
+            .into_iter()
+            .map(Into::into)
+            .filter(|name: &String| !name.trim().is_empty())
+            .collect::<BTreeSet<_>>();
+        if stream_names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let semaphores = {
+            let mut guard = self.stream_op_locks.lock().await;
+            stream_names
+                .into_iter()
+                .map(|name| {
+                    guard
+                        .entry(name)
+                        .or_insert_with(|| {
+                            Arc::new(Semaphore::new(STREAM_SHARED_REF_PERMITS as usize))
+                        })
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut permits = Vec::with_capacity(semaphores.len());
+        for semaphore in semaphores {
+            permits.push(semaphore.try_acquire_owned()?);
+        }
+        Ok(permits)
     }
 
     pub fn try_acquire_import_export_op(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {

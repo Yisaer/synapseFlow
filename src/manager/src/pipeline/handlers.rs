@@ -14,7 +14,10 @@ use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use super::context::{
     build_pipeline_context_payload, shared_mqtt_connector_keys_from_pipeline_request,
 };
-use super::spec::{build_pipeline_definition, status_label, validate_create_request};
+use super::spec::{
+    build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
+    validate_create_request,
+};
 use super::state::AppState;
 use super::types::{
     BuildPipelineContextResponse, CollectStatsQuery, CreatePipelineRequest, CreatePipelineResponse,
@@ -54,6 +57,25 @@ fn shared_mqtt_busy_response(keys: &BTreeSet<String>) -> axum::response::Respons
         format!(
             "shared mqtt clients {} are busy processing another command",
             keys.iter().cloned().collect::<Vec<_>>().join(", ")
+        ),
+    )
+        .into_response()
+}
+
+fn stream_refs_busy_response(streams: &BTreeSet<String>) -> axum::response::Response {
+    if let Some(stream) = streams.iter().next().filter(|_| streams.len() == 1) {
+        return (
+            StatusCode::CONFLICT,
+            format!("stream {stream} is busy processing another command"),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::CONFLICT,
+        format!(
+            "streams {} are busy processing another command",
+            streams.iter().cloned().collect::<Vec<_>>().join(", ")
         ),
     )
         .into_response()
@@ -166,6 +188,27 @@ async fn try_acquire_shared_mqtt_pipeline_ops(
     }
 }
 
+async fn try_acquire_referenced_stream_ops(
+    state: &AppState,
+    pipeline_req: &CreatePipelineRequest,
+    instance: &flow::FlowInstance,
+) -> Result<Vec<OwnedSemaphorePermit>, axum::response::Response> {
+    let streams = referenced_streams_from_pipeline_sql(pipeline_req, instance)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err).into_response())?;
+    match state
+        .try_acquire_stream_ref_ops(streams.iter().cloned())
+        .await
+    {
+        Ok(permits) => Ok(permits),
+        Err(TryAcquireError::NoPermits) => Err(stream_refs_busy_response(&streams)),
+        Err(TryAcquireError::Closed) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stream operation guard closed".to_string(),
+        )
+            .into_response()),
+    }
+}
+
 pub async fn create_pipeline_handler(
     State(state): State<AppState>,
     Json(req): Json<CreatePipelineRequest>,
@@ -214,6 +257,24 @@ pub async fn create_pipeline_handler(
             Err(resp) => return resp,
         };
 
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
+        Err(resp) => return *resp,
+    };
+
+    let _stream_permits =
+        match try_acquire_referenced_stream_ops(&state, &req, instance.as_ref()).await {
+            Ok(permits) => permits,
+            Err(resp) => return resp,
+        };
+
+    let encoder_registry = instance.encoder_registry();
+    let definition =
+        match build_pipeline_definition(&req, encoder_registry.as_ref(), instance.as_ref()) {
+            Ok(def) => def,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+
     let stored = match storage_bridge::stored_pipeline_from_request(&req) {
         Ok(stored) => stored,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -235,18 +296,6 @@ pub async fn create_pipeline_handler(
                 .into_response();
         }
     }
-
-    let instance = match local_instance_response(&state, &flow_instance_id) {
-        Ok(instance) => instance,
-        Err(resp) => return *resp,
-    };
-
-    let encoder_registry = instance.encoder_registry();
-    let definition =
-        match build_pipeline_definition(&req, encoder_registry.as_ref(), instance.as_ref()) {
-            Ok(def) => def,
-            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-        };
 
     let build_result = match instance.create_pipeline(flow::CreatePipelineRequest::new(definition))
     {
@@ -380,6 +429,12 @@ pub async fn upsert_pipeline_handler(
         Ok(instance) => instance,
         Err(resp) => return *resp,
     };
+
+    let _stream_permits =
+        match try_acquire_referenced_stream_ops(&state, &create_req, instance.as_ref()).await {
+            Ok(permits) => permits,
+            Err(resp) => return resp,
+        };
 
     let encoder_registry = instance.encoder_registry();
     let definition = match build_pipeline_definition(

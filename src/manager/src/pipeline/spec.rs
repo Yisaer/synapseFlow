@@ -9,7 +9,7 @@ use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
 use serde::Deserialize;
 use serde_json::Map as JsonMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use super::types::{
@@ -118,6 +118,18 @@ fn parse_pipeline_select_stmt(
         instance.stateful_registry(),
     )
     .map_err(|err| format!("parse pipeline {} sql: {err}", req.id))
+}
+
+pub(crate) fn referenced_streams_from_pipeline_sql(
+    req: &CreatePipelineRequest,
+    instance: &flow::FlowInstance,
+) -> Result<BTreeSet<String>, String> {
+    let select_stmt = parse_pipeline_select_stmt(req, instance)?;
+    Ok(select_stmt
+        .source_infos
+        .iter()
+        .map(|source| source.name.clone())
+        .collect())
 }
 
 fn build_source_definitions(
