@@ -33,6 +33,7 @@ pub struct StatusResponse {
     pub uptime_seconds: u64,
     pub active_pipeline_count: usize,
     pub commit: String,
+    pub release_tag: String,
 }
 
 pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -54,6 +55,7 @@ pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse 
     }
 
     let commit = build_info::git_sha().to_string();
+    let release_tag = build_info::git_tag().to_string();
 
     let response = StatusResponse {
         cpu_usage_percent,
@@ -64,6 +66,7 @@ pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse 
         uptime_seconds,
         active_pipeline_count,
         commit,
+        release_tag,
     };
 
     (StatusCode::OK, Json(response)).into_response()

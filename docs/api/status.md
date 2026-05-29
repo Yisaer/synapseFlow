@@ -27,7 +27,8 @@ No query parameters or request body.
   "tokio_tasks_inflight": 42,
   "uptime_seconds": 3600,
   "active_pipeline_count": 5,
-  "commit": "abc123def"
+  "commit": "abc123def",
+  "release_tag": "v0.1.0"
 }
 ```
 
@@ -43,6 +44,7 @@ No query parameters or request body.
 | `uptime_seconds` | `number` (`u64`) | Seconds elapsed since the manager server process started. |
 | `active_pipeline_count` | `number` (`usize`) | Number of pipelines currently in the `running` state across all flow instances. |
 | `commit` | `string` | Git commit SHA embedded at build time. Returns `"unknown"` when built outside a Git repository. |
+| `release_tag` | `string` | Git tag from `git describe --tags --always` embedded at build time. Returns the closest tag (e.g. `v0.1.0`) when HEAD is at a tag, or a describe-style string (e.g. `v0.1.0-3-gabc123`) otherwise. Returns `"unknown"` when built outside a Git repository. |
 
 ### Notes
 

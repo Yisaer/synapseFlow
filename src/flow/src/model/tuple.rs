@@ -45,9 +45,7 @@ impl Message {
     }
 
     pub fn entry_by_index(&self, index: usize) -> Option<(&Arc<str>, &Arc<Value>)> {
-        self.keys
-            .get(index)
-            .and_then(|k| self.values.get(index).map(|v| (k, v)))
+        self.keys.get(index).zip(self.values.get(index))
     }
 
     pub fn entry_by_name(&self, column: &str) -> Option<(&Arc<str>, &Arc<Value>)> {

@@ -73,6 +73,14 @@ async fn status_endpoint_returns_expected_fields() {
         "commit must be non-empty, got '{commit}'"
     );
 
+    let release_tag = body["release_tag"]
+        .as_str()
+        .expect("release_tag must be a string");
+    assert!(
+        !release_tag.is_empty(),
+        "release_tag must be non-empty, got '{release_tag}'"
+    );
+
     // --- 2. Create and start a pipeline, verify active_pipeline_count updates ---
     let stream_name = format!("status_test_stream_{}", random_suffix());
     let create_stream_resp = http
