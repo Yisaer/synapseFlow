@@ -1,3 +1,4 @@
+use crate::connector::sink::file::FileSinkConfig;
 use crate::connector::sink::kuksa::KuksaSinkConfig;
 use crate::connector::sink::kura::KuraSinkConfig;
 use crate::connector::sink::memory::MemorySinkConfig;
@@ -178,6 +179,7 @@ pub enum SinkConnectorConfig {
     Kuksa(KuksaSinkConfig),
     Kura(KuraSinkConfig),
     Memory(MemorySinkConfig),
+    File(FileSinkConfig),
     Video(VideoSinkConfig),
     NngPubSub(NngPubSubSinkConfig),
     Custom(CustomSinkConnectorConfig),
@@ -191,6 +193,7 @@ impl SinkConnectorConfig {
             SinkConnectorConfig::Kuksa(_) => "kuksa",
             SinkConnectorConfig::Kura(_) => "kura",
             SinkConnectorConfig::Memory(_) => "memory",
+            SinkConnectorConfig::File(_) => "file",
             SinkConnectorConfig::Video(_) => "video",
             SinkConnectorConfig::NngPubSub(_) => "nng_pubsub",
             SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),

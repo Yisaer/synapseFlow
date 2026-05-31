@@ -392,6 +392,22 @@ pub struct MemorySinkPropsRequest {
 
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
+pub struct FileSinkPropsRequest {
+    pub path: Option<String>,
+    pub filename_prefix: Option<String>,
+    pub filename_suffix: Option<String>,
+    pub retention: FileRetentionConfigRequest,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct FileRetentionConfigRequest {
+    pub max_file_count: Option<u64>,
+    pub max_file_age_days: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
 pub struct KuraSinkPropsRequest {
     pub addr: Option<String>,
     #[serde(rename = "mapping_path")]

@@ -21,6 +21,13 @@ features:
       - docs/runtime/sinks/connectors/nng_pubsub.md
     status: active
 
+  - id: sink.connector.file_output
+    title: File sink connector
+    summary: Emit encoded pipeline output through the documented local file sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/file.md
+    status: active
+
   - id: sink.memory_collection.materialize
     title: Memory collection materialize
     summary: Materialize sink output rows into the stable memory collection sink layout.

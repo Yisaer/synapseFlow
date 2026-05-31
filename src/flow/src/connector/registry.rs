@@ -1,3 +1,4 @@
+use super::sink::file::FileSinkConnector;
 use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::kura::KuraSinkConnector;
 use super::sink::memory::MemorySinkConnector;
@@ -161,6 +162,20 @@ impl ConnectorRegistry {
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Memory config but received {:?}",
+                    other.kind()
+                ))),
+            }),
+        );
+
+        self.register_sink_factory(
+            "file",
+            Arc::new(|sink_id, config, _, _, _| match config {
+                SinkConnectorConfig::File(cfg) => Ok(Box::new(FileSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                ))),
+                other => Err(ConnectorError::Other(format!(
+                    "connector `{sink_id}` expected File config but received {:?}",
                     other.kind()
                 ))),
             }),

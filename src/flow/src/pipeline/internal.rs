@@ -1,5 +1,8 @@
 use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
+use crate::connector::sink::file::{
+    FileRetentionConfig as FileSinkRetentionConfig, FileSinkConfig,
+};
 use crate::connector::sink::video::{
     VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig,
     VideoRollingConfig as VideoSinkRollingConfig, VideoSinkTargetConfig,
@@ -843,6 +846,42 @@ fn build_sinks_from_definition(
                     .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
+            SinkType::File => {
+                let props = match &sink.props {
+                    SinkProps::File(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected file props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                if matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    return Err(format!(
+                        "sink {} expected encoded bytes for file but received encoder `none`",
+                        sink.sink_id
+                    ));
+                }
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::File(FileSinkConfig {
+                        sink_name: sink.sink_id.clone(),
+                        pipeline_id: definition.id().to_string(),
+                        path: props.path.clone(),
+                        filename_prefix: props.filename_prefix.clone(),
+                        filename_suffix: props.filename_suffix.clone(),
+                        retention: FileSinkRetentionConfig {
+                            max_file_count: props.retention.max_file_count,
+                            max_file_age_days: props.retention.max_file_age_days,
+                        },
+                    }),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
+                sinks.push(pipeline_sink);
+            }
             SinkType::NngPubSub => {
                 #[cfg(feature = "nng_pubsub")]
                 {
@@ -1039,4 +1078,67 @@ pub(super) fn attach_sources_from_catalog(
     }
 }
 
-// Tests live in `pipeline/tests.rs`.
+// General pipeline tests live in `pipeline/tests.rs`; focused lowering tests stay close to these helpers.
+
+#[cfg(test)]
+mod file_sink_tests {
+    use super::*;
+    use crate::pipeline::{FileRetentionConfig, FileSinkProps};
+    use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkEncoderKind};
+    use serde_json::Map as JsonMap;
+
+    fn file_sink_definition(encoder: SinkEncoderConfig) -> PipelineDefinition {
+        let props = FileSinkProps::new("/tmp/vf-file", "speed_")
+            .with_filename_suffix(".json")
+            .with_retention(FileRetentionConfig {
+                max_file_count: 10,
+                max_file_age_days: 7,
+            });
+        let sink = SinkDefinition::new("sink_1", SinkType::File, SinkProps::File(props))
+            .with_encoder(encoder)
+            .with_common_props(CommonSinkProps {
+                batch_count: Some(1000),
+                batch_duration: Some(Duration::from_millis(1000)),
+            });
+        PipelineDefinition::new("pipe_1", "SELECT 1 AS a", vec![sink])
+    }
+
+    #[test]
+    fn file_sink_lowering_preserves_config_and_common_props() {
+        let definition = file_sink_definition(SinkEncoderConfig::json());
+
+        let sinks = build_sinks_from_definition(&definition).expect("build sinks");
+
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].common.batch_count, Some(1000));
+        assert_eq!(
+            sinks[0].common.batch_duration,
+            Some(Duration::from_millis(1000))
+        );
+        let SinkConnectorConfig::File(config) = &sinks[0].connector.connector else {
+            panic!("expected file sink connector config");
+        };
+        assert_eq!(config.sink_name, "sink_1");
+        assert_eq!(config.pipeline_id, "pipe_1");
+        assert_eq!(config.path, "/tmp/vf-file");
+        assert_eq!(config.filename_prefix, "speed_");
+        assert_eq!(config.filename_suffix, ".json");
+        assert_eq!(config.retention.max_file_count, 10);
+        assert_eq!(config.retention.max_file_age_days, 7);
+    }
+
+    #[test]
+    fn file_sink_lowering_rejects_encoder_none() {
+        let definition = file_sink_definition(SinkEncoderConfig::new(
+            SinkEncoderKind::None,
+            JsonMap::new(),
+        ));
+
+        let err = build_sinks_from_definition(&definition).expect_err("encoder none should fail");
+
+        assert!(
+            err.contains("expected encoded bytes for file"),
+            "unexpected error: {err}"
+        );
+    }
+}

@@ -28,8 +28,8 @@ fn json_schema(source_name: &str) -> Arc<Schema> {
     )]))
 }
 
-#[tokio::test]
 // coverage-covers: source.nng_pubsub.bytes_input
+#[tokio::test]
 async fn nng_pubsub_source_feeds_memory_sink_pipeline() {
     let instance = test_instance();
     let source_name = "nng_stream";
@@ -103,8 +103,8 @@ async fn nng_pubsub_source_feeds_memory_sink_pipeline() {
         .expect("stop pipeline");
 }
 
-#[tokio::test]
 // coverage-covers: sink.connector.nng_pubsub_output
+#[tokio::test]
 async fn memory_source_feeds_nng_pubsub_sink_pipeline() {
     let instance = test_instance();
     let source_name = "memory_stream";

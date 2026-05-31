@@ -373,6 +373,7 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
         "memory" => {
             SinkConnectorConfig::Memory(memory_sink_from_ir_settings(&sink.connector_settings)?)
         }
+        "file" => SinkConnectorConfig::File(file_sink_from_ir_settings(&sink.connector_settings)?),
         "nng_pubsub" => SinkConnectorConfig::NngPubSub(nng_pubsub_sink_from_ir_settings(
             &sink.connector_settings,
         )?),
@@ -428,6 +429,70 @@ fn memory_sink_from_ir_settings(
     Ok(crate::connector::MemorySinkConfig::new(
         sink_name, topic, kind,
     ))
+}
+
+fn file_sink_from_ir_settings(
+    settings: &JsonValue,
+) -> Result<crate::connector::sink::file::FileSinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "file sink settings must be an object".to_string())?;
+    let sink_name = obj
+        .get("sink_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "file sink settings missing sink_name".to_string())?
+        .to_string();
+    if sink_name.trim().is_empty() {
+        return Err("file sink settings missing sink_name".to_string());
+    }
+    let pipeline_id = obj
+        .get("pipeline_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "file sink settings missing pipeline_id".to_string())?
+        .to_string();
+    if pipeline_id.trim().is_empty() {
+        return Err("file sink settings missing pipeline_id".to_string());
+    }
+    let path = obj
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "file sink settings missing path".to_string())?
+        .to_string();
+    if path.trim().is_empty() {
+        return Err("file sink settings missing path".to_string());
+    }
+    let filename_prefix = obj
+        .get("filename_prefix")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let filename_suffix = obj
+        .get("filename_suffix")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    crate::connector::sink::file::validate_file_name_affixes(&filename_prefix, &filename_suffix)?;
+    let retention = obj.get("retention").and_then(|v| v.as_object());
+    let max_file_count = retention
+        .and_then(|retention| retention.get("max_file_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let max_file_age_days = retention
+        .and_then(|retention| retention.get("max_file_age_days"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    Ok(crate::connector::sink::file::FileSinkConfig {
+        sink_name,
+        pipeline_id,
+        path,
+        filename_prefix,
+        filename_suffix,
+        retention: crate::connector::sink::file::FileRetentionConfig {
+            max_file_count,
+            max_file_age_days,
+        },
+    })
 }
 
 fn nng_pubsub_sink_from_ir_settings(
@@ -940,6 +1005,20 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "kind": cfg.kind.to_string(),
             }),
         ),
+        SinkConnectorConfig::File(cfg) => (
+            "file".to_string(),
+            serde_json::json!({
+                "sink_name": cfg.sink_name,
+                "pipeline_id": cfg.pipeline_id,
+                "path": cfg.path,
+                "filename_prefix": cfg.filename_prefix,
+                "filename_suffix": cfg.filename_suffix,
+                "retention": {
+                    "max_file_count": cfg.retention.max_file_count,
+                    "max_file_age_days": cfg.retention.max_file_age_days,
+                },
+            }),
+        ),
         SinkConnectorConfig::NngPubSub(cfg) => (
             "nng_pubsub".to_string(),
             serde_json::json!({
@@ -1068,5 +1147,138 @@ mod tests {
         assert_eq!(config.url, "inproc://vf-nng-ir");
         assert_eq!(config.topic, "topic/can");
         assert_eq!(config.topic_delimiter, "\0");
+    }
+
+    #[test]
+    fn file_sink_ir_roundtrip_preserves_settings() {
+        let connector = SinkConnectorConfig::File(crate::connector::sink::file::FileSinkConfig {
+            sink_name: "sink_1".to_string(),
+            pipeline_id: "pipe_1".to_string(),
+            path: "/tmp/vf-file".to_string(),
+            filename_prefix: "speed_".to_string(),
+            filename_suffix: ".json".to_string(),
+            retention: crate::connector::sink::file::FileRetentionConfig {
+                max_file_count: 10,
+                max_file_age_days: 7,
+            },
+        });
+
+        let (kind, settings) = connector_to_ir(&connector);
+        assert_eq!(kind, "file");
+        let decoded = file_sink_from_ir_settings(&settings).expect("decode file sink config");
+
+        assert_eq!(decoded.sink_name, "sink_1");
+        assert_eq!(decoded.pipeline_id, "pipe_1");
+        assert_eq!(decoded.path, "/tmp/vf-file");
+        assert_eq!(decoded.filename_prefix, "speed_");
+        assert_eq!(decoded.filename_suffix, ".json");
+        assert_eq!(decoded.retention.max_file_count, 10);
+        assert_eq!(decoded.retention.max_file_age_days, 7);
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_missing_pipeline_id() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "path": "/tmp/vf-file",
+            "filename_prefix": "speed_",
+            "filename_suffix": ".json"
+        });
+
+        let err = file_sink_from_ir_settings(&settings).expect_err("missing pipeline_id");
+
+        assert!(
+            err.contains("missing pipeline_id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_empty_pipeline_id() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": " ",
+            "path": "/tmp/vf-file",
+            "filename_prefix": "speed_",
+            "filename_suffix": ".json"
+        });
+
+        let err = file_sink_from_ir_settings(&settings).expect_err("empty pipeline_id");
+
+        assert!(
+            err.contains("missing pipeline_id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_empty_path() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": " ",
+            "filename_prefix": "speed_",
+            "filename_suffix": ".json"
+        });
+
+        let err = file_sink_from_ir_settings(&settings).expect_err("empty path");
+
+        assert!(err.contains("missing path"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_filename_prefix_path_separator() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": "/tmp/vf-file",
+            "filename_prefix": "speed/",
+            "filename_suffix": ".json"
+        });
+
+        let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_prefix");
+
+        assert!(
+            err.contains("filename_prefix must not contain path separators"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_filename_suffix_path_separator() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": "/tmp/vf-file",
+            "filename_prefix": "speed_",
+            "filename_suffix": "/data.json"
+        });
+
+        let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_suffix");
+
+        assert!(
+            err.contains("filename_suffix must not contain path separators"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_reserved_filename_suffix() {
+        for suffix in [".", ".."] {
+            let settings = serde_json::json!({
+                "sink_name": "sink_1",
+                "pipeline_id": "pipe_1",
+                "path": "/tmp/vf-file",
+                "filename_prefix": "speed_",
+                "filename_suffix": suffix
+            });
+
+            let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_suffix");
+
+            assert!(
+                err.contains("filename_suffix must not be `.` or `..`"),
+                "unexpected error for suffix {suffix}: {err}"
+            );
+        }
     }
 }

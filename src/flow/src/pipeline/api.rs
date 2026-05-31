@@ -34,6 +34,8 @@ pub enum SinkType {
     Kura,
     /// Memory sink that publishes to an in-process pub/sub topic.
     Memory,
+    /// File sink that writes encoded payloads to local files.
+    File,
     /// Video sink that records video frame tuples.
     Video,
     /// NNG pub/sub sink.
@@ -53,6 +55,8 @@ pub enum SinkProps {
     Kura(KuraSinkProps),
     /// Memory sink config.
     Memory(MemorySinkProps),
+    /// File sink config.
+    File(FileSinkProps),
     /// Video sink config.
     Video(VideoSinkProps),
     /// NNG pub/sub sink config.
@@ -131,6 +135,22 @@ pub struct MemorySinkProps {
     pub topic: String,
 }
 
+/// Concrete file sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSinkProps {
+    pub path: String,
+    pub filename_prefix: String,
+    pub filename_suffix: String,
+    pub retention: FileRetentionConfig,
+}
+
+/// File sink retention configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileRetentionConfig {
+    pub max_file_count: u64,
+    pub max_file_age_days: u64,
+}
+
 /// Concrete video sink configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoSinkProps {
@@ -172,6 +192,27 @@ impl MemorySinkProps {
         Self {
             topic: topic.into(),
         }
+    }
+}
+
+impl FileSinkProps {
+    pub fn new(path: impl Into<String>, filename_prefix: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            filename_prefix: filename_prefix.into(),
+            filename_suffix: String::new(),
+            retention: FileRetentionConfig::default(),
+        }
+    }
+
+    pub fn with_filename_suffix(mut self, filename_suffix: impl Into<String>) -> Self {
+        self.filename_suffix = filename_suffix.into();
+        self
+    }
+
+    pub fn with_retention(mut self, retention: FileRetentionConfig) -> Self {
+        self.retention = retention;
+        self
     }
 }
 

@@ -1,9 +1,10 @@
 use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
-    KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps, NngPubSubSinkProps,
-    NopSinkProps, PipelineDefinition, PipelineOptions, PipelineStatus, SinkDefinition, SinkProps,
-    SinkType, SourceDefinition, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    FileRetentionConfig, FileSinkProps, KuksaSinkProps, KuraSinkProps, MemorySinkProps,
+    MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineDefinition, PipelineOptions,
+    PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition, VideoCodec,
+    VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -14,8 +15,8 @@ use std::time::Duration;
 
 use super::types::{
     CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
-    KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest, NngPubSubSinkPropsRequest,
-    NopSinkPropsRequest, SinkOutputConfigRequest, VideoSinkPropsRequest,
+    FileSinkPropsRequest, KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest,
+    NngPubSubSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest, VideoSinkPropsRequest,
 };
 
 #[derive(Deserialize)]
@@ -83,6 +84,37 @@ fn build_video_sink_props(
         props = props.with_filename_prefix(prefix);
     }
     Ok(props)
+}
+
+fn build_file_sink_props(req: FileSinkPropsRequest) -> Result<FileSinkProps, String> {
+    let path = req
+        .path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "file sink requires props.path".to_string())?;
+    let filename_prefix = req.filename_prefix.unwrap_or_default();
+    let filename_suffix = req.filename_suffix.unwrap_or_default();
+    validate_file_name_part("filename_prefix", &filename_prefix)?;
+    validate_file_name_part("filename_suffix", &filename_suffix)?;
+    if matches!(filename_suffix.as_str(), "." | "..") {
+        return Err("file sink filename_suffix must not be `.` or `..`".to_string());
+    }
+    let retention = FileRetentionConfig {
+        max_file_count: req.retention.max_file_count.unwrap_or(0),
+        max_file_age_days: req.retention.max_file_age_days.unwrap_or(0),
+    };
+    Ok(FileSinkProps::new(path, filename_prefix)
+        .with_filename_suffix(filename_suffix)
+        .with_retention(retention))
+}
+
+fn validate_file_name_part(field: &str, value: &str) -> Result<(), String> {
+    if value.contains('/') || value.contains('\\') {
+        return Err(format!(
+            "file sink {field} must not contain path separators"
+        ));
+    }
+    Ok(())
 }
 
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
@@ -343,6 +375,13 @@ pub(crate) fn build_pipeline_definition(
                     SinkProps::Memory(MemorySinkProps::new(topic)),
                 )
             }
+            "file" => {
+                let file_props: FileSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid file sink props: {err}"))?;
+                let props = build_file_sink_props(file_props)?;
+                SinkDefinition::new(sink_id.clone(), SinkType::File, SinkProps::File(props))
+            }
             "video" => {
                 let video_props: VideoSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
@@ -402,6 +441,11 @@ pub(crate) fn build_pipeline_definition(
             }
             SinkType::Memory if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
                 SinkEncoderConfig::new("none", sink_req.encoder.props.clone())
+            }
+            SinkType::File if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
+                return Err(
+                    "file sink requires an encoder; encoder.type=none is not supported".to_string(),
+                );
             }
             _ => {
                 let encoder_kind = sink_req.encoder.encode_type.clone();
@@ -944,6 +988,91 @@ mod tests {
         assert_eq!(
             nng.topic_delimiter,
             flow::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_accepts_file_sink() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "file",
+                    "props": {
+                        "path": "/tmp/veloflux-file-sink-test",
+                        "filename_prefix": "speed_",
+                        "filename_suffix": ".json",
+                        "retention": {
+                            "max_file_count": 10,
+                            "max_file_age_days": 7
+                        }
+                    },
+                    "encoder": {
+                        "type": "json"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let sink = &definition.sinks()[0];
+        let flow::pipeline::SinkProps::File(file) = &sink.props else {
+            panic!("expected file sink props");
+        };
+        assert_eq!(file.path, "/tmp/veloflux-file-sink-test");
+        assert_eq!(file.filename_prefix, "speed_");
+        assert_eq!(file.filename_suffix, ".json");
+        assert_eq!(file.retention.max_file_count, 10);
+        assert_eq!(file.retention.max_file_age_days, 7);
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_file_sink_encoder_none() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "file",
+                    "props": {
+                        "path": "/tmp/veloflux-file-sink-test"
+                    },
+                    "encoder": {
+                        "type": "none"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let err =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("file sink should reject encoder none");
+        assert!(
+            err.contains("encoder.type=none is not supported"),
+            "unexpected error: {err}"
         );
     }
 
