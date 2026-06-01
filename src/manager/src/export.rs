@@ -23,6 +23,7 @@ pub struct ExportBundleV1 {
 pub struct ExportResources {
     pub memory_topics: Vec<ExportMemoryTopic>,
     pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
+    #[serde(default)]
     pub schemas: Vec<ExportSchema>,
     pub streams: Vec<CreateStreamRequest>,
     pub pipelines: Vec<CreatePipelineRequest>,
