@@ -2,6 +2,8 @@
 
 This document describes the **Manager** REST API for managing streams.
 
+For named schema management and the proto schema parser, see `user_docs/api/schema.md`.
+
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 ## Endpoints
@@ -46,8 +48,9 @@ Request body: `CreateStreamRequest`
 
 Notes:
 
-- `schema.type` selects the schema declaration format. Manager currently ships with `json`.
-- `schema.props` is schema-format specific (for `json`, it must contain `columns`).
+- `schema.type` selects the schema declaration format. Built-in: `json`, `proto`.
+- `schema.props` is schema-format specific.
+- Alternatively, use `schema.ref` to reference a pre-defined named schema (see `user_docs/api/schema.md`). When `schema.ref` is set, `schema.type` and `schema.props` are ignored.
 - `decoder.type` must be registered in the runtime decoder registry (builtin: `json`).
 - `eventtime.type` must be registered in the runtime event-time registry (builtin: `unixtimestamp_s`, `unixtimestamp_ms`).
 
@@ -164,6 +167,8 @@ curl -s \
 - `type: string` (required)
   - Supported: `mqtt`, `history`
 - `schema: { type: string, props: object }` (required)
+  - Alternatively: `schema: { ref: string }` to reference a named schema.
+  - When `ref` is set, `type` and `props` are ignored.
 - `props: object` (optional, defaults to `{}`)
 - `shared: boolean` (optional, defaults to `false`)
 - `decoder: { type: string, props: object }` (optional, defaults to `{ "type": "json", "props": {} }`)
@@ -231,6 +236,17 @@ The `sampler` property enables stream-level downsampling. All pipelines consumin
 `schema.props` must be an object containing:
 
 - `columns: Column[]`
+
+### Schema Proto format (`schema.type == "proto"`)
+
+Derive schema from a `.proto` file. See `docs/api/schema_registry.md` for the full
+proto type mapping and `user_docs/api/schema.md` for the REST API.
+
+`schema.props` must be an object containing:
+
+- `proto_path: string` (path to the `.proto` file)
+- `message_type: string` (fully qualified message name)
+- Optional `include_paths: string[]` (additional proto include directories)
 
 ### `Column`
 
