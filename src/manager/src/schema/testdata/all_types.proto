@@ -1,0 +1,39 @@
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+
+enum Priority {
+  UNKNOWN = 0;
+  LOW = 1;
+  HIGH = 2;
+}
+
+message Metadata {
+  string key = 1;
+  string value = 2;
+}
+
+message AllTypes {
+  double double_val = 1;
+  float float_val = 2;
+  int32 int32_val = 3;
+  int64 int64_val = 4;
+  uint32 uint32_val = 5;
+  uint64 uint64_val = 6;
+  sint32 sint32_val = 7;
+  sint64 sint64_val = 8;
+  fixed32 fixed32_val = 9;
+  fixed64 fixed64_val = 10;
+  sfixed32 sfixed32_val = 11;
+  sfixed64 sfixed64_val = 12;
+  bool bool_val = 13;
+  string string_val = 14;
+  bytes bytes_val = 15;
+  Priority priority = 16;
+  Metadata metadata = 17;
+  google.protobuf.Timestamp created_at = 18;
+  repeated int32 int32_list = 19;
+  repeated string string_list = 20;
+  repeated Metadata metadata_list = 21;
+  map<string, int32> scores = 22;
+  map<int32, Metadata> complex_map = 23;
+}

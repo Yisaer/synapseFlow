@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+message WithList {
+  repeated int32 values = 1;
+  repeated string tags = 2;
+}

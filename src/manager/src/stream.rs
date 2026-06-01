@@ -165,6 +165,7 @@ impl SchemaRegistry {
     pub fn with_builtin() -> Self {
         let registry = Self::new();
         registry.register_schema("json", Arc::new(parse_json_schema));
+        registry.register_schema("proto", Arc::new(crate::schema::proto::parse_proto_schema));
         registry
     }
 

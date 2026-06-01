@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+message Ints {
+  int32 a = 1;
+  int64 b = 2;
+  uint32 c = 3;
+  uint64 d = 4;
+  sint32 e = 5;
+  sint64 f = 6;
+  fixed32 g = 7;
+  fixed64 h = 8;
+  sfixed32 i = 9;
+  sfixed64 j = 10;
+}

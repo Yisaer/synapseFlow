@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+message Simple {
+  string name = 1;
+  int32 count = 2;
+  float temperature = 3;
+  double score = 4;
+  bool active = 5;
+  bytes payload = 6;
+}
