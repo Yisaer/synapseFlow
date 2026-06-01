@@ -39,7 +39,7 @@ pub use instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec, build_in_process_flow_instance,
     find_default_flow_instance_spec, new_default_flow_instance,
 };
-pub use stream::{SchemaParser, register_schema, schema_registry};
+pub use stream::{SchemaParser, named_schema_store, register_schema, schema_registry};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 
@@ -99,6 +99,14 @@ fn build_app(state: AppState) -> Router {
         .route("/import", post(import::import_storage_handler))
         .route("/storage/export", get(export::export_storage_handler))
         .route("/streams/:name", delete(stream::delete_stream_handler))
+        .route(
+            "/schemas",
+            post(schema::handler::create_schema_handler).get(schema::handler::list_schemas_handler),
+        )
+        .route(
+            "/schemas/:name",
+            get(schema::handler::get_schema_handler).delete(schema::handler::delete_schema_handler),
+        )
         .route(
             "/memory/topics",
             post(memory_topic::create_memory_topic_handler)

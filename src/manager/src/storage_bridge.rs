@@ -3,7 +3,8 @@ use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::startup::StartupPhase;
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    validate_memory_stream_binding, validate_memory_stream_topic, validate_stream_decoder_config,
+    named_schema_store, schema_registry, validate_memory_stream_binding,
+    validate_memory_stream_topic, validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -107,6 +108,39 @@ pub fn stored_mqtt_from_config(cfg: &SharedMqttClientConfig) -> StoredMqttClient
         key: cfg.key.clone(),
         raw_json,
     }
+}
+
+fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<usize, String> {
+    let stored_schemas = storage.list_schemas().map_err(|e| e.to_string())?;
+    let count = stored_schemas.len();
+    for stored in &stored_schemas {
+        let props: serde_json::Map<String, serde_json::Value> =
+            match serde_json::from_str(&stored.props_json) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::error!(
+                        schema = %stored.name,
+                        error = %err,
+                        "failed to deserialize stored schema props"
+                    );
+                    continue;
+                }
+            };
+        match schema_registry().parse(&stored.schema_type, &stored.name, &props) {
+            Ok(schema) => {
+                named_schema_store().insert(stored.name.clone(), schema);
+            }
+            Err(err) => {
+                tracing::error!(
+                    schema = %stored.name,
+                    schema_type = %stored.schema_type,
+                    error = %err,
+                    "failed to parse stored schema; skipping"
+                );
+            }
+        }
+    }
+    Ok(count)
 }
 
 struct InstanceGlobalsHydrationSummary {
@@ -283,6 +317,10 @@ pub(crate) async fn hydrate_runtime_from_storage(
     let mqtt_configs = storage.list_mqtt_configs().map_err(|e| e.to_string())?;
     let streams = storage.list_streams().map_err(|e| e.to_string())?;
     let pipelines = storage.list_pipelines().map_err(|e| e.to_string())?;
+
+    // Hydrate named schemas first — streams may reference them.
+    let schema_count = hydrate_schemas_from_storage(storage)?;
+
     let instances_snapshot = instances.instances_snapshot();
 
     tracing::info!(
@@ -292,6 +330,7 @@ pub(crate) async fn hydrate_runtime_from_storage(
         result = "discovered",
         persisted_memory_topic_count = memory_topics.len(),
         persisted_shared_mqtt_client_count = mqtt_configs.len(),
+        persisted_schema_count = schema_count,
         persisted_stream_count = streams.len(),
         persisted_pipeline_count = pipelines.len(),
         instance_count = instances_snapshot.len(),
@@ -351,6 +390,7 @@ pub(crate) async fn hydrate_runtime_from_storage(
         elapsed_ms = phase.elapsed_ms(),
         persisted_memory_topic_count = memory_topics.len(),
         persisted_shared_mqtt_client_count = mqtt_configs.len(),
+        persisted_schema_count = schema_count,
         persisted_stream_count = streams.len(),
         persisted_pipeline_count = pipelines.len(),
         memory_topic_restore_failures,
@@ -399,6 +439,7 @@ mod tests {
             schema: crate::stream::SchemaConfigRequest {
                 schema_type: "json".to_string(),
                 props: schema_props,
+                r#ref: None,
             },
             props: crate::stream::StreamPropsRequest {
                 fields: props_fields,

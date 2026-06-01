@@ -16,6 +16,7 @@ const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("stream
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
 const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pipeline_run_states");
+const SCHEMAS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("schemas");
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
 const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_topics");
@@ -63,6 +64,15 @@ pub struct StoredStream {
     pub id: String,
     /// Original create-stream request serialized as JSON.
     pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSchema {
+    pub name: String,
+    /// Schema type ("proto", "json", etc.)
+    pub schema_type: String,
+    /// Schema-type-specific properties serialized as JSON.
+    pub props_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +135,7 @@ pub struct StoredUdf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataExportSnapshot {
     pub streams: Vec<StoredStream>,
+    pub schemas: Vec<StoredSchema>,
     pub pipelines: Vec<StoredPipeline>,
     pub pipeline_run_states: Vec<StoredPipelineRunState>,
     pub mqtt_configs: Vec<StoredMqttClientConfig>,
@@ -185,6 +196,22 @@ impl MetadataStorage {
 
     pub fn delete_stream(&self, id: &str) -> Result<(), StorageError> {
         self.delete_entry(STREAMS_TABLE, id)
+    }
+
+    pub fn create_schema(&self, schema: StoredSchema) -> Result<(), StorageError> {
+        self.insert_if_absent(SCHEMAS_TABLE, &schema.name, &schema)
+    }
+
+    pub fn get_schema(&self, name: &str) -> Result<Option<StoredSchema>, StorageError> {
+        self.get_entry(SCHEMAS_TABLE, name)
+    }
+
+    pub fn list_schemas(&self) -> Result<Vec<StoredSchema>, StorageError> {
+        self.list_entries(SCHEMAS_TABLE)
+    }
+
+    pub fn delete_schema(&self, name: &str) -> Result<(), StorageError> {
+        self.delete_entry(SCHEMAS_TABLE, name)
     }
 
     pub fn create_pipeline(&self, pipeline: StoredPipeline) -> Result<(), StorageError> {
@@ -303,6 +330,7 @@ impl MetadataStorage {
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
         Ok(MetadataExportSnapshot {
             streams: Self::list_entries_in_read_txn(&txn, STREAMS_TABLE)?,
+            schemas: Self::list_entries_in_read_txn(&txn, SCHEMAS_TABLE)?,
             pipelines: Self::list_entries_in_read_txn(&txn, PIPELINES_TABLE)?,
             pipeline_run_states: Self::list_entries_in_read_txn(&txn, PIPELINE_RUN_STATES_TABLE)?,
             mqtt_configs: Self::list_entries_in_read_txn(&txn, SHARED_MQTT_CONFIGS_TABLE)?,
@@ -315,6 +343,9 @@ impl MetadataStorage {
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         Self::replace_table_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
+        })?;
+        Self::replace_table_entries(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
+            schema.name.as_str()
         })?;
         Self::replace_table_entries(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
             pipeline.id.as_str()
@@ -359,6 +390,9 @@ impl MetadataStorage {
         Self::ensure_entries_absent(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
         })?;
+        Self::ensure_entries_absent(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
+            schema.name.as_str()
+        })?;
         Self::ensure_entries_absent(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
             pipeline.id.as_str()
         })?;
@@ -384,6 +418,9 @@ impl MetadataStorage {
 
         Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
+        })?;
+        Self::insert_entries(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
+            schema.name.as_str()
         })?;
         Self::insert_entries(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
             pipeline.id.as_str()
@@ -431,6 +468,8 @@ impl MetadataStorage {
         txn.open_table(INIT_APPLY_META_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(UDFS_TABLE).map_err(StorageError::backend)?;
+        txn.open_table(SCHEMAS_TABLE)
+            .map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
@@ -642,6 +681,22 @@ impl StorageManager {
 
     pub fn delete_stream(&self, id: &str) -> Result<(), StorageError> {
         self.metadata.delete_stream(id)
+    }
+
+    pub fn create_schema(&self, schema: StoredSchema) -> Result<(), StorageError> {
+        self.metadata.create_schema(schema)
+    }
+
+    pub fn get_schema(&self, name: &str) -> Result<Option<StoredSchema>, StorageError> {
+        self.metadata.get_schema(name)
+    }
+
+    pub fn list_schemas(&self) -> Result<Vec<StoredSchema>, StorageError> {
+        self.metadata.list_schemas()
+    }
+
+    pub fn delete_schema(&self, name: &str) -> Result<(), StorageError> {
+        self.metadata.delete_schema(name)
     }
 
     pub fn create_pipeline(&self, pipeline: StoredPipeline) -> Result<(), StorageError> {
@@ -977,6 +1032,7 @@ mod tests {
 
         let snapshot = MetadataExportSnapshot {
             streams: vec![sample_stream()],
+            schemas: vec![],
             pipelines: vec![sample_pipeline()],
             pipeline_run_states: vec![sample_pipeline_run_state()],
             mqtt_configs: vec![sample_mqtt_config()],
@@ -1018,6 +1074,7 @@ mod tests {
 
         let snapshot = MetadataExportSnapshot {
             streams: vec![stream.clone()],
+            schemas: vec![],
             pipelines: vec![pipeline.clone()],
             pipeline_run_states: vec![run_state.clone()],
             mqtt_configs: vec![mqtt.clone()],

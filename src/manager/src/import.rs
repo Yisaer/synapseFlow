@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use storage::{
     MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
-    StoredUdf,
+    StoredSchema, StoredUdf,
 };
 use tokio::sync::TryAcquireError;
 
@@ -27,6 +27,7 @@ pub struct ImportStorageResponse {
 pub struct ImportResourceCounts {
     pub memory_topics: usize,
     pub shared_mqtt_clients: usize,
+    pub schemas: usize,
     pub streams: usize,
     pub pipelines: usize,
     pub pipeline_run_states: usize,
@@ -115,6 +116,7 @@ pub async fn import_storage_handler(
     let imported_resource_counts = ImportResourceCounts {
         memory_topics: snapshot.memory_topics.len(),
         shared_mqtt_clients: snapshot.mqtt_configs.len(),
+        schemas: snapshot.schemas.len(),
         streams: snapshot.streams.len(),
         pipelines: snapshot.pipelines.len(),
         pipeline_run_states: snapshot.pipeline_run_states.len(),
@@ -207,6 +209,25 @@ where
         });
     }
 
+    let mut schemas = Vec::with_capacity(bundle.resources.schemas.len());
+    let mut schema_names = BTreeSet::new();
+    for schema in &bundle.resources.schemas {
+        let name = schema.name.trim();
+        if name.is_empty() {
+            return Err("schema name must not be empty".to_string());
+        }
+        if !schema_names.insert(name.to_string()) {
+            return Err(format!("duplicate schema name in bundle: {name}"));
+        }
+        let props_json = serde_json::to_string(&schema.props)
+            .map_err(|err| format!("serialize schema props for {name}: {err}"))?;
+        schemas.push(StoredSchema {
+            name: name.to_string(),
+            schema_type: schema.schema_type.clone(),
+            props_json,
+        });
+    }
+
     let mut streams = Vec::with_capacity(bundle.resources.streams.len());
     let mut bundle_stream_names = BTreeSet::new();
     let mut available_stream_names = existing_stream_names.clone();
@@ -251,6 +272,7 @@ where
 
     Ok(MetadataExportSnapshot {
         streams,
+        schemas,
         pipelines,
         pipeline_run_states,
         mqtt_configs,
@@ -584,6 +606,7 @@ mod tests {
                     qos: 1,
                     max_packet_size: None,
                 }],
+                schemas: vec![],
                 streams: vec![sample_stream_request(stream_name)],
                 pipelines: vec![sample_pipeline_request(pipeline_id, stream_name)],
                 pipeline_run_states: vec![ExportPipelineRunState {
