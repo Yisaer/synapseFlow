@@ -1,0 +1,5 @@
+syntax = "proto3";
+
+message Scores {
+  map<string, int32> scores = 1;
+}

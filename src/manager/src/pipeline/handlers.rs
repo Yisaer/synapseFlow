@@ -1057,6 +1057,7 @@ mod tests {
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
                 props: JsonMap::new(),
+                r#ref: None,
             },
             props: StreamPropsRequest { fields },
             shared: false,
@@ -1073,6 +1074,7 @@ mod tests {
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
                 props: JsonMap::new(),
+                r#ref: None,
             },
             props: StreamPropsRequest {
                 fields: JsonMap::new(),

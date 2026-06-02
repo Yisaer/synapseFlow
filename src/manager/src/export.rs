@@ -23,6 +23,8 @@ pub struct ExportBundleV1 {
 pub struct ExportResources {
     pub memory_topics: Vec<ExportMemoryTopic>,
     pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
+    #[serde(default)]
+    pub schemas: Vec<ExportSchema>,
     pub streams: Vec<CreateStreamRequest>,
     pub pipelines: Vec<CreatePipelineRequest>,
     pub pipeline_run_states: Vec<ExportPipelineRunState>,
@@ -48,6 +50,15 @@ pub struct ExportPipelineRunState {
 pub struct ExportUdf {
     pub name: String,
     pub wasm_sha256: String,
+}
+
+/// Schema metadata included in the export bundle.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExportSchema {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    pub props: serde_json::Map<String, serde_json::Value>,
 }
 
 pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -195,6 +206,19 @@ pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBund
     }
     shared_mqtt_clients.sort_by(|a, b| a.key.cmp(&b.key));
 
+    let mut schemas = Vec::with_capacity(snapshot.schemas.len());
+    for stored in snapshot.schemas {
+        let props: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&stored.props_json)
+                .map_err(|err| format!("decode stored schema {} props: {err}", stored.name))?;
+        schemas.push(ExportSchema {
+            name: stored.name,
+            schema_type: stored.schema_type,
+            props,
+        });
+    }
+    schemas.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut streams = Vec::with_capacity(snapshot.streams.len());
     for stored in snapshot.streams {
         let req: CreateStreamRequest = serde_json::from_str(&stored.raw_json)
@@ -252,6 +276,7 @@ pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBund
         resources: ExportResources {
             memory_topics,
             shared_mqtt_clients,
+            schemas,
             streams,
             pipelines,
             pipeline_run_states,

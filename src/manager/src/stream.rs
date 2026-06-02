@@ -101,6 +101,10 @@ pub struct SchemaConfigRequest {
     #[serde(rename = "type")]
     pub schema_type: String,
     pub props: JsonMap<String, JsonValue>,
+    /// If set, references a pre-defined named schema instead of using inline type+props.
+    #[serde(rename = "ref")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
 }
 
 impl SchemaConfigRequest {
@@ -108,6 +112,7 @@ impl SchemaConfigRequest {
         Self {
             schema_type: schema_type.into(),
             props,
+            r#ref: None,
         }
     }
 }
@@ -165,6 +170,7 @@ impl SchemaRegistry {
     pub fn with_builtin() -> Self {
         let registry = Self::new();
         registry.register_schema("json", Arc::new(parse_json_schema));
+        registry.register_schema("proto", Arc::new(crate::schema::proto::parse_proto_schema));
         registry
     }
 
@@ -196,6 +202,58 @@ pub fn schema_registry() -> &'static SchemaRegistry {
 /// Register a custom schema parser into the global registry.
 pub fn register_schema(kind: impl Into<String>, parser: Arc<SchemaParser>) {
     schema_registry().register_schema(kind, parser);
+}
+
+/// In-memory store of resolved named schemas, keyed by name.
+///
+/// Schemas are parsed once at creation time (or on startup restore)
+/// and cached here so that stream creation by reference is an O(1) lookup.
+pub struct NamedSchemaStore {
+    schemas: RwLock<HashMap<String, Arc<Schema>>>,
+}
+
+impl NamedSchemaStore {
+    pub fn new() -> Self {
+        Self {
+            schemas: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn insert(&self, name: String, schema: Schema) {
+        self.schemas.write().insert(name, Arc::new(schema));
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<Schema>> {
+        self.schemas.read().get(name).cloned()
+    }
+
+    pub fn remove(&self, name: &str) -> Option<Arc<Schema>> {
+        self.schemas.write().remove(name)
+    }
+
+    pub fn list_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.schemas.read().keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Remove all entries from the store.
+    pub fn clear(&self) {
+        self.schemas.write().clear();
+    }
+}
+
+impl Default for NamedSchemaStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static NAMED_SCHEMA_STORE: OnceLock<NamedSchemaStore> = OnceLock::new();
+
+/// Access the global named schema store.
+pub fn named_schema_store() -> &'static NamedSchemaStore {
+    NAMED_SCHEMA_STORE.get_or_init(NamedSchemaStore::new)
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -1006,6 +1064,16 @@ pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Sch
     if req.stream_type.eq_ignore_ascii_case("video") {
         return Ok(flow::codec::default_video_schema(req.name.clone()));
     }
+    if let Some(ref_name) = &req.schema.r#ref {
+        let trimmed = ref_name.trim();
+        if trimmed.is_empty() {
+            return Err("schema ref must not be empty".to_string());
+        }
+        return named_schema_store()
+            .get(trimmed)
+            .map(|schema| (*schema).clone())
+            .ok_or_else(|| format!("referenced schema '{}' not found", trimmed));
+    }
     schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)
 }
 
@@ -1451,6 +1519,7 @@ mod tests {
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
                 props: schema_props,
+                r#ref: None,
             },
             props: StreamPropsRequest {
                 fields: props_fields,
@@ -1490,6 +1559,7 @@ mod tests {
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
                 props: schema_props,
+                r#ref: None,
             },
             props: StreamPropsRequest {
                 fields: props_fields,
@@ -1517,6 +1587,7 @@ mod tests {
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
                 props: schema_props,
+                r#ref: None,
             },
             props: StreamPropsRequest::default(),
             shared: false,

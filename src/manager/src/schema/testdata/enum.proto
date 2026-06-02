@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+enum Status {
+  UNKNOWN = 0;
+  ACTIVE = 1;
+  INACTIVE = 2;
+}
+
+message Record {
+  string id = 1;
+  Status status = 2;
+}

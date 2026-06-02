@@ -1,9 +1,10 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeSet;
 use storage::{
     MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
-    StoredUdf,
+    StoredSchema, StoredUdf,
 };
 use tokio::sync::TryAcquireError;
 
@@ -14,7 +15,13 @@ use crate::export::{
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
 use crate::storage_bridge;
-use crate::stream::CreateStreamRequest;
+use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
+
+/// Reload all schemas from persistent storage into the in-memory `NamedSchemaStore`.
+fn reload_schemas_from_storage(storage: &storage::StorageManager) {
+    named_schema_store().clear();
+    let _ = crate::storage_bridge::hydrate_schemas_from_storage(storage);
+}
 
 #[derive(Serialize)]
 pub struct ImportStorageResponse {
@@ -27,6 +34,7 @@ pub struct ImportStorageResponse {
 pub struct ImportResourceCounts {
     pub memory_topics: usize,
     pub shared_mqtt_clients: usize,
+    pub schemas: usize,
     pub streams: usize,
     pub pipelines: usize,
     pub pipeline_run_states: usize,
@@ -115,6 +123,7 @@ pub async fn import_storage_handler(
     let imported_resource_counts = ImportResourceCounts {
         memory_topics: snapshot.memory_topics.len(),
         shared_mqtt_clients: snapshot.mqtt_configs.len(),
+        schemas: snapshot.schemas.len(),
         streams: snapshot.streams.len(),
         pipelines: snapshot.pipelines.len(),
         pipeline_run_states: snapshot.pipeline_run_states.len(),
@@ -126,6 +135,9 @@ pub async fn import_storage_handler(
         audit.log_failure(&err);
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
+
+    // Re-hydrate NamedSchemaStore from the newly imported storage
+    reload_schemas_from_storage(state.storage.as_ref());
 
     audit.log_success();
     (
@@ -207,12 +219,51 @@ where
         });
     }
 
+    let mut schemas = Vec::with_capacity(bundle.resources.schemas.len());
+    let mut schema_names = BTreeSet::new();
+    for schema in &bundle.resources.schemas {
+        let name = schema.name.trim();
+        if name.is_empty() {
+            return Err("schema name must not be empty".to_string());
+        }
+        if !schema_names.insert(name.to_string()) {
+            return Err(format!("duplicate schema name in bundle: {name}"));
+        }
+        let props_json = serde_json::to_string(&schema.props)
+            .map_err(|err| format!("serialize schema props for {name}: {err}"))?;
+        schemas.push(StoredSchema {
+            name: name.to_string(),
+            schema_type: schema.schema_type.clone(),
+            props_json,
+        });
+    }
+
+    // Validate each imported schema through the schema registry
+    let mut available_schema_names: BTreeSet<String> = BTreeSet::new();
+    for stored in &schemas {
+        let props: JsonMap<String, JsonValue> = serde_json::from_str(&stored.props_json)
+            .map_err(|err| format!("schema {} has invalid props JSON: {err}", stored.name))?;
+        if let Err(err) = schema_registry().parse(&stored.schema_type, &stored.name, &props) {
+            return Err(format!("schema {} is invalid: {err}", stored.name));
+        }
+        available_schema_names.insert(stored.name.clone());
+    }
+
     let mut streams = Vec::with_capacity(bundle.resources.streams.len());
     let mut bundle_stream_names = BTreeSet::new();
     let mut available_stream_names = existing_stream_names.clone();
 
     for req in &bundle.resources.streams {
         validate_stream_request(req, &mut bundle_stream_names)?;
+        if let Some(ref_name) = &req.schema.r#ref {
+            let trimmed = ref_name.trim();
+            if !available_schema_names.contains(trimmed) {
+                return Err(format!(
+                    "stream {} references schema '{}' which is not present in the import bundle",
+                    req.name, trimmed
+                ));
+            }
+        }
         available_stream_names.insert(req.name.clone());
         streams.push(storage_bridge::stored_stream_from_request(req)?);
     }
@@ -251,6 +302,7 @@ where
 
     Ok(MetadataExportSnapshot {
         streams,
+        schemas,
         pipelines,
         pipeline_run_states,
         mqtt_configs,
@@ -584,6 +636,7 @@ mod tests {
                     qos: 1,
                     max_packet_size: None,
                 }],
+                schemas: vec![],
                 streams: vec![sample_stream_request(stream_name)],
                 pipelines: vec![sample_pipeline_request(pipeline_id, stream_name)],
                 pipeline_run_states: vec![ExportPipelineRunState {

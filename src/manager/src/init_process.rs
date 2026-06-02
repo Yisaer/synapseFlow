@@ -193,6 +193,7 @@ mod tests {
             resources: ExportResources {
                 memory_topics: Vec::new(),
                 shared_mqtt_clients: Vec::new(),
+                schemas: vec![],
                 streams: vec![sample_stream_request(stream_name)],
                 pipelines: Vec::new(),
                 pipeline_run_states: Vec::new(),

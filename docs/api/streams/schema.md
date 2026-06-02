@@ -2,7 +2,10 @@
 
 This document describes stream metadata and schema introspection from a **SQL and schema** perspective.
 
-For agent implementation guidance (workflow, validation loop, do/don’t), see `docs/integrations/agents/runtime_playbook.md`.
+For the schema registry system (named schemas, proto parser), see `docs/api/schema_registry.md`.
+For the schema CRUD REST API, see `user_docs/api/schema.md`.
+
+For agent implementation guidance (workflow, validation loop, do/don't), see `docs/integrations/agents/runtime_playbook.md`.
 
 For stream management (create/delete) REST APIs, see `user_docs/api/stream.md`.
 
@@ -26,7 +29,7 @@ curl -s http://127.0.0.1:8080/streams | jq .
 
 `GET /streams/describe/:name`
 
-Returns a single stream’s schema and definition spec.
+Returns a single stream's schema and definition spec.
 
 Example:
 
