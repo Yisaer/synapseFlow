@@ -1245,13 +1245,12 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
-            name: "row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder",
+            name: "row_diff_with_batch_keeps_row_diff_and_uses_sink_encoder",
             source_name: "stream_ab",
             sql: "SELECT a, b FROM stream_ab",
             covers: &[
                 "sink.output.row_diff",
                 "sink.output.batching",
-                "planner.physical.streaming_encoder_rewrite",
                 "planner.physical.by_index_projection_into_row_diff_rewrite",
             ],
             input_data: vec![

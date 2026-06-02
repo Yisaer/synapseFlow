@@ -44,7 +44,7 @@ the connector does not inspect rows, schema, output mode, or encoder format.
 Each encoded delivery unit becomes one final file:
 
 ```text
-Encoder -> EncodedBytes -> FileSinkConnector::send -> one file
+PhysicalSinkEncoder -> EncodedDelivery -> FileSinkConnector delivery -> one file
 ```
 
 The file sink does not add delimiters, newlines, headers, or framing. If the output should be

@@ -250,7 +250,7 @@ The rule should be covered by table-driven planner explain tests in:
 Suggested cases:
 
 1. pure by-index project feeding row diff rewrites to passthrough project
-2. row diff branch with batching still rewrites before `StreamingEncoder`
+2. row diff branch with batching still rewrites before `SinkEncoder`
 3. shared project with one non-row-diff consumer does not rewrite
 4. wildcard project does not rewrite
 5. mixed projection does not rewrite in the first version

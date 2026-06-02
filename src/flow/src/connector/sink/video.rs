@@ -172,12 +172,6 @@ impl SinkConnector for VideoSinkConnector {
         }
     }
 
-    async fn send(&mut self, _payload: &[u8]) -> Result<(), SinkConnectorError> {
-        Err(SinkConnectorError::Other(
-            "video sink expects collection payloads with video frame fields".to_string(),
-        ))
-    }
-
     async fn send_collection(
         &mut self,
         collection: &dyn Collection,

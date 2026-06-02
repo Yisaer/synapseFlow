@@ -88,10 +88,8 @@ These are modeled as sink-level flush controls, not connector-specific controls.
 
 Behavior:
 
-- when batching is enabled, the planner inserts a `Batch` stage before delivery
-- batching is applicable to both encoded sink paths and direct collection sink paths
-- if the downstream encoder supports streaming, physical optimization may rewrite
-  `Batch -> Encoder` into a single `StreamingEncoder`
+- encoded-byte sinks carry batching settings on `PhysicalSinkEncoder`
+- direct collection sink paths use `PhysicalBatch` for the same sink-level batching semantics
 
 ## Current Connector-Specific Rules
 
@@ -160,19 +158,13 @@ After the final `Project`, each sink branch is built independently.
 Without batching:
 
 ```text
-Project -> Encoder -> DataSink
+Project -> SinkEncoder -> SinkConnector
 ```
 
 With batching:
 
 ```text
-Project -> Batch -> Encoder -> DataSink
-```
-
-After `StreamingEncoderRewrite`:
-
-```text
-Project -> StreamingEncoder -> DataSink
+Project -> SinkEncoder -> SinkConnector
 ```
 
 #### Direct collection path
@@ -227,8 +219,8 @@ These capabilities already exist near the sink boundary:
    - `encoder.props.omit_null_columns`
    - implemented inside the JSON encoder's native object-formatting path.
 
-4. **Streaming encoder rewrite**
-   - Rewrites `Batch -> Encoder` into `StreamingEncoder` when the encoder supports streaming.
+4. **Sink encoder lowering**
+   - Lowers encoded-byte sinks to `SinkEncoder -> SinkConnector`, with sink-side batch settings handled inside `SinkEncoder`.
 
 5. **By-index projection into encoder rewrite**
    - Delays materialization of eligible by-index projected columns into the encoder.
@@ -269,5 +261,4 @@ In particular:
 - [Row Diff Output](output/row_diff_output.md)
 - [Encoder Transform](encoders/encoder_transform.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)
-- [StreamingEncoderRewrite](../../planner/optimize/physical/streaming_encoder_rewrite.md)
 - [ByIndexProjectionIntoEncoderRewrite](../../planner/optimize/physical/by_index_projection_into_encoder_rewrite.md)

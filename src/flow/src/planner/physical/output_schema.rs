@@ -67,8 +67,7 @@ impl PhysicalPlan {
             | PhysicalPlan::Order(_)
             | PhysicalPlan::EmptySuppress(_)
             | PhysicalPlan::Batch(_)
-            | PhysicalPlan::Encoder(_)
-            | PhysicalPlan::StreamingEncoder(_)
+            | PhysicalPlan::SinkEncoder(_)
             | PhysicalPlan::ResultCollect(_)
             | PhysicalPlan::TumblingWindow(_)
             | PhysicalPlan::CountWindow(_)
@@ -81,7 +80,9 @@ impl PhysicalPlan {
             | PhysicalPlan::SourceChangeGate(_) => passthrough_single_child(self),
 
             PhysicalPlan::Barrier(_) => passthrough_fan_in(self),
-            PhysicalPlan::DataSink(_) => passthrough_single_child(self),
+            PhysicalPlan::DataSink(_) | PhysicalPlan::SinkConnector(_) => {
+                passthrough_single_child(self)
+            }
 
             PhysicalPlan::Compute(plan) => {
                 let mut columns = passthrough_single_child(self)?.columns.to_vec();

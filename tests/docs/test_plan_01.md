@@ -52,8 +52,8 @@
 
 ### Streaming encoder rewrite
 
-- Batch encoder to streaming encoder rewrite is covered by `optimize_rewrites_batch_encoder_chain_to_streaming_encoder`.
-- Template-transform plus batching rewrite is covered by `transform_template_with_batch_rewrites_to_streaming_encoder`.
+- Encoded sink batching lowering is covered by `encoded_sink_with_batch_lowers_to_sink_encoder`.
+- Template-transform plus batching rewrite is covered by `transform_template_with_batch_uses_sink_encoder`.
 
 ### By-index projection rewrite and row-diff planning
 
@@ -82,7 +82,7 @@
   - omit-if-empty insertion after row diff
 - Representative cases include:
   - `row_diff_single_json_sink_inserts_physical_row_diff`
-  - `row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder`
+  - `row_diff_with_batch_keeps_row_diff_and_uses_sink_encoder`
   - `row_diff_partial_late_materialization_splits_row_diff_and_encoder_owned_columns`
   - `row_diff_alias_project_rewrites_into_row_diff`
   - `row_diff_memory_collection_sink_places_row_diff_before_materialize`
@@ -145,7 +145,7 @@
 - Baseline batching runtime coverage is provided by:
   - `pipeline_batching_table_driven`
   - `pipeline_encoder_transform_table_driven`
-- Graceful-stop flushing of a partial batch is covered by `streaming_encoder_flushes_partial_batch_on_graceful_stop`.
+- Graceful-stop flushing of a partial batch is covered by `sink_encoder_flushes_partial_batch_on_graceful_stop`.
 - Row-diff plus batching plus omit-if-empty runtime behavior is covered by `delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones`.
 
 ### Sampler runtime
@@ -164,7 +164,7 @@
 ### Stateful runtime pairings
 
 - Stateful projection plus row diff is covered by `stateful_projection_followed_by_row_diff_delta_output`.
-- Stateful projection plus batched streaming encoder is covered by `stateful_projection_with_batched_streaming_encoder`.
+- Stateful projection plus batched streaming encoder is covered by `stateful_projection_with_batched_sink_encoder`.
 - Stateful window aggregation runtime coverage is included in `stateful_function_table_driven`.
 
 ### Pipeline stats

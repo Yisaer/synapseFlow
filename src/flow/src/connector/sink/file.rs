@@ -1,10 +1,10 @@
 //! File sink connector for writing encoded delivery units to local files.
 
-use super::{SinkConnector, SinkConnectorError};
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -28,11 +28,18 @@ pub struct FileRetentionConfig {
     pub max_file_age_days: u64,
 }
 
-#[derive(Clone)]
 pub(crate) struct FileSinkConnector {
     id: String,
     config: FileSinkConfig,
     tmp_scope: String,
+    current: Option<FileDeliveryState>,
+}
+
+struct FileDeliveryState {
+    tmp_path: PathBuf,
+    file: File,
+    bytes_written: u64,
+    ts_ms: u128,
 }
 
 impl FileSinkConnector {
@@ -41,6 +48,7 @@ impl FileSinkConnector {
             id: id.into(),
             tmp_scope: tmp_scope(&config.pipeline_id, &config.sink_name),
             config,
+            current: None,
         }
     }
 
@@ -172,21 +180,6 @@ impl FileSinkConnector {
                 ))
             })?;
         Ok((tmp_path, file))
-    }
-
-    fn write_payload(&self, file: &mut File, payload: &[u8]) -> Result<(), SinkConnectorError> {
-        file.write_all(payload).map_err(|err| {
-            SinkConnectorError::Other(format!(
-                "file sink `{}` failed to write payload: {err}",
-                self.id
-            ))
-        })?;
-        file.sync_all().map_err(|err| {
-            SinkConnectorError::Other(format!(
-                "file sink `{}` failed to flush payload: {err}",
-                self.id
-            ))
-        })
     }
 
     fn finalize_tmp_file(
@@ -338,31 +331,117 @@ impl FileSinkConnector {
         let _ = fs::remove_file(tmp_path);
     }
 
+    fn cleanup_lost_delivery_tmp_file(&self, tmp_path: &Path, reason: &str) {
+        match fs::remove_file(tmp_path) {
+            Ok(()) => {
+                tracing::warn!(
+                    connector_id = %self.id,
+                    tmp_path = %tmp_path.display(),
+                    reason,
+                    "file sink cleaned up lost delivery tmp file"
+                );
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(
+                    connector_id = %self.id,
+                    tmp_path = %tmp_path.display(),
+                    reason,
+                    error = %err,
+                    "file sink failed to clean up lost delivery tmp file"
+                );
+            }
+        }
+    }
+
     fn prepare_blocking(&self) -> Result<(), SinkConnectorError> {
         self.validate_config()?;
         self.ensure_dirs_exist()?;
         self.cleanup_orphaned_tmp_files()
     }
 
-    fn send_blocking(&self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    fn start_delivery_blocking(&mut self) -> Result<(), SinkConnectorError> {
+        if self.current.is_some() {
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` already has an active delivery",
+                self.id
+            )));
+        }
         self.validate_config()?;
         self.ensure_dirs_exist()?;
         let ts_ms = current_epoch_millis()?;
-        let (tmp_path, mut file) = self.begin_tmp_file()?;
+        let (tmp_path, file) = self.begin_tmp_file()?;
+        self.current = Some(FileDeliveryState {
+            tmp_path,
+            file,
+            bytes_written: 0,
+            ts_ms,
+        });
+        Ok(())
+    }
+
+    fn write_chunk_blocking(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(state) = self.current.as_mut() else {
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+        state.file.write_all(bytes).map_err(|err| {
+            SinkConnectorError::Other(format!(
+                "file sink `{}` failed to write payload: {err}",
+                self.id
+            ))
+        })?;
+        state.bytes_written += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn finish_delivery_blocking(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let Some(state) = self.current.take() else {
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` finished without active delivery",
+                self.id
+            )));
+        };
         let result = (|| {
-            self.write_payload(&mut file, payload)?;
-            drop(file);
-            let _final_path = self.finalize_tmp_file(&tmp_path, ts_ms)?;
-            self.apply_retention()
+            state.file.sync_all().map_err(|err| {
+                SinkConnectorError::Other(format!(
+                    "file sink `{}` failed to flush payload: {err}",
+                    self.id
+                ))
+            })?;
+            drop(state.file);
+            let _final_path = self.finalize_tmp_file(&state.tmp_path, state.ts_ms)?;
+            self.apply_retention()?;
+            Ok(DeliveryResult {
+                bytes_written: state.bytes_written,
+            })
         })();
         if result.is_err() {
-            self.abort_tmp_file(&tmp_path);
+            self.abort_tmp_file(&state.tmp_path);
         }
         result
     }
 
+    fn abort_delivery_blocking(&mut self) {
+        if let Some(state) = self.current.take() {
+            drop(state.file);
+            self.abort_tmp_file(&state.tmp_path);
+        }
+    }
+
+    fn blocking_view(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            config: self.config.clone(),
+            tmp_scope: self.tmp_scope.clone(),
+            current: None,
+        }
+    }
+
     async fn run_blocking<T>(
-        &self,
+        connector_id: String,
         operation: impl FnOnce() -> Result<T, SinkConnectorError> + Send + 'static,
     ) -> Result<T, SinkConnectorError>
     where
@@ -372,8 +451,7 @@ impl FileSinkConnector {
             .await
             .map_err(|err| {
                 SinkConnectorError::Other(format!(
-                    "file sink `{}` blocking task failed: {err}",
-                    self.id
+                    "file sink `{connector_id}` blocking task failed: {err}"
                 ))
             })?
     }
@@ -386,15 +464,106 @@ impl SinkConnector for FileSinkConnector {
     }
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
-        let state = self.clone();
-        self.run_blocking(move || state.prepare_blocking()).await
+        let connector_id = self.id.clone();
+        let connector = self.blocking_view();
+        Self::run_blocking(connector_id, move || connector.prepare_blocking()).await
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
-        let state = self.clone();
-        let payload = payload.to_vec();
-        self.run_blocking(move || state.send_blocking(&payload))
-            .await
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        let connector_id = self.id.clone();
+        let mut connector = self.blocking_view();
+        let state = Self::run_blocking(connector_id.clone(), move || {
+            connector.start_delivery_blocking()?;
+            connector.current.take().ok_or_else(|| {
+                SinkConnectorError::Other(format!(
+                    "file sink `{connector_id}` started without active delivery"
+                ))
+            })
+        })
+        .await?;
+        self.current = Some(state);
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(state) = self.current.take() else {
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+
+        let connector_id = self.id.clone();
+        let tmp_path = state.tmp_path.clone();
+        let mut connector = self.blocking_view();
+        connector.current = Some(state);
+        let payload = bytes.to_vec();
+        let result = Self::run_blocking(connector_id.clone(), move || {
+            if let Err(err) = connector.write_chunk_blocking(&payload) {
+                connector.abort_delivery_blocking();
+                return Err(err);
+            }
+            connector.current.take().ok_or_else(|| {
+                SinkConnectorError::Other(format!(
+                    "file sink `{connector_id}` wrote chunk without active delivery"
+                ))
+            })
+        })
+        .await;
+        let state = match result {
+            Ok(state) => state,
+            Err(err) => {
+                self.cleanup_lost_delivery_tmp_file(
+                    &tmp_path,
+                    "write_chunk failed after state handoff",
+                );
+                return Err(err);
+            }
+        };
+        self.current = Some(state);
+        Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let Some(state) = self.current.take() else {
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` finished without active delivery",
+                self.id
+            )));
+        };
+
+        let connector_id = self.id.clone();
+        let tmp_path = state.tmp_path.clone();
+        let mut connector = self.blocking_view();
+        connector.current = Some(state);
+        let result =
+            Self::run_blocking(connector_id, move || connector.finish_delivery_blocking()).await;
+        if result.is_err() {
+            self.cleanup_lost_delivery_tmp_file(
+                &tmp_path,
+                "finish_delivery failed after state handoff",
+            );
+        }
+        result
+    }
+
+    async fn abort_delivery(&mut self) {
+        let Some(state) = self.current.take() else {
+            return;
+        };
+
+        let connector_id = self.id.clone();
+        let mut connector = self.blocking_view();
+        connector.current = Some(state);
+        if let Err(err) =
+            tokio::task::spawn_blocking(move || connector.abort_delivery_blocking()).await
+        {
+            tracing::warn!(
+                connector_id = %connector_id,
+                error = %err,
+                "file sink failed to abort delivery in blocking task"
+            );
+        }
     }
 
     async fn close(&mut self) -> Result<(), SinkConnectorError> {
@@ -508,13 +677,19 @@ mod tests {
         files
     }
 
+    async fn deliver(connector: &mut FileSinkConnector, bytes: &[u8]) {
+        connector.start_delivery().await.expect("start delivery");
+        connector.write_chunk(bytes).await.expect("write chunk");
+        connector.finish_delivery().await.expect("finish delivery");
+    }
+
     #[tokio::test]
     async fn file_sink_writes_one_payload_to_one_final_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut connector = FileSinkConnector::new("sink_1", config(dir.path()));
 
         connector.ready().await.expect("ready");
-        connector.send(br#"{"speed":42}"#).await.expect("send");
+        deliver(&mut connector, br#"{"speed":42}"#).await;
 
         let files = final_files(dir.path());
         assert_eq!(files.len(), 1);
@@ -533,9 +708,8 @@ mod tests {
         let ts_ms = current_epoch_millis().expect("clock");
         fs::write(connector.final_path(ts_ms, 1), b"existing").expect("write existing");
         let (tmp_path, mut tmp) = connector.begin_tmp_file().expect("tmp");
-        connector
-            .write_payload(&mut tmp, b"new")
-            .expect("write tmp");
+        tmp.write_all(b"new").expect("write tmp");
+        tmp.sync_all().expect("sync tmp");
         drop(tmp);
 
         let final_path = connector
@@ -575,7 +749,7 @@ mod tests {
         let mut connector = FileSinkConnector::new("sink_1", cfg);
 
         connector.ready().await.expect("ready");
-        connector.send(b"bytes").await.expect("send");
+        deliver(&mut connector, b"bytes").await;
 
         let files = final_files(dir.path());
         assert_eq!(files.len(), 1);
@@ -585,16 +759,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_sink_send_does_not_cleanup_tmp_files() {
+    async fn file_sink_delivery_does_not_cleanup_tmp_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut connector = FileSinkConnector::new("sink_1", config(dir.path()));
         connector.ready().await.expect("ready");
         let orphan = connector.tmp_dir().join("orphan.tmp");
         fs::write(&orphan, b"orphan").expect("write orphan");
 
-        connector.send(b"bytes").await.expect("send");
+        deliver(&mut connector, b"bytes").await;
 
-        assert!(orphan.exists(), "send must not run tmp cleanup");
+        assert!(orphan.exists(), "delivery must not run tmp cleanup");
     }
 
     #[tokio::test]

@@ -1780,8 +1780,8 @@ async fn acc_lifecycle_delta_omit_if_empty_suppresses_unchanged_inactive_state()
 
 // coverage-covers: parser.function.stateful_functions, sink.output.batching, sink.connector.memory_output
 #[tokio::test]
-async fn stateful_projection_with_batched_streaming_encoder() {
-    let case_name = "stateful_projection_with_batched_streaming_encoder";
+async fn stateful_projection_with_batched_sink_encoder() {
+    let case_name = "stateful_projection_with_batched_sink_encoder";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
@@ -1863,8 +1863,8 @@ async fn stateful_projection_with_batched_streaming_encoder() {
 
 // coverage-covers: parser.function.stateful_functions, sink.output.batching, sink.connector.memory_output
 #[tokio::test]
-async fn acc_lifecycle_with_batched_streaming_encoder() {
-    let case_name = "acc_lifecycle_with_batched_streaming_encoder";
+async fn acc_lifecycle_with_batched_sink_encoder() {
+    let case_name = "acc_lifecycle_with_batched_sink_encoder";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))

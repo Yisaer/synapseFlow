@@ -1,6 +1,6 @@
 //! Memory sink connector that publishes to in-process pub/sub topics.
 
-use super::{SinkConnector, SinkConnectorError};
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use crate::connector::memory_pubsub::{MemoryPubSubRegistry, MemoryTopicKind, SharedCollection};
 use crate::model::Collection;
 use async_trait::async_trait;
@@ -57,6 +57,7 @@ pub struct MemoryBytesSinkConnector {
     topic: String,
     registry: MemoryPubSubRegistry,
     publisher: Option<crate::connector::MemoryPublisher>,
+    buffer: Option<Vec<u8>>,
 }
 
 impl MemoryBytesSinkConnector {
@@ -70,6 +71,7 @@ impl MemoryBytesSinkConnector {
             topic: topic.into(),
             registry,
             publisher: None,
+            buffer: None,
         }
     }
 
@@ -100,12 +102,40 @@ impl SinkConnector for MemoryBytesSinkConnector {
         Ok(())
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        let _ = self.ensure_publisher()?;
+        self.buffer = Some(Vec::new());
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(buffer) = self.buffer.as_mut() else {
+            return Err(SinkConnectorError::Other(format!(
+                "memory bytes sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+        buffer.extend_from_slice(payload);
+        Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let payload = self.buffer.take().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "memory bytes sink `{}` finished without active delivery",
+                self.id
+            ))
+        })?;
+        let bytes_written = payload.len() as u64;
         let publisher = self.ensure_publisher()?;
         publisher
-            .publish_bytes(Bytes::copy_from_slice(payload))
+            .publish_bytes(Bytes::from(payload))
             .map_err(|err| SinkConnectorError::Other(err.to_string()))?;
-        Ok(())
+        Ok(DeliveryResult { bytes_written })
+    }
+
+    async fn abort_delivery(&mut self) {
+        self.buffer = None;
     }
 
     async fn close(&mut self) -> Result<(), SinkConnectorError> {
@@ -162,13 +192,6 @@ impl SinkConnector for MemoryCollectionSinkConnector {
         Ok(())
     }
 
-    async fn send(&mut self, _payload: &[u8]) -> Result<(), SinkConnectorError> {
-        Err(SinkConnectorError::Other(format!(
-            "connector `{}` does not support bytes payloads for collection topic `{}`",
-            self.id, self.topic
-        )))
-    }
-
     async fn send_collection(
         &mut self,
         collection: &dyn Collection,
@@ -209,10 +232,31 @@ impl SinkConnector for MemorySinkConnector {
         }
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
         match self {
-            MemorySinkConnector::Bytes(inner) => inner.send(payload).await,
-            MemorySinkConnector::Collection(inner) => inner.send(payload).await,
+            MemorySinkConnector::Bytes(inner) => inner.start_delivery().await,
+            MemorySinkConnector::Collection(inner) => inner.start_delivery().await,
+        }
+    }
+
+    async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
+        match self {
+            MemorySinkConnector::Bytes(inner) => inner.write_chunk(bytes).await,
+            MemorySinkConnector::Collection(inner) => inner.write_chunk(bytes).await,
+        }
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        match self {
+            MemorySinkConnector::Bytes(inner) => inner.finish_delivery().await,
+            MemorySinkConnector::Collection(inner) => inner.finish_delivery().await,
+        }
+    }
+
+    async fn abort_delivery(&mut self) {
+        match self {
+            MemorySinkConnector::Bytes(inner) => inner.abort_delivery().await,
+            MemorySinkConnector::Collection(inner) => inner.abort_delivery().await,
         }
     }
 
@@ -252,6 +296,12 @@ mod tests {
         SharedCollection::from_box(Box::new(batch))
     }
 
+    async fn deliver(connector: &mut MemorySinkConnector, bytes: &[u8]) {
+        connector.start_delivery().await.expect("start delivery");
+        connector.write_chunk(bytes).await.expect("write chunk");
+        connector.finish_delivery().await.expect("finish delivery");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn memory_bytes_sink_connector_publishes_bytes_and_rejects_collection_payloads() {
         let registry = MemoryPubSubRegistry::new();
@@ -271,10 +321,7 @@ mod tests {
         );
         connector.ready().await.expect("ready bytes connector");
 
-        connector
-            .send(b"without_subscribers")
-            .await
-            .expect("bytes send should succeed without subscribers");
+        deliver(&mut connector, b"without_subscribers").await;
 
         let err = connector
             .send_collection(&sample_collection())
@@ -289,10 +336,7 @@ mod tests {
         let mut output = registry
             .open_subscribe_bytes(topic)
             .expect("subscribe bytes topic");
-        connector
-            .send(b"hello_bytes")
-            .await
-            .expect("publish bytes payload");
+        deliver(&mut connector, b"hello_bytes").await;
 
         let received = timeout(Duration::from_secs(2), output.recv())
             .await
@@ -330,12 +374,12 @@ mod tests {
             .expect("collection send should succeed without subscribers");
 
         let err = connector
-            .send(b"unexpected_bytes")
+            .start_delivery()
             .await
             .expect_err("collection connector should reject bytes payloads");
         assert!(
             err.to_string()
-                .contains("does not support bytes payloads for collection topic"),
+                .contains("does not support encoded delivery"),
             "unexpected bytes rejection error: {err}"
         );
 

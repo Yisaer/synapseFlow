@@ -6,7 +6,9 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -96,6 +98,7 @@ struct SinkForwarding<'a> {
 
 struct ConnectorBinding {
     connector: Box<dyn SinkConnector>,
+    active_delivery: bool,
 }
 
 impl ConnectorBinding {
@@ -110,15 +113,6 @@ impl ConnectorBinding {
             .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
     }
 
-    async fn publish(&mut self, payload: &[u8]) -> Result<(), ProcessorError> {
-        self.connector
-            .send(payload)
-            .await
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-
-        Ok(())
-    }
-
     async fn publish_collection(
         &mut self,
         collection: &dyn Collection,
@@ -130,10 +124,78 @@ impl ConnectorBinding {
     }
 
     async fn close(&mut self) -> Result<(), ProcessorError> {
+        if self.active_delivery {
+            self.connector.abort_delivery().await;
+            self.active_delivery = false;
+        }
         self.connector
             .close()
             .await
             .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
+    }
+
+    async fn handle_delivery(
+        &mut self,
+        flags: EncodedDeliveryFlags,
+        bytes: &[u8],
+    ) -> Result<bool, ProcessorError> {
+        if flags.contains(EncodedDeliveryFlags::ABORT) {
+            self.connector.abort_delivery().await;
+            self.active_delivery = false;
+            return Ok(false);
+        }
+
+        if flags.contains(EncodedDeliveryFlags::START) {
+            if self.active_delivery {
+                self.connector.abort_delivery().await;
+                self.active_delivery = false;
+                return Err(ProcessorError::ProcessingError(
+                    "encoded delivery protocol error: START received while delivery is active"
+                        .to_string(),
+                ));
+            }
+            self.connector
+                .start_delivery()
+                .await
+                .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+            self.active_delivery = true;
+        }
+
+        if !bytes.is_empty() {
+            if !self.active_delivery {
+                return Err(ProcessorError::ProcessingError(
+                    "encoded delivery protocol error: chunk received without active delivery"
+                        .to_string(),
+                ));
+            }
+            if let Err(err) = self.connector.write_chunk(bytes).await {
+                self.connector.abort_delivery().await;
+                self.active_delivery = false;
+                return Err(ProcessorError::ProcessingError(err.to_string()));
+            }
+        }
+
+        if flags.contains(EncodedDeliveryFlags::END) {
+            if !self.active_delivery {
+                return Err(ProcessorError::ProcessingError(
+                    "encoded delivery protocol error: END received without active delivery"
+                        .to_string(),
+                ));
+            }
+            match self.connector.finish_delivery().await {
+                Ok(_) => {
+                    self.active_delivery = false;
+                    return Ok(true);
+                }
+                Err(err) => {
+                    self.connector.abort_delivery().await;
+                    self.active_delivery = false;
+                    return Err(ProcessorError::ProcessingError(err.to_string()));
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
 
@@ -195,15 +257,10 @@ impl SinkProcessor {
 
     /// Register a connector binding.
     pub fn add_connector(&mut self, connector: Box<dyn SinkConnector>) {
-        self.connector = Some(ConnectorBinding { connector });
-    }
-
-    async fn handle_payload(
-        connector: &mut ConnectorBinding,
-        payload: &[u8],
-    ) -> Result<(), ProcessorError> {
-        connector.publish(payload).await?;
-        Ok(())
+        self.connector = Some(ConnectorBinding {
+            connector,
+            active_delivery: false,
+        });
     }
 
     async fn handle_collection(
@@ -273,7 +330,7 @@ impl SinkProcessor {
             stats.record_in(rows);
         }
         match data {
-            StreamData::EncodedBytes { payload, num_rows } => {
+            StreamData::EncodedDelivery { flags, bytes } => {
                 if !ready_state.is_ready()
                     && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
                         .await
@@ -285,22 +342,28 @@ impl SinkProcessor {
                     return Ok(false);
                 }
                 let handle_start = std::time::Instant::now();
-                if let Err(err) = Self::handle_payload(connector, payload.as_ref()).await {
-                    tracing::error!(
-                        processor_id = %processor_id,
-                        error = %err,
-                        "payload handling error"
-                    );
-                    stats.record_handle_duration(handle_start.elapsed());
-                    stats.record_error(err.to_string());
-                    return Ok(false);
+                match connector.handle_delivery(flags, bytes.as_ref()).await {
+                    Ok(completed) => {
+                        if completed {
+                            stats.record_out(1);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            processor_id = %processor_id,
+                            error = %err,
+                            "encoded delivery handling error"
+                        );
+                        stats.record_handle_duration(handle_start.elapsed());
+                        stats.record_error(err.to_string());
+                        return Ok(false);
+                    }
                 }
-                stats.record_out(1);
                 if forwarding.forward_data {
                     let send_res = send_with_backpressure(
                         forwarding.output,
                         forwarding.data_channel_capacity,
-                        StreamData::EncodedBytes { payload, num_rows },
+                        StreamData::EncodedDelivery { flags, bytes },
                         Some(stats),
                     )
                     .await;

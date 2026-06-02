@@ -39,7 +39,7 @@ where:
 This rewrite is applied only when **all consumers** of the `Project` node can honor delayed
 materialization:
 
-- Every consumer must be either `PhysicalPlan::Encoder` or `PhysicalPlan::StreamingEncoder`.
+- Every consumer must be `PhysicalPlan::SinkEncoder`.
 - The encoder kind must report support via:
   - `EncoderRegistry::supports_by_index_projection(kind)`
 
@@ -57,7 +57,7 @@ When matched and safe, the rule rewrites the plan in two coordinated ways:
    - Children remain the same
 
 2. **Attach the delayed projection spec to encoders**:
-   - The downstream `PhysicalEncoder` / `PhysicalStreamingEncoder` nodes receive
+   - The downstream `PhysicalSinkEncoder` nodes receive
      `by_index_projection: Some(ByIndexProjection)`
    - Each spec item records:
      - `source_name`

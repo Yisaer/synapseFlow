@@ -33,7 +33,7 @@
 ## Existing Tests That Needed `covers` Fixes
 
 - `runtime.stateful.memory_output_batching`
-  - Backed by `stateful_projection_with_batched_streaming_encoder`.
+  - Backed by `stateful_projection_with_batched_sink_encoder`.
   - The testcase already exercised batching via `batch_count=2` and asserted two staged output
     payloads, but the previous `covers` list did not include `sink.output.batching`.
 

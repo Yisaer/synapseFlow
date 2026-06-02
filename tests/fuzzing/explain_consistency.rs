@@ -184,8 +184,8 @@ fn normalize_plan_topology(lines: &[String]) -> Vec<String> {
 
             let node = [
                 "physicalresultcollect",
-                "physicaldatasink",
-                "physicalencoder",
+                "physicalsinkconnector",
+                "physicalsinkencoder",
                 "physicalproject",
                 "physicalfilter",
                 "physicaldecoder",
@@ -350,8 +350,8 @@ fn supported_sql_fragments_match_expected_physical_explain_shape() {
                 topology,
                 vec![
                     "physicalresultcollect",
-                    "physicaldatasink",
-                    "physicalencoder",
+                    "physicalsinkconnector",
+                    "physicalsinkencoder",
                     "physicalproject",
                     "physicalfilter",
                     "physicaldecoder",

@@ -103,8 +103,8 @@ async fn recv_next_json(
             .expect("timeout waiting for pipeline output")
             .expect("pipeline output channel closed");
         match item {
-            StreamData::EncodedBytes { payload, .. } => {
-                return serde_json::from_slice(&payload).expect("invalid JSON payload")
+            StreamData::EncodedDelivery { bytes, .. } => {
+                return serde_json::from_slice(&bytes).expect("invalid JSON payload")
             }
             StreamData::Control(_) => continue,
             StreamData::Watermark(_) => continue,

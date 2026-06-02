@@ -23,8 +23,8 @@ different sink suffixes. A common shape is:
 
 ```text
 Project
-  -> Encoder -> DataSink
-  -> RowDiff -> Encoder -> DataSink
+  -> SinkEncoder -> SinkConnector
+  -> RowDiff -> SinkEncoder -> SinkConnector
 ```
 
 Without a mixed-consumer rule, that shared project remains materializing even though every consumer
@@ -41,7 +41,7 @@ fields that continue to be materialized by the project.
 The direct consumers must include both:
 
 - at least one `PhysicalRowDiff`
-- at least one `PhysicalEncoder` or `PhysicalStreamingEncoder`
+- at least one `PhysicalSinkEncoder`
 
 ## Preconditions
 

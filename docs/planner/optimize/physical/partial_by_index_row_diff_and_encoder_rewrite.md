@@ -103,7 +103,7 @@ After optimization, `EXPLAIN` should show:
 
 - `PhysicalProject` with passthrough behavior
 - `PhysicalRowDiff` with a by-index projection containing only tracked columns
-- downstream `PhysicalEncoder` or `PhysicalStreamingEncoder` with a by-index projection containing
+- downstream `PhysicalSinkEncoder` with a by-index projection containing
   only untracked pass-through columns
 
 The rule should be covered by table-driven planner explain tests in:

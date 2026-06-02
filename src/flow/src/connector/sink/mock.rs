@@ -1,6 +1,6 @@
 //! Mock sink connector useful for tests and demos.
 
-use super::{SinkConnector, SinkConnectorError};
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 pub struct MockSinkConnector {
     id: String,
     sender: Option<mpsc::Sender<Vec<u8>>>,
+    buffer: Option<Vec<u8>>,
 }
 
 /// Handle that exposes the receiver side of the mock connector.
@@ -30,6 +31,7 @@ impl MockSinkConnector {
             Self {
                 id: id.into(),
                 sender: Some(sender),
+                buffer: None,
             },
             MockSinkHandle { receiver },
         )
@@ -64,14 +66,41 @@ impl SinkConnector for MockSinkConnector {
         Ok(())
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        self.buffer = Some(Vec::new());
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(buffer) = self.buffer.as_mut() else {
+            return Err(SinkConnectorError::Other(format!(
+                "mock sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+        buffer.extend_from_slice(payload);
+        Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let payload = self.buffer.take().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "mock sink `{}` finished without active delivery",
+                self.id
+            ))
+        })?;
+        let bytes_written = payload.len() as u64;
         if let Some(sender) = self.sender.clone() {
-            if sender.send(payload.to_vec()).await.is_err() {
+            if sender.send(payload).await.is_err() {
                 self.sender = None;
             }
         }
 
-        Ok(())
+        Ok(DeliveryResult { bytes_written })
+    }
+
+    async fn abort_delivery(&mut self) {
+        self.buffer = None;
     }
 
     async fn close(&mut self) -> Result<(), SinkConnectorError> {

@@ -166,11 +166,18 @@ Reason:
 Recommended physical shape:
 
 ```text
+Encoded-byte path:
+PhysicalProject
+  -> PhysicalRowDiff?
+  -> PhysicalEmptySuppress
+  -> PhysicalSinkEncoder
+  -> PhysicalSinkConnector
+
+Direct collection path:
 PhysicalProject
   -> PhysicalRowDiff?
   -> PhysicalEmptySuppress
   -> PhysicalBatch?
-  -> PhysicalEncoder?
   -> PhysicalDataSink
 ```
 

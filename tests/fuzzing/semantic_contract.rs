@@ -960,16 +960,6 @@ async fn upsert_pipeline_rejects_invalid_stream_reference() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
 
-async fn fetch_pipeline_status(http: &HttpClient, base: &str, pipeline_id: &str) -> JsonValue {
-    http.get(format!("{base}/pipelines/{pipeline_id}"))
-        .send()
-        .await
-        .expect("get pipeline")
-        .json::<JsonValue>()
-        .await
-        .expect("decode pipeline")
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upsert_pipeline_preserves_running_state() {
     let Some(h) = TestHarness::new().await else {

@@ -4,14 +4,43 @@ use async_trait::async_trait;
 
 use crate::model::Collection;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeliveryResult {
+    pub bytes_written: u64,
+}
+
 /// Trait implemented by all sink connectors.
 #[async_trait]
 pub trait SinkConnector: Send + Sync + 'static {
     /// Identifier for logging/metrics.
     fn id(&self) -> &str;
 
-    /// Send a single payload downstream.
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError>;
+    /// Start a new encoded delivery.
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        Err(SinkConnectorError::Other(format!(
+            "connector `{}` does not support encoded delivery",
+            self.id()
+        )))
+    }
+
+    /// Write a chunk into the active encoded delivery.
+    async fn write_chunk(&mut self, _bytes: &[u8]) -> Result<(), SinkConnectorError> {
+        Err(SinkConnectorError::Other(format!(
+            "connector `{}` does not support encoded delivery",
+            self.id()
+        )))
+    }
+
+    /// Finish the active encoded delivery.
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        Err(SinkConnectorError::Other(format!(
+            "connector `{}` does not support encoded delivery",
+            self.id()
+        )))
+    }
+
+    /// Abort the active encoded delivery best-effort.
+    async fn abort_delivery(&mut self) {}
 
     /// Send a `Collection` downstream without going through an encoder.
     ///

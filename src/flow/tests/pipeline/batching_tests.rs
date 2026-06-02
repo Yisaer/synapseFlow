@@ -215,7 +215,7 @@ async fn pipeline_batching_table_driven() {
 async fn pipeline_encoder_transform_table_driven() {
     let cases = vec![
         BatchBytesCase {
-            name: "streaming_encoder_flushes_transformed_json_bytes",
+            name: "sink_encoder_flushes_transformed_json_bytes",
             sql: "SELECT a + 1 AS c, b + 10 AS d FROM stream",
             input_data: vec![
                 (
@@ -271,14 +271,14 @@ async fn pipeline_encoder_transform_table_driven() {
 
 // coverage-covers: sink.output.batching
 #[tokio::test]
-async fn streaming_encoder_flushes_partial_batch_on_graceful_stop() {
+async fn sink_encoder_flushes_partial_batch_on_graceful_stop() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
     .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_batching",
-        "streaming_encoder_flushes_partial_batch_on_graceful_stop",
+        "sink_encoder_flushes_partial_batch_on_graceful_stop",
     );
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     let input_data = vec![(

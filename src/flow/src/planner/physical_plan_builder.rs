@@ -12,13 +12,13 @@ use crate::planner::logical::{
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink,
-    PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress,
-    PhysicalEncoder, PhysicalEventtimeWatermark, PhysicalFilter,
-    PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
-    PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
-    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalSourceChangeGate,
-    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PartitionGroupKey, PhysicalAggregation, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
+    PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress,
+    PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
+    PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
+    PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
+    PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSourceChangeGate, PhysicalStatefulFunction,
+    StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -1004,7 +1004,11 @@ fn create_physical_data_sink_with_builder_cached(
     let (encoded_child, connector) =
         build_sink_chain_with_builder(&logical_sink.sink, &input_child, registries, builder)?;
     let physical_sink = PhysicalDataSink::new(encoded_child, sink_index, connector);
-    Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
+    if physical_sink.connector.encoder_plan_index.is_some() {
+        Ok(Arc::new(PhysicalPlan::SinkConnector(physical_sink)))
+    } else {
+        Ok(Arc::new(PhysicalPlan::DataSink(physical_sink)))
+    }
 }
 
 /// Build sink chain using centralized index management
@@ -1021,13 +1025,11 @@ fn build_sink_chain_with_builder(
         row_diff_input.as_ref().unwrap_or(input_child),
         builder,
     );
-    let batch_input = empty_suppress_input
+    let sink_input = empty_suppress_input
         .as_ref()
         .map(Arc::clone)
         .or_else(|| row_diff_input.as_ref().map(Arc::clone))
         .unwrap_or_else(|| Arc::clone(input_child));
-    let batch_processor =
-        create_batch_processor_if_needed_with_builder(sink, &batch_input, builder);
 
     let connector = &sink.connector;
     let connector_kind = connector.connector.kind();
@@ -1041,11 +1043,7 @@ fn build_sink_chain_with_builder(
         ));
     }
 
-    let encoder_input = batch_processor
-        .as_ref()
-        .map(Arc::clone)
-        .unwrap_or(batch_input);
-    add_regular_encoder_with_builder(sink, connector, encoder_input, registries, builder)
+    add_regular_encoder_with_builder(sink, connector, sink_input, registries, builder)
 }
 
 /// Create row diff processor if needed using centralized index management
@@ -1210,28 +1208,6 @@ fn format_output_column_names(
     names.join(", ")
 }
 
-/// Create batch processor if needed using centralized index management
-fn create_batch_processor_if_needed_with_builder(
-    sink: &PipelineSink,
-    input_child: &Arc<PhysicalPlan>,
-    builder: &mut PhysicalPlanBuilder,
-) -> Option<Arc<PhysicalPlan>> {
-    let needs_batch = sink.common.is_batching_enabled();
-
-    if !needs_batch {
-        return None;
-    }
-
-    let batch_index = builder.allocate_index();
-    let batch_plan = PhysicalBatch::new(
-        vec![Arc::clone(input_child)],
-        batch_index,
-        sink.sink_id.clone(),
-        sink.common.clone(),
-    );
-    Some(Arc::new(PhysicalPlan::Batch(batch_plan)))
-}
-
 /// Add regular encoder using centralized index management
 fn add_regular_encoder_with_builder(
     sink: &PipelineSink,
@@ -1300,14 +1276,15 @@ fn add_regular_encoder_with_builder(
             ));
         }
         let encoder_index = builder.allocate_index();
-        let encoder = PhysicalEncoder::new(
+        let encoder = PhysicalSinkEncoder::new(
             vec![encoder_input],
             encoder_index,
             sink.sink_id.clone(),
             connector.encoder.clone(),
+            sink.common.clone(),
         );
         Ok((
-            Arc::new(PhysicalPlan::Encoder(encoder)),
+            Arc::new(PhysicalPlan::SinkEncoder(encoder)),
             PhysicalSinkConnector::new(
                 sink.sink_id.clone(),
                 sink.forward_to_result,

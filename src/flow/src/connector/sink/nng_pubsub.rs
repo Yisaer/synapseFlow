@@ -1,4 +1,4 @@
-use super::{SinkConnector, SinkConnectorError};
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use crate::connector::nng_pubsub::NngPubSubSinkConfig;
 use anng::protocols::pubsub0;
 use anng::{Message, Socket};
@@ -12,6 +12,7 @@ pub(crate) struct NngPubSubSinkConnector {
     flow_instance_id: Arc<str>,
     config: NngPubSubSinkConfig,
     socket: Option<Socket<pubsub0::Pub0>>,
+    buffer: Option<Vec<u8>>,
 }
 
 impl NngPubSubSinkConnector {
@@ -25,6 +26,7 @@ impl NngPubSubSinkConnector {
             flow_instance_id: flow_instance_id.into(),
             config,
             socket: None,
+            buffer: None,
         }
     }
 
@@ -63,13 +65,36 @@ impl SinkConnector for NngPubSubSinkConnector {
         self.ensure_socket().await
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
         self.ensure_socket().await?;
+        self.buffer = Some(Vec::new());
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(buffer) = self.buffer.as_mut() else {
+            return Err(SinkConnectorError::Other(format!(
+                "nng pubsub sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+        buffer.extend_from_slice(payload);
+        Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let payload = self.buffer.take().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "nng pubsub sink `{}` finished without active delivery",
+                self.id
+            ))
+        })?;
+        let bytes_written = payload.len() as u64;
         veloflux_metrics::nng_pubsub_sink_records_in_total()
             .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
             .inc();
 
-        let message = build_message(&self.config.topic, &self.config.topic_delimiter, payload)?;
+        let message = build_message(&self.config.topic, &self.config.topic_delimiter, &payload)?;
         let socket = self.socket.as_mut().ok_or_else(|| {
             SinkConnectorError::Unavailable(format!("nng pubsub sink `{}` not connected", self.id))
         })?;
@@ -78,7 +103,7 @@ impl SinkConnector for NngPubSubSinkConnector {
                 veloflux_metrics::nng_pubsub_sink_records_out_total()
                     .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                     .inc();
-                Ok(())
+                Ok(DeliveryResult { bytes_written })
             }
             Err((err, _message)) => {
                 self.socket = None;
@@ -88,6 +113,10 @@ impl SinkConnector for NngPubSubSinkConnector {
                 )))
             }
         }
+    }
+
+    async fn abort_delivery(&mut self) {
+        self.buffer = None;
     }
 
     async fn close(&mut self) -> Result<(), SinkConnectorError> {
@@ -138,7 +167,12 @@ mod tests {
         connector.ready().await.expect("ready");
         sleep(Duration::from_millis(100)).await;
 
-        connector.send(br#"{"v":1}"#).await.expect("send");
+        connector.start_delivery().await.expect("start delivery");
+        connector
+            .write_chunk(br#"{"v":1}"#)
+            .await
+            .expect("write chunk");
+        connector.finish_delivery().await.expect("finish delivery");
         let message = timeout(Duration::from_secs(2), sub.next())
             .await
             .expect("receive timeout")

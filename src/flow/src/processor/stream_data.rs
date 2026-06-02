@@ -6,6 +6,36 @@ use crate::model::Collection;
 use bytes::Bytes;
 use std::time::SystemTime;
 
+/// Flags attached to sink-side encoded delivery events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EncodedDeliveryFlags(u8);
+
+impl EncodedDeliveryFlags {
+    pub const START: Self = Self(0b0000_0001);
+    pub const END: Self = Self(0b0000_0010);
+    pub const ABORT: Self = Self(0b0000_0100);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for EncodedDeliveryFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
 /// Control signals for stream processing
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ControlSignal {
@@ -105,8 +135,11 @@ impl ControlSignal {
 pub enum StreamData {
     /// Data payload - Collection (owned)
     Collection(Box<dyn Collection>),
-    /// Encoded bytes for sink connectors
-    EncodedBytes { payload: Bytes, num_rows: u64 },
+    /// Encoded bytes delivery event for sink connectors.
+    EncodedDelivery {
+        flags: EncodedDeliveryFlags,
+        bytes: Bytes,
+    },
     /// Raw bytes that still need to be decoded into a collection
     Bytes(Bytes),
     /// Control signal for flow management
@@ -180,12 +213,35 @@ impl StreamData {
         StreamData::Bytes(payload.into())
     }
 
-    /// Create encoded payload
-    pub fn encoded_bytes(payload: impl Into<Bytes>, num_rows: u64) -> Self {
-        StreamData::EncodedBytes {
-            payload: payload.into(),
-            num_rows,
+    /// Create encoded delivery event.
+    pub fn encoded_delivery(flags: EncodedDeliveryFlags, bytes: impl Into<Bytes>) -> Self {
+        StreamData::EncodedDelivery {
+            flags,
+            bytes: bytes.into(),
         }
+    }
+
+    pub fn encoded_delivery_start(bytes: impl Into<Bytes>) -> Self {
+        Self::encoded_delivery(EncodedDeliveryFlags::START, bytes)
+    }
+
+    pub fn encoded_delivery_chunk(bytes: impl Into<Bytes>) -> Self {
+        Self::encoded_delivery(EncodedDeliveryFlags::empty(), bytes)
+    }
+
+    pub fn encoded_delivery_end(bytes: impl Into<Bytes>) -> Self {
+        Self::encoded_delivery(EncodedDeliveryFlags::END, bytes)
+    }
+
+    pub fn encoded_delivery_single(bytes: impl Into<Bytes>) -> Self {
+        Self::encoded_delivery(
+            EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+            bytes,
+        )
+    }
+
+    pub fn encoded_delivery_abort() -> Self {
+        Self::encoded_delivery(EncodedDeliveryFlags::ABORT, Bytes::new())
     }
 
     /// Create control signal
@@ -207,7 +263,7 @@ impl StreamData {
     pub fn is_data(&self) -> bool {
         matches!(
             self,
-            StreamData::Collection(_) | StreamData::Bytes(_) | StreamData::EncodedBytes { .. }
+            StreamData::Collection(_) | StreamData::Bytes(_) | StreamData::EncodedDelivery { .. }
         )
     }
 
@@ -277,7 +333,7 @@ impl StreamData {
     pub fn num_rows_hint(&self) -> Option<u64> {
         match self {
             StreamData::Collection(collection) => Some(collection.num_rows() as u64),
-            StreamData::Bytes(_) | StreamData::EncodedBytes { .. } => Some(1),
+            StreamData::Bytes(_) | StreamData::EncodedDelivery { .. } => Some(1),
             StreamData::Control(_) | StreamData::Watermark(_) | StreamData::Error(_) => None,
         }
     }
@@ -288,11 +344,11 @@ impl StreamData {
             StreamData::Collection(collection) => {
                 format!("Collection with {} rows", collection.num_rows())
             }
-            StreamData::EncodedBytes { payload, num_rows } => {
+            StreamData::EncodedDelivery { flags, bytes } => {
                 format!(
-                    "Encoded payload ({} bytes, {} rows)",
-                    payload.len(),
-                    num_rows
+                    "Encoded delivery (flags={:?}, {} bytes)",
+                    flags,
+                    bytes.len()
                 )
             }
             StreamData::Bytes(payload) => format!("Bytes payload ({} bytes)", payload.len()),
@@ -322,5 +378,34 @@ impl StreamData {
     /// Create watermark signal
     pub fn watermark(timestamp: SystemTime) -> Self {
         StreamData::Watermark(timestamp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_delivery_single_sets_start_and_end() {
+        let data = StreamData::encoded_delivery_single("secret-payload");
+        let StreamData::EncodedDelivery { flags, bytes } = data else {
+            panic!("expected encoded delivery");
+        };
+
+        assert!(flags.contains(EncodedDeliveryFlags::START));
+        assert!(flags.contains(EncodedDeliveryFlags::END));
+        assert!(!flags.contains(EncodedDeliveryFlags::ABORT));
+        assert_eq!(bytes.as_ref(), b"secret-payload");
+    }
+
+    #[test]
+    fn encoded_delivery_hint_and_description_do_not_include_payload() {
+        let data = StreamData::encoded_delivery_single("secret-payload");
+
+        assert_eq!(data.num_rows_hint(), Some(1));
+        let description = data.description();
+        assert!(description.contains("Encoded delivery"));
+        assert!(description.contains("14 bytes"));
+        assert!(!description.contains("secret-payload"));
     }
 }

@@ -12,7 +12,6 @@ pub mod physical_data_sink;
 pub mod physical_data_source;
 pub mod physical_decoder;
 pub mod physical_empty_suppress;
-pub mod physical_encoder;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
 pub mod physical_memory_collection_materialize;
@@ -23,10 +22,10 @@ pub mod physical_result_collect;
 pub mod physical_row_diff;
 pub mod physical_sampler;
 pub mod physical_shared_stream;
+pub mod physical_sink_encoder;
 pub mod physical_source_change_gate;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
-pub mod physical_streaming_encoder;
 pub mod physical_watermark;
 pub mod physical_window;
 
@@ -42,7 +41,6 @@ pub use physical_data_source::PhysicalDataSource;
 pub use physical_decoder::PhysicalDecoder;
 pub use physical_decoder::PhysicalDecoderEventtimeSpec;
 pub use physical_empty_suppress::PhysicalEmptySuppress;
-pub use physical_encoder::PhysicalEncoder;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
 pub use physical_memory_collection_materialize::PhysicalMemoryCollectionMaterialize;
@@ -53,10 +51,10 @@ pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_row_diff::PhysicalRowDiff;
 pub use physical_sampler::PhysicalSampler;
 pub use physical_shared_stream::PhysicalSharedStream;
+pub use physical_sink_encoder::PhysicalSinkEncoder;
 pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
-pub use physical_streaming_encoder::PhysicalStreamingEncoder;
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
 pub use physical_window::{
     PhysicalCountWindow, PhysicalSlidingWindow, PhysicalStateWindow, PhysicalTumblingWindow,
@@ -82,9 +80,9 @@ pub enum PhysicalPlan {
     SourceChangeGate(PhysicalSourceChangeGate),
     Batch(PhysicalBatch),
     DataSink(PhysicalDataSink),
-    Encoder(PhysicalEncoder),
+    SinkConnector(PhysicalDataSink),
+    SinkEncoder(PhysicalSinkEncoder),
     StreamingAggregation(PhysicalStreamingAggregation),
-    StreamingEncoder(PhysicalStreamingEncoder),
     ResultCollect(PhysicalResultCollect),
     Barrier(PhysicalBarrier),
     TumblingWindow(PhysicalTumblingWindow),
@@ -120,10 +118,11 @@ impl PhysicalPlan {
             PhysicalPlan::SharedStream(plan) => plan.base.children(),
             PhysicalPlan::SourceChangeGate(plan) => plan.base.children(),
             PhysicalPlan::Batch(plan) => plan.base.children(),
-            PhysicalPlan::DataSink(plan) => plan.base.children(),
-            PhysicalPlan::Encoder(plan) => plan.base.children(),
+            PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => {
+                plan.base.children()
+            }
+            PhysicalPlan::SinkEncoder(plan) => plan.base.children(),
             PhysicalPlan::StreamingAggregation(plan) => plan.base.children(),
-            PhysicalPlan::StreamingEncoder(plan) => plan.base.children(),
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
             PhysicalPlan::Barrier(plan) => plan.base.children(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.children(),
@@ -156,9 +155,9 @@ impl PhysicalPlan {
             PhysicalPlan::SourceChangeGate(_) => "PhysicalSourceChangeGate",
             PhysicalPlan::Batch(_) => "PhysicalBatch",
             PhysicalPlan::DataSink(_) => "PhysicalDataSink",
-            PhysicalPlan::Encoder(_) => "PhysicalEncoder",
+            PhysicalPlan::SinkConnector(_) => "PhysicalSinkConnector",
+            PhysicalPlan::SinkEncoder(_) => "PhysicalSinkEncoder",
             PhysicalPlan::StreamingAggregation(_) => "PhysicalStreamingAggregation",
-            PhysicalPlan::StreamingEncoder(_) => "PhysicalStreamingEncoder",
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
             PhysicalPlan::Barrier(_) => "PhysicalBarrier",
             PhysicalPlan::TumblingWindow(_) => "PhysicalTumblingWindow",
@@ -190,10 +189,9 @@ impl PhysicalPlan {
             PhysicalPlan::SharedStream(plan) => plan.base.index(),
             PhysicalPlan::SourceChangeGate(plan) => plan.base.index(),
             PhysicalPlan::Batch(plan) => plan.base.index(),
-            PhysicalPlan::DataSink(plan) => plan.base.index(),
-            PhysicalPlan::Encoder(plan) => plan.base.index(),
+            PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => plan.base.index(),
+            PhysicalPlan::SinkEncoder(plan) => plan.base.index(),
             PhysicalPlan::StreamingAggregation(plan) => plan.base.index(),
-            PhysicalPlan::StreamingEncoder(plan) => plan.base.index(),
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
             PhysicalPlan::Barrier(plan) => plan.base.index(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.index(),
@@ -244,10 +242,11 @@ impl PhysicalPlan {
             PhysicalPlan::SharedStream(plan) => &mut plan.base.children,
             PhysicalPlan::SourceChangeGate(plan) => &mut plan.base.children,
             PhysicalPlan::Batch(plan) => &mut plan.base.children,
-            PhysicalPlan::DataSink(plan) => &mut plan.base.children,
-            PhysicalPlan::Encoder(plan) => &mut plan.base.children,
+            PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => {
+                &mut plan.base.children
+            }
+            PhysicalPlan::SinkEncoder(plan) => &mut plan.base.children,
             PhysicalPlan::StreamingAggregation(plan) => &mut plan.base.children,
-            PhysicalPlan::StreamingEncoder(plan) => &mut plan.base.children,
             PhysicalPlan::ResultCollect(plan) => &mut plan.base.children,
             PhysicalPlan::Barrier(plan) => &mut plan.base.children,
             PhysicalPlan::TumblingWindow(plan) => &mut plan.base.children,

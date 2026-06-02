@@ -349,7 +349,7 @@ impl StrategyState {
 fn should_sample_data(item: &StreamData) -> bool {
     matches!(
         item,
-        StreamData::Bytes(_) | StreamData::Collection(_) | StreamData::EncodedBytes { .. }
+        StreamData::Bytes(_) | StreamData::Collection(_) | StreamData::EncodedDelivery { .. }
     )
 }
 

@@ -17,13 +17,12 @@ use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
     CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
-    DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, EncoderProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, MemoryCollectionMaterializeProcessor,
-    OrderProcessor, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
-    RowDiffProcessor, SamplerProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
-    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
-    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
+    DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, FilterProcessor, Ingress,
+    InstantControlSignal, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
+    ProcessorError, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
+    SharedStreamProcessor, SinkEncoderProcessor, SinkProcessor, SlidingWindowProcessor,
+    SourceChangeGateProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
+    StreamingAggregationProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -78,12 +77,10 @@ pub(crate) enum PlanProcessor {
     StatefulFunction(StatefulFunctionProcessor),
     /// FilterProcessor created from PhysicalFilter
     Filter(FilterProcessor),
-    /// BatchProcessor inserted before encoders when batching enabled
+    /// BatchProcessor used by standalone batch/window nodes
     Batch(BatchProcessor),
-    /// EncoderProcessor inserted before sinks
-    Encoder(EncoderProcessor),
-    /// Streaming encoder processor combining batch + encoder
-    StreamingEncoder(StreamingEncoderProcessor),
+    /// Sink encoder processor combining batch + encoder
+    SinkEncoder(SinkEncoderProcessor),
     /// Streaming aggregation combining window + aggregation
     StreamingAggregation(StreamingAggregationProcessor),
     /// Watermark processor used to drive time progression
@@ -299,8 +296,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.id(),
             PlanProcessor::Filter(p) => p.id(),
             PlanProcessor::Batch(p) => p.id(),
-            PlanProcessor::Encoder(p) => p.id(),
-            PlanProcessor::StreamingEncoder(p) => p.id(),
+            PlanProcessor::SinkEncoder(p) => p.id(),
             PlanProcessor::StreamingAggregation(p) => p.id(),
             PlanProcessor::Watermark(p) => p.id(),
             PlanProcessor::TumblingWindow(p) => p.id(),
@@ -330,8 +326,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(_) => "stateful_function",
             PlanProcessor::Filter(_) => "filter",
             PlanProcessor::Batch(_) => "batch",
-            PlanProcessor::Encoder(_) => "encoder",
-            PlanProcessor::StreamingEncoder(_) => "streaming_encoder",
+            PlanProcessor::SinkEncoder(_) => "sink_encoder",
             PlanProcessor::StreamingAggregation(_) => "streaming_aggregation",
             PlanProcessor::Watermark(_) => "watermark",
             PlanProcessor::TumblingWindow(_) => "tumbling_window",
@@ -367,8 +362,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
             PlanProcessor::Filter(p) => p.set_stats(stats),
             PlanProcessor::Batch(p) => p.set_stats(stats),
-            PlanProcessor::Encoder(p) => p.set_stats(stats),
-            PlanProcessor::StreamingEncoder(p) => p.set_stats(stats),
+            PlanProcessor::SinkEncoder(p) => p.set_stats(stats),
             PlanProcessor::StreamingAggregation(p) => p.set_stats(stats),
             PlanProcessor::Watermark(p) => p.set_stats(stats),
             PlanProcessor::TumblingWindow(p) => p.set_stats(stats),
@@ -402,8 +396,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.start(spawner),
             PlanProcessor::Filter(p) => p.start(spawner),
             PlanProcessor::Batch(p) => p.start(spawner),
-            PlanProcessor::Encoder(p) => p.start(spawner),
-            PlanProcessor::StreamingEncoder(p) => p.start(spawner),
+            PlanProcessor::SinkEncoder(p) => p.start(spawner),
             PlanProcessor::StreamingAggregation(p) => p.start(spawner),
             PlanProcessor::Watermark(p) => p.start(spawner),
             PlanProcessor::TumblingWindow(p) => p.start(spawner),
@@ -434,8 +427,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
             PlanProcessor::Filter(p) => p.subscribe_output(),
             PlanProcessor::Batch(p) => p.subscribe_output(),
-            PlanProcessor::Encoder(p) => p.subscribe_output(),
-            PlanProcessor::StreamingEncoder(p) => p.subscribe_output(),
+            PlanProcessor::SinkEncoder(p) => p.subscribe_output(),
             PlanProcessor::StreamingAggregation(p) => p.subscribe_output(),
             PlanProcessor::Watermark(p) => p.subscribe_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_output(),
@@ -466,8 +458,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
             PlanProcessor::Batch(p) => p.subscribe_control_output(),
-            PlanProcessor::Encoder(p) => p.subscribe_control_output(),
-            PlanProcessor::StreamingEncoder(p) => p.subscribe_control_output(),
+            PlanProcessor::SinkEncoder(p) => p.subscribe_control_output(),
             PlanProcessor::StreamingAggregation(p) => p.subscribe_control_output(),
             PlanProcessor::Watermark(p) => p.subscribe_control_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_control_output(),
@@ -498,8 +489,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
             PlanProcessor::Batch(p) => p.add_input(receiver),
-            PlanProcessor::Encoder(p) => p.add_input(receiver),
-            PlanProcessor::StreamingEncoder(p) => p.add_input(receiver),
+            PlanProcessor::SinkEncoder(p) => p.add_input(receiver),
             PlanProcessor::StreamingAggregation(p) => p.add_input(receiver),
             PlanProcessor::Watermark(p) => p.add_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_input(receiver),
@@ -530,8 +520,7 @@ impl PlanProcessor {
             PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
             PlanProcessor::Batch(p) => p.add_control_input(receiver),
-            PlanProcessor::Encoder(p) => p.add_control_input(receiver),
-            PlanProcessor::StreamingEncoder(p) => p.add_control_input(receiver),
+            PlanProcessor::SinkEncoder(p) => p.add_control_input(receiver),
             PlanProcessor::StreamingAggregation(p) => p.add_control_input(receiver),
             PlanProcessor::Watermark(p) => p.add_control_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_control_input(receiver),
@@ -1148,7 +1137,7 @@ fn create_processor_from_plan_node(
                 processor,
             )))
         }
-        PhysicalPlan::Encoder(encoder) => {
+        PhysicalPlan::SinkEncoder(encoder) => {
             let encoder_impl = context
                 .encoder_registry()?
                 .instantiate(&encoder.encoder)
@@ -1167,13 +1156,19 @@ fn create_processor_from_plan_node(
             } else {
                 encoder_impl
             };
-            let processor = EncoderProcessor::new_with_channel_capacities(
+            SinkEncoderProcessor::validate_batch_config(
+                encoder.common.batch_count,
+                encoder.common.batch_duration,
+            )?;
+            let processor = SinkEncoderProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 encoder_impl,
+                encoder.common.batch_count,
+                encoder.common.batch_duration,
                 channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Encoder(processor),
+                PlanProcessor::SinkEncoder(processor),
             ))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
@@ -1185,40 +1180,6 @@ fn create_processor_from_plan_node(
             )?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StreamingAggregation(processor),
-            ))
-        }
-        PhysicalPlan::StreamingEncoder(streaming) => {
-            let encoder_impl = context
-                .encoder_registry()?
-                .instantiate(&streaming.encoder)
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let encoder_impl = attach_encoder_output_schema(plan, encoder_impl)?;
-            let encoder_impl = if let Some(spec) = streaming.by_index_projection.as_ref() {
-                if !encoder_impl.supports_index_lazy_materialization() {
-                    return Err(ProcessorError::InvalidConfiguration(format!(
-                        "encoder kind `{}` does not support index lazy materialization",
-                        streaming.encoder.kind_str()
-                    )));
-                }
-                encoder_impl
-                    .with_by_index_projection(Arc::clone(spec))
-                    .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
-            } else {
-                encoder_impl
-            };
-            StreamingEncoderProcessor::validate_batch_config(
-                streaming.common.batch_count,
-                streaming.common.batch_duration,
-            )?;
-            let processor = StreamingEncoderProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                encoder_impl,
-                streaming.common.batch_count,
-                streaming.common.batch_duration,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::StreamingEncoder(processor),
             ))
         }
         PhysicalPlan::ProcessTimeWatermark(_) | PhysicalPlan::EventtimeWatermark(_) => {
@@ -1281,7 +1242,7 @@ fn create_processor_from_plan_node(
                 PlanProcessor::StateWindow(processor),
             ))
         }
-        PhysicalPlan::DataSink(sink_plan) => {
+        PhysicalPlan::DataSink(sink_plan) | PhysicalPlan::SinkConnector(sink_plan) => {
             let processor_id = format!("{}_{}", processor_id, sink_plan.connector.sink_id);
             let mut processor = SinkProcessor::new_with_channel_capacities(
                 processor_id.clone(),
@@ -1766,9 +1727,7 @@ mod tests {
     use crate::expr::ScalarExpr;
     use crate::planner::physical::{
         PhysicalDataSource, PhysicalDecoder, PhysicalProject, PhysicalProjectField,
-        PhysicalStreamingEncoder,
     };
-    use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
     use datatypes::{ConcreteDatatype, Schema, Value};
     use sqlparser::ast::{Expr, Value as SqlValue};
     use std::sync::Arc;
@@ -1852,67 +1811,6 @@ mod tests {
         tracing::info!(
             processor_id = %processor.id(),
             "PhysicalProject processor created successfully"
-        );
-    }
-
-    #[test]
-    fn test_streaming_encoder_rejects_missing_batch_config_during_build() {
-        let schema = Arc::new(Schema::new(vec![]));
-        let upstream = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
-            "test_source".to_string(),
-            None,
-            Arc::clone(&schema),
-            None,
-            0,
-        )));
-        let physical_plan = Arc::new(PhysicalPlan::StreamingEncoder(
-            PhysicalStreamingEncoder::new(
-                vec![upstream],
-                1,
-                "test_sink".to_string(),
-                SinkEncoderConfig::json(),
-                CommonSinkProps::default(),
-            ),
-        ));
-
-        let spawner = crate::runtime::TaskSpawner::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("runtime"),
-        );
-        let connector_registry =
-            ConnectorRegistry::with_builtin_sinks(crate::connector::MemoryPubSubRegistry::new());
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let decoder_registry = DecoderRegistry::with_builtin_decoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let stateful_registry = StatefulFunctionRegistry::with_builtins();
-        let context = ProcessorBuilderContext {
-            flow_instance_id: Arc::<str>::from("default"),
-            mqtt_clients: Some(MqttClientManager::new("default", spawner.clone())),
-            connector_registry: Some(connector_registry),
-            encoder_registry: Some(encoder_registry),
-            decoder_registry: Some(decoder_registry),
-            aggregate_registry: Some(aggregate_registry),
-            stateful_registry: Some(stateful_registry),
-            shared_stream_registry: None,
-            eventtime: None,
-            merger_registry: None,
-            shared_stream: None,
-            channel_capacities: ProcessorChannelCapacities::new(
-                DEFAULT_DATA_CHANNEL_CAPACITY,
-                DEFAULT_CONTROL_CHANNEL_CAPACITY,
-            ),
-            spawner,
-        };
-
-        let err = match create_processor_from_plan_node(&physical_plan, &context) {
-            Ok(_) => panic!("streaming encoder without batching should fail during build"),
-            Err(err) => err,
-        };
-        assert_eq!(
-            err.to_string(),
-            "Invalid configuration: streaming encoder requires batch_count or batch_duration"
         );
     }
 }

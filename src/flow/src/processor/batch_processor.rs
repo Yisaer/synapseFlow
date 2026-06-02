@@ -52,6 +52,9 @@ impl BatchProcessor {
             (Some(0), _) => Err(ProcessorError::InvalidConfiguration(
                 "batch processor requires batch_count > 0 when configured".to_string(),
             )),
+            (_, Some(duration)) if duration.is_zero() => Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_duration > 0 when configured".to_string(),
+            )),
             (Some(count), Some(duration)) => Ok(BatchMode::Combined { count, duration }),
             (Some(count), None) => Ok(BatchMode::CountOnly { count }),
             (None, Some(duration)) => Ok(BatchMode::DurationOnly { duration }),

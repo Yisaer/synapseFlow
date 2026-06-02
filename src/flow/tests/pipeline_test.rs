@@ -89,8 +89,8 @@ async fn recv_next_json(
             .expect("timeout waiting for pipeline output")
             .expect("pipeline output channel closed");
         match item {
-            StreamData::EncodedBytes { payload, .. } => {
-                return serde_json::from_slice(&payload).expect("decode pipeline json output")
+            StreamData::EncodedDelivery { bytes, .. } => {
+                return serde_json::from_slice(&bytes).expect("decode pipeline json output")
             }
             StreamData::Control(_) | StreamData::Watermark(_) => continue,
             StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
@@ -149,14 +149,14 @@ async fn test_sampler_execution_latest_strategy() {
 
     // Verify content: should be value 5
     match result {
-        StreamData::EncodedBytes { payload, .. } => {
-            let json: serde_json::Value = serde_json::from_slice(&payload).expect("json");
+        StreamData::EncodedDelivery { bytes, .. } => {
+            let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
             // Output format depends on sink, typically [{"x": 5}]
             let rows = json.as_array().expect("output is array");
             assert_eq!(rows.len(), 1, "expected 1 row in batch");
             assert_eq!(rows[0]["x"], 5, "Expected latest value 5");
         }
-        other => panic!("expected EncodedBytes, got {}", other.description()),
+        other => panic!("expected EncodedDelivery, got {}", other.description()),
     }
 
     // Ensure no more outputs come (sampler should wait for next interval)

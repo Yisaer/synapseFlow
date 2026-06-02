@@ -90,7 +90,7 @@ The manager validates file-oriented settings before the flow runtime is built:
 
 ## Explain Shape
 
-For a video sink branch, the physical plan contains no `PhysicalEncoder`:
+For a video sink branch, the physical plan contains no `PhysicalSinkEncoder`:
 
 ```text
 PhysicalDataSink(connector=video)

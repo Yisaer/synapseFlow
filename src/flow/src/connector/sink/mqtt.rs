@@ -1,6 +1,6 @@
 //! MQTT sink connector supporting shared or standalone clients.
 
-use super::{SinkConnector, SinkConnectorError};
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use rumqttc::{
@@ -80,6 +80,7 @@ pub(crate) struct MqttSinkConnector {
     flow_instance_id: Arc<str>,
     config: MqttSinkConfig,
     client: Option<SinkClient>,
+    buffer: Option<Vec<u8>>,
     mqtt_clients: MqttClientManager,
     spawner: TaskSpawner,
 }
@@ -243,6 +244,7 @@ impl MqttSinkConnector {
             flow_instance_id: flow_instance_id.into(),
             config,
             client: None,
+            buffer: None,
             mqtt_clients,
             spawner,
         }
@@ -291,32 +293,55 @@ impl SinkConnector for MqttSinkConnector {
         &self.id
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
         self.ensure_client().await?;
+        self.buffer = Some(Vec::new());
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(buffer) = self.buffer.as_mut() else {
+            return Err(SinkConnectorError::Other(format!(
+                "mqtt sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+        buffer.extend_from_slice(payload);
+        Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let payload = self.buffer.take().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "mqtt sink `{}` finished without active delivery",
+                self.id
+            ))
+        })?;
+        let bytes_written = payload.len() as u64;
         let qos = self.publish_qos()?;
         if let Some(client) = &self.client {
             veloflux_metrics::mqtt_sink_records_in_total()
                 .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                 .inc();
             client
-                .publish(
-                    &self.config.topic,
-                    qos,
-                    self.config.retain,
-                    payload.to_vec(),
-                )
+                .publish(&self.config.topic, qos, self.config.retain, payload)
                 .await
                 .map(|_| {
                     veloflux_metrics::mqtt_sink_records_out_total()
                         .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                         .inc()
-                })
+                })?;
+            Ok(DeliveryResult { bytes_written })
         } else {
             Err(SinkConnectorError::Unavailable(format!(
                 "mqtt sink `{}` not connected",
                 self.id
             )))
         }
+    }
+
+    async fn abort_delivery(&mut self) {
+        self.buffer = None;
     }
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
@@ -511,7 +536,13 @@ mod tests {
         let expected_payload = br#"{"a":1}"#;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            match connector.send(expected_payload).await {
+            match async {
+                connector.start_delivery().await?;
+                connector.write_chunk(expected_payload).await?;
+                connector.finish_delivery().await.map(|_| ())
+            }
+            .await
+            {
                 Ok(()) => break,
                 Err(err)
                     if err.to_string().contains("mqtt not connected")

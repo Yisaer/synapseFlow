@@ -200,12 +200,6 @@ impl SinkConnector for KuraSinkConnector {
         Ok(())
     }
 
-    async fn send(&mut self, _payload: &[u8]) -> Result<(), SinkConnectorError> {
-        Err(SinkConnectorError::Other(
-            "kura sink expects collection payloads (encoder must be none)".to_string(),
-        ))
-    }
-
     async fn send_collection(
         &mut self,
         collection: &dyn Collection,

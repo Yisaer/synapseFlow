@@ -216,9 +216,9 @@ Properties:
 - Memory usage is acceptable for the common case because we only build the final payload buffer,
   not an extra transformed collection.
 
-## Behavior With `StreamingEncoderRewrite`
+## Behavior With `PhysicalSinkEncoder`
 
-`StreamingEncoderRewrite` remains valid for this design.
+`PhysicalSinkEncoder` remains valid for this design.
 
 Reason:
 
@@ -228,10 +228,10 @@ Reason:
   - Render the current row through the row template.
   - Encode the transformed item into the current JSON array buffer.
 
-Physical shape after rewrite:
+Physical shape:
 
 ```text
-Project -> StreamingEncoder(json + row template transform) -> Sink
+Project -> SinkEncoder(json + row template transform) -> Sink
 ```
 
 Runtime behavior:
@@ -276,7 +276,7 @@ Reason:
 Physical shape remains:
 
 ```text
-Project -> Encoder/StreamingEncoder(json + row template transform) -> Sink
+Project -> SinkEncoder(json + row template transform) -> SinkConnector
 ```
 
 Runtime implication:
@@ -289,14 +289,15 @@ Runtime implication:
 This means the delayed-materialization CPU saving from `ByIndexProjectionIntoEncoderRewrite` does
 not apply to `encoder.transform=template`.
 
-## Behavior With Both Optimizations Enabled
+## Behavior With By-Index Projection Enabled
 
-When `encoder.transform=template` is enabled, only `StreamingEncoderRewrite` remains applicable.
+When `encoder.transform=template` is enabled, by-index projection into the encoder is not
+applicable because the template needs the materialized output row.
 
 Physical shape:
 
 ```text
-Project -> StreamingEncoder(json + row template transform) -> Sink
+Project -> SinkEncoder(json + row template transform) -> Sink
 ```
 
 Per-row execution becomes:
@@ -311,7 +312,7 @@ Flush execution becomes:
 2. Emit one payload.
 3. Reset encoder state.
 
-This path still avoids the extra `Batch -> Encoder` buffering through streaming append, but it does
+This path still avoids the extra standalone batch-then-encode buffering through streaming append, but it does
 not remove project-side row materialization.
 
 ## Unsupported Cases In This MVP
@@ -338,7 +339,7 @@ The current encoder transform design is:
 Under this design:
 
 - No optimization: supported
-- `StreamingEncoderRewrite`: supported
+- `PhysicalSinkEncoder`: supported
 - `ByIndexProjectionIntoEncoderRewrite`: not supported when `encoder.transform=template` is enabled
 
 This provides a practical path for the current sink-batch use case without introducing a separate

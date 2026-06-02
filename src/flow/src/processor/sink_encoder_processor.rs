@@ -1,4 +1,4 @@
-//! Streaming encoder processor combines batching and encoding when the encoder
+//! Sink encoder processor combines batching and encoding when the encoder
 //! supports incremental streaming.
 
 use crate::codec::{CollectionEncoder, CollectionEncoderStream};
@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Sleep};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-pub struct StreamingEncoderProcessor {
+pub struct SinkEncoderProcessor {
     id: String,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
@@ -31,6 +31,7 @@ pub struct StreamingEncoderProcessor {
 }
 
 enum StreamingBatchMode {
+    Immediate,
     CountOnly { count: usize },
     DurationOnly { duration: Duration },
     Combined { count: usize, duration: Duration },
@@ -42,7 +43,7 @@ impl StreamingBatchMode {
             (Some(count), Some(duration)) => Some(Self::Combined { count, duration }),
             (Some(count), None) => Some(Self::CountOnly { count }),
             (None, Some(duration)) => Some(Self::DurationOnly { duration }),
-            (None, None) => None,
+            (None, None) => Some(Self::Immediate),
         }
     }
 
@@ -50,7 +51,7 @@ impl StreamingBatchMode {
         match self {
             StreamingBatchMode::CountOnly { count }
             | StreamingBatchMode::Combined { count, .. } => Some(*count),
-            StreamingBatchMode::DurationOnly { .. } => None,
+            StreamingBatchMode::Immediate | StreamingBatchMode::DurationOnly { .. } => None,
         }
     }
 
@@ -58,23 +59,27 @@ impl StreamingBatchMode {
         match self {
             StreamingBatchMode::DurationOnly { duration }
             | StreamingBatchMode::Combined { duration, .. } => Some(*duration),
-            StreamingBatchMode::CountOnly { .. } => None,
+            StreamingBatchMode::Immediate | StreamingBatchMode::CountOnly { .. } => None,
         }
     }
 }
 
-impl StreamingEncoderProcessor {
+impl SinkEncoderProcessor {
     pub(crate) fn validate_batch_config(
         batch_count: Option<usize>,
         batch_duration: Option<Duration>,
     ) -> Result<(), ProcessorError> {
-        StreamingBatchMode::new(batch_count, batch_duration)
-            .map(|_| ())
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(
-                    "streaming encoder requires batch_count or batch_duration".to_string(),
-                )
-            })
+        if matches!(batch_count, Some(0)) {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink encoder processor requires batch_count > 0 when configured".to_string(),
+            ));
+        }
+        if matches!(batch_duration, Some(duration) if duration.is_zero()) {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink encoder processor requires batch_duration > 0 when configured".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn new(
@@ -126,7 +131,7 @@ impl StreamingEncoderProcessor {
         if stream.is_none() {
             let state = encoder.start_stream().ok_or_else(|| {
                 ProcessorError::ProcessingError(
-                    "streaming encoder is not available for this processor".to_string(),
+                    "sink encoder is not available for this processor".to_string(),
                 )
             })?;
             *stream = Some(state);
@@ -150,6 +155,27 @@ impl StreamingEncoderProcessor {
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         stats.record_in(collection.num_rows() as u64);
+        if collection.num_rows() == 0 {
+            if matches!(mode, StreamingBatchMode::Immediate) {
+                let stream = encoder.start_stream().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "sink encoder is not available for this processor".to_string(),
+                    )
+                })?;
+                let payload = stream.finish().map_err(|err| {
+                    ProcessorError::ProcessingError(format!("stream finish error: {err}"))
+                })?;
+                send_with_backpressure(
+                    output,
+                    data_channel_capacity,
+                    StreamData::encoded_delivery_single(payload),
+                    Some(stats.as_ref()),
+                )
+                .await?;
+                tracing::debug!(processor_id = %processor_id, "flushed empty collection");
+            }
+            return Ok(());
+        }
         for tuple in collection.rows().iter() {
             let stream = Self::ensure_stream(encoder, stream_state)?;
             stream.append(tuple).map_err(|err| {
@@ -168,12 +194,26 @@ impl StreamingEncoderProcessor {
                     )
                     .await?;
                     if flushed > 0 {
-                        stats.record_out(1);
+                        stats.record_out(flushed as u64);
                     }
                 }
             }
             if let Some(duration) = mode.duration() {
                 Self::schedule_timer(timer, duration, *row_count > 0);
+            }
+        }
+        if matches!(mode, StreamingBatchMode::Immediate) {
+            let flushed = Self::flush_buffer(
+                processor_id,
+                row_count,
+                stream_state,
+                output,
+                data_channel_capacity,
+                stats,
+            )
+            .await?;
+            if flushed > 0 {
+                stats.record_out(flushed as u64);
             }
         }
         Ok(())
@@ -203,7 +243,7 @@ impl StreamingEncoderProcessor {
         send_with_backpressure(
             output,
             data_channel_capacity,
-            StreamData::encoded_bytes(payload, flushed_rows as u64),
+            StreamData::encoded_delivery_single(payload),
             Some(stats.as_ref()),
         )
         .await?;
@@ -222,7 +262,7 @@ impl StreamingEncoderProcessor {
     }
 }
 
-impl Processor for StreamingEncoderProcessor {
+impl Processor for SinkEncoderProcessor {
     fn id(&self) -> &str {
         &self.id
     }
@@ -241,19 +281,11 @@ impl Processor for StreamingEncoderProcessor {
         let encoder = Arc::clone(&self.encoder);
         let batch_count = self.batch_count;
         let batch_duration = self.batch_duration;
-        let mode = match StreamingBatchMode::new(batch_count, batch_duration) {
-            Some(mode) => mode,
-            None => {
-                return spawner.spawn(async move {
-                    Err(ProcessorError::InvalidConfiguration(
-                        "streaming encoder requires batch_count or batch_duration".to_string(),
-                    ))
-                });
-            }
-        };
+        let mode = StreamingBatchMode::new(batch_count, batch_duration)
+            .expect("sink encoder batch mode should always be available");
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
-        tracing::info!(processor_id = %processor_id, "streaming encoder processor starting");
+        tracing::info!(processor_id = %processor_id, "sink encoder processor starting");
 
         spawner.spawn(async move {
             let mut row_count: usize = 0;
@@ -273,7 +305,7 @@ impl Processor for StreamingEncoderProcessor {
                             .await?;
                             if is_terminal {
                                 if let Err(err) = async {
-                                    let flushed = StreamingEncoderProcessor::flush_buffer(
+                                    let flushed = SinkEncoderProcessor::flush_buffer(
                                         &processor_id,
                                         &mut row_count,
                                         &mut stream_state,
@@ -283,7 +315,7 @@ impl Processor for StreamingEncoderProcessor {
                                     )
                                     .await?;
                                     if flushed > 0 {
-                                        stats.record_out(1);
+                                        stats.record_out(flushed as u64);
                                     }
                                     Ok::<(), ProcessorError>(())
                                 }
@@ -306,7 +338,7 @@ impl Processor for StreamingEncoderProcessor {
                         }
                     }, if timer.is_some() => {
                         if let Err(err) = async {
-                            let flushed = StreamingEncoderProcessor::flush_buffer(
+                            let flushed = SinkEncoderProcessor::flush_buffer(
                                 &processor_id,
                                 &mut row_count,
                                 &mut stream_state,
@@ -316,7 +348,7 @@ impl Processor for StreamingEncoderProcessor {
                             )
                             .await?;
                             if flushed > 0 {
-                                stats.record_out(1);
+                                stats.record_out(flushed as u64);
                             }
                             Ok::<(), ProcessorError>(())
                         }
@@ -326,7 +358,7 @@ impl Processor for StreamingEncoderProcessor {
                             stats.record_error(err.to_string());
                         }
                         if let Some(duration) = mode.duration() {
-                            StreamingEncoderProcessor::schedule_timer(&mut timer, duration, row_count > 0);
+                            SinkEncoderProcessor::schedule_timer(&mut timer, duration, row_count > 0);
                         }
                     }
                     item = input_streams.next() => {
@@ -336,7 +368,7 @@ impl Processor for StreamingEncoderProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        let res = StreamingEncoderProcessor::handle_collection(
+                                        let res = SinkEncoderProcessor::handle_collection(
                                                 &processor_id,
                                                 collection,
                                                 &encoder,
@@ -365,7 +397,7 @@ impl Processor for StreamingEncoderProcessor {
                                         let is_terminal = data.is_terminal();
                                         if is_terminal {
                                             if let Err(err) = async {
-                                                let flushed = StreamingEncoderProcessor::flush_buffer(
+                                                let flushed = SinkEncoderProcessor::flush_buffer(
                                                     &processor_id,
                                                     &mut row_count,
                                                     &mut stream_state,
@@ -375,7 +407,7 @@ impl Processor for StreamingEncoderProcessor {
                                                 )
                                                 .await?;
                                                 if flushed > 0 {
-                                                    stats.record_out(1);
+                                                    stats.record_out(flushed as u64);
                                                 }
                                                 Ok::<(), ProcessorError>(())
                                             }
@@ -401,7 +433,7 @@ impl Processor for StreamingEncoderProcessor {
                                             return Ok(());
                                         }
                                         if let Some(duration) = mode.duration() {
-                                            StreamingEncoderProcessor::schedule_timer(
+                                            SinkEncoderProcessor::schedule_timer(
                                                 &mut timer,
                                                 duration,
                                                 row_count > 0,
@@ -414,13 +446,13 @@ impl Processor for StreamingEncoderProcessor {
                                 log_broadcast_lagged(
                                     &processor_id,
                                     skipped,
-                                    "streaming encoder data input",
+                                    "sink encoder data input",
                                 );
                                 continue;
                             }
                             None => {
                                 if let Err(err) = async {
-                                    let flushed = StreamingEncoderProcessor::flush_buffer(
+                                    let flushed = SinkEncoderProcessor::flush_buffer(
                                         &processor_id,
                                         &mut row_count,
                                         &mut stream_state,
@@ -430,7 +462,7 @@ impl Processor for StreamingEncoderProcessor {
                                     )
                                     .await?;
                                     if flushed > 0 {
-                                        stats.record_out(1);
+                                        stats.record_out(flushed as u64);
                                     }
                                     Ok::<(), ProcessorError>(())
                                 }

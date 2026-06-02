@@ -398,8 +398,7 @@ After row diff is introduced, downstream sink-side components fall into two grou
 
 Components that can consume the mask:
 
-- `EncoderProcessor`
-- `StreamingEncoderProcessor`
+- `SinkEncoderProcessor`
 - future mask-aware direct sink paths
 
 Components that do not interpret the mask but must preserve it when rebuilding rows:
@@ -495,13 +494,7 @@ Batching remains a sink-side flush policy. Row diff should run before batching.
 Result:
 
 ```text
-Project -> RowDiff -> Batch -> Encoder -> DataSink
-```
-
-or, after streaming rewrite:
-
-```text
-Project -> RowDiff -> StreamingEncoder -> DataSink
+Project -> RowDiff -> SinkEncoder -> SinkConnector
 ```
 
 ### With JSON encoding
@@ -624,7 +617,7 @@ change set.
 - add `output_mask` to runtime row metadata
 - preserve the mask on sink paths that rebuild tuples, especially memory collection materialization
 - disable `ByIndexProjectionIntoEncoderRewrite` on row diff branches
-- keep `StreamingEncoderRewrite` available
+- keep sink encoder delivery available
 
 At this point, row diff semantics already exist at the runtime row contract level, even if some
 encoders still choose to emit dense rows.

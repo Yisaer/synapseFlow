@@ -6,12 +6,9 @@ use std::sync::Arc;
 
 use super::PhysicalPlan;
 
-/// Physical node representing a streaming encoder stage that also handles batching.
-///
-/// Note: connector_id has been removed as it's not needed for processor identification.
-/// Processor IDs are now generated using only sink_id and physical_plan_name.
+/// Physical node representing the sink-side encoding and delivery boundary.
 #[derive(Clone)]
-pub struct PhysicalStreamingEncoder {
+pub struct PhysicalSinkEncoder {
     pub base: BasePhysicalPlan,
     pub sink_id: String,
     pub encoder: SinkEncoderConfig,
@@ -19,7 +16,7 @@ pub struct PhysicalStreamingEncoder {
     pub by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
-impl PhysicalStreamingEncoder {
+impl PhysicalSinkEncoder {
     pub fn new(
         children: Vec<Arc<PhysicalPlan>>,
         index: i64,
@@ -37,9 +34,9 @@ impl PhysicalStreamingEncoder {
     }
 }
 
-impl fmt::Debug for PhysicalStreamingEncoder {
+impl fmt::Debug for PhysicalSinkEncoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PhysicalStreamingEncoder")
+        f.debug_struct("PhysicalSinkEncoder")
             .field("index", &self.base.index())
             .field("sink_id", &self.sink_id)
             .finish()

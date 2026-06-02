@@ -2,11 +2,8 @@ use super::{
     bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
     wait_for_server,
 };
-use flate2::read::GzDecoder;
 use reqwest::{Client as HttpClient, StatusCode};
-use sdk::ManagerClient;
 use serde_json::{json, Value as JsonValue};
-use std::io::Read;
 use std::net::SocketAddr;
 
 struct ImportExportHarness {
@@ -14,7 +11,6 @@ struct ImportExportHarness {
     server: tokio::task::JoinHandle<()>,
     addr: SocketAddr,
     http: HttpClient,
-    client: ManagerClient,
 }
 
 impl ImportExportHarness {
@@ -53,7 +49,6 @@ impl ImportExportHarness {
             server,
             addr,
             http,
-            client,
         })
     }
 

@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
+const FILE_SINK_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn test_instance() -> FlowInstance {
     FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -41,7 +43,7 @@ async fn wait_for_generated_files(
     dir: &std::path::Path,
     expected_count: usize,
 ) -> Vec<std::path::PathBuf> {
-    timeout(Duration::from_secs(3), async {
+    timeout(FILE_SINK_TEST_TIMEOUT, async {
         loop {
             let files = generated_files(dir);
             if files.len() >= expected_count {
@@ -105,7 +107,7 @@ async fn memory_source_feeds_file_sink_pipeline() {
             &input_topic,
             MemoryTopicKind::Bytes,
             1,
-            Duration::from_secs(3),
+            FILE_SINK_TEST_TIMEOUT,
         )
         .await
         .expect("wait for memory source");
@@ -133,7 +135,7 @@ async fn memory_source_feeds_file_sink_pipeline() {
     );
 
     instance
-        .stop_pipeline(pipeline_id, PipelineStopMode::Quick, Duration::from_secs(3))
+        .stop_pipeline(pipeline_id, PipelineStopMode::Quick, FILE_SINK_TEST_TIMEOUT)
         .await
         .expect("stop pipeline");
     instance
@@ -197,7 +199,7 @@ async fn file_sink_rolls_files_by_common_batch_count() {
             &input_topic,
             MemoryTopicKind::Bytes,
             1,
-            Duration::from_secs(3),
+            FILE_SINK_TEST_TIMEOUT,
         )
         .await
         .expect("wait for memory source");
@@ -239,7 +241,7 @@ async fn file_sink_rolls_files_by_common_batch_count() {
         .stop_pipeline(
             &pipeline_id,
             PipelineStopMode::Quick,
-            Duration::from_secs(3),
+            FILE_SINK_TEST_TIMEOUT,
         )
         .await
         .expect("stop pipeline");

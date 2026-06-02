@@ -1,6 +1,6 @@
 //! A sink connector that simply discards every payload.
 
-use super::{SinkConnector, SinkConnectorError};
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 
 use crate::planner::sink::NopSinkConfig;
@@ -9,6 +9,7 @@ use crate::planner::sink::NopSinkConfig;
 pub struct NopSinkConnector {
     id: String,
     config: NopSinkConfig,
+    active_bytes: Option<u64>,
 }
 
 impl NopSinkConnector {
@@ -16,6 +17,7 @@ impl NopSinkConnector {
         Self {
             id: id.into(),
             config,
+            active_bytes: None,
         }
     }
 }
@@ -33,15 +35,41 @@ impl SinkConnector for NopSinkConnector {
         Ok(())
     }
 
-    async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        self.active_bytes = Some(0);
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+        let Some(bytes_written) = self.active_bytes.as_mut() else {
+            return Err(SinkConnectorError::Other(format!(
+                "nop sink `{}` received chunk without active delivery",
+                self.id
+            )));
+        };
+        *bytes_written += payload.len() as u64;
         if self.config.log {
             tracing::info!(
                 connector_id = %self.id,
                 payload_len = payload.len(),
-                "nop sink received payload"
+                "nop sink received chunk"
             );
         }
         Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        let bytes_written = self.active_bytes.take().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "nop sink `{}` finished without active delivery",
+                self.id
+            ))
+        })?;
+        Ok(DeliveryResult { bytes_written })
+    }
+
+    async fn abort_delivery(&mut self) {
+        self.active_bytes = None;
     }
 
     async fn close(&mut self) -> Result<(), SinkConnectorError> {

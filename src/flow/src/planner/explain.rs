@@ -917,7 +917,7 @@ fn build_physical_node_with_prefix(
                 info.push(format!("batch_duration_ms={}", duration.as_millis()));
             }
         }
-        PhysicalPlan::DataSink(sink) => {
+        PhysicalPlan::DataSink(sink) | PhysicalPlan::SinkConnector(sink) => {
             info.push(format!("sink_id={}", sink.connector.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
             if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) =
@@ -927,40 +927,21 @@ fn build_physical_node_with_prefix(
                 info.push(format!("kind={}", cfg.kind));
             }
         }
-        PhysicalPlan::Encoder(encoder) => {
+        PhysicalPlan::SinkEncoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));
             if let Some(transform_kind) = encoder.encoder.transform_kind() {
                 info.push(format!("transform={}", transform_kind));
             }
-            if let Some(spec) = &encoder.by_index_projection {
-                if !spec.is_empty() {
-                    let cols = spec
-                        .columns()
-                        .iter()
-                        .map(|c| {
-                            format!(
-                                "{}#{}->{}",
-                                c.source_name.as_ref(),
-                                c.column_index,
-                                c.output_name.as_ref()
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
+            if encoder.common.is_batching_enabled() {
+                if let Some(count) = encoder.common.batch_count {
+                    info.push(format!("batch_count={}", count));
+                }
+                if let Some(duration) = encoder.common.batch_duration {
+                    info.push(format!("batch_duration_ms={}", duration.as_millis()));
                 }
             }
-        }
-        PhysicalPlan::StreamingEncoder(streaming) => {
-            info.push(format!("sink_id={}", streaming.sink_id));
-            info.push(format!("encoder={}", streaming.encoder.kind_str()));
-            if let Some(transform_kind) = streaming.encoder.transform_kind() {
-                info.push(format!("transform={}", transform_kind));
-            }
-            if streaming.common.is_batching_enabled() {
-                info.push("batching=true".to_string());
-            }
-            if let Some(spec) = &streaming.by_index_projection {
+            if let Some(spec) = &encoder.by_index_projection {
                 if !spec.is_empty() {
                     let cols = spec
                         .columns()

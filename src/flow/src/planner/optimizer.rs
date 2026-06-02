@@ -3,9 +3,8 @@ use crate::codec::EncoderRegistry;
 use crate::expr::scalar::ColumnRef;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{
-    ByIndexProjection, ByIndexProjectionColumn, PhysicalBarrier, PhysicalDataSink, PhysicalPlan,
-    PhysicalProjectField, PhysicalSinkConnector, PhysicalStreamingAggregation,
-    PhysicalStreamingEncoder, StreamingWindowSpec,
+    ByIndexProjection, ByIndexProjectionColumn, PhysicalBarrier, PhysicalPlan,
+    PhysicalProjectField, PhysicalStreamingAggregation, StreamingWindowSpec,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -30,7 +29,6 @@ pub fn optimize_physical_plan(
         Box::new(StreamingAggregationRewrite {
             aggregate_registry: Arc::clone(&aggregate_registry),
         }),
-        Box::new(StreamingEncoderRewrite),
         Box::new(ByIndexProjectionAcrossMixedConsumersRewrite),
         Box::new(PartialByIndexRowDiffAndEncoderRewrite),
         Box::new(ByIndexProjectionIntoRowDiffRewrite),
@@ -44,10 +42,6 @@ pub fn optimize_physical_plan(
     }
     current
 }
-
-/// Rule: if a sink has a Batch -> Encoder chain and the encoder supports streaming,
-/// rewrite it to StreamingEncoder -> Sink (dropping the batch).
-struct StreamingEncoderRewrite;
 
 /// Rule: fuse Window -> Aggregation into StreamingAggregation when all calls are incremental.
 struct StreamingAggregationRewrite {
@@ -197,111 +191,6 @@ impl StreamingAggregationRewrite {
     }
 }
 
-impl PhysicalOptRule for StreamingEncoderRewrite {
-    fn name(&self) -> &str {
-        "streaming_encoder_rewrite"
-    }
-
-    fn optimize(
-        &self,
-        plan: Arc<PhysicalPlan>,
-        encoder_registry: &EncoderRegistry,
-    ) -> Arc<PhysicalPlan> {
-        self.optimize_node(plan, encoder_registry)
-    }
-}
-
-impl StreamingEncoderRewrite {
-    fn optimize_node(
-        &self,
-        plan: Arc<PhysicalPlan>,
-        encoder_registry: &EncoderRegistry,
-    ) -> Arc<PhysicalPlan> {
-        let optimized_children = self.optimize_children(plan.children(), encoder_registry);
-        match plan.as_ref() {
-            PhysicalPlan::DataSink(sink) => {
-                self.optimize_data_sink(sink, optimized_children, encoder_registry)
-            }
-            _ => rebuild_with_children(plan.as_ref(), optimized_children),
-        }
-    }
-
-    fn optimize_children(
-        &self,
-        children: &[Arc<PhysicalPlan>],
-        encoder_registry: &EncoderRegistry,
-    ) -> Vec<Arc<PhysicalPlan>> {
-        children
-            .iter()
-            .map(|child| self.optimize_node(Arc::clone(child), encoder_registry))
-            .collect()
-    }
-
-    fn optimize_data_sink(
-        &self,
-        sink: &PhysicalDataSink,
-        optimized_children: Vec<Arc<PhysicalPlan>>,
-        encoder_registry: &EncoderRegistry,
-    ) -> Arc<PhysicalPlan> {
-        if let Some(child) = optimized_children.first() {
-            if let Some((rewritten_child, connector)) =
-                self.rewrite_streaming_encoder_chain(sink, child, encoder_registry)
-            {
-                let mut new_sink = sink.clone();
-                new_sink.base.children = vec![rewritten_child];
-                new_sink.connector = connector;
-                return Arc::new(PhysicalPlan::DataSink(new_sink));
-            }
-        }
-
-        let mut new_sink = sink.clone();
-        new_sink.base.children = optimized_children;
-        Arc::new(PhysicalPlan::DataSink(new_sink))
-    }
-
-    fn rewrite_streaming_encoder_chain(
-        &self,
-        sink: &PhysicalDataSink,
-        child: &Arc<PhysicalPlan>,
-        encoder_registry: &EncoderRegistry,
-    ) -> Option<(Arc<PhysicalPlan>, PhysicalSinkConnector)> {
-        let encoder = match child.as_ref() {
-            PhysicalPlan::Encoder(encoder) => encoder,
-            _ => return None,
-        };
-
-        if !encoder_registry.supports_streaming(encoder.encoder.kind_str()) {
-            return None;
-        }
-
-        let batch = match encoder.base.children.first() {
-            Some(plan) => match plan.as_ref() {
-                PhysicalPlan::Batch(batch) => batch,
-                _ => return None,
-            },
-            None => return None,
-        };
-
-        let upstream = batch.base.children.first().cloned()?;
-        let streaming_index = encoder.base.index();
-        let streaming_encoder = PhysicalStreamingEncoder::new(
-            vec![upstream],
-            streaming_index,
-            encoder.sink_id.clone(),
-            encoder.encoder.clone(),
-            batch.common.clone(),
-        );
-
-        let mut connector = sink.connector.clone();
-        connector.encoder_plan_index = Some(streaming_index);
-
-        Some((
-            Arc::new(PhysicalPlan::StreamingEncoder(streaming_encoder)),
-            connector,
-        ))
-    }
-}
-
 impl PhysicalOptRule for ByIndexProjectionIntoEncoderRewrite {
     fn name(&self) -> &str {
         "by_index_projection_into_encoder_rewrite"
@@ -363,12 +252,7 @@ enum ProjectConsumer {
     RowDiff {
         row_diff_index: i64,
     },
-    Encoder {
-        encoder_index: i64,
-        kind: String,
-        transform_enabled: bool,
-    },
-    StreamingEncoder {
+    SinkEncoder {
         encoder_index: i64,
         kind: String,
         transform_enabled: bool,
@@ -437,24 +321,16 @@ fn rewrite_by_index_projection_across_mixed_consumers(
         let has_row_diff = consumers
             .iter()
             .any(|consumer| matches!(consumer, ProjectConsumer::RowDiff { .. }));
-        let has_encoder = consumers.iter().any(|consumer| {
-            matches!(
-                consumer,
-                ProjectConsumer::Encoder { .. } | ProjectConsumer::StreamingEncoder { .. }
-            )
-        });
+        let has_encoder = consumers
+            .iter()
+            .any(|consumer| matches!(consumer, ProjectConsumer::SinkEncoder { .. }));
         if !has_row_diff || !has_encoder {
             continue;
         }
 
         if !consumers.iter().all(|consumer| match consumer {
             ProjectConsumer::RowDiff { .. } => true,
-            ProjectConsumer::Encoder {
-                kind,
-                transform_enabled,
-                ..
-            } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
-            ProjectConsumer::StreamingEncoder {
+            ProjectConsumer::SinkEncoder {
                 kind,
                 transform_enabled,
                 ..
@@ -480,15 +356,7 @@ fn rewrite_by_index_projection_across_mixed_consumers(
                         || !downstream_consumers
                             .iter()
                             .all(|downstream| match downstream {
-                                ProjectConsumer::Encoder {
-                                    kind,
-                                    transform_enabled,
-                                    ..
-                                } => {
-                                    !transform_enabled
-                                        && supports_by_index_projection(kind, encoder_registry)
-                                }
-                                ProjectConsumer::StreamingEncoder {
+                                ProjectConsumer::SinkEncoder {
                                     kind,
                                     transform_enabled,
                                     ..
@@ -506,8 +374,7 @@ fn rewrite_by_index_projection_across_mixed_consumers(
                         .insert(row_diff_index, Arc::clone(&spec));
                     for downstream in downstream_consumers {
                         match downstream {
-                            ProjectConsumer::Encoder { encoder_index, .. }
-                            | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                            ProjectConsumer::SinkEncoder { encoder_index, .. } => {
                                 state
                                     .encoder_to_projection
                                     .insert(encoder_index, Arc::clone(&spec));
@@ -516,8 +383,7 @@ fn rewrite_by_index_projection_across_mixed_consumers(
                         }
                     }
                 }
-                ProjectConsumer::Encoder { encoder_index, .. }
-                | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                ProjectConsumer::SinkEncoder { encoder_index, .. } => {
                     state
                         .encoder_to_projection
                         .insert(encoder_index, Arc::clone(&spec));
@@ -602,12 +468,7 @@ fn rewrite_partial_by_index_row_diff_and_encoder(
             if !downstream_consumers
                 .iter()
                 .all(|downstream| match downstream {
-                    ProjectConsumer::Encoder {
-                        kind,
-                        transform_enabled,
-                        ..
-                    } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
-                    ProjectConsumer::StreamingEncoder {
+                    ProjectConsumer::SinkEncoder {
                         kind,
                         transform_enabled,
                         ..
@@ -644,8 +505,7 @@ fn rewrite_partial_by_index_row_diff_and_encoder(
             let encoder_spec = Arc::new(ByIndexProjection::new(encoder_columns));
             for downstream in downstream_consumers {
                 match downstream {
-                    ProjectConsumer::Encoder { encoder_index, .. }
-                    | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                    ProjectConsumer::SinkEncoder { encoder_index, .. } => {
                         encoder_specs.push((encoder_index, Arc::clone(&encoder_spec)));
                     }
                     ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => {}
@@ -711,12 +571,7 @@ fn rewrite_by_index_projection_into_encoder(
         // if every consumer is an encoder that can honor delayed materialization.
         if !consumers.iter().all(|consumer| match consumer {
             ProjectConsumer::RowDiff { .. } => false,
-            ProjectConsumer::Encoder {
-                kind,
-                transform_enabled,
-                ..
-            } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
-            ProjectConsumer::StreamingEncoder {
+            ProjectConsumer::SinkEncoder {
                 kind,
                 transform_enabled,
                 ..
@@ -735,8 +590,7 @@ fn rewrite_by_index_projection_into_encoder(
         for consumer in consumers {
             match consumer {
                 ProjectConsumer::RowDiff { .. } => {}
-                ProjectConsumer::Encoder { encoder_index, .. }
-                | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                ProjectConsumer::SinkEncoder { encoder_index, .. } => {
                     state
                         .encoder_to_projection
                         .insert(encoder_index, Arc::clone(&spec));
@@ -889,18 +743,11 @@ fn build_node_and_consumer_maps(
                 PhysicalPlan::RowDiff(row_diff) => vec![ProjectConsumer::RowDiff {
                     row_diff_index: row_diff.base.index(),
                 }],
-                PhysicalPlan::Encoder(encoder) => vec![ProjectConsumer::Encoder {
+                PhysicalPlan::SinkEncoder(encoder) => vec![ProjectConsumer::SinkEncoder {
                     encoder_index: encoder.base.index(),
                     kind: encoder.encoder.kind_str().to_string(),
                     transform_enabled: encoder.encoder.transform_kind().is_some(),
                 }],
-                PhysicalPlan::StreamingEncoder(encoder) => {
-                    vec![ProjectConsumer::StreamingEncoder {
-                        encoder_index: encoder.base.index(),
-                        kind: encoder.encoder.kind_str().to_string(),
-                        transform_enabled: encoder.encoder.transform_kind().is_some(),
-                    }]
-                }
                 _ => vec![ProjectConsumer::Other],
             };
             consumers
@@ -950,19 +797,11 @@ fn rewrite_by_index_nodes(
             new.passthrough_messages = true;
             Arc::new(PhysicalPlan::Project(new))
         }
-        PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+        PhysicalPlan::SinkEncoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
             let mut new = encoder.clone();
             new.base.children = rewritten_children;
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
-            Arc::new(PhysicalPlan::Encoder(new))
-        }
-        PhysicalPlan::StreamingEncoder(encoder)
-            if state.encoder_to_projection.contains_key(&index) =>
-        {
-            let mut new = encoder.clone();
-            new.base.children = rewritten_children;
-            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
-            Arc::new(PhysicalPlan::StreamingEncoder(new))
+            Arc::new(PhysicalPlan::SinkEncoder(new))
         }
         _ => rebuild_with_children(plan.as_ref(), rewritten_children),
     };
@@ -1048,19 +887,11 @@ fn rewrite_by_index_mixed_nodes(
             new.late_projection = state.row_diff_to_projection.get(&index).cloned();
             Arc::new(PhysicalPlan::RowDiff(new))
         }
-        PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+        PhysicalPlan::SinkEncoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
             let mut new = encoder.clone();
             new.base.children = rewritten_children;
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
-            Arc::new(PhysicalPlan::Encoder(new))
-        }
-        PhysicalPlan::StreamingEncoder(encoder)
-            if state.encoder_to_projection.contains_key(&index) =>
-        {
-            let mut new = encoder.clone();
-            new.base.children = rewritten_children;
-            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
-            Arc::new(PhysicalPlan::StreamingEncoder(new))
+            Arc::new(PhysicalPlan::SinkEncoder(new))
         }
         _ => rebuild_with_children(plan.as_ref(), rewritten_children),
     };
@@ -1104,19 +935,11 @@ fn rewrite_by_index_row_diff_encoder_nodes(
             new.late_projection = state.row_diff_to_projection.get(&index).cloned();
             Arc::new(PhysicalPlan::RowDiff(new))
         }
-        PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+        PhysicalPlan::SinkEncoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
             let mut new = encoder.clone();
             new.base.children = rewritten_children;
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
-            Arc::new(PhysicalPlan::Encoder(new))
-        }
-        PhysicalPlan::StreamingEncoder(encoder)
-            if state.encoder_to_projection.contains_key(&index) =>
-        {
-            let mut new = encoder.clone();
-            new.base.children = rewritten_children;
-            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
-            Arc::new(PhysicalPlan::StreamingEncoder(new))
+            Arc::new(PhysicalPlan::SinkEncoder(new))
         }
         _ => rebuild_with_children(plan.as_ref(), rewritten_children),
     };
@@ -1264,20 +1087,15 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Batch(new))
         }
-        PhysicalPlan::Encoder(encoder) => {
+        PhysicalPlan::SinkEncoder(encoder) => {
             let mut new = encoder.clone();
             new.base.children = children;
-            Arc::new(PhysicalPlan::Encoder(new))
+            Arc::new(PhysicalPlan::SinkEncoder(new))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
             let mut new = agg.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::StreamingAggregation(new))
-        }
-        PhysicalPlan::StreamingEncoder(streaming) => {
-            let mut new = streaming.clone();
-            new.base.children = children;
-            Arc::new(PhysicalPlan::StreamingEncoder(new))
         }
         PhysicalPlan::ResultCollect(collect) => {
             let mut new = collect.clone();
@@ -1328,6 +1146,11 @@ fn rebuild_with_children(
             let mut new = sink.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::DataSink(new))
+        }
+        PhysicalPlan::SinkConnector(sink) => {
+            let mut new = sink.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::SinkConnector(new))
         }
         PhysicalPlan::Sampler(sampler) => {
             let mut new = sampler.clone();
