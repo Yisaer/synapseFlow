@@ -127,7 +127,11 @@ pub async fn get_schema_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match state.storage.get_schema(&name) {
+    let name = name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "schema name must not be empty").into_response();
+    }
+    match state.storage.get_schema(name) {
         Ok(Some(stored)) => (StatusCode::OK, Json(stored_to_info(&stored))).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, format!("schema {name} not found")).into_response(),
         Err(err) => (
@@ -142,7 +146,11 @@ pub async fn delete_schema_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let audit = ResourceMutationLog::new("schema", "delete", name.as_str(), None);
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "schema name must not be empty").into_response();
+    }
+    let audit = ResourceMutationLog::new("schema", "delete", &name, None);
 
     // Check if any stream references this schema
     let referencing = match find_streams_referencing_schema(&state, &name) {

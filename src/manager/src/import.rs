@@ -19,45 +19,8 @@ use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
 
 /// Reload all schemas from persistent storage into the in-memory `NamedSchemaStore`.
 fn reload_schemas_from_storage(storage: &storage::StorageManager) {
-    let stored = match storage.list_schemas() {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "failed to list schemas from storage during reload"
-            );
-            return;
-        }
-    };
-    let store = named_schema_store();
-    store.clear();
-    for s in &stored {
-        let props: serde_json::Map<String, serde_json::Value> =
-            match serde_json::from_str(&s.props_json) {
-                Ok(p) => p,
-                Err(err) => {
-                    tracing::error!(
-                        schema = %s.name,
-                        error = %err,
-                        "failed to deserialize stored schema props during reload"
-                    );
-                    continue;
-                }
-            };
-        match schema_registry().parse(&s.schema_type, &s.name, &props) {
-            Ok(schema) => {
-                store.insert(s.name.clone(), schema);
-            }
-            Err(err) => {
-                tracing::error!(
-                    schema = %s.name,
-                    schema_type = %s.schema_type,
-                    error = %err,
-                    "failed to parse stored schema during reload; skipping"
-                );
-            }
-        }
-    }
+    named_schema_store().clear();
+    let _ = crate::storage_bridge::hydrate_schemas_from_storage(storage);
 }
 
 #[derive(Serialize)]

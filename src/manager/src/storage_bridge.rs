@@ -110,7 +110,7 @@ pub fn stored_mqtt_from_config(cfg: &SharedMqttClientConfig) -> StoredMqttClient
     }
 }
 
-fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<usize, String> {
+pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<usize, String> {
     let stored_schemas = storage.list_schemas().map_err(|e| e.to_string())?;
     let count = stored_schemas.len();
     for stored in &stored_schemas {
