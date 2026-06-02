@@ -236,6 +236,11 @@ impl NamedSchemaStore {
         names.sort();
         names
     }
+
+    /// Remove all entries from the store.
+    pub fn clear(&self) {
+        self.schemas.write().clear();
+    }
 }
 
 impl Default for NamedSchemaStore {

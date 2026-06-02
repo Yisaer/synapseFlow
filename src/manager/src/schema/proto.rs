@@ -19,7 +19,7 @@ const WKT_TIMESTAMP_FQN: &str = "google.protobuf.Timestamp";
 ///   - `message_type`: fully qualified message name, e.g. `"Sensor"` or `"com.example.Sensor"` (required)
 ///   - `include_paths`: optional array of additional proto include directories
 pub fn parse_proto_schema(
-    _stream_name: &str,
+    stream_name: &str,
     props: &JsonMap<String, JsonValue>,
 ) -> Result<Schema, String> {
     let proto_path = get_string_prop(props, "proto_path")?;
@@ -54,7 +54,7 @@ pub fn parse_proto_schema(
         )
     })?;
 
-    let columns = message_to_columns(&proto_path, target_msg, &fds, 0)?;
+    let columns = message_to_columns(stream_name, &proto_path, target_msg, &fds, 0)?;
     Ok(Schema::new(columns))
 }
 
@@ -75,6 +75,8 @@ fn find_message_descriptor<'a>(
     fds: &'a FileDescriptorSet,
     full_name: &str,
 ) -> Option<&'a DescriptorProto> {
+    // Strip a leading dot (common in protobuf FQN notation like ".com.example.Sensor")
+    let full_name = full_name.strip_prefix('.').unwrap_or(full_name);
     let parts: Vec<&str> = full_name.split('.').collect();
     if parts.is_empty() {
         return None;
@@ -125,7 +127,10 @@ fn find_message_in_descriptors<'a>(
 }
 
 /// Convert a protobuf message descriptor into a list of `ColumnSchema`.
+///
+/// `stream_name` is used as the `source_name` for every column.
 fn message_to_columns(
+    stream_name: &str,
     proto_path: &str,
     msg: &DescriptorProto,
     fds: &FileDescriptorSet,
@@ -139,19 +144,21 @@ fn message_to_columns(
         ));
     }
 
-    let source_name = msg.name.as_deref().unwrap_or("<unknown>").to_string();
     let mut columns = Vec::new();
 
     for field in &msg.field {
         let field_name = field
             .name
             .as_deref()
-            .ok_or_else(|| format!("field without name in message '{}'", source_name))?
+            .ok_or_else(|| {
+                let msg_name = msg.name.as_deref().unwrap_or("<unknown>");
+                format!("field without name in message '{}'", msg_name)
+            })?
             .to_string();
 
-        let data_type = map_field_type(proto_path, field, fds, depth)?;
+        let data_type = map_field_type(stream_name, proto_path, field, fds, depth)?;
         columns.push(ColumnSchema::new(
-            source_name.clone(),
+            stream_name.to_string(),
             field_name,
             data_type,
         ));
@@ -162,6 +169,7 @@ fn message_to_columns(
 
 /// Map a proto `FieldDescriptorProto` to a `ConcreteDatatype`.
 fn map_field_type(
+    stream_name: &str,
     proto_path: &str,
     field: &FieldDescriptorProto,
     fds: &FileDescriptorSet,
@@ -202,7 +210,7 @@ fn map_field_type(
                 .type_name
                 .as_deref()
                 .ok_or_else(|| "message field without type_name".to_string())?;
-            resolve_message_type(proto_path, msg_type_name, fds, depth + 1)?
+            resolve_message_type(stream_name, proto_path, msg_type_name, fds, depth + 1)?
         }
         Some(_) => {
             return Err(format!(
@@ -231,6 +239,7 @@ fn map_field_type(
 /// Well-known types like `google.protobuf.Timestamp` get special treatment;
 /// all others are expanded recursively as `Struct`.
 fn resolve_message_type(
+    stream_name: &str,
     proto_path: &str,
     type_name: &str,
     fds: &FileDescriptorSet,
@@ -249,7 +258,7 @@ fn resolve_message_type(
         )
     })?;
 
-    let fields = message_to_columns(proto_path, target, fds, depth)?;
+    let fields = message_to_columns(stream_name, proto_path, target, fds, depth)?;
     let struct_fields: Vec<StructField> = fields
         .into_iter()
         .map(|col| StructField::new(col.name.clone(), col.data_type.clone(), false))
@@ -558,6 +567,33 @@ mod tests {
             }
             other => panic!("expected struct for map entry, got {other:?}"),
         }
+    }
+
+    // ── source_name and edge-case tests ───────────────────────────────
+
+    #[test]
+    fn source_name_is_stream_name_not_message_name() {
+        let path = testdata_path("simple.proto");
+        let props = make_props(&path, "Simple");
+        let schema = parse_proto_schema("test_stream_name", &props).expect("parse schema");
+        for col in schema.column_schemas() {
+            assert_eq!(
+                col.source_name(),
+                "test_stream_name",
+                "source_name should be the stream name, not the proto message name"
+            );
+        }
+    }
+
+    #[test]
+    fn message_type_accepts_leading_dot() {
+        let path = testdata_path("pkg.proto");
+        // Use leading dot like protobuf tooling often does
+        let props = make_props(&path, ".com.example.Sensor");
+        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        assert_eq!(schema.column_schemas().len(), 2);
+        assert_column(&schema.column_schemas()[0], "sensor_id", "string");
+        assert_column(&schema.column_schemas()[1], "reading", "float64");
     }
 
     // ── error cases ───────────────────────────────────────────────────

@@ -101,7 +101,7 @@ pub async fn create_schema_handler(
     audit.log_success();
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({ "name": req.name })),
+        Json(serde_json::json!({ "name": req.name.trim() })),
     )
         .into_response()
 }
@@ -272,7 +272,7 @@ fn find_streams_referencing_schema(
             name: String,
         }
         match serde_json::from_str::<StreamSchemaCheck>(&stream.raw_json) {
-            Ok(check) if check.schema.r#ref.as_deref() == Some(schema_name) => {
+            Ok(check) if check.schema.r#ref.as_deref().map(|s| s.trim()) == Some(schema_name) => {
                 referencing.push(check.name);
             }
             _ => {}

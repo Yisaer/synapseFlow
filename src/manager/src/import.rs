@@ -1,5 +1,6 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeSet;
 use storage::{
     MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
@@ -14,7 +15,50 @@ use crate::export::{
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
 use crate::storage_bridge;
-use crate::stream::CreateStreamRequest;
+use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
+
+/// Reload all schemas from persistent storage into the in-memory `NamedSchemaStore`.
+fn reload_schemas_from_storage(storage: &storage::StorageManager) {
+    let stored = match storage.list_schemas() {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "failed to list schemas from storage during reload"
+            );
+            return;
+        }
+    };
+    let store = named_schema_store();
+    store.clear();
+    for s in &stored {
+        let props: serde_json::Map<String, serde_json::Value> =
+            match serde_json::from_str(&s.props_json) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::error!(
+                        schema = %s.name,
+                        error = %err,
+                        "failed to deserialize stored schema props during reload"
+                    );
+                    continue;
+                }
+            };
+        match schema_registry().parse(&s.schema_type, &s.name, &props) {
+            Ok(schema) => {
+                store.insert(s.name.clone(), schema);
+            }
+            Err(err) => {
+                tracing::error!(
+                    schema = %s.name,
+                    schema_type = %s.schema_type,
+                    error = %err,
+                    "failed to parse stored schema during reload; skipping"
+                );
+            }
+        }
+    }
+}
 
 #[derive(Serialize)]
 pub struct ImportStorageResponse {
@@ -129,6 +173,9 @@ pub async fn import_storage_handler(
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
 
+    // Re-hydrate NamedSchemaStore from the newly imported storage
+    reload_schemas_from_storage(state.storage.as_ref());
+
     audit.log_success();
     (
         StatusCode::OK,
@@ -228,12 +275,32 @@ where
         });
     }
 
+    // Validate each imported schema through the schema registry
+    let mut available_schema_names: BTreeSet<String> = BTreeSet::new();
+    for stored in &schemas {
+        let props: JsonMap<String, JsonValue> = serde_json::from_str(&stored.props_json)
+            .map_err(|err| format!("schema {} has invalid props JSON: {err}", stored.name))?;
+        if let Err(err) = schema_registry().parse(&stored.schema_type, &stored.name, &props) {
+            return Err(format!("schema {} is invalid: {err}", stored.name));
+        }
+        available_schema_names.insert(stored.name.clone());
+    }
+
     let mut streams = Vec::with_capacity(bundle.resources.streams.len());
     let mut bundle_stream_names = BTreeSet::new();
     let mut available_stream_names = existing_stream_names.clone();
 
     for req in &bundle.resources.streams {
         validate_stream_request(req, &mut bundle_stream_names)?;
+        if let Some(ref_name) = &req.schema.r#ref {
+            let trimmed = ref_name.trim();
+            if !available_schema_names.contains(trimmed) {
+                return Err(format!(
+                    "stream {} references schema '{}' which is not present in the import bundle",
+                    req.name, trimmed
+                ));
+            }
+        }
         available_stream_names.insert(req.name.clone());
         streams.push(storage_bridge::stored_stream_from_request(req)?);
     }

@@ -208,10 +208,12 @@ pre-defined named schema instead of inline-defining columns:
 }
 ```
 
-**Important:** Stream creation resolves the schema at creation time via a
-snapshot (`Arc::clone`). Subsequent modifications to the named schema do
-not affect existing streams. To update a stream's schema, delete and
-recreate the stream.
+**Important:** Stream creation resolves the schema at creation time, but the
+stored stream definition retains the `schema.ref` reference. On process
+restart (or any path that rebuilds the stream from storage), the schema is
+re-resolved from the in-memory `NamedSchemaStore`. This means that changes
+to a named schema can affect existing streams after a restart. To freeze a
+stream's schema permanently, create it with inline column definitions.
 
 ## Lifecycle and Persistence
 

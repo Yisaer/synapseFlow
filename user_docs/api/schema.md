@@ -224,7 +224,7 @@ curl -s -XPOST http://127.0.0.1:8080/streams \
 When `schema.ref` is present:
 - `schema.type` and `schema.props` are ignored.
 - The referenced schema must exist.
-- The schema is resolved at stream creation time (snapshot semantics).
+- The stored stream retains the `schema.ref` reference (live reference semantics). Changes to the named schema will be picked up after process restart.
 
 Inline schema definition (`schema.type` + `schema.props`) continues to
 work as before for backwards compatibility.
