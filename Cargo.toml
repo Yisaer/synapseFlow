@@ -71,6 +71,9 @@ tempfile = "3"
 flate2 = "1"
 tar = "0.4"
 proptest = "1"
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+rumqttd = "0.20.0"
+uuid = "1"
 
 [[bench]]
 name = "pipeline_e2e"

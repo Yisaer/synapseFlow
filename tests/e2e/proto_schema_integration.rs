@@ -1,0 +1,640 @@
+use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use reqwest::StatusCode;
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use tokio::net::TcpStream;
+
+// ── embedded MQTT broker helpers ──────────────────────────────────
+
+struct EmbeddedMqttBroker {
+    port: u16,
+}
+
+impl EmbeddedMqttBroker {
+    async fn start() -> Self {
+        let port = reserve_local_port();
+        let (startup_tx, startup_rx) = mpsc::channel();
+
+        let config = Config {
+            id: 0,
+            router: RouterConfig {
+                max_connections: 32,
+                max_outgoing_packet_count: 64,
+                max_segment_size: 1024,
+                max_segment_count: 8,
+                custom_segment: None,
+                initialized_filters: None,
+                shared_subscriptions_strategy: Default::default(),
+            },
+            v4: Some(HashMap::from([(
+                "test".to_string(),
+                ServerSettings {
+                    name: "mqtt-test".to_string(),
+                    listen: SocketAddr::from(([127, 0, 0, 1], port)),
+                    tls: None,
+                    next_connection_delay_ms: 1,
+                    connections: ConnectionSettings {
+                        connection_timeout_ms: 5_000,
+                        max_payload_size: 1024 * 1024,
+                        max_inflight_count: 32,
+                        auth: None,
+                        external_auth: None,
+                        dynamic_filters: true,
+                    },
+                },
+            )])),
+            ..Config::default()
+        };
+
+        thread::Builder::new()
+            .name(format!("rumqttd-e2e-{port}"))
+            .spawn(move || {
+                let mut broker = Broker::new(config);
+                let _ = startup_tx.send(broker.start());
+            })
+            .expect("spawn embedded mqtt broker thread");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                return Self { port };
+            }
+            if tokio::time::Instant::now() > deadline {
+                let msg = startup_rx
+                    .try_recv()
+                    .unwrap_or_else(|_| Ok(()))
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "broker did not start in time".to_string());
+                panic!("embedded mqtt broker startup failed: {msg}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn broker_url(&self) -> String {
+        format!("tcp://127.0.0.1:{}", self.port)
+    }
+}
+
+fn reserve_local_port() -> u16 {
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral tcp listener");
+    listener
+        .local_addr()
+        .expect("read ephemeral tcp listener address")
+        .port()
+}
+
+// ── proto content ─────────────────────────────────────────────────
+
+/// Proto file content covering all veloflux-supported type mappings.
+const ALL_TYPES_PROTO: &str = r#"
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+
+enum Priority {
+  UNKNOWN = 0;
+  LOW = 1;
+  HIGH = 2;
+}
+
+message Metadata {
+  string key = 1;
+  string value = 2;
+}
+
+message AllTypes {
+  double double_val = 1;
+  float float_val = 2;
+  int32 int32_val = 3;
+  int64 int64_val = 4;
+  uint32 uint32_val = 5;
+  uint64 uint64_val = 6;
+  sint32 sint32_val = 7;
+  sint64 sint64_val = 8;
+  fixed32 fixed32_val = 9;
+  fixed64 fixed64_val = 10;
+  sfixed32 sfixed32_val = 11;
+  sfixed64 sfixed64_val = 12;
+  bool bool_val = 13;
+  string string_val = 14;
+  bytes bytes_val = 15;
+  Priority priority = 16;
+  Metadata metadata = 17;
+  google.protobuf.Timestamp created_at = 18;
+  repeated int32 int32_list = 19;
+  repeated string string_list = 20;
+  repeated Metadata metadata_list = 21;
+  map<string, int32> scores = 22;
+  map<int32, Metadata> complex_map = 23;
+}
+"#;
+
+// ── helpers for asserting column structure in GET /schemas response ──
+
+fn assert_scalar(col: &JsonValue, name: &str, expected_type: &str) {
+    assert_eq!(col["name"].as_str().unwrap(), name, "column name mismatch");
+    assert_eq!(
+        col["data_type"].as_str().unwrap(),
+        expected_type,
+        "column '{name}' data_type mismatch"
+    );
+    assert!(
+        col["fields"].is_null(),
+        "scalar column '{name}' should not have fields"
+    );
+    assert!(
+        col["element"].is_null(),
+        "scalar column '{name}' should not have element"
+    );
+}
+
+fn assert_struct(col: &JsonValue, name: &str, expected_fields: &[(&str, &str)]) {
+    assert_eq!(col["name"].as_str().unwrap(), name);
+    assert_eq!(col["data_type"].as_str().unwrap(), "struct");
+    let fields = col["fields"]
+        .as_array()
+        .expect("struct must have fields array");
+    assert_eq!(
+        fields.len(),
+        expected_fields.len(),
+        "struct '{name}' field count mismatch"
+    );
+    for (i, (fname, ftype)) in expected_fields.iter().enumerate() {
+        assert_eq!(fields[i]["name"].as_str().unwrap(), *fname);
+        assert_eq!(
+            fields[i]["data_type"].as_str().unwrap(),
+            *ftype,
+            "struct '{name}' field '{fname}' type mismatch"
+        );
+    }
+    assert!(col["element"].is_null());
+}
+
+fn assert_list_scalar(col: &JsonValue, name: &str, expected_elem_type: &str) {
+    assert_eq!(col["name"].as_str().unwrap(), name);
+    assert_eq!(col["data_type"].as_str().unwrap(), "list");
+    let elem = &col["element"];
+    assert!(elem.is_object(), "list '{name}' must have element object");
+    assert_eq!(elem["name"].as_str().unwrap(), "element");
+    assert_eq!(
+        elem["data_type"].as_str().unwrap(),
+        expected_elem_type,
+        "list '{name}' element type mismatch"
+    );
+    assert!(col["fields"].is_null());
+}
+
+fn assert_list_struct(col: &JsonValue, name: &str, expected_fields: &[(&str, &str)]) {
+    assert_eq!(col["name"].as_str().unwrap(), name);
+    assert_eq!(col["data_type"].as_str().unwrap(), "list");
+    let elem = &col["element"];
+    assert_eq!(elem["data_type"].as_str().unwrap(), "struct");
+    let fields = elem["fields"]
+        .as_array()
+        .expect("list element struct must have fields");
+    assert_eq!(
+        fields.len(),
+        expected_fields.len(),
+        "list '{name}' element field count mismatch"
+    );
+    for (i, (fname, ftype)) in expected_fields.iter().enumerate() {
+        assert_eq!(fields[i]["name"].as_str().unwrap(), *fname);
+        assert_eq!(
+            fields[i]["data_type"].as_str().unwrap(),
+            *ftype,
+            "list '{name}' element field '{fname}' type mismatch"
+        );
+    }
+    assert!(col["fields"].is_null());
+}
+
+// ── test ──────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_with_proto_schema_ref_pipeline_injects_data() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
+    let instance = manager::new_default_flow_instance();
+    let injector = instance.clone();
+
+    let Some(listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().expect("read listener addr");
+
+    let server = tokio::spawn(async move {
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
+    });
+
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client");
+    let manager_base = format!("http://{addr}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // ── 1. Start embedded MQTT broker for output verification ──────
+
+    let broker = EmbeddedMqttBroker::start().await;
+    let broker_url = broker.broker_url();
+    let mqtt_topic = format!("e2e/proto/{}", random_suffix());
+
+    // ── 2. Write proto file to temp dir ────────────────────────────
+
+    let proto_path = temp_dir.path().join("all_types.proto");
+    std::fs::write(&proto_path, ALL_TYPES_PROTO).expect("write proto file");
+
+    // ── 3. Create proto schema via REST ────────────────────────────
+
+    let schema_name = format!("e2e_proto_schema_{}", random_suffix());
+    let create_schema_resp = http
+        .post(format!("{manager_base}/schemas"))
+        .json(&serde_json::json!({
+            "name": schema_name,
+            "type": "proto",
+            "props": {
+                "proto_path": proto_path.to_string_lossy(),
+                "message_type": "AllTypes"
+            }
+        }))
+        .send()
+        .await
+        .expect("create schema request");
+    assert_eq!(
+        create_schema_resp.status(),
+        StatusCode::CREATED,
+        "create proto schema should return 201: {}",
+        create_schema_resp.text().await.unwrap_or_default()
+    );
+
+    // ── 4. Retrieve schema and verify all column types ─────────────
+
+    let get_schema_resp = http
+        .get(format!("{manager_base}/schemas/{schema_name}"))
+        .send()
+        .await
+        .expect("get schema request");
+    assert_eq!(get_schema_resp.status(), StatusCode::OK);
+    let schema_info: JsonValue = get_schema_resp
+        .json()
+        .await
+        .expect("decode schema response");
+    assert_eq!(schema_info["name"].as_str().unwrap(), schema_name);
+    assert_eq!(schema_info["type"].as_str().unwrap(), "proto");
+
+    let columns = schema_info["columns"]
+        .as_array()
+        .expect("schema must have columns array");
+    assert_eq!(
+        columns.len(),
+        23,
+        "all_types.proto should produce 23 columns"
+    );
+
+    // Scalars (fields 1–15)
+    assert_scalar(&columns[0], "double_val", "float64");
+    assert_scalar(&columns[1], "float_val", "float32");
+    assert_scalar(&columns[2], "int32_val", "int32");
+    assert_scalar(&columns[3], "int64_val", "int64");
+    assert_scalar(&columns[4], "uint32_val", "uint32");
+    assert_scalar(&columns[5], "uint64_val", "uint64");
+    assert_scalar(&columns[6], "sint32_val", "int32");
+    assert_scalar(&columns[7], "sint64_val", "int64");
+    assert_scalar(&columns[8], "fixed32_val", "uint32");
+    assert_scalar(&columns[9], "fixed64_val", "uint64");
+    assert_scalar(&columns[10], "sfixed32_val", "int32");
+    assert_scalar(&columns[11], "sfixed64_val", "int64");
+    assert_scalar(&columns[12], "bool_val", "bool");
+    assert_scalar(&columns[13], "string_val", "string");
+    assert_scalar(&columns[14], "bytes_val", "bytes");
+
+    // Enum → int32 (field 16)
+    assert_scalar(&columns[15], "priority", "int32");
+
+    // Nested message → struct (field 17)
+    assert_struct(
+        &columns[16],
+        "metadata",
+        &[("key", "string"), ("value", "string")],
+    );
+
+    // Well-known Timestamp (field 18)
+    assert_scalar(&columns[17], "created_at", "timestamp");
+
+    // Repeated primitive → list<int32> (field 19)
+    assert_list_scalar(&columns[18], "int32_list", "int32");
+
+    // Repeated string → list<string> (field 20)
+    assert_list_scalar(&columns[19], "string_list", "string");
+
+    // Repeated message → list<struct> (field 21)
+    assert_list_struct(
+        &columns[20],
+        "metadata_list",
+        &[("key", "string"), ("value", "string")],
+    );
+
+    // Map<string,int32> → list<struct<key:string, value:int32>> (field 22)
+    assert_list_struct(
+        &columns[21],
+        "scores",
+        &[("key", "string"), ("value", "int32")],
+    );
+
+    // Map<int32,Metadata> → list<struct<key:int32, value:struct<key:string, value:string>>> (field 23)
+    {
+        let col = &columns[22];
+        assert_eq!(col["name"].as_str().unwrap(), "complex_map");
+        assert_eq!(col["data_type"].as_str().unwrap(), "list");
+        let elem = &col["element"];
+        assert_eq!(elem["data_type"].as_str().unwrap(), "struct");
+        let fields = elem["fields"]
+            .as_array()
+            .expect("complex_map element must have fields");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0]["name"].as_str().unwrap(), "key");
+        assert_eq!(fields[0]["data_type"].as_str().unwrap(), "int32");
+        assert_eq!(fields[1]["name"].as_str().unwrap(), "value");
+        assert_eq!(fields[1]["data_type"].as_str().unwrap(), "struct");
+        let inner_fields = fields[1]["fields"]
+            .as_array()
+            .expect("complex_map value must have nested fields");
+        assert_eq!(inner_fields.len(), 2);
+        assert_eq!(inner_fields[0]["name"].as_str().unwrap(), "key");
+        assert_eq!(inner_fields[0]["data_type"].as_str().unwrap(), "string");
+        assert_eq!(inner_fields[1]["name"].as_str().unwrap(), "value");
+        assert_eq!(inner_fields[1]["data_type"].as_str().unwrap(), "string");
+    }
+
+    // ── 5. Create stream referencing the proto schema ──────────────
+
+    let stream_name = format!("e2e_proto_stream_{}", random_suffix());
+    let create_stream_resp = http
+        .post(format!("{manager_base}/streams"))
+        .json(&serde_json::json!({
+            "name": stream_name,
+            "type": "mock",
+            "schema": { "ref": schema_name },
+            "props": {},
+            "shared": true,
+            "decoder": { "type": "json", "props": {} }
+        }))
+        .send()
+        .await
+        .expect("create stream request");
+    assert_eq!(
+        create_stream_resp.status(),
+        StatusCode::CREATED,
+        "create stream with schema ref should return 201: {}",
+        create_stream_resp.text().await.unwrap_or_default()
+    );
+
+    // ── 6. Describe stream and verify schema columns match ──────────
+
+    let describe_resp = http
+        .get(format!("{manager_base}/streams/describe/{stream_name}"))
+        .send()
+        .await
+        .expect("describe stream request");
+    assert_eq!(describe_resp.status(), StatusCode::OK);
+    let describe_info: JsonValue = describe_resp
+        .json()
+        .await
+        .expect("decode describe response");
+    let stream_columns = describe_info["spec"]["schema"]["columns"]
+        .as_array()
+        .expect("stream describe must have columns");
+    assert_eq!(
+        stream_columns.len(),
+        23,
+        "stream schema should have 23 columns from proto schema"
+    );
+    assert_eq!(stream_columns[0]["name"].as_str().unwrap(), "double_val");
+    assert_eq!(stream_columns[0]["data_type"].as_str().unwrap(), "float64");
+    assert_eq!(stream_columns[14]["name"].as_str().unwrap(), "bytes_val");
+    assert_eq!(stream_columns[14]["data_type"].as_str().unwrap(), "bytes");
+
+    // ── 7. Create and start pipeline with MQTT sink ────────────────
+
+    let pipeline_id = format!("e2e_proto_pipe_{}", random_suffix());
+    let create_pipeline_resp = http
+        .post(format!("{manager_base}/pipelines"))
+        .json(&serde_json::json!({
+            "id": pipeline_id,
+            "sql": format!("SELECT double_val, int32_val, string_val, bool_val FROM {stream_name}"),
+            "sinks": [{
+                "type": "mqtt",
+                "props": {
+                    "broker_url": broker_url,
+                    "topic": mqtt_topic,
+                    "qos": 0
+                },
+                "encoder": { "type": "json", "props": {} }
+            }]
+        }))
+        .send()
+        .await
+        .expect("create pipeline request");
+    assert_eq!(
+        create_pipeline_resp.status(),
+        StatusCode::CREATED,
+        "create pipeline should return 201: {}",
+        create_pipeline_resp.text().await.unwrap_or_default()
+    );
+
+    let start_resp = http
+        .post(format!("{manager_base}/pipelines/{pipeline_id}/start"))
+        .send()
+        .await
+        .expect("start pipeline request");
+    assert_eq!(
+        start_resp.status(),
+        StatusCode::OK,
+        "start pipeline should return 200: {}",
+        start_resp.text().await.unwrap_or_default()
+    );
+
+    // ── 8. Subscribe to MQTT output topic ──────────────────────────
+
+    let (host, port) = {
+        let url = broker_url.strip_prefix("tcp://").unwrap_or(&broker_url);
+        let (h, p) = url.split_once(':').expect("broker_url must have port");
+        (
+            h.to_string(),
+            p.parse::<u16>().expect("invalid broker port"),
+        )
+    };
+    let sub_client_id = format!("sub-{}", random_suffix());
+    let mut sub_options = MqttOptions::new(&sub_client_id, &host, port);
+    sub_options.set_keep_alive(Duration::from_secs(5));
+    let (sub_client, mut sub_event_loop) = AsyncClient::new(sub_options, 10);
+    sub_client
+        .subscribe(&mqtt_topic, QoS::AtLeastOnce)
+        .await
+        .expect("subscribe to mqtt topic");
+
+    // Wait for the subscriber's MQTT handshake to complete (ConnAck).
+    // Without this, the subscriber may miss messages injected before
+    // the TCP+TLS handshake finishes, especially under coverage
+    // instrumentation where connection setup is slower.
+    let (connack_tx, connack_rx) = tokio::sync::oneshot::channel();
+    let received: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let received_clone = received.clone();
+    tokio::spawn(async move {
+        let mut connack_tx = Some(connack_tx);
+        loop {
+            match sub_event_loop.poll().await {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    if let Some(tx) = connack_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    *received_clone.lock().unwrap() = Some(publish.payload.to_vec());
+                    return;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    eprintln!("mqtt event loop error in background task: {err}");
+                    return;
+                }
+            }
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(15), connack_rx)
+        .await
+        .expect("subscriber connack timeout")
+        .expect("subscriber connack channel closed");
+
+    // ── 9. Inject data with retries ────────────────────────────────
+
+    // Build the payload once.
+    let payload = serde_json::json!({
+        "double_val": 1.5,
+        "float_val": 2.5,
+        "int32_val": 42,
+        "int64_val": 43,
+        "uint32_val": 44,
+        "uint64_val": 45,
+        "sint32_val": 46,
+        "sint64_val": 47,
+        "fixed32_val": 48,
+        "fixed64_val": 49,
+        "sfixed32_val": 50,
+        "sfixed64_val": 51,
+        "bool_val": true,
+        "string_val": "hello",
+        "bytes_val": "d29ybGQ=",
+        "priority": 1,
+        "metadata": { "key": "k1", "value": "v1" },
+        "created_at": "2024-01-01T00:00:00Z",
+        "int32_list": [1, 2, 3],
+        "string_list": ["a", "b"],
+        "metadata_list": [{ "key": "k", "value": "v" }],
+        "scores": [{ "key": "s1", "value": 90 }],
+        "complex_map": [{ "key": 1, "value": { "key": "mk", "value": "mv" } }]
+    });
+    let payload_bytes = serde_json::to_vec(&payload).expect("serialize payload");
+
+    // Retry injection multiple times. The MQTT sink inside the
+    // pipeline connects asynchronously and may not be ready on the
+    // first attempt (especially under coverage instrumentation).
+    // Each injection re-publishes the data; once the sink is
+    // connected, it will forward output to the broker.
+    const MAX_INJECT_ATTEMPTS: usize = 10;
+    const INJECT_RETRY_DELAY: Duration = Duration::from_secs(3);
+    for _attempt in 1..=MAX_INJECT_ATTEMPTS {
+        injector
+            .send_shared_mock_stream_payload(&stream_name, payload_bytes.clone())
+            .await
+            .expect("inject payload into mock stream");
+
+        tokio::time::sleep(INJECT_RETRY_DELAY).await;
+
+        if received.lock().unwrap().is_some() {
+            break;
+        }
+    }
+
+    let output_bytes = received
+        .lock()
+        .unwrap()
+        .take()
+        .expect("timed out waiting for mqtt output after retries");
+
+    let _ = sub_client.disconnect().await;
+
+    let output: JsonValue =
+        serde_json::from_slice(&output_bytes).expect("parse mqtt output as json");
+
+    // JSON encoder wraps records in an array; extract the first record.
+    let record = &output[0];
+
+    // Pipeline SELECTs: double_val, int32_val, string_val, bool_val
+    assert_eq!(
+        record["double_val"].as_f64().unwrap(),
+        1.5,
+        "output double_val mismatch"
+    );
+    assert_eq!(
+        record["int32_val"].as_i64().unwrap(),
+        42,
+        "output int32_val mismatch"
+    );
+    assert_eq!(
+        record["string_val"].as_str().unwrap(),
+        "hello",
+        "output string_val mismatch"
+    );
+    assert!(
+        record["bool_val"].as_bool().unwrap(),
+        "output bool_val should be true"
+    );
+
+    // ── 11. Cleanup ────────────────────────────────────────────────
+
+    let stop_resp = http
+        .post(format!(
+            "{manager_base}/pipelines/{pipeline_id}/stop?mode=graceful&timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .expect("stop pipeline request");
+    assert_eq!(stop_resp.status(), StatusCode::OK);
+
+    let delete_pipe_resp = http
+        .delete(format!("{manager_base}/pipelines/{pipeline_id}"))
+        .send()
+        .await
+        .expect("delete pipeline request");
+    assert_eq!(delete_pipe_resp.status(), StatusCode::OK);
+
+    let delete_stream_resp = http
+        .delete(format!("{manager_base}/streams/{stream_name}"))
+        .send()
+        .await
+        .expect("delete stream request");
+    assert_eq!(delete_stream_resp.status(), StatusCode::OK);
+
+    let delete_schema_resp = http
+        .delete(format!("{manager_base}/schemas/{schema_name}"))
+        .send()
+        .await
+        .expect("delete schema request");
+    assert_eq!(delete_schema_resp.status(), StatusCode::OK);
+
+    server.abort();
+    let _ = server.await;
+}
