@@ -64,7 +64,6 @@ jobs:
 
   test:
     name: Test
-    needs: lint
     runs-on: infra-emqx-io-4c
     services:
       nanomq:
@@ -95,7 +94,6 @@ jobs:
 
   coverage:
     name: Coverage
-    needs: lint
     runs-on: ubuntu-latest
     services:
       nanomq:
