@@ -1,5 +1,5 @@
 use super::template_transform::JsonTemplateTransform;
-use super::{CollectionEncoder, CollectionEncoderStream, EncodeError};
+use super::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use crate::model::{Collection, Tuple};
 use crate::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
 use crate::planner::physical::ByIndexProjection;
@@ -43,48 +43,18 @@ impl JsonEncoder {
     }
 }
 
-impl CollectionEncoder for JsonEncoder {
+impl SinkEncoderFactory for JsonEncoder {
     fn id(&self) -> &str {
         &self.id
     }
 
-    fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
-        if self.transform.is_some() {
-            let mut stream = JsonStreamingEncoder::new(
-                self.omit_null_columns,
-                None,
-                self.transform.clone(),
-                self.output_schema.clone(),
-            );
-            stream.append_collection(collection)?;
-            return Box::new(stream).finish();
-        }
-
-        let rows = collection.rows();
-        let payload = if rows.is_empty() {
-            serde_json::to_vec(&JsonValue::Array(Vec::new()))
-        } else {
-            let mut json_rows = Vec::with_capacity(rows.len());
-            let options = JsonRowEncodeOptions::native(
-                self.by_index_projection.as_deref(),
-                self.output_schema.as_deref(),
-                if self.omit_null_columns {
-                    NullColumnPolicy::OmitNullObjectFields
-                } else {
-                    NullColumnPolicy::KeepNulls
-                },
-            );
-            for tuple in rows {
-                json_rows.push(tuple_to_json_with_options(tuple, options)?);
-            }
-            serde_json::to_vec(&JsonValue::Array(json_rows))
-        }
-        .map_err(EncodeError::Serialization)?;
-        Ok(payload)
-    }
-
-    fn supports_streaming(&self) -> bool {
-        true
+    fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
+        Ok(Box::new(JsonEncoderRuntime::new(
+            self.omit_null_columns,
+            self.by_index_projection.clone(),
+            self.transform.clone(),
+            self.output_schema.clone(),
+        )))
     }
 
     fn supports_index_lazy_materialization(&self) -> bool {
@@ -94,7 +64,7 @@ impl CollectionEncoder for JsonEncoder {
     fn with_by_index_projection(
         self: Arc<Self>,
         spec: Arc<ByIndexProjection>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         if self.transform.is_some() {
             return Err(EncodeError::Other(
                 "index lazy materialization is not supported when encoder.transform=template"
@@ -114,7 +84,7 @@ impl CollectionEncoder for JsonEncoder {
     fn with_output_schema(
         self: Arc<Self>,
         output_schema: Arc<OutputSchema>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             props: self.props.clone(),
@@ -124,19 +94,9 @@ impl CollectionEncoder for JsonEncoder {
             output_schema: Some(output_schema),
         }))
     }
-
-    fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        Some(Box::new(JsonStreamingEncoder::new(
-            self.omit_null_columns,
-            self.by_index_projection.clone(),
-            self.transform.clone(),
-            self.output_schema.clone(),
-        )))
-    }
 }
 
-struct JsonStreamingEncoder {
-    payload: Vec<u8>,
+struct JsonEncoderRuntime {
     is_first_row: bool,
     omit_null_columns: bool,
     by_index_projection: Option<Arc<ByIndexProjection>>,
@@ -144,7 +104,7 @@ struct JsonStreamingEncoder {
     output_schema: Option<Arc<OutputSchema>>,
 }
 
-impl JsonStreamingEncoder {
+impl JsonEncoderRuntime {
     fn new(
         omit_null_columns: bool,
         by_index_projection: Option<Arc<ByIndexProjection>>,
@@ -152,7 +112,6 @@ impl JsonStreamingEncoder {
         output_schema: Option<Arc<OutputSchema>>,
     ) -> Self {
         Self {
-            payload: vec![b'['],
             is_first_row: true,
             omit_null_columns,
             by_index_projection,
@@ -209,23 +168,41 @@ enum NullColumnPolicy {
     OmitNullObjectFields,
 }
 
-impl CollectionEncoderStream for JsonStreamingEncoder {
-    fn append(&mut self, tuple: &Tuple) -> Result<(), EncodeError> {
-        append_tuple_to_payload(
-            &mut self.payload,
-            &mut self.is_first_row,
-            self.omit_null_columns,
-            tuple,
-            self.by_index_projection.as_deref(),
-            self.transform.as_deref(),
-            self.output_schema.as_deref(),
-        )
+impl SinkEncoder for JsonEncoderRuntime {
+    fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        self.is_first_row = true;
+        Ok(Some(bytes::Bytes::from_static(b"[")))
     }
 
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
-        let mut encoder = *self;
-        encoder.payload.push(b']');
-        Ok(encoder.payload)
+    fn append(&mut self, record: &dyn Collection) -> Result<Option<bytes::Bytes>, EncodeError> {
+        if record.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        let mut chunk = Vec::new();
+        for tuple in record.rows() {
+            if !self.is_first_row {
+                chunk.push(b',');
+            }
+            self.is_first_row = false;
+            append_tuple_json(
+                &mut chunk,
+                self.omit_null_columns,
+                tuple,
+                self.by_index_projection.as_deref(),
+                self.transform.as_deref(),
+                self.output_schema.as_deref(),
+            )?;
+        }
+        Ok(Some(chunk.into()))
+    }
+
+    fn finish_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        Ok(Some(bytes::Bytes::from_static(b"]")))
+    }
+
+    fn abort_delivery(&mut self) {
+        self.is_first_row = true;
     }
 }
 
@@ -452,21 +429,14 @@ fn encode_row_from_tuple_layout(
     Ok(JsonValue::Object(json_row))
 }
 
-fn append_tuple_to_payload(
+fn append_tuple_json(
     payload: &mut Vec<u8>,
-    is_first_row: &mut bool,
     omit_null_columns: bool,
     tuple: &Tuple,
     by_index_projection: Option<&ByIndexProjection>,
     transform: Option<&JsonTemplateTransform>,
     output_schema: Option<&OutputSchema>,
 ) -> Result<(), EncodeError> {
-    if *is_first_row {
-        *is_first_row = false;
-    } else {
-        payload.push(b',');
-    }
-
     let options = if transform.is_some() {
         JsonRowEncodeOptions::transform(by_index_projection, output_schema)
     } else {
@@ -512,12 +482,37 @@ fn number_from_f64(value: f64) -> JsonValue {
 mod tests {
     use super::*;
     use crate::model::batch_from_columns_simple;
+    use crate::model::Collection;
     use crate::planner::sink::SinkEncoderConfig;
     use datatypes::{
         ConcreteDatatype, Int64Type, ListType, ListValue, StringType, StructField, StructType,
         StructValue, TimestampValue,
     };
     use std::sync::Arc;
+
+    fn extend_optional(payload: &mut Vec<u8>, chunk: Option<bytes::Bytes>) {
+        if let Some(chunk) = chunk {
+            payload.extend_from_slice(&chunk);
+        }
+    }
+
+    fn encode_collection(encoder: &JsonEncoder, collection: &dyn Collection) -> Vec<u8> {
+        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let mut payload = Vec::new();
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
+        );
+        extend_optional(
+            &mut payload,
+            runtime.append(collection).expect("append record"),
+        );
+        extend_optional(
+            &mut payload,
+            runtime.finish_delivery().expect("finish delivery"),
+        );
+        payload
+    }
 
     #[test]
     fn json_encoder_emits_single_payload() {
@@ -539,7 +534,7 @@ mod tests {
         .expect("valid batch");
 
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(
@@ -564,7 +559,7 @@ mod tests {
         .expect("valid batch");
 
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(
@@ -592,7 +587,7 @@ mod tests {
         .expect("valid batch");
 
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([{ "amount": 10 }]));
@@ -616,7 +611,7 @@ mod tests {
 
         let config = SinkEncoderConfig::json().with_json_omit_null_columns(false);
         let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([{ "amount": 10, "status": null }]));
@@ -632,7 +627,7 @@ mod tests {
         .expect("valid batch");
 
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([{ "payload": "aGVsbG8=" }]));
@@ -668,7 +663,7 @@ mod tests {
         .expect("valid batch");
 
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(
@@ -705,11 +700,12 @@ mod tests {
     #[test]
     fn json_encoder_streaming() {
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        assert!(
-            encoder.supports_streaming(),
-            "json encoder should be streaming"
+        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let mut payload = Vec::new();
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
         );
-        let mut stream = encoder.start_stream().expect("stream");
 
         let batch1 = batch_from_columns_simple(vec![
             (
@@ -724,7 +720,9 @@ mod tests {
             ),
         ])
         .expect("batch1");
-        stream.append_collection(&batch1).expect("append batch1");
+        if let Some(chunk) = runtime.append(&batch1).expect("append batch1") {
+            payload.extend_from_slice(&chunk);
+        }
 
         let batch2 = batch_from_columns_simple(vec![
             (
@@ -739,11 +737,14 @@ mod tests {
             ),
         ])
         .expect("batch2");
-        for tuple in batch2.rows() {
-            stream.append(tuple).expect("stream append");
+        if let Some(chunk) = runtime.append(&batch2).expect("append batch2") {
+            payload.extend_from_slice(&chunk);
         }
 
-        let payload = stream.finish().expect("stream finish");
+        extend_optional(
+            &mut payload,
+            runtime.finish_delivery().expect("finish delivery"),
+        );
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(
             json,
@@ -757,8 +758,16 @@ mod tests {
     #[test]
     fn json_encoder_streaming_empty_payload_is_array() {
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let stream = encoder.start_stream().expect("stream");
-        let payload = stream.finish().expect("stream finish");
+        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let mut payload = Vec::new();
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
+        );
+        extend_optional(
+            &mut payload,
+            runtime.finish_delivery().expect("finish delivery"),
+        );
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([]));
@@ -787,7 +796,7 @@ mod tests {
             "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
         );
         let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let payload = encoder.encode(&batch).expect("encode collection");
+        let payload = encode_collection(&encoder, &batch);
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(
@@ -805,7 +814,12 @@ mod tests {
             "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
         );
         let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let mut stream = encoder.start_stream().expect("stream");
+        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let mut payload = Vec::new();
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
+        );
 
         let batch1 = batch_from_columns_simple(vec![
             (
@@ -820,7 +834,9 @@ mod tests {
             ),
         ])
         .expect("batch1");
-        stream.append_collection(&batch1).expect("append batch1");
+        if let Some(chunk) = runtime.append(&batch1).expect("append batch1") {
+            payload.extend_from_slice(&chunk);
+        }
 
         let batch2 = batch_from_columns_simple(vec![
             (
@@ -835,11 +851,14 @@ mod tests {
             ),
         ])
         .expect("batch2");
-        for tuple in batch2.rows() {
-            stream.append(tuple).expect("append row");
+        if let Some(chunk) = runtime.append(&batch2).expect("append batch2") {
+            payload.extend_from_slice(&chunk);
         }
 
-        let payload = stream.finish().expect("stream finish");
+        extend_optional(
+            &mut payload,
+            runtime.finish_delivery().expect("finish delivery"),
+        );
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(
             json,

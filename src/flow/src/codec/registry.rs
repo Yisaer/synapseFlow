@@ -1,5 +1,5 @@
 use super::decoder::{JsonDecoder, RecordDecoder};
-use super::encoder::CollectionEncoder;
+use super::encoder::SinkEncoderFactory;
 use super::CodecError;
 use crate::catalog::StreamDecoderConfig;
 use crate::codec::encoder::JsonEncoder;
@@ -9,12 +9,12 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type EncoderFactory =
-    Arc<dyn Fn(&SinkEncoderConfig) -> Result<Arc<dyn CollectionEncoder>, CodecError> + Send + Sync>;
+type EncoderFactory = Arc<
+    dyn Fn(&SinkEncoderConfig) -> Result<Arc<dyn SinkEncoderFactory>, CodecError> + Send + Sync,
+>;
 
 struct EncoderEntry {
     factory: EncoderFactory,
-    supports_streaming: bool,
     supports_by_index_projection: bool,
 }
 type DecoderFactory = Arc<
@@ -111,27 +111,20 @@ impl EncoderRegistry {
         registry
     }
 
-    pub fn register_encoder(
-        &self,
-        kind: impl Into<String>,
-        factory: EncoderFactory,
-        supports_streaming: bool,
-    ) {
-        self.register_encoder_with_caps(kind, factory, supports_streaming, false);
+    pub fn register_encoder(&self, kind: impl Into<String>, factory: EncoderFactory) {
+        self.register_encoder_with_caps(kind, factory, false);
     }
 
     pub fn register_encoder_with_caps(
         &self,
         kind: impl Into<String>,
         factory: EncoderFactory,
-        supports_streaming: bool,
         supports_by_index_projection: bool,
     ) {
         self.factories.write().insert(
             kind.into(),
             EncoderEntry {
                 factory,
-                supports_streaming,
                 supports_by_index_projection,
             },
         );
@@ -140,7 +133,7 @@ impl EncoderRegistry {
     pub fn instantiate(
         &self,
         config: &SinkEncoderConfig,
-    ) -> Result<Arc<dyn CollectionEncoder>, CodecError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, CodecError> {
         let guard = self.factories.read();
         let kind = config.kind_str();
         let factory = guard
@@ -152,14 +145,6 @@ impl EncoderRegistry {
     pub fn is_registered(&self, kind: &str) -> bool {
         let guard = self.factories.read();
         guard.contains_key(kind)
-    }
-
-    pub fn supports_streaming(&self, kind: &str) -> bool {
-        let guard = self.factories.read();
-        guard
-            .get(kind)
-            .map(|entry| entry.supports_streaming)
-            .unwrap_or(false)
     }
 
     pub fn supports_by_index_projection(&self, kind: &str) -> bool {
@@ -179,7 +164,6 @@ impl EncoderRegistry {
                         .map_err(|err| CodecError::Other(err.to_string()))?,
                 ) as Arc<_>)
             }),
-            true,
             true,
         );
     }

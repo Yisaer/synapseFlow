@@ -9,7 +9,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use datatypes::Value;
-use flow::codec::encoder::{CollectionEncoder, CollectionEncoderStream, EncodeError};
+use flow::codec::encoder::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use flow::model::{Collection, Tuple};
 use flow::planner::physical::ByIndexProjection;
 use flow::planner::physical::output_schema::OutputSchema;
@@ -35,25 +35,13 @@ impl ColumnarCsvJsonEncoder {
     }
 }
 
-impl CollectionEncoder for ColumnarCsvJsonEncoder {
+impl SinkEncoderFactory for ColumnarCsvJsonEncoder {
     fn id(&self) -> &str {
         &self.id
     }
 
-    fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
-        let mut aggregator = ColumnarAggregator::default();
-        for tuple in collection.rows() {
-            aggregator.append_tuple(tuple);
-        }
-        aggregator.finish_bytes()
-    }
-
-    fn supports_streaming(&self) -> bool {
-        true
-    }
-
-    fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        Some(Box::new(ColumnarCsvJsonStream::new(
+    fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
+        Ok(Box::new(ColumnarCsvJsonEncoderRuntime::new(
             self.by_index_projection.clone(),
         )))
     }
@@ -65,7 +53,7 @@ impl CollectionEncoder for ColumnarCsvJsonEncoder {
     fn with_by_index_projection(
         self: Arc<Self>,
         spec: Arc<ByIndexProjection>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             by_index_projection: Some(spec),
@@ -75,7 +63,7 @@ impl CollectionEncoder for ColumnarCsvJsonEncoder {
     fn with_output_schema(
         self: Arc<Self>,
         _output_schema: Arc<OutputSchema>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             by_index_projection: self.by_index_projection.clone(),
@@ -83,32 +71,49 @@ impl CollectionEncoder for ColumnarCsvJsonEncoder {
     }
 }
 
-struct ColumnarCsvJsonStream {
+struct ColumnarCsvJsonEncoderRuntime {
     agg: ColumnarAggregator,
+    by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
-impl ColumnarCsvJsonStream {
+impl ColumnarCsvJsonEncoderRuntime {
     fn new(by_index_projection: Option<Arc<ByIndexProjection>>) -> Self {
         Self {
-            agg: ColumnarAggregator::new(by_index_projection),
+            agg: ColumnarAggregator::new(by_index_projection.clone()),
+            by_index_projection,
         }
     }
 }
 
-impl Default for ColumnarCsvJsonStream {
+impl Default for ColumnarCsvJsonEncoderRuntime {
     fn default() -> Self {
         Self::new(None)
     }
 }
 
-impl CollectionEncoderStream for ColumnarCsvJsonStream {
-    fn append(&mut self, tuple: &Tuple) -> Result<(), EncodeError> {
-        self.agg.append_tuple(tuple);
-        Ok(())
+impl SinkEncoder for ColumnarCsvJsonEncoderRuntime {
+    fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        self.agg = ColumnarAggregator::new(self.by_index_projection.clone());
+        Ok(None)
     }
 
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
-        self.agg.finish_bytes()
+    fn append(&mut self, record: &dyn Collection) -> Result<Option<bytes::Bytes>, EncodeError> {
+        for tuple in record.rows() {
+            self.agg.append_tuple(tuple);
+        }
+        Ok(None)
+    }
+
+    fn finish_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        let agg = std::mem::replace(
+            &mut self.agg,
+            ColumnarAggregator::new(self.by_index_projection.clone()),
+        );
+        agg.finish_bytes().map(bytes::Bytes::from).map(Some)
+    }
+
+    fn abort_delivery(&mut self) {
+        self.agg = ColumnarAggregator::new(self.by_index_projection.clone());
     }
 }
 
@@ -371,7 +376,7 @@ fn value_to_string(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flow::model::Message;
+    use flow::model::{Message, RecordBatch};
     use std::sync::Arc;
 
     fn create_test_tuple(id: i64, name: &str) -> Tuple {
@@ -394,6 +399,21 @@ mod tests {
         Tuple::new(vec![message])
     }
 
+    fn encode_tuples(encoder: &ColumnarCsvJsonEncoder, tuples: Vec<Tuple>) -> Vec<u8> {
+        let mut runtime = encoder.start_encoder().unwrap();
+        runtime.begin_delivery().unwrap();
+        let batch = RecordBatch::new(tuples).unwrap();
+        assert!(runtime.append(&batch).unwrap().is_none());
+        runtime.finish_delivery().unwrap().unwrap().to_vec()
+    }
+
+    fn encode_batch(encoder: &ColumnarCsvJsonEncoder, batch: &RecordBatch) -> Vec<u8> {
+        let mut runtime = encoder.start_encoder().unwrap();
+        runtime.begin_delivery().unwrap();
+        assert!(runtime.append(batch).unwrap().is_none());
+        runtime.finish_delivery().unwrap().unwrap().to_vec()
+    }
+
     #[test]
     fn test_encoder_id() {
         let encoder = ColumnarCsvJsonEncoder::new("test_encoder");
@@ -401,26 +421,18 @@ mod tests {
     }
 
     #[test]
-    fn test_supports_streaming() {
+    fn test_start_encoder() {
         let encoder = ColumnarCsvJsonEncoder::new("test");
-        assert!(encoder.supports_streaming());
-    }
-
-    #[test]
-    fn test_start_stream() {
-        let encoder = ColumnarCsvJsonEncoder::new("test");
-        let stream = encoder.start_stream();
-        assert!(stream.is_some());
+        assert!(encoder.start_encoder().is_ok());
     }
 
     #[test]
     fn test_encode_tuple_single() {
-        use flow::model::RecordBatch;
         let encoder = ColumnarCsvJsonEncoder::new("test");
         let tuple = create_test_tuple(123, "alice");
         let batch = RecordBatch::new(vec![tuple]).unwrap();
 
-        let result = encoder.encode(&batch).unwrap();
+        let result = encode_batch(&encoder, &batch);
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -429,14 +441,16 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_append_and_finish() {
+    fn test_runtime_append_and_finish() {
         let encoder = ColumnarCsvJsonEncoder::new("test");
-        let mut stream = encoder.start_stream().unwrap();
 
-        stream.append(&create_test_tuple(123, "alice")).unwrap();
-        stream.append(&create_test_tuple(456, "bob")).unwrap();
-
-        let result = stream.finish().unwrap();
+        let result = encode_tuples(
+            &encoder,
+            vec![
+                create_test_tuple(123, "alice"),
+                create_test_tuple(456, "bob"),
+            ],
+        );
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -454,15 +468,16 @@ mod tests {
     #[test]
     fn test_empty_values_are_preserved() {
         let encoder = ColumnarCsvJsonEncoder::new("test");
-        let mut stream = encoder.start_stream().unwrap();
-
-        stream.append(&create_test_tuple(1, "a")).unwrap();
-        stream.append(&create_empty_tuple()).unwrap();
-        stream.append(&create_test_tuple(3, "c")).unwrap();
-        stream.append(&create_empty_tuple()).unwrap();
-        stream.append(&create_empty_tuple()).unwrap();
-
-        let result = stream.finish().unwrap();
+        let result = encode_tuples(
+            &encoder,
+            vec![
+                create_test_tuple(1, "a"),
+                create_empty_tuple(),
+                create_test_tuple(3, "c"),
+                create_empty_tuple(),
+                create_empty_tuple(),
+            ],
+        );
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -473,12 +488,7 @@ mod tests {
     #[test]
     fn test_only_empty_values() {
         let encoder = ColumnarCsvJsonEncoder::new("test");
-        let mut stream = encoder.start_stream().unwrap();
-
-        stream.append(&create_empty_tuple()).unwrap();
-        stream.append(&create_empty_tuple()).unwrap();
-
-        let result = stream.finish().unwrap();
+        let result = encode_tuples(&encoder, vec![create_empty_tuple(), create_empty_tuple()]);
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -556,14 +566,12 @@ mod tests {
 
     #[test]
     fn test_encode_with_collection() {
-        use flow::model::RecordBatch;
-
         let encoder = ColumnarCsvJsonEncoder::new("test");
         let tuple1 = create_test_tuple(1, "alice");
         let tuple2 = create_test_tuple(2, "bob");
         let batch = RecordBatch::new(vec![tuple1, tuple2]).unwrap();
 
-        let result = encoder.encode(&batch).unwrap();
+        let result = encode_batch(&encoder, &batch);
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -572,9 +580,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_with_various_types() {
+    fn test_runtime_with_various_types() {
         let encoder = ColumnarCsvJsonEncoder::new("test");
-        let mut stream = encoder.start_stream().unwrap();
 
         let keys = vec![
             Arc::<str>::from("int8"),
@@ -591,8 +598,7 @@ mod tests {
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         let tuple = Tuple::new(vec![message]);
 
-        stream.append(&tuple).unwrap();
-        let result = stream.finish().unwrap();
+        let result = encode_tuples(&encoder, vec![tuple]);
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -603,9 +609,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_with_uint_types() {
+    fn test_runtime_with_uint_types() {
         let encoder = ColumnarCsvJsonEncoder::new("test");
-        let mut stream = encoder.start_stream().unwrap();
 
         let keys = vec![
             Arc::<str>::from("u8"),
@@ -622,8 +627,7 @@ mod tests {
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         let tuple = Tuple::new(vec![message]);
 
-        stream.append(&tuple).unwrap();
-        let result = stream.finish().unwrap();
+        let result = encode_tuples(&encoder, vec![tuple]);
         let json_str = String::from_utf8(result).unwrap();
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 

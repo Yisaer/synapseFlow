@@ -1,11 +1,12 @@
-//! Encoder abstractions for turning in-memory [`Collection`]s into outbound payloads.
+//! Encoder abstractions for turning collection-backed input records into outbound sink payloads.
 
 mod json;
 mod template_transform;
 
-use crate::model::{Collection, Tuple};
+use crate::model::Collection;
 use crate::planner::physical::output_schema::OutputSchema;
 use crate::planner::physical::ByIndexProjection;
+use bytes::Bytes;
 use std::sync::Arc;
 
 pub use json::JsonEncoder;
@@ -21,16 +22,12 @@ pub enum EncodeError {
     Other(String),
 }
 
-/// Trait implemented by every sink encoder.
-pub trait CollectionEncoder: Send + Sync + 'static {
+/// Factory and shared configuration for every sink encoder.
+pub trait SinkEncoderFactory: Send + Sync + 'static {
     /// Identifier for metrics/logging.
     fn id(&self) -> &str;
-    /// Convert a collection into a single payload.
-    fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError>;
-    /// Whether this encoder supports streaming aggregation.
-    fn supports_streaming(&self) -> bool {
-        false
-    }
+    /// Start a processor-local reusable encoder.
+    fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError>;
     /// Whether this encoder supports index-based lazy materialization (`ByIndexProjection`).
     fn supports_index_lazy_materialization(&self) -> bool {
         false
@@ -39,7 +36,7 @@ pub trait CollectionEncoder: Send + Sync + 'static {
     fn with_by_index_projection(
         self: Arc<Self>,
         _spec: Arc<ByIndexProjection>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Err(EncodeError::Other(
             "index lazy materialization is not supported for this encoder".to_string(),
         ))
@@ -48,24 +45,19 @@ pub trait CollectionEncoder: Send + Sync + 'static {
     fn with_output_schema(
         self: Arc<Self>,
         _output_schema: Arc<OutputSchema>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError>;
-    /// Start a streaming session if supported.
-    fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        None
-    }
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError>;
 }
 
-/// Stateful encoder stream used for incremental encoding.
-pub trait CollectionEncoderStream: Send {
-    /// Append a tuple into the stream buffer.
-    fn append(&mut self, tuple: &Tuple) -> Result<(), EncodeError>;
-    /// Append an entire collection by iterating its rows.
-    fn append_collection(&mut self, collection: &dyn Collection) -> Result<(), EncodeError> {
-        for tuple in collection.rows() {
-            self.append(tuple)?;
-        }
-        Ok(())
-    }
-    /// Finalize the stream and emit the payload.
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError>;
+/// Processor-local reusable sink encoder.
+pub trait SinkEncoder: Send {
+    /// Start a new delivery, reset per-delivery state, and optionally emit start bytes.
+    fn begin_delivery(&mut self) -> Result<Option<Bytes>, EncodeError>;
+    /// Append one input record and optionally emit one intermediate chunk.
+    ///
+    /// The runtime representation of an input record is [`Collection`].
+    fn append(&mut self, record: &dyn Collection) -> Result<Option<Bytes>, EncodeError>;
+    /// Finalize the current delivery and optionally emit end bytes.
+    fn finish_delivery(&mut self) -> Result<Option<Bytes>, EncodeError>;
+    /// Abort the current delivery and clear any partial state.
+    fn abort_delivery(&mut self) {}
 }

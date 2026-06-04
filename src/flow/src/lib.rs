@@ -31,8 +31,8 @@ pub use catalog::{
     VideoRtspTransport, VideoStreamProps,
 };
 pub use codec::{
-    CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
-    EncoderRegistry, JsonDecoder, JsonEncoder, Merger, MergerRegistry, RecordDecoder,
+    CodecError, DecoderRegistry, EncodeError, EncoderRegistry, JsonDecoder, JsonEncoder, Merger,
+    MergerRegistry, RecordDecoder, SinkEncoder, SinkEncoderFactory,
 };
 pub use datatypes::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type,

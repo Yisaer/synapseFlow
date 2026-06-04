@@ -26,19 +26,16 @@ pub fn register(instance: &flow::FlowInstance) {
                     .map_err(|err| flow::codec::CodecError::Other(err.to_string()))?,
             ) as Arc<_>)
         }),
-        true,
     );
     encoder_registry.register_encoder(
         "columnar_json",
         Arc::new(|_config| Ok(Arc::new(encoder::ColumnarJsonEncoder::new()) as Arc<_>)),
-        true,
     );
     encoder_registry.register_encoder_with_caps(
         "columnar_csv_json",
         Arc::new(|_config| {
             Ok(Arc::new(encoder::ColumnarCsvJsonEncoder::new("columnar_csv_json")) as Arc<_>)
         }),
-        true,
         true,
     );
 

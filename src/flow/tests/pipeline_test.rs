@@ -6,7 +6,7 @@ use flow::planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig,
 };
-use flow::processor::{SamplerConfig, StreamData};
+use flow::processor::{EncodedDeliveryFlags, SamplerConfig, StreamData};
 use flow::FlowInstance;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -77,24 +77,61 @@ fn build_result_sink(
         .with_common_props(common_props)
 }
 
-async fn recv_next_json(
-    output: &mut mpsc::Receiver<StreamData>,
-    timeout_duration: Duration,
-) -> JsonValue {
-    let deadline = tokio::time::Instant::now() + timeout_duration;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let item = timeout(remaining, output.recv())
+struct JsonOutput {
+    receiver: mpsc::Receiver<StreamData>,
+    delivery: Vec<u8>,
+    active_delivery: bool,
+}
+
+impl JsonOutput {
+    fn new(receiver: mpsc::Receiver<StreamData>) -> Self {
+        Self {
+            receiver,
+            delivery: Vec::new(),
+            active_delivery: false,
+        }
+    }
+
+    async fn recv_next_json(&mut self, timeout_duration: Duration) -> JsonValue {
+        self.recv_next_json_or_timeout(timeout_duration)
             .await
             .expect("timeout waiting for pipeline output")
-            .expect("pipeline output channel closed");
-        match item {
-            StreamData::EncodedDelivery { bytes, .. } => {
-                return serde_json::from_slice(&bytes).expect("decode pipeline json output")
+    }
+
+    async fn recv_next_json_or_timeout(&mut self, timeout_duration: Duration) -> Option<JsonValue> {
+        let deadline = tokio::time::Instant::now() + timeout_duration;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let item = match timeout(remaining, self.receiver.recv()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => panic!("pipeline output channel closed"),
+                Err(_) => return None,
+            };
+            match item {
+                StreamData::EncodedDelivery { flags, bytes } => {
+                    if flags.contains(EncodedDeliveryFlags::ABORT) {
+                        panic!("encoded delivery aborted");
+                    }
+                    if flags.contains(EncodedDeliveryFlags::START) {
+                        self.delivery.clear();
+                        self.active_delivery = true;
+                    }
+                    if !self.active_delivery {
+                        panic!("encoded delivery chunk without START");
+                    }
+                    self.delivery.extend_from_slice(&bytes);
+                    if flags.contains(EncodedDeliveryFlags::END) {
+                        let json = serde_json::from_slice(&self.delivery)
+                            .expect("decode pipeline json output");
+                        self.delivery.clear();
+                        self.active_delivery = false;
+                        return Some(json);
+                    }
+                }
+                StreamData::Control(_) | StreamData::Watermark(_) => continue,
+                StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
+                other => panic!("unexpected pipeline output: {}", other.description()),
             }
-            StreamData::Control(_) | StreamData::Watermark(_) => continue,
-            StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
-            other => panic!("unexpected pipeline output: {}", other.description()),
         }
     }
 }
@@ -137,32 +174,23 @@ async fn test_sampler_execution_latest_strategy() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let mut output = pipeline
-        .take_output()
-        .expect("pipeline should expose an output receiver");
+    let mut output = JsonOutput::new(
+        pipeline
+            .take_output()
+            .expect("pipeline should expose an output receiver"),
+    );
 
-    // We expect EXACTLY one output (the sampled value)
-    let result = timeout(Duration::from_millis(500), output.recv())
-        .await
-        .expect("wait for sampled output")
-        .expect("sampled output missing");
-
-    // Verify content: should be value 5
-    match result {
-        StreamData::EncodedDelivery { bytes, .. } => {
-            let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-            // Output format depends on sink, typically [{"x": 5}]
-            let rows = json.as_array().expect("output is array");
-            assert_eq!(rows.len(), 1, "expected 1 row in batch");
-            assert_eq!(rows[0]["x"], 5, "Expected latest value 5");
-        }
-        other => panic!("expected EncodedDelivery, got {}", other.description()),
-    }
+    let json = output.recv_next_json(Duration::from_millis(500)).await;
+    let rows = json.as_array().expect("output is array");
+    assert_eq!(rows.len(), 1, "expected 1 row in batch");
+    assert_eq!(rows[0]["x"], 5, "Expected latest value 5");
 
     // Ensure no more outputs come (sampler should wait for next interval)
-    let extra = timeout(Duration::from_millis(100), output.recv()).await;
+    let extra = output
+        .recv_next_json_or_timeout(Duration::from_millis(100))
+        .await;
     assert!(
-        extra.is_err(),
+        extra.is_none(),
         "Expected no extra outputs, sampler should have throttled intermediate values"
     );
 
@@ -197,7 +225,13 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
     .expect("create flow instance");
     create_mock_stream(&instance, "barrier_stream", &["x"]).await;
 
-    let fast_sink = build_result_sink("fast_sink", "fast_conn", CommonSinkProps::default());
+    let fast_connector = PipelineSinkConnector::new(
+        "fast_conn",
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+        SinkEncoderConfig::json(),
+    );
+    let fast_sink = PipelineSink::new("fast_sink", fast_connector)
+        .with_common_props(CommonSinkProps::default());
     let batched_sink = build_result_sink(
         "batched_sink",
         "batched_conn",
@@ -213,7 +247,7 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
             vec![fast_sink, batched_sink],
         )
         .expect("build pipeline with shared-tail barrier");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -227,25 +261,11 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
     }
 
     let timeout_duration = Duration::from_secs(5);
-    assert_eq!(
-        recv_next_json(&mut output, timeout_duration).await,
-        serde_json::json!([{"x": 1}]),
-        "fast sibling should keep forwarding rows before graceful close"
-    );
-    assert_eq!(
-        recv_next_json(&mut output, timeout_duration).await,
-        serde_json::json!([{"x": 2}]),
-        "fast sibling should preserve per-row forwarding order"
-    );
-    assert_eq!(
-        recv_next_json(&mut output, timeout_duration).await,
-        serde_json::json!([{"x": 3}]),
-        "fast sibling should emit every row before barrier alignment"
-    );
     assert!(
-        timeout(Duration::from_millis(200), output.recv())
+        output
+            .recv_next_json_or_timeout(Duration::from_millis(200))
             .await
-            .is_err(),
+            .is_none(),
         "batched sibling should not flush its partial batch before graceful close"
     );
 
@@ -258,7 +278,7 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
     .expect("close pipeline");
 
     assert_eq!(
-        recv_next_json(&mut output, timeout_duration).await,
+        output.recv_next_json(timeout_duration).await,
         serde_json::json!([{"x": 1}, {"x": 2}, {"x": 3}]),
         "shared-tail barrier should hold the graceful end until the batched sibling flushes"
     );

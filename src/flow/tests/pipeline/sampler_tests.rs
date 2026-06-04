@@ -7,7 +7,7 @@ use flow::planner::sink::{
     SinkEncoderConfig, SinkOutputConfig,
 };
 use flow::processor::sampler_processor::{MergerConfig, PackerProps};
-use flow::processor::{SamplerConfig, SamplingStrategy, StreamData};
+use flow::processor::{EncodedDeliveryFlags, SamplerConfig, SamplingStrategy, StreamData};
 use flow::{CodecError, FlowInstance, Merger};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::Arc;
@@ -106,20 +106,58 @@ fn packer_strategy(merger_type: &str) -> SamplingStrategy {
     }
 }
 
-async fn recv_next_json(
-    output: &mut mpsc::Receiver<StreamData>,
-    timeout_duration: Duration,
-) -> JsonValue {
+struct JsonOutput {
+    receiver: mpsc::Receiver<StreamData>,
+    delivery: Vec<u8>,
+    active_delivery: bool,
+}
+
+impl JsonOutput {
+    fn new(receiver: mpsc::Receiver<StreamData>) -> Self {
+        Self {
+            receiver,
+            delivery: Vec::new(),
+            active_delivery: false,
+        }
+    }
+
+    fn append_encoded_delivery(
+        &mut self,
+        flags: EncodedDeliveryFlags,
+        bytes: bytes::Bytes,
+    ) -> Option<JsonValue> {
+        if flags.contains(EncodedDeliveryFlags::ABORT) {
+            panic!("encoded delivery aborted");
+        }
+        if flags.contains(EncodedDeliveryFlags::START) {
+            self.delivery.clear();
+            self.active_delivery = true;
+        }
+        if !self.active_delivery {
+            panic!("encoded delivery chunk without START");
+        }
+        self.delivery.extend_from_slice(&bytes);
+        if flags.contains(EncodedDeliveryFlags::END) {
+            self.active_delivery = false;
+            return Some(serde_json::from_slice(&self.delivery).expect("invalid JSON payload"));
+        }
+        None
+    }
+}
+
+async fn recv_next_json(output: &mut JsonOutput, timeout_duration: Duration) -> JsonValue {
     let deadline = tokio::time::Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let item = timeout(remaining, output.recv())
+        let item = timeout(remaining, output.receiver.recv())
             .await
             .expect("timeout waiting for sampler output")
             .expect("sampler output channel closed");
         match item {
-            StreamData::EncodedDelivery { bytes, .. } => {
-                return serde_json::from_slice(&bytes).expect("invalid JSON payload")
+            StreamData::EncodedDelivery { flags, bytes } => {
+                if let Some(json) = output.append_encoded_delivery(flags, bytes) {
+                    return json;
+                }
             }
             StreamData::Control(_) | StreamData::Watermark(_) => continue,
             StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
@@ -128,12 +166,21 @@ async fn recv_next_json(
     }
 }
 
-async fn assert_no_output(output: &mut mpsc::Receiver<StreamData>, timeout_duration: Duration) {
-    match timeout(timeout_duration, output.recv()).await {
-        Err(_) | Ok(None) => {}
-        Ok(Some(StreamData::Control(_))) | Ok(Some(StreamData::Watermark(_))) => {}
-        Ok(Some(StreamData::Error(err))) => panic!("pipeline returned error: {}", err.message),
-        Ok(Some(other)) => panic!("unexpected sampler output: {}", other.description()),
+async fn assert_no_output(output: &mut JsonOutput, timeout_duration: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match timeout(remaining, output.receiver.recv()).await {
+            Err(_) | Ok(None) => return,
+            Ok(Some(StreamData::Control(_))) | Ok(Some(StreamData::Watermark(_))) => continue,
+            Ok(Some(StreamData::EncodedDelivery { flags, bytes })) => {
+                if let Some(json) = output.append_encoded_delivery(flags, bytes) {
+                    panic!("unexpected sampler output: {json}");
+                }
+            }
+            Ok(Some(StreamData::Error(err))) => panic!("pipeline returned error: {}", err.message),
+            Ok(Some(other)) => panic!("unexpected sampler output: {}", other.description()),
+        }
     }
 }
 
@@ -156,7 +203,7 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
     let mut pipeline = instance
         .build_pipeline("SELECT x FROM latest_stream", vec![build_result_sink()])
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -216,7 +263,7 @@ async fn sampler_latest_flushes_buffer_on_close() {
     let mut pipeline = instance
         .build_pipeline("SELECT x FROM flush_stream", vec![build_result_sink()])
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -232,15 +279,26 @@ async fn sampler_latest_flushes_buffer_on_close() {
 
     assert_no_output(&mut output, Duration::from_millis(100)).await;
 
-    timeout(
-        Duration::from_secs(2),
-        pipeline.close(Duration::from_secs(1)),
-    )
-    .await
-    .expect("close pipeline should not hang")
-    .expect("close pipeline");
-
-    let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
+    let actual = {
+        let close = pipeline.close(Duration::from_secs(1));
+        tokio::pin!(close);
+        let mut close_done = false;
+        let actual = tokio::select! {
+            close_result = &mut close => {
+                close_done = true;
+                close_result.expect("close pipeline");
+                recv_next_json(&mut output, Duration::from_millis(500)).await
+            }
+            actual = recv_next_json(&mut output, Duration::from_secs(2)) => actual,
+        };
+        if !close_done {
+            timeout(Duration::from_secs(2), &mut close)
+                .await
+                .expect("close pipeline should not hang")
+                .expect("close pipeline");
+        }
+        actual
+    };
     assert_eq!(actual, serde_json::json!([{"x": 20}]));
 
     let sampler_stats = pipeline
@@ -281,7 +339,7 @@ async fn sampler_latest_before_filter_and_projection() {
             vec![build_result_sink()],
         )
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -358,7 +416,7 @@ async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
             )],
         )
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -432,7 +490,7 @@ async fn sampler_latest_before_row_diff_delta_output() {
             vec![build_result_sink_with_output(SinkOutputConfig::delta())],
         )
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -525,7 +583,7 @@ async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
             vec![build_result_sink_with_output(SinkOutputConfig::delta())],
         )
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -650,7 +708,7 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
             )],
         )
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
     let interval_settle = interval + Duration::from_millis(60);
 
     pipeline.start();
@@ -774,7 +832,7 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
     let mut pipeline = instance
         .build_pipeline("SELECT x, y FROM packer_stream", vec![build_result_sink()])
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -846,7 +904,7 @@ async fn sampler_packer_flushes_buffer_on_close() {
             vec![build_result_sink()],
         )
         .expect("build pipeline");
-    let mut output = pipeline.take_output().expect("take output receiver");
+    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -861,15 +919,26 @@ async fn sampler_packer_flushes_buffer_on_close() {
 
     assert_no_output(&mut output, Duration::from_millis(100)).await;
 
-    timeout(
-        Duration::from_secs(2),
-        pipeline.close(Duration::from_secs(1)),
-    )
-    .await
-    .expect("close pipeline should not hang")
-    .expect("close pipeline");
-
-    let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
+    let actual = {
+        let close = pipeline.close(Duration::from_secs(1));
+        tokio::pin!(close);
+        let mut close_done = false;
+        let actual = tokio::select! {
+            close_result = &mut close => {
+                close_done = true;
+                close_result.expect("close pipeline");
+                recv_next_json(&mut output, Duration::from_millis(500)).await
+            }
+            actual = recv_next_json(&mut output, Duration::from_secs(2)) => actual,
+        };
+        if !close_done {
+            timeout(Duration::from_secs(2), &mut close)
+                .await
+                .expect("close pipeline should not hang")
+                .expect("close pipeline");
+        }
+        actual
+    };
     assert_eq!(actual, serde_json::json!([{"x": 7, "y": 9}]));
 
     let sampler_stats = pipeline

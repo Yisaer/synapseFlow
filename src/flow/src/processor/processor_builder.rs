@@ -1160,9 +1160,12 @@ fn create_processor_from_plan_node(
                 encoder.common.batch_count,
                 encoder.common.batch_duration,
             )?;
+            let encoder_runtime = encoder_impl
+                .start_encoder()
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let processor = SinkEncoderProcessor::new_with_channel_capacities(
                 processor_id.clone(),
-                encoder_impl,
+                encoder_runtime,
                 encoder.common.batch_count,
                 encoder.common.batch_duration,
                 channel_capacities,
@@ -1310,8 +1313,8 @@ fn create_processor_from_plan_node(
 
 fn attach_encoder_output_schema(
     plan: &Arc<PhysicalPlan>,
-    encoder_impl: Arc<dyn crate::codec::encoder::CollectionEncoder>,
-) -> Result<Arc<dyn crate::codec::encoder::CollectionEncoder>, ProcessorError> {
+    encoder_impl: Arc<dyn crate::codec::encoder::SinkEncoderFactory>,
+) -> Result<Arc<dyn crate::codec::encoder::SinkEncoderFactory>, ProcessorError> {
     let input_child = plan.children().first().ok_or_else(|| {
         ProcessorError::InvalidConfiguration(
             "encoder processor requires exactly one input child".to_string(),

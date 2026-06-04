@@ -5,7 +5,7 @@ pub mod registry;
 pub mod video;
 
 pub use decoder::{CodecError, JsonDecoder, RecordDecoder};
-pub use encoder::{CollectionEncoder, CollectionEncoderStream, EncodeError, JsonEncoder};
+pub use encoder::{EncodeError, JsonEncoder, SinkEncoder, SinkEncoderFactory};
 pub use merger::Merger;
 pub use registry::{DecoderRegistry, EncoderRegistry, MergerRegistry};
 pub use video::{

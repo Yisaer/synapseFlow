@@ -7,7 +7,7 @@ use crate::connector::{MemoryPubSubRegistry, MockSourceConnector, MqttClientMana
 use crate::planner::sink::{
     NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 };
-use crate::processor::StreamData;
+use crate::processor::{EncodedDeliveryFlags, StreamData};
 use crate::runtime::TaskSpawner;
 use crate::shared_stream::{SharedStreamConfig, SharedStreamRegistry};
 use crate::PipelineRegistries;
@@ -96,6 +96,8 @@ async fn recv_next_json(
     timeout_duration: Duration,
 ) -> JsonValue {
     let deadline = tokio::time::Instant::now() + timeout_duration;
+    let mut delivery: Vec<u8> = Vec::new();
+    let mut active_delivery = false;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let item = timeout(remaining, output.recv())
@@ -103,8 +105,21 @@ async fn recv_next_json(
             .expect("timeout waiting for pipeline output")
             .expect("pipeline output channel closed");
         match item {
-            StreamData::EncodedDelivery { bytes, .. } => {
-                return serde_json::from_slice(&bytes).expect("invalid JSON payload")
+            StreamData::EncodedDelivery { flags, bytes } => {
+                if flags.contains(EncodedDeliveryFlags::ABORT) {
+                    panic!("encoded delivery aborted");
+                }
+                if flags.contains(EncodedDeliveryFlags::START) {
+                    delivery.clear();
+                    active_delivery = true;
+                }
+                if !active_delivery {
+                    panic!("encoded delivery chunk without START");
+                }
+                delivery.extend_from_slice(&bytes);
+                if flags.contains(EncodedDeliveryFlags::END) {
+                    return serde_json::from_slice(&delivery).expect("invalid JSON payload");
+                }
             }
             StreamData::Control(_) => continue,
             StreamData::Watermark(_) => continue,

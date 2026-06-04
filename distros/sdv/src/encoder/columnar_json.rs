@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use flow::codec::encoder::{CollectionEncoder, CollectionEncoderStream, EncodeError};
+use flow::codec::encoder::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use flow::model::Collection;
 use flow::planner::physical::output_schema::OutputSchema;
 use serde_json::Value as JsonValue;
@@ -25,47 +25,48 @@ impl ColumnarJsonEncoder {
     }
 }
 
-impl CollectionEncoder for ColumnarJsonEncoder {
+impl SinkEncoderFactory for ColumnarJsonEncoder {
     fn id(&self) -> &str {
         "columnar_json"
     }
 
-    fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
-        let mut aggregator = ColumnarAggregator::default();
-        for tuple in collection.rows() {
-            aggregator.append_tuple(tuple)?;
-        }
-        aggregator.finish_bytes()
-    }
-
-    fn supports_streaming(&self) -> bool {
-        true
+    fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
+        Ok(Box::new(ColumnarJsonEncoderRuntime::default()))
     }
 
     fn with_output_schema(
         self: Arc<Self>,
         _output_schema: Arc<OutputSchema>,
-    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(self)
-    }
-
-    fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        Some(Box::new(ColumnarJsonStream::default()))
     }
 }
 
 #[derive(Default)]
-struct ColumnarJsonStream {
+struct ColumnarJsonEncoderRuntime {
     agg: ColumnarAggregator,
 }
 
-impl CollectionEncoderStream for ColumnarJsonStream {
-    fn append(&mut self, tuple: &flow::model::Tuple) -> Result<(), EncodeError> {
-        self.agg.append_tuple(tuple)
+impl SinkEncoder for ColumnarJsonEncoderRuntime {
+    fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        self.agg = ColumnarAggregator::default();
+        Ok(None)
     }
 
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
-        self.agg.finish_bytes()
+    fn append(&mut self, record: &dyn Collection) -> Result<Option<bytes::Bytes>, EncodeError> {
+        for tuple in record.rows() {
+            self.agg.append_tuple(tuple)?;
+        }
+        Ok(None)
+    }
+
+    fn finish_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        let agg = std::mem::take(&mut self.agg);
+        agg.finish_bytes().map(bytes::Bytes::from).map(Some)
+    }
+
+    fn abort_delivery(&mut self) {
+        self.agg = ColumnarAggregator::default();
     }
 }
 
@@ -167,7 +168,6 @@ fn to_json_value(val: &datatypes::Value) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flow::codec::encoder::CollectionEncoder;
     use flow::model::{Message, RecordBatch, Tuple};
 
     fn make_tuple(source: &str, keys: &[&str], vals: &[datatypes::Value]) -> Tuple {
@@ -175,6 +175,13 @@ mod tests {
         let vals_arc: Vec<Arc<datatypes::Value>> = vals.iter().cloned().map(Arc::new).collect();
         let msg = Arc::new(Message::new(Arc::<str>::from(source), keys_arc, vals_arc));
         Tuple::new(vec![msg])
+    }
+
+    fn encode_batch(enc: &ColumnarJsonEncoder, batch: &RecordBatch) -> Vec<u8> {
+        let mut runtime = enc.start_encoder().unwrap();
+        runtime.begin_delivery().unwrap();
+        assert!(runtime.append(batch).unwrap().is_none());
+        runtime.finish_delivery().unwrap().unwrap().to_vec()
     }
 
     #[test]
@@ -199,7 +206,7 @@ mod tests {
         let batch = RecordBatch::new(vec![t1, t2]).unwrap();
 
         let enc = ColumnarJsonEncoder::new();
-        let bytes = enc.encode(&batch).unwrap();
+        let bytes = encode_batch(&enc, &batch);
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         assert_eq!(
@@ -226,29 +233,30 @@ mod tests {
         );
         let batch = RecordBatch::new(vec![t]).unwrap();
         let enc = ColumnarJsonEncoder::new();
-        let bytes = enc.encode(&batch).unwrap();
+        let bytes = encode_batch(&enc, &batch);
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json, serde_json::json!({"x": [42], "y": [true]}));
     }
 
     #[test]
-    fn supports_streaming_returns_true() {
+    fn start_encoder_returns_runtime_encoder() {
         let enc = ColumnarJsonEncoder::new();
-        assert!(enc.supports_streaming());
+        assert!(enc.start_encoder().is_ok());
     }
 
     #[test]
-    fn streaming_api_works() {
+    fn runtime_encoder_works() {
         let enc = ColumnarJsonEncoder::new();
-        let mut stream = enc.start_stream().expect("stream should be Some");
+        let mut runtime = enc.start_encoder().expect("encoder runtime");
+        runtime.begin_delivery().expect("begin delivery");
 
         let t1 = make_tuple("src", &["a"], &[datatypes::Value::Int64(10)]);
         let t2 = make_tuple("src", &["a"], &[datatypes::Value::Int64(20)]);
 
-        stream.append(&t1).unwrap();
-        stream.append(&t2).unwrap();
+        let batch = RecordBatch::new(vec![t1, t2]).unwrap();
+        assert!(runtime.append(&batch).unwrap().is_none());
 
-        let bytes = stream.finish().unwrap();
+        let bytes = runtime.finish_delivery().unwrap().unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json, serde_json::json!({"a": [10, 20]}));
     }
