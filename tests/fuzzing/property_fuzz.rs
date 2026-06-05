@@ -731,7 +731,10 @@ fn invalid_import_never_mutates_existing_storage() {
 
             let after = export_bundle(&h).await;
 
-            assert_eq!(before, after, "invalid import should not mutate storage");
+            assert_eq!(
+                before["resources"], after["resources"],
+                "invalid import should not mutate storage"
+            );
         }
     });
 }

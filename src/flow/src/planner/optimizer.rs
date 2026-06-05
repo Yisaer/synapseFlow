@@ -29,6 +29,7 @@ pub fn optimize_physical_plan(
         Box::new(StreamingAggregationRewrite {
             aggregate_registry: Arc::clone(&aggregate_registry),
         }),
+        Box::new(StreamingEncoderRewrite),
         Box::new(ByIndexProjectionAcrossMixedConsumersRewrite),
         Box::new(PartialByIndexRowDiffAndEncoderRewrite),
         Box::new(ByIndexProjectionIntoRowDiffRewrite),
@@ -55,6 +56,14 @@ struct StreamingAggregationRewrite {
 ///
 /// This is a topology rewrite rule and is intentionally applied as the last physical optimization.
 struct InsertBarrierForFanIn;
+
+/// Rule: fuse `PhysicalBatch -> PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`
+/// when the encoder supports streaming delivery.
+///
+/// This eliminates one data-pass between BatchProcessor and SinkEncoderProcessor
+/// for streaming-capable encoders (e.g. json, protobuf). Non-streaming encoders
+/// (future Parquet) keep the two-node chain intact.
+struct StreamingEncoderRewrite;
 
 /// Rule: detect shared `Project` nodes that are pure `ColumnRef::ByIndex` projections
 /// (with no aliases) directly upstream of encoders, and prepare them for
@@ -188,6 +197,70 @@ impl StreamingAggregationRewrite {
             agg.base.index(),
         );
         Some(Arc::new(PhysicalPlan::StreamingAggregation(streaming)))
+    }
+}
+
+impl PhysicalOptRule for StreamingEncoderRewrite {
+    fn name(&self) -> &str {
+        "streaming_encoder_rewrite"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        fuse_streaming_encoder(plan, encoder_registry)
+    }
+}
+
+fn fuse_streaming_encoder(
+    plan: Arc<PhysicalPlan>,
+    encoder_registry: &EncoderRegistry,
+) -> Arc<PhysicalPlan> {
+    let children: Vec<Arc<PhysicalPlan>> = plan
+        .children()
+        .iter()
+        .map(|child| fuse_streaming_encoder(Arc::clone(child), encoder_registry))
+        .collect();
+
+    match plan.as_ref() {
+        PhysicalPlan::SinkEncoder(encoder) => {
+            // Check if the unique child is PhysicalBatch
+            if children.len() != 1 {
+                return rebuild_with_children(plan.as_ref(), children);
+            }
+            let first_child = &children[0];
+            if !matches!(first_child.as_ref(), PhysicalPlan::Batch(_)) {
+                return rebuild_with_children(plan.as_ref(), children);
+            }
+
+            let encoder_kind = encoder.encoder.kind_str();
+            if !encoder_registry.supports_streaming(encoder_kind) {
+                // Encoder does not support streaming, keep PhysicalBatch -> SinkEncoder intact
+                return rebuild_with_children(plan.as_ref(), children);
+            }
+
+            // Fuse PhysicalBatch into PhysicalIncSinkEncoder:
+            // - take PhysicalBatch's children (skip the batch node)
+            // - take PhysicalBatch's common (batch params)
+            // - create PhysicalIncSinkEncoder with same sink_id, encoder, index
+            if let PhysicalPlan::Batch(batch) = first_child.as_ref() {
+                let batch_children = first_child.children().to_vec();
+                let fused_index = encoder.base.index();
+                let fused = crate::planner::physical::PhysicalIncSinkEncoder::new(
+                    batch_children,
+                    fused_index,
+                    encoder.sink_id.clone(),
+                    encoder.encoder.clone(),
+                    batch.common.clone(),
+                );
+                Arc::new(PhysicalPlan::IncSinkEncoder(fused))
+            } else {
+                rebuild_with_children(plan.as_ref(), children)
+            }
+        }
+        _ => rebuild_with_children(plan.as_ref(), children),
     }
 }
 
@@ -748,6 +821,11 @@ fn build_node_and_consumer_maps(
                     kind: encoder.encoder.kind_str().to_string(),
                     transform_enabled: encoder.encoder.transform_kind().is_some(),
                 }],
+                PhysicalPlan::IncSinkEncoder(encoder) => vec![ProjectConsumer::SinkEncoder {
+                    encoder_index: encoder.base.index(),
+                    kind: encoder.encoder.kind_str().to_string(),
+                    transform_enabled: encoder.encoder.transform_kind().is_some(),
+                }],
                 _ => vec![ProjectConsumer::Other],
             };
             consumers
@@ -802,6 +880,14 @@ fn rewrite_by_index_nodes(
             new.base.children = rewritten_children;
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
             Arc::new(PhysicalPlan::SinkEncoder(new))
+        }
+        PhysicalPlan::IncSinkEncoder(encoder)
+            if state.encoder_to_projection.contains_key(&index) =>
+        {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::IncSinkEncoder(new))
         }
         _ => rebuild_with_children(plan.as_ref(), rewritten_children),
     };
@@ -893,6 +979,14 @@ fn rewrite_by_index_mixed_nodes(
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
             Arc::new(PhysicalPlan::SinkEncoder(new))
         }
+        PhysicalPlan::IncSinkEncoder(encoder)
+            if state.encoder_to_projection.contains_key(&index) =>
+        {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::IncSinkEncoder(new))
+        }
         _ => rebuild_with_children(plan.as_ref(), rewritten_children),
     };
 
@@ -940,6 +1034,14 @@ fn rewrite_by_index_row_diff_encoder_nodes(
             new.base.children = rewritten_children;
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
             Arc::new(PhysicalPlan::SinkEncoder(new))
+        }
+        PhysicalPlan::IncSinkEncoder(encoder)
+            if state.encoder_to_projection.contains_key(&index) =>
+        {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::IncSinkEncoder(new))
         }
         _ => rebuild_with_children(plan.as_ref(), rewritten_children),
     };
@@ -1091,6 +1193,11 @@ fn rebuild_with_children(
             let mut new = encoder.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::SinkEncoder(new))
+        }
+        PhysicalPlan::IncSinkEncoder(encoder) => {
+            let mut new = encoder.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::IncSinkEncoder(new))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
             let mut new = agg.clone();

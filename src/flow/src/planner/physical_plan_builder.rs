@@ -12,8 +12,8 @@ use crate::planner::logical::{
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PartitionGroupKey, PhysicalAggregation, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
-    PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress,
+    PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink,
+    PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress,
     PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
     PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
@@ -21,7 +21,7 @@ use crate::planner::physical::{
     StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
-use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
+use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
 use datatypes::ConcreteDatatype;
 use std::collections::HashSet;
@@ -1043,7 +1043,24 @@ fn build_sink_chain_with_builder(
         ));
     }
 
-    add_regular_encoder_with_builder(sink, connector, sink_input, registries, builder)
+    // Create PhysicalBatch for ALL sinks with batching enabled.
+    // For streaming encoders (json), StreamingEncoderRewrite will later fuse
+    // PhysicalBatch → PhysicalSinkEncoder into PhysicalIncSinkEncoder.
+    // For encoder=none (kuksa/kura/video) and non-streaming encoders (future Parquet),
+    // the PhysicalBatch stays as a standalone node.
+    let encoder_input = if sink.common.is_batching_enabled() {
+        let batch_index = builder.allocate_index();
+        Arc::new(PhysicalPlan::Batch(PhysicalBatch::new(
+            vec![sink_input],
+            batch_index,
+            sink.sink_id.clone(),
+            sink.common.clone(),
+        )))
+    } else {
+        sink_input
+    };
+
+    add_regular_encoder_with_builder(sink, connector, encoder_input, registries, builder)
 }
 
 /// Create row diff processor if needed using centralized index management
@@ -1276,12 +1293,16 @@ fn add_regular_encoder_with_builder(
             ));
         }
         let encoder_index = builder.allocate_index();
+        // PhysicalSinkEncoder always runs in Immediate mode.
+        // Batching is handled by either:
+        // - PhysicalBatch (standalone, for encoder=none or non-streaming encoders), or
+        // - PhysicalIncSinkEncoder (fused by StreamingEncoderRewrite, for streaming encoders).
         let encoder = PhysicalSinkEncoder::new(
             vec![encoder_input],
             encoder_index,
             sink.sink_id.clone(),
             connector.encoder.clone(),
-            sink.common.clone(),
+            CommonSinkProps::default(),
         );
         Ok((
             Arc::new(PhysicalPlan::SinkEncoder(encoder)),

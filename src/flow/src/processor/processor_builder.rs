@@ -1174,6 +1174,44 @@ fn create_processor_from_plan_node(
                 PlanProcessor::SinkEncoder(processor),
             ))
         }
+        PhysicalPlan::IncSinkEncoder(encoder) => {
+            let encoder_impl = context
+                .encoder_registry()?
+                .instantiate(&encoder.encoder)
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let encoder_impl = attach_encoder_output_schema(plan, encoder_impl)?;
+            let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
+                if !encoder_impl.supports_index_lazy_materialization() {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "encoder kind `{}` does not support index lazy materialization",
+                        encoder.encoder.kind_str()
+                    )));
+                }
+                encoder_impl
+                    .with_by_index_projection(Arc::clone(spec))
+                    .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
+            } else {
+                encoder_impl
+            };
+            // PhysicalIncSinkEncoder (fused) uses batch params from the original PhysicalBatch.
+            SinkEncoderProcessor::validate_batch_config(
+                encoder.common.batch_count,
+                encoder.common.batch_duration,
+            )?;
+            let encoder_runtime = encoder_impl
+                .start_encoder()
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let processor = SinkEncoderProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                encoder_runtime,
+                encoder.common.batch_count,
+                encoder.common.batch_duration,
+                channel_capacities,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::SinkEncoder(processor),
+            ))
+        }
         PhysicalPlan::StreamingAggregation(agg) => {
             let processor = StreamingAggregationProcessor::new_with_channel_capacities(
                 processor_id.clone(),

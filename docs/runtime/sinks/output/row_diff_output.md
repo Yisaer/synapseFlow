@@ -275,13 +275,21 @@ the runtime row contract. Otherwise the row diff semantics degrade to dense `NUL
 The row diff stage should sit after the final `Project` and before batching / encoding:
 
 ```text
-... -> Project -> RowDiff -> Batch? -> Encoder? -> DataSink
+... -> Project -> RowDiff -> PhysicalBatch? -> PhysicalSinkEncoder -> SinkConnector
+```
+
+When the encoder supports streaming (json), the `StreamingEncoderRewrite`
+optimizer rule fuses `PhysicalBatch → PhysicalSinkEncoder` into a single
+`PhysicalIncSinkEncoder`:
+
+```text
+... -> Project -> RowDiff -> PhysicalIncSinkEncoder(encoder=json, batch_count=…) -> SinkConnector
 ```
 
 This placement is important:
 
 - after `Project`: diff sees the final sink-facing row shape
-- before `Batch`: diff operates row by row, not batch by batch
+- before batching: diff operates row by row, not batch by batch
 - before `Encoder`: diff remains independent of JSON or any other bytes format
 
 ## Planner And Runtime Integration
@@ -336,11 +344,14 @@ That means the builder sequencing becomes:
 
 ```text
 input_child
-  -> RowDiff? 
-  -> Batch?
-  -> Encoder?
+  -> RowDiff?
+  -> PhysicalBatch?
+  -> PhysicalSinkEncoder?
   -> DataSink
 ```
+
+For streaming encoders the `StreamingEncoderRewrite` optimizer rule later
+fuses `PhysicalBatch → PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`.
 
 This preserves the existing sink builder structure and avoids mixing row diff logic into encoder
 construction.
@@ -491,10 +502,20 @@ Current implementation note:
 
 Batching remains a sink-side flush policy. Row diff should run before batching.
 
-Result:
+The physical plan builder inserts a `PhysicalBatch` node when batching is
+configured. For streaming encoders the `StreamingEncoderRewrite` optimizer rule
+fuses `PhysicalBatch → PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`.
+
+Result (streaming encoder):
 
 ```text
-Project -> RowDiff -> SinkEncoder -> SinkConnector
+Project -> RowDiff -> PhysicalIncSinkEncoder(encoder=json, batch_count=…) -> SinkConnector
+```
+
+Result (non-streaming encoder):
+
+```text
+Project -> RowDiff -> PhysicalBatch -> PhysicalSinkEncoder -> SinkConnector
 ```
 
 ### With JSON encoding

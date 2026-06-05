@@ -68,6 +68,7 @@ impl PhysicalPlan {
             | PhysicalPlan::EmptySuppress(_)
             | PhysicalPlan::Batch(_)
             | PhysicalPlan::SinkEncoder(_)
+            | PhysicalPlan::IncSinkEncoder(_)
             | PhysicalPlan::ResultCollect(_)
             | PhysicalPlan::TumblingWindow(_)
             | PhysicalPlan::CountWindow(_)

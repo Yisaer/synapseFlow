@@ -959,6 +959,38 @@ fn build_physical_node_with_prefix(
                 }
             }
         }
+        PhysicalPlan::IncSinkEncoder(encoder) => {
+            info.push(format!("sink_id={}", encoder.sink_id));
+            info.push(format!("encoder={}", encoder.encoder.kind_str()));
+            if let Some(transform_kind) = encoder.encoder.transform_kind() {
+                info.push(format!("transform={}", transform_kind));
+            }
+            if encoder.common.is_batching_enabled() {
+                if let Some(count) = encoder.common.batch_count {
+                    info.push(format!("batch_count={}", count));
+                }
+                if let Some(duration) = encoder.common.batch_duration {
+                    info.push(format!("batch_duration_ms={}", duration.as_millis()));
+                }
+            }
+            if let Some(spec) = &encoder.by_index_projection {
+                if !spec.is_empty() {
+                    let cols = spec
+                        .columns()
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "{}#{}->{}",
+                                c.source_name.as_ref(),
+                                c.column_index,
+                                c.output_name.as_ref()
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
+                }
+            }
+        }
         PhysicalPlan::ResultCollect(rc) => {
             let _ = rc;
         }

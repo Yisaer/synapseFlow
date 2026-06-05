@@ -14,6 +14,7 @@ pub mod physical_decoder;
 pub mod physical_empty_suppress;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
+pub mod physical_inc_sink_encoder;
 pub mod physical_memory_collection_materialize;
 pub mod physical_order;
 pub mod physical_process_time_watermark;
@@ -43,6 +44,7 @@ pub use physical_decoder::PhysicalDecoderEventtimeSpec;
 pub use physical_empty_suppress::PhysicalEmptySuppress;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
+pub use physical_inc_sink_encoder::PhysicalIncSinkEncoder;
 pub use physical_memory_collection_materialize::PhysicalMemoryCollectionMaterialize;
 pub use physical_order::{PhysicalOrder, PhysicalOrderKey};
 pub use physical_process_time_watermark::PhysicalProcessTimeWatermark;
@@ -82,6 +84,7 @@ pub enum PhysicalPlan {
     DataSink(PhysicalDataSink),
     SinkConnector(PhysicalDataSink),
     SinkEncoder(PhysicalSinkEncoder),
+    IncSinkEncoder(PhysicalIncSinkEncoder),
     StreamingAggregation(PhysicalStreamingAggregation),
     ResultCollect(PhysicalResultCollect),
     Barrier(PhysicalBarrier),
@@ -122,6 +125,7 @@ impl PhysicalPlan {
                 plan.base.children()
             }
             PhysicalPlan::SinkEncoder(plan) => plan.base.children(),
+            PhysicalPlan::IncSinkEncoder(plan) => plan.base.children(),
             PhysicalPlan::StreamingAggregation(plan) => plan.base.children(),
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
             PhysicalPlan::Barrier(plan) => plan.base.children(),
@@ -157,6 +161,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSink(_) => "PhysicalDataSink",
             PhysicalPlan::SinkConnector(_) => "PhysicalSinkConnector",
             PhysicalPlan::SinkEncoder(_) => "PhysicalSinkEncoder",
+            PhysicalPlan::IncSinkEncoder(_) => "PhysicalIncSinkEncoder",
             PhysicalPlan::StreamingAggregation(_) => "PhysicalStreamingAggregation",
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
             PhysicalPlan::Barrier(_) => "PhysicalBarrier",
@@ -191,6 +196,7 @@ impl PhysicalPlan {
             PhysicalPlan::Batch(plan) => plan.base.index(),
             PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => plan.base.index(),
             PhysicalPlan::SinkEncoder(plan) => plan.base.index(),
+            PhysicalPlan::IncSinkEncoder(plan) => plan.base.index(),
             PhysicalPlan::StreamingAggregation(plan) => plan.base.index(),
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
             PhysicalPlan::Barrier(plan) => plan.base.index(),
@@ -246,6 +252,7 @@ impl PhysicalPlan {
                 &mut plan.base.children
             }
             PhysicalPlan::SinkEncoder(plan) => &mut plan.base.children,
+            PhysicalPlan::IncSinkEncoder(plan) => &mut plan.base.children,
             PhysicalPlan::StreamingAggregation(plan) => &mut plan.base.children,
             PhysicalPlan::ResultCollect(plan) => &mut plan.base.children,
             PhysicalPlan::Barrier(plan) => &mut plan.base.children,

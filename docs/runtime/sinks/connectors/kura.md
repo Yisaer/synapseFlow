@@ -83,7 +83,18 @@ For Kura sinks, the physical plan contains no encoder node:
 - Logical plan shows `encoder=none` for the sink.
 - Physical plan directly connects the decoder/project chain to the sink processor.
 
-This avoids any passthrough/encoding step and ensures the sink receives `Collection` payloads.
+When batching is enabled (`batch_count` or `batch_duration`), a `PhysicalBatch`
+node is inserted before the `PhysicalDataSink`:
+
+```
+PhysicalBatch(batch_count=10) → PhysicalDataSink(connector=kura)
+```
+
+The `PhysicalBatch` node creates a `BatchProcessor` that accumulates rows into
+`RecordBatch` payloads before delivering them to the sink.
+
+This avoids any passthrough/encoding step and ensures the sink receives
+`Collection` payloads.
 
 ## Limitations
 

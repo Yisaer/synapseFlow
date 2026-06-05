@@ -14,6 +14,8 @@ Implementation entrypoint: `src/flow/src/planner/optimizer.rs` (`optimize_physic
 
 ## Rules
 
+- `StreamingEncoderRewrite` (`streaming_encoder_rewrite`):
+  [`streaming_encoder_rewrite.md`](streaming_encoder_rewrite.md)
 - `StreamingAggregationRewrite` (`streaming_aggregation_rewrite`):
   [`streaming_aggregation_rewrite.md`](streaming_aggregation_rewrite.md)
 - `ByIndexProjectionAcrossMixedConsumersRewrite`

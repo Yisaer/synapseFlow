@@ -16,6 +16,7 @@ type EncoderFactory = Arc<
 struct EncoderEntry {
     factory: EncoderFactory,
     supports_by_index_projection: bool,
+    supports_streaming: bool,
 }
 type DecoderFactory = Arc<
     dyn Fn(&StreamDecoderConfig, Arc<Schema>, &str) -> Result<Arc<dyn RecordDecoder>, CodecError>
@@ -125,7 +126,7 @@ impl EncoderRegistry {
     }
 
     pub fn register_encoder(&self, kind: impl Into<String>, factory: EncoderFactory) {
-        self.register_encoder_with_caps(kind, factory, false);
+        self.register_encoder_with_all_caps(kind, factory, false, false);
     }
 
     pub fn register_encoder_with_caps(
@@ -134,11 +135,22 @@ impl EncoderRegistry {
         factory: EncoderFactory,
         supports_by_index_projection: bool,
     ) {
+        self.register_encoder_with_all_caps(kind, factory, supports_by_index_projection, false);
+    }
+
+    pub fn register_encoder_with_all_caps(
+        &self,
+        kind: impl Into<String>,
+        factory: EncoderFactory,
+        supports_by_index_projection: bool,
+        supports_streaming: bool,
+    ) {
         self.factories.write().insert(
             kind.into(),
             EncoderEntry {
                 factory,
                 supports_by_index_projection,
+                supports_streaming,
             },
         );
     }
@@ -168,8 +180,16 @@ impl EncoderRegistry {
             .unwrap_or(false)
     }
 
+    pub fn supports_streaming(&self, kind: &str) -> bool {
+        let guard = self.factories.read();
+        guard
+            .get(kind)
+            .map(|entry| entry.supports_streaming)
+            .unwrap_or(false)
+    }
+
     fn register_builtin_encoders(&self) {
-        self.register_encoder_with_caps(
+        self.register_encoder_with_all_caps(
             "json",
             Arc::new(|config| {
                 Ok(Arc::new(
@@ -177,6 +197,7 @@ impl EncoderRegistry {
                         .map_err(|err| CodecError::Other(err.to_string()))?,
                 ) as Arc<_>)
             }),
+            true,
             true,
         );
     }
