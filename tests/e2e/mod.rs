@@ -1,4 +1,5 @@
 mod pipeline_stats;
+mod proto_decoder_e2e;
 mod proto_schema_integration;
 mod shared_stream_stats;
 

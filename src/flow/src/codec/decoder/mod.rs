@@ -1,5 +1,8 @@
 //! Decoder abstractions for turning raw bytes into RecordBatch collections.
 
+pub mod proto;
+pub mod proto_bundle;
+
 use crate::model::{CollectionError, Message, RecordBatch, Tuple};
 use crate::planner::decode_projection::{DecodeProjection, ProjectionNode};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

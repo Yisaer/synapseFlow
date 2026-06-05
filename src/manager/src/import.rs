@@ -243,8 +243,11 @@ where
     for stored in &schemas {
         let props: JsonMap<String, JsonValue> = serde_json::from_str(&stored.props_json)
             .map_err(|err| format!("schema {} has invalid props JSON: {err}", stored.name))?;
-        if let Err(err) = schema_registry().parse(&stored.schema_type, &stored.name, &props) {
-            return Err(format!("schema {} is invalid: {err}", stored.name));
+        match schema_registry().parse(&stored.schema_type, &stored.name, &props) {
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("schema {} is invalid: {err}", stored.name));
+            }
         }
         available_schema_names.insert(stored.name.clone());
     }

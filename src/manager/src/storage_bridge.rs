@@ -127,8 +127,16 @@ pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<u
                 }
             };
         match schema_registry().parse(&stored.schema_type, &stored.name, &props) {
-            Ok(schema) => {
-                named_schema_store().insert(stored.name.clone(), schema);
+            Ok((schema, proto_bundle)) => {
+                if let Some(bundle) = proto_bundle {
+                    named_schema_store().insert_with_bundle(
+                        stored.name.clone(),
+                        schema,
+                        (*bundle).clone(),
+                    );
+                } else {
+                    named_schema_store().insert(stored.name.clone(), schema);
+                }
             }
             Err(err) => {
                 tracing::error!(

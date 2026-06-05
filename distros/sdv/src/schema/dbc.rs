@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use can_dbc::{ByteOrder, MultiplexIndicator};
-use flow::{ColumnSchema, ConcreteDatatype, Float64Type, Int64Type, Schema};
+use flow::{ColumnSchema, ConcreteDatatype, Float64Type, Int64Type, ProtoDescriptorBundle, Schema};
 use manager::register_schema;
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -22,7 +22,7 @@ pub fn register_dbc_schema() {
 pub fn parse_dbc_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
-) -> Result<Schema, String> {
+) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
     let schema_path = props
         .get("schema_path")
         .and_then(|v| v.as_str())
@@ -31,7 +31,7 @@ pub fn parse_dbc_schema(
     let pattern = props.get("signal_name_pattern").and_then(|v| v.as_str());
 
     let dbc_json = load_can_schema(schema_path)?;
-    Ok(schema_from_dbc(stream_name, &dbc_json, pattern))
+    Ok((schema_from_dbc(stream_name, &dbc_json, pattern), None))
 }
 
 /// Root structure containing all CAN buses and their messages/signals.
@@ -398,7 +398,7 @@ mod tests {
 
         let result = parse_dbc_schema("test_stream", &props);
         assert!(result.is_ok());
-        let schema = result.unwrap();
+        let (schema, _) = result.unwrap();
         assert_eq!(schema.column_schemas().len(), 7);
     }
 

@@ -289,10 +289,27 @@ impl StreamDefinition {
 }
 
 /// Configuration describing which decoder should be used for a stream's payloads.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamDecoderConfig {
     pub decode_type: String,
     pub props: JsonMap<String, JsonValue>,
+    /// Pre-built proto descriptor bundle, set by the manager when the decoder kind is
+    /// `"protobuf"` and the schema is proto-based. Multiple streams referencing the same
+    /// proto message type share the same `Arc`.
+    pub proto_bundle: Option<Arc<crate::codec::ProtoDescriptorBundle>>,
+}
+
+impl std::fmt::Debug for StreamDecoderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamDecoderConfig")
+            .field("decode_type", &self.decode_type)
+            .field("props", &self.props)
+            .field(
+                "proto_bundle",
+                &self.proto_bundle.as_ref().map(|_| "<bundle>"),
+            )
+            .finish()
+    }
 }
 
 impl StreamDecoderConfig {
@@ -300,7 +317,13 @@ impl StreamDecoderConfig {
         Self {
             decode_type: decode_type.into(),
             props,
+            proto_bundle: None,
         }
+    }
+
+    pub fn with_proto_bundle(mut self, bundle: Arc<crate::codec::ProtoDescriptorBundle>) -> Self {
+        self.proto_bundle = Some(bundle);
+        self
     }
 
     pub fn kind(&self) -> &str {

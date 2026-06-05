@@ -21,6 +21,7 @@ pub mod processor;
 mod runtime;
 pub mod shared_stream;
 pub mod stateful;
+pub mod test_proto;
 #[cfg(test)]
 mod test_support;
 
@@ -32,7 +33,8 @@ pub use catalog::{
 };
 pub use codec::{
     CodecError, DecoderRegistry, EncodeError, EncoderRegistry, JsonDecoder, JsonEncoder, Merger,
-    MergerRegistry, RecordDecoder, SinkEncoder, SinkEncoderFactory,
+    MergerRegistry, ProtoDescriptorBundle, ProtoFieldInfo, ProtobufDecoder, RecordDecoder,
+    SinkEncoder, SinkEncoderFactory,
 };
 pub use datatypes::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type,

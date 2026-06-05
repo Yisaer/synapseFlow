@@ -1,11 +1,12 @@
 use flow::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int32Type,
-    Int64Type, ListType, Schema, StringType, StructField, StructType, TimestampType, Uint32Type,
-    Uint64Type,
+    Int64Type, ListType, ProtoDescriptorBundle, ProtoFieldInfo, Schema, StringType, StructField,
+    StructType, TimestampType, Uint32Type, Uint64Type,
 };
 use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorSet};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,10 +19,13 @@ const WKT_TIMESTAMP_FQN: &str = "google.protobuf.Timestamp";
 ///   - `proto_path`: path to the .proto file (required)
 ///   - `message_type`: fully qualified message name, e.g. `"Sensor"` or `"com.example.Sensor"` (required)
 ///   - `include_paths`: optional array of additional proto include directories
+///
+/// Returns both the resolved [`Schema`] and a pre-built [`ProtoDescriptorBundle`]
+/// that the protobuf decoder can use at runtime.
 pub fn parse_proto_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
-) -> Result<Schema, String> {
+) -> Result<(Schema, ProtoDescriptorBundle), String> {
     let proto_path = get_string_prop(props, "proto_path")?;
     let message_type = get_string_prop(props, "message_type")?;
 
@@ -55,7 +59,9 @@ pub fn parse_proto_schema(
     })?;
 
     let columns = message_to_columns(stream_name, &proto_path, target_msg, &fds, 0)?;
-    Ok(Schema::new(columns))
+    let schema = Schema::new(columns);
+    let bundle = build_proto_bundle(target_msg, &fds, schema.column_schemas(), 0)?;
+    Ok((schema, bundle))
 }
 
 fn get_string_prop(props: &JsonMap<String, JsonValue>, key: &str) -> Result<String, String> {
@@ -269,6 +275,228 @@ fn resolve_message_type(
     ))))
 }
 
+/// Build a [`ProtoDescriptorBundle`] from an already-parsed `FileDescriptorSet`.
+///
+/// This is called once during schema creation so the protobuf decoder can reuse the bundle
+/// without re-parsing the `.proto` file.
+fn build_proto_bundle(
+    msg: &DescriptorProto,
+    fds: &FileDescriptorSet,
+    columns: &[ColumnSchema],
+    depth: usize,
+) -> Result<ProtoDescriptorBundle, String> {
+    if depth > MAX_NESTING_DEPTH {
+        let name = msg.name.as_deref().unwrap_or("<unknown>");
+        return Err(format!(
+            "maximum nesting depth ({}) exceeded at message '{}'",
+            MAX_NESTING_DEPTH, name
+        ));
+    }
+
+    let mut field_map = BTreeMap::new();
+    let mut column_to_field = BTreeMap::new();
+    let mut column_names: Vec<Arc<str>> = Vec::with_capacity(columns.len());
+
+    for col in columns {
+        column_names.push(Arc::from(col.name.as_str()));
+    }
+
+    for field in &msg.field {
+        let field_name = field.name.as_deref().ok_or_else(|| {
+            let msg_name = msg.name.as_deref().unwrap_or("<unknown>");
+            format!("field without name in message '{}'", msg_name)
+        })?;
+
+        let field_number = field
+            .number
+            .ok_or_else(|| format!("field '{}' has no number", field_name))?
+            as u32;
+
+        let type_id = field.r#type;
+        let label_id = field.label;
+        let is_repeated = label_id == Some(Label::Repeated as i32);
+        let is_zigzag = type_id
+            .map(|id| id == Type::Sint32 as i32 || id == Type::Sint64 as i32)
+            .unwrap_or(false);
+
+        // Determine the ConcreteDatatype for this field (handling repeated vs non-repeated).
+        // For non-repeated message fields, we need the StructType for nested bundle building.
+        let (base_dt, nested_bundle) = match type_id {
+            Some(id) if id == Type::Message as i32 || id == Type::Group as i32 => {
+                let type_name = field
+                    .type_name
+                    .as_deref()
+                    .ok_or_else(|| "message field without type_name".to_string())?;
+                // Build nested StructType and nested bundle.
+                let nested_dt = resolve_message_type_inner(type_name, fds, depth + 1)?;
+                let nested_bundle = match &nested_dt {
+                    ConcreteDatatype::Struct(_) => {
+                        let nested_msg = find_message_descriptor(
+                            fds,
+                            type_name.strip_prefix('.').unwrap_or(type_name),
+                        )
+                        .ok_or_else(|| format!("nested message '{}' not found", type_name))?;
+                        Some(Arc::new(build_proto_bundle(
+                            nested_msg,
+                            fds,
+                            &nested_fields_as_columns(&nested_dt),
+                            depth + 1,
+                        )?))
+                    }
+                    ConcreteDatatype::Timestamp(_) => None,
+                    _ => None,
+                };
+                let dt = if is_repeated {
+                    ConcreteDatatype::List(ListType::new(Arc::new(nested_dt)))
+                } else {
+                    nested_dt
+                };
+                (dt, nested_bundle)
+            }
+            _ => {
+                // Non-message types — just determine the element datatype.
+                let base = map_field_type_to_bundle(field, fds, depth)?;
+                let dt = if is_repeated {
+                    ConcreteDatatype::List(ListType::new(Arc::new(base)))
+                } else {
+                    base
+                };
+                (dt, None)
+            }
+        };
+
+        // Find column index by matching field name.
+        let column_index = columns
+            .iter()
+            .position(|col| col.name == field_name)
+            .ok_or_else(|| format!("field '{}' has no matching column in schema", field_name))?;
+
+        let element_type = if is_repeated {
+            match &base_dt {
+                ConcreteDatatype::List(lt) => lt.item_type().clone(),
+                other => other.clone(),
+            }
+        } else {
+            base_dt
+        };
+
+        field_map.insert(
+            field_number,
+            ProtoFieldInfo {
+                column_index,
+                datatype: element_type,
+                is_repeated,
+                is_zigzag,
+                nested_bundle,
+            },
+        );
+        column_to_field.insert(field_name.to_string(), field_number);
+    }
+
+    Ok(ProtoDescriptorBundle::new(
+        field_map,
+        column_to_field,
+        columns.len(),
+        column_names,
+    ))
+}
+
+/// Helper: map a non-message protobuf field type to a [`ConcreteDatatype`]
+/// (used only by `build_proto_bundle` for element type resolution).
+fn map_field_type_to_bundle(
+    field: &FieldDescriptorProto,
+    fds: &FileDescriptorSet,
+    depth: usize,
+) -> Result<ConcreteDatatype, String> {
+    let type_id = field.r#type;
+    match type_id {
+        Some(id) if id == Type::Double as i32 => Ok(ConcreteDatatype::Float64(Float64Type)),
+        Some(id) if id == Type::Float as i32 => Ok(ConcreteDatatype::Float32(Float32Type)),
+        Some(id)
+            if id == Type::Int64 as i32
+                || id == Type::Sint64 as i32
+                || id == Type::Sfixed64 as i32 =>
+        {
+            Ok(ConcreteDatatype::Int64(Int64Type))
+        }
+        Some(id) if id == Type::Uint64 as i32 || id == Type::Fixed64 as i32 => {
+            Ok(ConcreteDatatype::Uint64(Uint64Type))
+        }
+        Some(id)
+            if id == Type::Int32 as i32
+                || id == Type::Sint32 as i32
+                || id == Type::Sfixed32 as i32 =>
+        {
+            Ok(ConcreteDatatype::Int32(Int32Type))
+        }
+        Some(id) if id == Type::Uint32 as i32 || id == Type::Fixed32 as i32 => {
+            Ok(ConcreteDatatype::Uint32(Uint32Type))
+        }
+        Some(id) if id == Type::Bool as i32 => Ok(ConcreteDatatype::Bool(BooleanType)),
+        Some(id) if id == Type::String as i32 => Ok(ConcreteDatatype::String(StringType)),
+        Some(id) if id == Type::Bytes as i32 => Ok(ConcreteDatatype::Bytes(BytesType)),
+        Some(id) if id == Type::Enum as i32 => Ok(ConcreteDatatype::Int32(Int32Type)),
+        Some(id) if id == Type::Message as i32 || id == Type::Group as i32 => {
+            let type_name = field
+                .type_name
+                .as_deref()
+                .ok_or_else(|| "message field without type_name".to_string())?;
+            resolve_message_type_inner(type_name, fds, depth + 1)
+        }
+        Some(_) => Err(format!(
+            "unsupported proto field type {:?} for field '{}'",
+            field.r#type,
+            field.name.as_deref().unwrap_or("<unknown>")
+        )),
+        None => Err("proto field without type".to_string()),
+    }
+}
+
+/// Resolve a message type reference to a [`ConcreteDatatype`] without requiring stream_name.
+fn resolve_message_type_inner(
+    type_name: &str,
+    fds: &FileDescriptorSet,
+    depth: usize,
+) -> Result<ConcreteDatatype, String> {
+    let fqn = type_name.strip_prefix('.').unwrap_or(type_name);
+
+    if fqn == WKT_TIMESTAMP_FQN {
+        return Ok(ConcreteDatatype::Timestamp(TimestampType));
+    }
+
+    let target = find_message_descriptor(fds, fqn).ok_or_else(|| {
+        format!(
+            "referenced message type '{}' not found (resolved from '{}')",
+            fqn, type_name
+        )
+    })?;
+
+    // Build nested StructType by collecting field names and types.
+    let fields: Vec<StructField> = target
+        .field
+        .iter()
+        .filter_map(|f| {
+            let name = f.name.as_deref()?;
+            let dt = map_field_type_to_bundle(f, fds, depth).ok()?;
+            Some(StructField::new(name.to_string(), dt, false))
+        })
+        .collect();
+
+    Ok(ConcreteDatatype::Struct(StructType::new(Arc::new(fields))))
+}
+
+/// Extract columns from a nested StructType for use in `build_proto_bundle`.
+fn nested_fields_as_columns(dt: &ConcreteDatatype) -> Vec<ColumnSchema> {
+    match dt {
+        ConcreteDatatype::Struct(st) => st
+            .fields()
+            .iter()
+            .map(|f| ColumnSchema::new("".to_string(), f.name().to_string(), f.data_type().clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,7 +569,7 @@ mod tests {
     fn parse_simple_primitive_types() {
         let path = testdata_path("simple.proto");
         let props = make_props(&path, "Simple");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 6);
         assert_column(&schema.column_schemas()[0], "name", "string");
@@ -356,7 +584,7 @@ mod tests {
     fn parse_integer_types() {
         let path = testdata_path("ints.proto");
         let props = make_props(&path, "Ints");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 10);
         assert_column(&schema.column_schemas()[0], "a", "int32");
@@ -377,7 +605,7 @@ mod tests {
     fn parse_nested_struct_message() {
         let path = testdata_path("nested.proto");
         let props = make_props(&path, "Person");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 3);
         assert_column(&schema.column_schemas()[0], "name", "string");
@@ -398,7 +626,7 @@ mod tests {
     fn parse_repeated_field_as_list() {
         let path = testdata_path("list.proto");
         let props = make_props(&path, "WithList");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 2);
 
@@ -413,7 +641,7 @@ mod tests {
     fn parse_map_field_as_list_of_struct() {
         let path = testdata_path("map.proto");
         let props = make_props(&path, "Scores");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 1);
 
@@ -437,7 +665,7 @@ mod tests {
     fn parse_timestamp_well_known_type() {
         let path = testdata_path("timestamp.proto");
         let props = make_props(&path, "Event");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 2);
         assert_column(&schema.column_schemas()[0], "name", "string");
@@ -450,7 +678,7 @@ mod tests {
     fn parse_enum_as_int32() {
         let path = testdata_path("enum.proto");
         let props = make_props(&path, "Record");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 2);
         assert_column(&schema.column_schemas()[0], "id", "string");
@@ -463,7 +691,7 @@ mod tests {
     fn parse_message_with_package() {
         let path = testdata_path("pkg.proto");
         let props = make_props(&path, "com.example.Sensor");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 2);
         assert_column(&schema.column_schemas()[0], "sensor_id", "string");
@@ -479,7 +707,7 @@ mod tests {
     fn parse_comprehensive_all_types() {
         let path = testdata_path("all_types.proto");
         let props = make_props(&path, "AllTypes");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
 
         assert_eq!(schema.column_schemas().len(), 23);
         let cols = schema.column_schemas();
@@ -575,7 +803,8 @@ mod tests {
     fn source_name_is_stream_name_not_message_name() {
         let path = testdata_path("simple.proto");
         let props = make_props(&path, "Simple");
-        let schema = parse_proto_schema("test_stream_name", &props).expect("parse schema");
+        let (schema, _bundle) =
+            parse_proto_schema("test_stream_name", &props).expect("parse schema");
         for col in schema.column_schemas() {
             assert_eq!(
                 col.source_name(),
@@ -590,7 +819,7 @@ mod tests {
         let path = testdata_path("pkg.proto");
         // Use leading dot like protobuf tooling often does
         let props = make_props(&path, ".com.example.Sensor");
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
         assert_eq!(schema.column_schemas().len(), 2);
         assert_column(&schema.column_schemas()[0], "sensor_id", "string");
         assert_column(&schema.column_schemas()[1], "reading", "float64");
@@ -660,7 +889,7 @@ mod tests {
             "include_paths".to_string(),
             json!(["/some/nonexistent/path"]),
         );
-        let schema = parse_proto_schema("test_stream", &props).expect("parse schema");
+        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
         assert_eq!(schema.column_schemas().len(), 1);
         assert_column(&schema.column_schemas()[0], "value", "string");
     }

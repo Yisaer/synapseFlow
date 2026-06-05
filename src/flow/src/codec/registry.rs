@@ -1,4 +1,4 @@
-use super::decoder::{JsonDecoder, RecordDecoder};
+use super::decoder::{proto::ProtobufDecoder, JsonDecoder, RecordDecoder};
 use super::encoder::SinkEncoderFactory;
 use super::CodecError;
 use crate::catalog::StreamDecoderConfig;
@@ -79,6 +79,19 @@ impl DecoderRegistry {
                     stream_name.to_string(),
                     schema,
                     config.props().clone(),
+                )) as Arc<_>)
+            }),
+        );
+        self.register_decoder(
+            "protobuf",
+            Arc::new(|config, schema, stream_name| {
+                let bundle = config.proto_bundle.as_ref().ok_or_else(|| {
+                    CodecError::Other("protobuf decoder requires a proto descriptor bundle".into())
+                })?;
+                Ok(Arc::new(ProtobufDecoder::new(
+                    stream_name.to_string(),
+                    schema,
+                    Arc::clone(bundle),
                 )) as Arc<_>)
             }),
         );

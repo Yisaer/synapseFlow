@@ -3560,3 +3560,305 @@ async fn udf() {
         .await
         .expect("delete pipeline");
 }
+
+// ── protobuf decoder tests ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn memory_source_bytes_topic_with_protobuf_decoder_decodes_expected_rows() {
+    use flow::codec::{ProtoDescriptorBundle, ProtoFieldInfo};
+    use std::collections::BTreeMap;
+
+    let case_name = "memory_source_bytes_topic_with_protobuf_decoder_decodes_expected_rows";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_proto_decode", case_name);
+
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+
+    // Build a simple schema and ProtoDescriptorBundle for:
+    //   message Simple { int32 a = 1; int32 b = 2; }
+    let stream_name = "stream_proto";
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+
+    let mut field_map = BTreeMap::new();
+    field_map.insert(
+        1u32,
+        ProtoFieldInfo {
+            column_index: 0,
+            datatype: ConcreteDatatype::Int64(Int64Type),
+            is_repeated: false,
+            is_zigzag: false,
+            nested_bundle: None,
+        },
+    );
+    field_map.insert(
+        2u32,
+        ProtoFieldInfo {
+            column_index: 1,
+            datatype: ConcreteDatatype::Int64(Int64Type),
+            is_repeated: false,
+            is_zigzag: false,
+            nested_bundle: None,
+        },
+    );
+    let mut column_to_field = BTreeMap::new();
+    column_to_field.insert("a".to_string(), 1);
+    column_to_field.insert("b".to_string(), 2);
+    let bundle = Arc::new(ProtoDescriptorBundle::new(
+        field_map,
+        column_to_field,
+        2,
+        vec![Arc::from("a"), Arc::from("b")],
+    ));
+
+    let decoder_config =
+        StreamDecoderConfig::new("protobuf", serde_json::Map::new()).with_proto_bundle(bundle);
+
+    let definition = StreamDefinition::new(
+        stream_name.to_string(),
+        Arc::clone(&schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        decoder_config,
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create stream");
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT a, b FROM stream_proto",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+
+    // Encode protobuf message using the generated `Simple` type.
+    let proto_payload =
+        flow::test_proto::encode_simple(&flow::test_proto::simple::Simple { a: 10, b: 20 });
+    publisher
+        .publish_bytes(proto_payload)
+        .expect("publish protobuf bytes");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {"a": 10, "b": 20}
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "protobuf decoder should decode a=10, b=20"
+    );
+
+    instance
+        .stop_pipeline(
+            &pipeline_id,
+            flow::pipeline::PipelineStopMode::Quick,
+            timeout_duration,
+        )
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
+#[tokio::test]
+async fn memory_source_bytes_topic_with_protobuf_decoder_respects_column_pruning() {
+    use flow::codec::{ProtoDescriptorBundle, ProtoFieldInfo};
+    use std::collections::BTreeMap;
+
+    let case_name = "memory_source_bytes_topic_with_protobuf_decoder_respects_column_pruning";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_proto_prune", case_name);
+
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+
+    let stream_name = "stream_prune";
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+
+    let mut field_map = BTreeMap::new();
+    field_map.insert(
+        1u32,
+        ProtoFieldInfo {
+            column_index: 0,
+            datatype: ConcreteDatatype::Int64(Int64Type),
+            is_repeated: false,
+            is_zigzag: false,
+            nested_bundle: None,
+        },
+    );
+    field_map.insert(
+        2u32,
+        ProtoFieldInfo {
+            column_index: 1,
+            datatype: ConcreteDatatype::Int64(Int64Type),
+            is_repeated: false,
+            is_zigzag: false,
+            nested_bundle: None,
+        },
+    );
+    let mut column_to_field = BTreeMap::new();
+    column_to_field.insert("a".to_string(), 1);
+    column_to_field.insert("b".to_string(), 2);
+    let bundle = Arc::new(ProtoDescriptorBundle::new(
+        field_map,
+        column_to_field,
+        2,
+        vec![Arc::from("a"), Arc::from("b")],
+    ));
+
+    let decoder_config =
+        StreamDecoderConfig::new("protobuf", serde_json::Map::new()).with_proto_bundle(bundle);
+
+    let definition = StreamDefinition::new(
+        stream_name.to_string(),
+        Arc::clone(&schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        decoder_config,
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create stream");
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    // Select only column 'a' — 'b' should be skipped via column pruning.
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT a FROM stream_prune",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+
+    // Encode protobuf message using the generated `Simple` type.
+    let proto_payload =
+        flow::test_proto::encode_simple(&flow::test_proto::simple::Simple { a: 10, b: 20 });
+    publisher
+        .publish_bytes(proto_payload)
+        .expect("publish protobuf bytes");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    // Only column 'a' should appear; 'b' is pruned.
+    let expected = serde_json::json!([
+        {"a": 10}
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "column pruning should skip b"
+    );
+
+    instance
+        .stop_pipeline(
+            &pipeline_id,
+            flow::pipeline::PipelineStopMode::Quick,
+            timeout_duration,
+        )
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}

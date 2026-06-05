@@ -1873,3 +1873,113 @@ fn plan_explain_custom_udf_call() {
         "EXPLAIN should show the UDF call expression: {explain_json}"
     );
 }
+
+/// Verify that EXPLAIN output shows `decoder=protobuf` for a stream using protobuf decoder.
+#[test]
+fn plan_explain_shows_protobuf_decoder() {
+    use flow::codec::{ProtoDescriptorBundle, ProtoFieldInfo};
+    use std::collections::BTreeMap;
+
+    let registries = PipelineRegistries::new(
+        flow::connector::ConnectorRegistry::with_builtin_sinks(
+            flow::connector::MemoryPubSubRegistry::new(),
+        ),
+        flow::EncoderRegistry::with_builtin_encoders(),
+        flow::DecoderRegistry::with_builtin_decoders(),
+        flow::AggregateFunctionRegistry::with_builtins(),
+        flow::StatefulFunctionRegistry::with_builtins(),
+        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![]).expect("registry"),
+        flow::EventtimeTypeRegistry::with_builtin_types(),
+        Arc::new(flow::MergerRegistry::new()),
+    );
+
+    let stream_name = "proto_stream";
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+
+    let mut field_map = BTreeMap::new();
+    field_map.insert(
+        1u32,
+        ProtoFieldInfo {
+            column_index: 0,
+            datatype: ConcreteDatatype::Int64(Int64Type),
+            is_repeated: false,
+            is_zigzag: false,
+            nested_bundle: None,
+        },
+    );
+    field_map.insert(
+        2u32,
+        ProtoFieldInfo {
+            column_index: 1,
+            datatype: ConcreteDatatype::Int64(Int64Type),
+            is_repeated: false,
+            is_zigzag: false,
+            nested_bundle: None,
+        },
+    );
+    let mut column_to_field = BTreeMap::new();
+    column_to_field.insert("a".to_string(), 1);
+    column_to_field.insert("b".to_string(), 2);
+    let bundle = Arc::new(ProtoDescriptorBundle::new(
+        field_map,
+        column_to_field,
+        2,
+        vec![Arc::from("a"), Arc::from("b")],
+    ));
+
+    let decoder_config =
+        StreamDecoderConfig::new("protobuf", JsonMap::new()).with_proto_bundle(bundle);
+
+    let stream_def = Arc::new(StreamDefinition::new(
+        stream_name.to_string(),
+        Arc::clone(&schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        decoder_config,
+    ));
+
+    let mut stream_defs = setup_streams();
+    stream_defs.insert(stream_name.to_string(), stream_def);
+
+    let sql = "SELECT a, b FROM proto_stream";
+    let select_stmt = parse_sql(sql).expect("parse sql");
+    let bindings = bindings_for_select(&select_stmt, &stream_defs);
+    let logical_plan = create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical");
+    let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+    let physical_plan =
+        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+            .expect("physical");
+    let physical_plan = flow::optimize_physical_plan(
+        physical_plan,
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+    let explain = PipelineExplain::new(
+        logical_plan,
+        physical_plan,
+        PipelineExplainConfig::default(),
+    );
+
+    println!("{sql}");
+    println!("{}", explain.to_pretty_string());
+
+    let explain_json = explain.to_json().to_string();
+    assert!(
+        explain_json.contains("decoder=protobuf"),
+        "EXPLAIN should show decoder=protobuf for proto_stream: {explain_json}"
+    );
+    assert!(
+        explain_json.contains("source=proto_stream"),
+        "EXPLAIN should show source name: {explain_json}"
+    );
+}

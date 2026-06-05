@@ -57,7 +57,8 @@ pub async fn create_schema_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let schema = match schema_registry().parse(&req.schema_type, &name, &req.props) {
+    let (schema, proto_bundle) = match schema_registry().parse(&req.schema_type, &name, &req.props)
+    {
         Ok(s) => s,
         Err(err) => {
             audit.log_failure(&err);
@@ -97,7 +98,11 @@ pub async fn create_schema_handler(
         }
     }
 
-    named_schema_store().insert(name, schema);
+    if let Some(bundle) = proto_bundle {
+        named_schema_store().insert_with_bundle(name, schema, (*bundle).clone());
+    } else {
+        named_schema_store().insert(name, schema);
+    }
     audit.log_success();
     (
         StatusCode::CREATED,

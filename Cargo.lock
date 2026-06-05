@@ -1611,6 +1611,7 @@ dependencies = [
  "parquet",
  "parser",
  "prost 0.12.6",
+ "prost-build 0.12.6",
  "prost-types 0.12.6",
  "rand 0.10.0",
  "regex",

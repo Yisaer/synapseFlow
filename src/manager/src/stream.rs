@@ -30,8 +30,8 @@ use tokio::sync::TryAcquireError;
 
 use flow::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type,
-    Int16Type, Int32Type, Int64Type, ListType, StringType, StructField, StructType, TimestampType,
-    Uint8Type, Uint16Type, Uint32Type, Uint64Type,
+    Int16Type, Int32Type, Int64Type, ListType, ProtoDescriptorBundle, StringType, StructField,
+    StructType, TimestampType, Uint8Type, Uint16Type, Uint32Type, Uint64Type,
 };
 use storage::{StorageError, StorageManager, StoredMemoryTopicKind};
 
@@ -146,12 +146,18 @@ impl Default for DecoderConfigRequest {
     }
 }
 
-pub type SchemaParser =
-    dyn Fn(&str, &JsonMap<String, JsonValue>) -> Result<Schema, String> + Send + Sync;
+pub type SchemaParser = dyn Fn(
+        &str,
+        &JsonMap<String, JsonValue>,
+    ) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String>
+    + Send
+    + Sync;
 
 /// Registry for schema parsers, enabling pluggable schema declaration formats.
 pub struct SchemaRegistry {
     parsers: RwLock<HashMap<String, Arc<SchemaParser>>>,
+    /// Cache of pre-built protobuf descriptor bundles, keyed by (proto_path, message_type).
+    proto_bundles: RwLock<HashMap<(String, String), Arc<ProtoDescriptorBundle>>>,
 }
 
 impl Default for SchemaRegistry {
@@ -164,13 +170,21 @@ impl SchemaRegistry {
     pub fn new() -> Self {
         Self {
             parsers: RwLock::new(HashMap::new()),
+            proto_bundles: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn with_builtin() -> Self {
         let registry = Self::new();
         registry.register_schema("json", Arc::new(parse_json_schema));
-        registry.register_schema("proto", Arc::new(crate::schema::proto::parse_proto_schema));
+        registry.register_schema(
+            "proto",
+            Arc::new(|stream_name, props| {
+                let (schema, bundle) =
+                    crate::schema::proto::parse_proto_schema(stream_name, props)?;
+                Ok((schema, Some(Arc::new(bundle))))
+            }),
+        );
         registry
     }
 
@@ -183,12 +197,43 @@ impl SchemaRegistry {
         schema_type: &str,
         stream_name: &str,
         props: &JsonMap<String, JsonValue>,
-    ) -> Result<Schema, String> {
+    ) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
         let guard = self.parsers.read();
         let parser = guard
             .get(schema_type)
             .ok_or_else(|| format!("schema type `{schema_type}` not registered"))?;
-        parser(stream_name, props)
+        let (schema, bundle) = parser(stream_name, props)?;
+        if let Some(ref bundle) = bundle {
+            let proto_path = props
+                .get("proto_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let message_type = props
+                .get("message_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !proto_path.is_empty() && !message_type.is_empty() {
+                self.proto_bundles
+                    .write()
+                    .entry((proto_path, message_type))
+                    .or_insert_with(|| Arc::clone(bundle));
+            }
+        }
+        Ok((schema, bundle))
+    }
+
+    /// Retrieve a cached [`ProtoDescriptorBundle`] for the given proto file and message type.
+    pub fn get_proto_bundle(
+        &self,
+        proto_path: &str,
+        message_type: &str,
+    ) -> Option<Arc<ProtoDescriptorBundle>> {
+        self.proto_bundles
+            .read()
+            .get(&(proto_path.to_string(), message_type.to_string()))
+            .cloned()
     }
 }
 
@@ -208,14 +253,18 @@ pub fn register_schema(kind: impl Into<String>, parser: Arc<SchemaParser>) {
 ///
 /// Schemas are parsed once at creation time (or on startup restore)
 /// and cached here so that stream creation by reference is an O(1) lookup.
+/// For proto-based schemas, the corresponding [`ProtoDescriptorBundle`] is
+/// also stored so the protobuf decoder can retrieve it without re-parsing.
 pub struct NamedSchemaStore {
     schemas: RwLock<HashMap<String, Arc<Schema>>>,
+    proto_bundles: RwLock<HashMap<String, Arc<ProtoDescriptorBundle>>>,
 }
 
 impl NamedSchemaStore {
     pub fn new() -> Self {
         Self {
             schemas: RwLock::new(HashMap::new()),
+            proto_bundles: RwLock::new(HashMap::new()),
         }
     }
 
@@ -223,11 +272,21 @@ impl NamedSchemaStore {
         self.schemas.write().insert(name, Arc::new(schema));
     }
 
+    pub fn insert_with_bundle(&self, name: String, schema: Schema, bundle: ProtoDescriptorBundle) {
+        self.schemas.write().insert(name.clone(), Arc::new(schema));
+        self.proto_bundles.write().insert(name, Arc::new(bundle));
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<Schema>> {
         self.schemas.read().get(name).cloned()
     }
 
+    pub fn get_proto_bundle(&self, name: &str) -> Option<Arc<ProtoDescriptorBundle>> {
+        self.proto_bundles.read().get(name).cloned()
+    }
+
     pub fn remove(&self, name: &str) -> Option<Arc<Schema>> {
+        self.proto_bundles.write().remove(name);
         self.schemas.write().remove(name)
     }
 
@@ -239,6 +298,7 @@ impl NamedSchemaStore {
 
     /// Remove all entries from the store.
     pub fn clear(&self) {
+        self.proto_bundles.write().clear();
         self.schemas.write().clear();
     }
 }
@@ -1041,11 +1101,11 @@ fn duration_millis_u64(duration: std::time::Duration) -> u64 {
 fn parse_json_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
-) -> Result<Schema, String> {
+) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
     let schema_value = JsonValue::Object(props.clone());
     let schema_req: StreamSchemaRequest = serde_json::from_value(schema_value)
         .map_err(|err| format!("invalid json schema: {err}"))?;
-    schema_from_columns(stream_name, &schema_req)
+    schema_from_columns(stream_name, &schema_req).map(|s| (s, None))
 }
 
 fn schema_from_columns(
@@ -1074,7 +1134,10 @@ pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Sch
             .map(|schema| (*schema).clone())
             .ok_or_else(|| format!("referenced schema '{}' not found", trimmed));
     }
-    schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)
+    let (schema, _bundle) =
+        schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)?;
+    // Bundle is cached in SchemaRegistry; stream decoder will look it up later.
+    Ok(schema)
 }
 
 pub(crate) fn build_stream_props(
@@ -1238,10 +1301,42 @@ pub(crate) fn build_stream_decoder(
             decoder_config.decode_type
         ));
     }
-    Ok(StreamDecoderConfig::new(
-        decoder_config.decode_type,
-        decoder_config.props,
-    ))
+    let mut config =
+        StreamDecoderConfig::new(decoder_config.decode_type.clone(), decoder_config.props);
+    // Attach proto descriptor bundle for protobuf decoders.
+    if config.kind().eq_ignore_ascii_case("protobuf") {
+        let bundle = if let Some(ref schema_name) = req.schema.r#ref {
+            let trimmed = schema_name.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                named_schema_store().get_proto_bundle(trimmed)
+            }
+        } else {
+            // Inline schema — look up from SchemaRegistry cache.
+            let proto_path = req
+                .schema
+                .props
+                .get("proto_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let message_type = req
+                .schema
+                .props
+                .get("message_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if proto_path.is_empty() || message_type.is_empty() {
+                None
+            } else {
+                schema_registry().get_proto_bundle(proto_path, message_type)
+            }
+        };
+        if let Some(bundle) = bundle {
+            config = config.with_proto_bundle(bundle);
+        }
+    }
+    Ok(config)
 }
 
 pub(crate) fn validate_stream_decoder_config(

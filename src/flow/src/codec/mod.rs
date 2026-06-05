@@ -4,7 +4,11 @@ pub mod merger;
 pub mod registry;
 pub mod video;
 
-pub use decoder::{CodecError, JsonDecoder, RecordDecoder};
+pub use decoder::{
+    proto::ProtobufDecoder,
+    proto_bundle::{ProtoDescriptorBundle, ProtoFieldInfo},
+    CodecError, JsonDecoder, RecordDecoder,
+};
 pub use encoder::{EncodeError, JsonEncoder, SinkEncoder, SinkEncoderFactory};
 pub use merger::Merger;
 pub use registry::{DecoderRegistry, EncoderRegistry, MergerRegistry};

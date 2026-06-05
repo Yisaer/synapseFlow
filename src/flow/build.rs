@@ -5,5 +5,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         .build_server(false)
         .compile(&["proto/yoriito/viss/v1/producer.proto"], &["proto"])?;
+
+    // Generate test-only proto message for decoder/integration tests.
+    prost_build::Config::new()
+        .out_dir(std::env::var("OUT_DIR").unwrap())
+        .compile_protos(&["proto/test/simple.proto"], &["proto/test"])?;
     Ok(())
 }
