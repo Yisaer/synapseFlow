@@ -69,3 +69,17 @@ features:
     doc_refs:
       - docs/runtime/sinks/connectors/video.md
     status: active
+
+  - id: sink.compress.gzip_delivery
+    title: Gzip compression delivery transform
+    summary: Apply gzip compression to sink delivery output via PhysicalSinkCompress.
+    doc_refs:
+      - docs/runtime/sinks/delivery/compress.md
+    status: active
+
+  - id: sink.compress.zstd_delivery
+    title: Zstd compression delivery transform
+    summary: Apply zstd compression to sink delivery output via PhysicalSinkCompress.
+    doc_refs:
+      - docs/runtime/sinks/delivery/compress.md
+    status: active

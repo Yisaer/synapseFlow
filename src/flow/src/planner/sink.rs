@@ -1,3 +1,4 @@
+use crate::codec::CompressionCodec;
 use crate::connector::sink::file::FileSinkConfig;
 use crate::connector::sink::kuksa::KuksaSinkConfig;
 use crate::connector::sink::kura::KuraSinkConfig;
@@ -145,6 +146,7 @@ pub struct PipelineSinkConnector {
     pub connector_id: String,
     pub connector: SinkConnectorConfig,
     pub encoder: SinkEncoderConfig,
+    pub compression: Option<CompressionCodec>,
 }
 
 impl PipelineSinkConnector {
@@ -157,7 +159,13 @@ impl PipelineSinkConnector {
             connector_id: connector_id.into(),
             connector,
             encoder,
+            compression: None,
         }
+    }
+
+    pub fn with_compression(mut self, compression: Option<CompressionCodec>) -> Self {
+        self.compression = compression;
+        self
     }
 }
 

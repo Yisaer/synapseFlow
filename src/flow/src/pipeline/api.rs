@@ -1,4 +1,5 @@
 use crate::catalog::Catalog;
+use crate::codec::CompressionCodec;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkOutputConfig};
 use crate::PipelineRegistries;
 use std::collections::HashMap;
@@ -326,6 +327,7 @@ pub struct SinkDefinition {
     pub common: CommonSinkProps,
     pub encoder: SinkEncoderConfig,
     pub output: SinkOutputConfig,
+    pub compression: Option<CompressionCodec>,
 }
 
 impl SinkDefinition {
@@ -338,6 +340,7 @@ impl SinkDefinition {
             common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::default(),
+            compression: None,
         }
     }
 
@@ -353,6 +356,11 @@ impl SinkDefinition {
 
     pub fn with_output(mut self, output: SinkOutputConfig) -> Self {
         self.output = output;
+        self
+    }
+
+    pub fn with_compression(mut self, compression: CompressionCodec) -> Self {
+        self.compression = Some(compression);
         self
     }
 }

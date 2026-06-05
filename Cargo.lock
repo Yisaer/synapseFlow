@@ -1596,6 +1596,7 @@ dependencies = [
  "chrono",
  "crc32fast",
  "datatypes",
+ "flate2",
  "futures",
  "gmp-mpfr-sys",
  "gstreamer",
@@ -1634,6 +1635,7 @@ dependencies = [
  "url",
  "uuid",
  "veloflux_metrics",
+ "zstd",
 ]
 
 [[package]]

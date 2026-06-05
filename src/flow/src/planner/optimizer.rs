@@ -1194,10 +1194,16 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::SinkEncoder(new))
         }
+
         PhysicalPlan::IncSinkEncoder(encoder) => {
             let mut new = encoder.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::IncSinkEncoder(new))
+        }
+        PhysicalPlan::SinkCompress(compress) => {
+            let mut new = compress.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::SinkCompress(new))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
             let mut new = agg.clone();

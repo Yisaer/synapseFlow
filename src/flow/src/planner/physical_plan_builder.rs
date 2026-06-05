@@ -17,8 +17,8 @@ use crate::planner::physical::{
     PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
     PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSourceChangeGate, PhysicalStatefulFunction,
-    StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalSinkCompress, PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSourceChangeGate,
+    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -1304,8 +1304,19 @@ fn add_regular_encoder_with_builder(
             connector.encoder.clone(),
             CommonSinkProps::default(),
         );
+        let encoder_node: Arc<PhysicalPlan> = Arc::new(PhysicalPlan::SinkEncoder(encoder));
+
+        // Insert PhysicalSinkCompress between encoder and connector when configured.
+        let compress_or_encoder_node = if let Some(codec) = connector.compression.clone() {
+            let compress_index = builder.allocate_index();
+            let compress = PhysicalSinkCompress::new(encoder_node, compress_index, codec);
+            Arc::new(PhysicalPlan::SinkCompress(compress))
+        } else {
+            encoder_node
+        };
+
         Ok((
-            Arc::new(PhysicalPlan::SinkEncoder(encoder)),
+            compress_or_encoder_node,
             PhysicalSinkConnector::new(
                 sink.sink_id.clone(),
                 sink.forward_to_result,

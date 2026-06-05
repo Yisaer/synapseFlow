@@ -99,3 +99,10 @@ features:
     doc_refs:
       - docs/planner/optimize/logical/eliminate_video_sink_identity_project.md
     status: active
+
+  - id: planner.physical.sink_compress_insertion
+    title: Sink compress node insertion
+    summary: Insert PhysicalSinkCompress into the physical sink delivery pipeline when compression is configured.
+    doc_refs:
+      - docs/runtime/sinks/delivery/compress.md
+    status: active

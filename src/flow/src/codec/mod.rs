@@ -1,9 +1,11 @@
+pub mod compress;
 pub mod decoder;
 pub mod encoder;
 pub mod merger;
 pub mod registry;
 pub mod video;
 
+pub use compress::{CompressError, CompressWriter, CompressionCodec};
 pub use decoder::{
     proto::ProtobufDecoder,
     proto_bundle::{ProtoDescriptorBundle, ProtoFieldInfo},

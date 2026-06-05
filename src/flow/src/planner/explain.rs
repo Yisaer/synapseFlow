@@ -927,6 +927,12 @@ fn build_physical_node_with_prefix(
                 info.push(format!("kind={}", cfg.kind));
             }
         }
+        PhysicalPlan::SinkCompress(compress) => {
+            info.push(format!("codec={}", compress.codec.kind_str()));
+            if let Some(level) = compress.codec.level_display() {
+                info.push(format!("level={}", level));
+            }
+        }
         PhysicalPlan::SinkEncoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));

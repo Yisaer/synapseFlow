@@ -7,3 +7,19 @@ interactions:
       - sink.connector.memory_output
       - sink.output.omit_if_empty
     status: active
+
+  - id: sink.encoder_gzip_file_delivery
+    title: Encoder + gzip compress + file connector delivery
+    summary: Validate that encoder output passes through gzip compression and is correctly written by the file connector.
+    features:
+      - sink.compress.gzip_delivery
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.encoder_zstd_file_delivery
+    title: Encoder + zstd compress + file connector delivery
+    summary: Validate that encoder output passes through zstd compression and is correctly written by the file connector.
+    features:
+      - sink.compress.zstd_delivery
+      - sink.connector.file_output
+    status: active
