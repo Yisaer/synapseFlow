@@ -1,6 +1,7 @@
 //! Encoder abstractions for turning collection-backed input records into outbound sink payloads.
 
 mod json;
+mod proto;
 mod template_transform;
 
 use crate::model::Collection;
@@ -10,6 +11,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 pub use json::JsonEncoder;
+pub use proto::ProtobufEncoder;
 
 /// Errors that can occur during encoding.
 #[derive(thiserror::Error, Debug)]

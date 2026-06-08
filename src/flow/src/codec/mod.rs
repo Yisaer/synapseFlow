@@ -11,7 +11,7 @@ pub use decoder::{
     proto_bundle::{ProtoDescriptorBundle, ProtoFieldInfo},
     CodecError, JsonDecoder, RecordDecoder,
 };
-pub use encoder::{EncodeError, JsonEncoder, SinkEncoder, SinkEncoderFactory};
+pub use encoder::{EncodeError, JsonEncoder, ProtobufEncoder, SinkEncoder, SinkEncoderFactory};
 pub use merger::Merger;
 pub use registry::{DecoderRegistry, EncoderRegistry, MergerRegistry};
 pub use video::{

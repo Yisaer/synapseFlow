@@ -458,6 +458,7 @@ pub(crate) fn build_pipeline_definition(
 
         encoder_config =
             apply_encoder_transform_request(encoder_config, sink_req.encoder.transform.as_ref());
+        encoder_config = resolve_proto_bundle_for_encoder(encoder_config, &sink_req.encoder)?;
         encoder_config
             .validate()
             .map_err(|err| format!("invalid encoder config for sink `{sink_id}`: {err}"))?;
@@ -511,6 +512,38 @@ fn apply_encoder_transform_request(
     }
 
     encoder_config.with_transform_template(transform.template.clone())
+}
+
+/// Resolve a [`ProtoDescriptorBundle`] from the schema registry when the encoder
+/// type is `"protobuf"` and `props.ref` references a named schema.
+fn resolve_proto_bundle_for_encoder(
+    encoder_config: SinkEncoderConfig,
+    encoder_req: &super::types::EncoderConfigRequest,
+) -> Result<SinkEncoderConfig, String> {
+    if !matches!(encoder_config.kind(), SinkEncoderKind::Protobuf) {
+        return Ok(encoder_config);
+    }
+
+    let schema_ref = encoder_req
+        .props
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "protobuf encoder requires encoder.props.ref referencing a named proto schema"
+                .to_string()
+        })?;
+
+    let bundle = crate::stream::named_schema_store()
+        .get_proto_bundle(&schema_ref)
+        .ok_or_else(|| {
+            format!(
+                "protobuf encoder references schema `{schema_ref}` which has no proto descriptor bundle"
+            )
+        })?;
+
+    Ok(encoder_config.with_proto_bundle(bundle))
 }
 
 #[cfg(test)]

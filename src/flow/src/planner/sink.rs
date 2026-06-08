@@ -8,6 +8,7 @@ use crate::connector::sink::video::VideoSinkConfig;
 use crate::connector::NngPubSubSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Declarative description of a sink processor in the logical/physical plans.
@@ -230,17 +231,27 @@ pub struct NopSinkConfig {
 }
 
 /// Configuration for supported sink encoders.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SinkEncoderConfig {
     kind: SinkEncoderKind,
     props: JsonMap<String, JsonValue>,
     transform: Option<SinkEncoderTransformConfig>,
+    proto_bundle: Option<Arc<crate::codec::ProtoDescriptorBundle>>,
 }
+
+impl PartialEq for SinkEncoderConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.props == other.props && self.transform == other.transform
+    }
+}
+
+impl Eq for SinkEncoderConfig {}
 
 /// Supported encoder kinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SinkEncoderKind {
     Json,
+    Protobuf,
     None,
     Custom(String),
 }
@@ -269,6 +280,7 @@ impl SinkEncoderKind {
     pub fn as_str(&self) -> &str {
         match self {
             SinkEncoderKind::Json => "json",
+            SinkEncoderKind::Protobuf => "protobuf",
             SinkEncoderKind::None => "none",
             SinkEncoderKind::Custom(kind) => kind.as_str(),
         }
@@ -279,6 +291,7 @@ impl From<String> for SinkEncoderKind {
     fn from(value: String) -> Self {
         match value.as_str() {
             "json" => SinkEncoderKind::Json,
+            "protobuf" => SinkEncoderKind::Protobuf,
             "none" => SinkEncoderKind::None,
             other => SinkEncoderKind::Custom(other.to_string()),
         }
@@ -289,6 +302,7 @@ impl From<&str> for SinkEncoderKind {
     fn from(value: &str) -> Self {
         match value {
             "json" => SinkEncoderKind::Json,
+            "protobuf" => SinkEncoderKind::Protobuf,
             "none" => SinkEncoderKind::None,
             other => SinkEncoderKind::Custom(other.to_string()),
         }
@@ -301,6 +315,7 @@ impl SinkEncoderConfig {
             kind: kind.into(),
             props,
             transform: None,
+            proto_bundle: None,
         }
     }
 
@@ -360,6 +375,15 @@ impl SinkEncoderConfig {
         self
     }
 
+    pub fn proto_bundle(&self) -> Option<&Arc<crate::codec::ProtoDescriptorBundle>> {
+        self.proto_bundle.as_ref()
+    }
+
+    pub fn with_proto_bundle(mut self, bundle: Arc<crate::codec::ProtoDescriptorBundle>) -> Self {
+        self.proto_bundle = Some(bundle);
+        self
+    }
+
     pub fn with_json_omit_null_columns(mut self, omit_null_columns: bool) -> Self {
         self.props.insert(
             "omit_null_columns".to_string(),
@@ -371,6 +395,12 @@ impl SinkEncoderConfig {
     pub fn validate(&self) -> Result<(), String> {
         if matches!(self.kind, SinkEncoderKind::Json) {
             self.json_omit_null_columns()?;
+        }
+
+        if matches!(self.kind, SinkEncoderKind::Protobuf) && self.proto_bundle.is_none() {
+            return Err(
+                "protobuf encoder requires a proto descriptor bundle (schema_ref)".to_string(),
+            );
         }
 
         let Some(_transform) = self.transform.as_ref() else {

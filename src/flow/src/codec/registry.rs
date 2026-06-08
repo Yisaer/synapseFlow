@@ -2,7 +2,7 @@ use super::decoder::{proto::ProtobufDecoder, JsonDecoder, RecordDecoder};
 use super::encoder::SinkEncoderFactory;
 use super::CodecError;
 use crate::catalog::StreamDecoderConfig;
-use crate::codec::encoder::JsonEncoder;
+use crate::codec::encoder::{JsonEncoder, ProtobufEncoder};
 use crate::planner::sink::SinkEncoderConfig;
 use datatypes::Schema;
 use parking_lot::RwLock;
@@ -199,6 +199,18 @@ impl EncoderRegistry {
             }),
             true,
             true,
+        );
+        self.register_encoder(
+            "protobuf",
+            Arc::new(|config| {
+                let bundle = config.proto_bundle().ok_or_else(|| {
+                    CodecError::Other(
+                        "protobuf encoder requires a proto descriptor bundle (schema_ref)"
+                            .to_string(),
+                    )
+                })?;
+                Ok(Arc::new(ProtobufEncoder::new(Arc::clone(bundle))) as Arc<_>)
+            }),
         );
     }
 }
