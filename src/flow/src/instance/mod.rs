@@ -202,7 +202,6 @@ impl FlowInstance {
         spawner: crate::runtime::TaskSpawner,
         shared_registries: Option<FlowInstanceSharedRegistries>,
     ) -> Self {
-        let shared_stream_registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
         let mqtt_client_manager = MqttClientManager::new(id.clone(), spawner.clone());
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let connector_registry =
@@ -217,6 +216,10 @@ impl FlowInstance {
             eventtime_type_registry: EventtimeTypeRegistry::with_builtin_types(),
             merger_registry: Arc::new(MergerRegistry::new()),
         });
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new_with_merger_registry(
+            spawner.clone(),
+            Arc::clone(&registries.merger_registry),
+        ));
 
         let registries_bundle = PipelineRegistries::new(
             Arc::clone(&connector_registry),

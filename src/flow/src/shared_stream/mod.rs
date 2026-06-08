@@ -1,6 +1,6 @@
 use crate::backpressure_hub::BackpressureHub;
 use crate::catalog::StreamDecoderConfig;
-use crate::codec::RecordDecoder;
+use crate::codec::{MergerRegistry, RecordDecoder};
 use crate::connector::SourceConnector;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
@@ -68,13 +68,23 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
 pub struct SharedStreamRegistry {
     streams: RwLock<HashMap<String, Arc<SharedStreamInner>>>,
     spawner: TaskSpawner,
+    merger_registry: Arc<MergerRegistry>,
 }
 
 impl SharedStreamRegistry {
+    #[cfg(test)]
     pub(crate) fn new(spawner: TaskSpawner) -> Self {
+        Self::new_with_merger_registry(spawner, Arc::new(MergerRegistry::new()))
+    }
+
+    pub(crate) fn new_with_merger_registry(
+        spawner: TaskSpawner,
+        merger_registry: Arc<MergerRegistry>,
+    ) -> Self {
         Self {
             streams: RwLock::new(HashMap::new()),
             spawner,
+            merger_registry,
         }
     }
 
@@ -93,7 +103,11 @@ impl SharedStreamRegistry {
             return Err(SharedStreamError::AlreadyExists(config.stream_name));
         }
 
-        let inner = SharedStreamInner::new(config, self.spawner.clone())?;
+        let inner = SharedStreamInner::new(
+            config,
+            self.spawner.clone(),
+            Arc::clone(&self.merger_registry),
+        )?;
         let info = inner.snapshot().await;
         streams.insert(info.name.clone(), inner);
         Ok(info)
@@ -447,6 +461,7 @@ struct SharedStreamInner {
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
     sampler: Option<SamplerConfig>,
+    merger_registry: Arc<MergerRegistry>,
     spawner: TaskSpawner,
     runtime_lock: Mutex<()>,
     applied_decode_state: Arc<SyncRwLock<AppliedDecodeState>>,
@@ -516,6 +531,7 @@ impl SharedStreamInner {
     fn new(
         config: SharedStreamConfig,
         spawner: TaskSpawner,
+        merger_registry: Arc<MergerRegistry>,
     ) -> Result<Arc<Self>, SharedStreamError> {
         let SharedStreamConfig {
             stream_name,
@@ -569,6 +585,7 @@ impl SharedStreamInner {
             connector_id,
             connector_factory,
             sampler,
+            merger_registry,
             spawner,
             runtime_lock: Mutex::new(()),
             applied_decode_state: Arc::clone(&applied_decode_state),
@@ -650,6 +667,7 @@ impl SharedStreamInner {
             flow_instance_id: Arc::clone(&self.flow_instance_id),
             decoder,
             applied_decode_state: Arc::clone(&self.applied_decode_state),
+            merger_registry: Arc::clone(&self.merger_registry),
         };
         let mut pipeline = create_processor_pipeline_for_shared_stream(
             physical_plan,

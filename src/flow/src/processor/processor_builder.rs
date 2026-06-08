@@ -43,6 +43,7 @@ pub(crate) struct SharedStreamPipelineOptions {
     pub flow_instance_id: Arc<str>,
     pub decoder: Arc<dyn RecordDecoder>,
     pub applied_decode_state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
+    pub merger_registry: Arc<MergerRegistry>,
 }
 
 /// Enum for all processor types created from PhysicalPlan
@@ -1750,7 +1751,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             stateful_registry: None,
             shared_stream_registry: None,
             eventtime: None,
-            merger_registry: None,
+            merger_registry: Some(Arc::clone(&options.merger_registry)),
             shared_stream: Some(options),
             channel_capacities: ProcessorChannelCapacities::new(
                 DEFAULT_DATA_CHANNEL_CAPACITY,
