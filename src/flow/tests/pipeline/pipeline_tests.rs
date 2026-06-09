@@ -67,6 +67,7 @@ async fn run_test_case(test_case: TestCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", test_case.name));
 
     let columns = test_case
@@ -167,6 +168,7 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", test_case.name));
 
     let topic_source: Arc<str> = Arc::<str>::from(input_topic.as_str());
@@ -286,6 +288,7 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", test_case.name));
 
     let columns = test_case
@@ -421,6 +424,7 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let columns = case
@@ -502,6 +506,7 @@ async fn run_omit_if_empty_json_case(case: OmitIfEmptyJsonCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -691,6 +696,7 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -1513,6 +1519,7 @@ async fn transform_template_with_alias_projection_keeps_output_correct() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let columns = input_data
@@ -1904,6 +1911,7 @@ async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -2006,6 +2014,7 @@ async fn memory_source_json_bytes_decodes_and_encodes_base64() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -2105,6 +2114,7 @@ async fn memory_source_json_timestamp_decodes_filters_and_encodes_utc() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -2215,6 +2225,7 @@ async fn memory_source_json_timestamp_feeds_date_time_scalars() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -2316,6 +2327,7 @@ async fn memory_source_bytes_topic_batches_json_output() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let timeout_duration = Duration::from_secs(5);
@@ -2454,6 +2466,7 @@ async fn memory_collection_source_layout_normalize_then_collection_sink_material
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let topic_source: Arc<str> = Arc::<str>::from(input_topic.as_str());
@@ -2553,6 +2566,7 @@ async fn pipeline_list_element_pruning_sparse_index_json_runtime() {
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case_name));
 
     let input_rows = serde_json::json!([
@@ -2687,6 +2701,7 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let columns = case
@@ -2872,6 +2887,7 @@ async fn run_mixed_output_kinds_case(case: MixedOutputKindsCase) {
 
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let columns = case
@@ -3203,6 +3219,7 @@ async fn memory_collection_sink_delta_output_preserves_output_mask() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let columns = input_data
@@ -3329,6 +3346,7 @@ async fn memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collect
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -3519,6 +3537,7 @@ async fn udf() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let columns: Vec<(String, String, Vec<Value>)> = input_data
@@ -3671,6 +3690,7 @@ async fn memory_source_bytes_topic_with_protobuf_decoder_decodes_expected_rows()
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -3820,6 +3840,7 @@ async fn memory_source_bytes_topic_with_protobuf_decoder_respects_column_pruning
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);

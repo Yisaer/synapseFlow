@@ -62,6 +62,7 @@ async fn run_stateful_case(case: StatefulCase) {
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let columns = case
@@ -1564,6 +1565,7 @@ async fn stateful_projection_followed_by_row_diff_delta_output() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let columns = input_data
@@ -1645,6 +1647,7 @@ async fn acc_lifecycle_delta_omit_if_empty_suppresses_unchanged_inactive_state()
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let timeout_duration = Duration::from_secs(5);
@@ -1816,6 +1819,7 @@ async fn stateful_projection_with_batched_sink_encoder() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let columns = input_data
@@ -1909,6 +1913,7 @@ async fn acc_lifecycle_with_batched_sink_encoder() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let columns = input_data
@@ -1988,6 +1993,7 @@ async fn streaming_state_window_graceful_close_flushes_active_window() {
         .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
 
     let columns = input_data

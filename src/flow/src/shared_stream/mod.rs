@@ -695,7 +695,10 @@ impl SharedStreamInner {
             SharedStreamError::Internal("shared stream pipeline output unavailable".into())
         })?;
 
-        pipeline.start();
+        pipeline
+            .start()
+            .await
+            .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
 
         let data_hub = Arc::clone(&self.data_hub);
         let control_hub = Arc::clone(&self.control_hub);

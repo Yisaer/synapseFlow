@@ -527,7 +527,7 @@ pub async fn upsert_pipeline_handler(
                 .into_response();
         }
 
-        if let Err(err) = instance.start_pipeline(&id) {
+        if let Err(err) = instance.start_pipeline(&id).await {
             tracing::error!(
                 pipeline_id = %id,
                 error = %err,
@@ -772,7 +772,7 @@ pub async fn start_pipeline_handler(
         Ok(instance) => instance,
         Err(resp) => return *resp,
     };
-    match instance.start_pipeline(&id) {
+    match instance.start_pipeline(&id).await {
         Ok(_) => {
             audit.log_success();
             (StatusCode::OK, format!("pipeline {id} started")).into_response()

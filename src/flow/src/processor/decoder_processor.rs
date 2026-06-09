@@ -8,7 +8,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorStart, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
 use crate::shared_stream::AppliedDecodeState;
 use futures::stream::StreamExt;
@@ -100,10 +100,7 @@ impl Processor for DecoderProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let decoder = Arc::clone(&self.decoder);
@@ -119,7 +116,7 @@ impl Processor for DecoderProcessor {
         let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         tracing::info!(processor_id = %processor_id, "decoder processor starting");
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -230,7 +227,7 @@ impl Processor for DecoderProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

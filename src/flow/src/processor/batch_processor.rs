@@ -6,7 +6,9 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 #[cfg(test)]
 use datatypes::Value;
@@ -196,10 +198,7 @@ impl Processor for BatchProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -210,11 +209,11 @@ impl Processor for BatchProcessor {
         let processor_id = self.id.clone();
         let mode = match Self::batch_mode(self.batch_count, self.batch_duration) {
             Ok(mode) => mode,
-            Err(err) => return spawner.spawn(async move { Err(err) }),
+            Err(err) => return ProcessorStart::failed(spawner, err),
         };
         let stats = Arc::clone(&self.stats);
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut buffer: Vec<Tuple> = Vec::new();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             loop {
@@ -376,7 +375,7 @@ impl Processor for BatchProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

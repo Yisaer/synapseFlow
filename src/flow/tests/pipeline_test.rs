@@ -160,7 +160,7 @@ async fn test_sampler_execution_latest_strategy() {
         .build_pipeline("SELECT x FROM latest_stream", vec![sink])
         .expect("pipeline creation should succeed");
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send 5 JSON messages as raw bytes: {"x": 1}, ..., {"x": 5}
@@ -249,7 +249,7 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
         .expect("build pipeline with shared-tail barrier");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in 1..=3 {

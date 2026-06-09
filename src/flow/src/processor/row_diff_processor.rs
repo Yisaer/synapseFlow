@@ -8,7 +8,9 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::output_row_accessor::OutputRowAccessor;
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
@@ -362,10 +364,7 @@ impl Processor for RowDiffProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -381,7 +380,7 @@ impl Processor for RowDiffProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "row diff processor starting");
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut state = RowDiffState::default();
             loop {
                 tokio::select! {
@@ -474,7 +473,7 @@ impl Processor for RowDiffProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

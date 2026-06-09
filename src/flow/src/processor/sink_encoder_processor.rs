@@ -7,7 +7,9 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::pin::Pin;
@@ -453,10 +455,7 @@ impl Processor for SinkEncoderProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -467,13 +466,14 @@ impl Processor for SinkEncoderProcessor {
         let mut encoder = match self.take_encoder() {
             Ok(Some(encoder)) => encoder,
             Ok(None) => {
-                return spawner.spawn(async {
-                    Err(ProcessorError::ProcessingError(
+                return ProcessorStart::failed(
+                    spawner,
+                    ProcessorError::ProcessingError(
                         "sink encoder processor already started".to_string(),
-                    ))
-                });
+                    ),
+                );
             }
-            Err(err) => return spawner.spawn(async move { Err(err) }),
+            Err(err) => return ProcessorStart::failed(spawner, err),
         };
         let batch_count = self.batch_count;
         let batch_duration = self.batch_duration;
@@ -482,7 +482,7 @@ impl Processor for SinkEncoderProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "sink encoder processor starting");
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut delivery = DeliveryEncoding::default();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             loop {
@@ -681,7 +681,7 @@ impl Processor for SinkEncoderProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

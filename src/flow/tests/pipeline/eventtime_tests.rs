@@ -153,6 +153,7 @@ async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {
         .expect("create eventtime pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start eventtime pipeline");
 
     publish_json_row(
@@ -252,6 +253,7 @@ async fn eventtime_tumbling_window_drops_tuple_older_than_current_watermark() {
         .expect("create eventtime pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start eventtime pipeline");
 
     publish_json_row(
@@ -382,6 +384,7 @@ async fn eventtime_tumbling_window_with_on_change_gate_suppresses_unchanged_rows
         .expect("create eventtime pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start eventtime pipeline");
 
     publish_json_row(
@@ -490,6 +493,7 @@ async fn eventtime_tumbling_window_with_on_change_gate_drops_late_rows_after_wat
         .expect("create eventtime pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start eventtime pipeline");
 
     publish_json_row(
@@ -611,6 +615,7 @@ async fn eventtime_tumbling_window_graceful_stop_flushes_final_window() {
         .expect("create eventtime pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start eventtime pipeline");
 
     publish_json_row(

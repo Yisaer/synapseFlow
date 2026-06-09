@@ -96,6 +96,7 @@ async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline");
 
     let stats = instance
@@ -147,6 +148,7 @@ async fn collect_pipeline_stats_returns_error_for_stopped_pipeline() {
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline");
     instance
         .stop_pipeline(pipeline_id, PipelineStopMode::Quick, Duration::from_secs(5))
@@ -212,6 +214,7 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
 
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline before stats collection");
 
     let batch = batch_from_columns_simple(vec![(
@@ -248,6 +251,7 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
         .expect("stop pipeline before rebuild");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("restart pipeline to rebuild runtime");
 
     let stats_after = instance
@@ -316,6 +320,7 @@ async fn collect_pipeline_stats_exposes_empty_suppress_custom_metrics() {
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline before stats collection");
 
     let first_batch = batch_from_columns_simple(vec![(
@@ -426,6 +431,7 @@ async fn collect_pipeline_stats_reports_decoder_errors_without_failing_collectio
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline before stats collection");
 
     instance

@@ -270,7 +270,7 @@ async fn restore_pipeline(
                 storage::StoredPipelineDesiredState::Running
             ) =>
         {
-            if let Err(err) = instance.start_pipeline(&pipeline.id) {
+            if let Err(err) = instance.start_pipeline(&pipeline.id).await {
                 tracing::error!(
                     pipeline_id = %pipeline.id,
                     error = %err,

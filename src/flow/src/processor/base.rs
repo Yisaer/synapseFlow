@@ -8,7 +8,8 @@
 use crate::processor::{ControlSignal, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
 use futures::stream::SelectAll;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -116,6 +117,55 @@ pub(crate) fn default_channel_capacities() -> ProcessorChannelCapacities {
     )
 }
 
+pub(crate) type ProcessorReadyReceiver = oneshot::Receiver<Result<(), ProcessorError>>;
+
+pub(crate) struct ProcessorStart {
+    pub(crate) handle: JoinHandle<Result<(), ProcessorError>>,
+    ready: Option<ProcessorReadyReceiver>,
+}
+
+impl ProcessorStart {
+    pub(crate) fn ready(handle: JoinHandle<Result<(), ProcessorError>>) -> Self {
+        Self {
+            handle,
+            ready: None,
+        }
+    }
+
+    pub(crate) fn failed(spawner: &TaskSpawner, err: ProcessorError) -> Self {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let task_err = err.clone();
+        let _ = ready_tx.send(Err(err));
+        Self {
+            handle: spawner.spawn(async move { Err(task_err) }),
+            ready: Some(ready_rx),
+        }
+    }
+
+    pub(crate) fn with_ready(
+        handle: JoinHandle<Result<(), ProcessorError>>,
+        ready: ProcessorReadyReceiver,
+    ) -> Self {
+        Self {
+            handle,
+            ready: Some(ready),
+        }
+    }
+
+    pub(crate) fn take_ready(&mut self) -> Option<ProcessorReadyReceiver> {
+        self.ready.take()
+    }
+}
+
+impl std::future::IntoFuture for ProcessorStart {
+    type Output = <JoinHandle<Result<(), ProcessorError>> as std::future::Future>::Output;
+    type IntoFuture = JoinHandle<Result<(), ProcessorError>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        self.handle
+    }
+}
+
 /// Trait for all stream processors
 ///
 /// Processors are the building blocks of the stream processing pipeline.
@@ -125,12 +175,11 @@ pub(crate) trait Processor: Send + Sync {
     /// Get the processor identifier
     fn id(&self) -> &str;
 
-    /// Start the processor asynchronously
-    /// Returns a handle that can be used to await completion
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>>;
+    /// Start the processor asynchronously.
+    ///
+    /// Processors with external startup work should resolve the readiness receiver only after
+    /// they can safely accept upstream data.
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart;
 
     /// Get output channel senders (for connecting downstream processors)
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>>;

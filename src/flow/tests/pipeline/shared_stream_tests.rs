@@ -288,6 +288,7 @@ async fn shared_stream_new_consumer_waits_for_required_columns_before_first_tupl
 
     instance
         .start_pipeline(pipeline_a_id)
+        .await
         .expect("start pipeline a");
     wait_for_shared_stream_decoding_columns(
         &instance,
@@ -300,6 +301,7 @@ async fn shared_stream_new_consumer_waits_for_required_columns_before_first_tupl
 
     instance
         .start_pipeline(pipeline_c_id)
+        .await
         .expect("start pipeline c");
     wait_for_shared_stream_subscriber_count(&instance, stream_name, 2, Duration::from_secs(5))
         .await;
@@ -380,9 +382,11 @@ async fn shared_stream_required_columns_shrink_after_consumer_stop() {
 
     instance
         .start_pipeline(pipeline_a_id)
+        .await
         .expect("start pipeline a");
     instance
         .start_pipeline(pipeline_b_id)
+        .await
         .expect("start pipeline b");
     wait_for_shared_stream_decoding_columns(
         &instance,
@@ -490,6 +494,7 @@ async fn shared_stream_decode_projection_survives_consumer_lifecycle_changes() {
 
     instance
         .start_pipeline(pipeline_a_id)
+        .await
         .expect("start pipeline a");
     wait_for_shared_stream_decoding_columns(
         &instance,
@@ -502,6 +507,7 @@ async fn shared_stream_decode_projection_survives_consumer_lifecycle_changes() {
 
     instance
         .start_pipeline(pipeline_b_id)
+        .await
         .expect("start pipeline b");
     wait_for_shared_stream_decoding_columns(
         &instance,
@@ -552,6 +558,7 @@ async fn shared_stream_decode_projection_survives_consumer_lifecycle_changes() {
     );
     instance
         .start_pipeline(pipeline_c_id)
+        .await
         .expect("start pipeline c");
     wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
     wait_for_shared_stream_decoding_columns(
@@ -624,6 +631,7 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
 
     instance
         .start_pipeline(pipeline_a_id)
+        .await
         .expect("start pipeline a");
     wait_for_shared_stream_decoding_columns(
         &instance,
@@ -636,6 +644,7 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
 
     instance
         .start_pipeline(pipeline_all_id)
+        .await
         .expect("start wildcard pipeline");
     wait_for_shared_stream_decoding_columns(
         &instance,
@@ -722,6 +731,7 @@ async fn shared_stream_runtime_is_lazy_started_and_reclaimed_when_last_consumer_
 
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline");
     wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
     wait_for_shared_stream_subscriber_count(&instance, stream_name, 1, Duration::from_secs(5))
@@ -795,6 +805,7 @@ async fn shared_stream_runtime_can_restart_after_all_consumers_released() {
     );
     instance
         .start_pipeline(pipeline_first)
+        .await
         .expect("start first pipeline");
     wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
 
@@ -813,6 +824,7 @@ async fn shared_stream_runtime_can_restart_after_all_consumers_released() {
     );
     instance
         .start_pipeline(pipeline_second)
+        .await
         .expect("start second pipeline");
     wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
     wait_for_shared_stream_subscriber_count(&instance, stream_name, 1, Duration::from_secs(5))
@@ -883,6 +895,7 @@ async fn shared_stream_sampler_dynamic_decode_lifecycle_keeps_outputs_in_sync() 
 
     instance
         .start_pipeline(pipeline_a_id)
+        .await
         .expect("start pipeline a");
     wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
     wait_for_shared_stream_decoding_columns(
@@ -912,6 +925,7 @@ async fn shared_stream_sampler_dynamic_decode_lifecycle_keeps_outputs_in_sync() 
 
     instance
         .start_pipeline(pipeline_c_id)
+        .await
         .expect("start pipeline c");
     wait_for_shared_stream_decoding_columns(
         &instance,

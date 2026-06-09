@@ -62,6 +62,7 @@ async fn create_memory_json_pipeline(
         .expect("create memory json pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start memory json pipeline");
 }
 

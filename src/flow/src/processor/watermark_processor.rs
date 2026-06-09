@@ -8,7 +8,9 @@ use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::cmp::Reverse;
@@ -123,10 +125,7 @@ impl Processor for WatermarkProcessor {
         }
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         match self {
             WatermarkProcessor::ProcessTime(p) => p.start(spawner),
             WatermarkProcessor::Eventtime(p) => p.start(spawner),
@@ -170,10 +169,7 @@ impl Processor for ProcessTimeWatermarkProcessor {
         }
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         match self {
             ProcessTimeWatermarkProcessor::Tumbling(p) => p.start(spawner),
             ProcessTimeWatermarkProcessor::Sliding(p) => p.start(spawner),
@@ -267,10 +263,7 @@ impl Processor for TumblingWatermarkProcessor {
         self.id()
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -283,7 +276,7 @@ impl Processor for TumblingWatermarkProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "watermark processor starting");
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -375,7 +368,7 @@ impl Processor for TumblingWatermarkProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
@@ -509,10 +502,7 @@ impl Processor for SlidingWatermarkProcessor {
         self.id()
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let lookahead = self.lookahead;
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
@@ -525,7 +515,7 @@ impl Processor for SlidingWatermarkProcessor {
         let mut ticker = self.ticker.take();
         let stats = Arc::clone(&self.stats);
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut pending_deadlines: BinaryHeap<Reverse<u128>> = BinaryHeap::new();
             let mut next_sleep: Option<Pin<Box<Sleep>>> = None;
             let mut last_emitted_nanos: Option<u128> = None;
@@ -678,7 +668,7 @@ impl Processor for SlidingWatermarkProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
@@ -802,10 +792,7 @@ impl Processor for EventtimeWatermarkProcessor {
         self.id()
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -818,7 +805,7 @@ impl Processor for EventtimeWatermarkProcessor {
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "eventtime watermark processor starting");
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -968,7 +955,7 @@ impl Processor for EventtimeWatermarkProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

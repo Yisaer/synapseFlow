@@ -7,82 +7,18 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{
-    ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError, ProcessorStats, StreamData,
+    ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError, ProcessorStart, ProcessorStats,
+    StreamData,
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio::time::{interval_at, timeout, Instant, MissedTickBehavior};
+use tokio::sync::{broadcast, oneshot};
+use tokio::time::timeout;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-const SINK_READY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const SINK_READY_TIMEOUT: Duration = Duration::from_secs(2);
-const SINK_READY_FAST_TIMEOUT: Duration = Duration::from_millis(1);
-
-struct ReadyState {
-    ready: bool,
-    last_error: Option<String>,
-    drop_logged: bool,
-}
-
-impl ReadyState {
-    fn new() -> Self {
-        Self {
-            ready: false,
-            last_error: None,
-            drop_logged: false,
-        }
-    }
-
-    fn is_ready(&self) -> bool {
-        self.ready
-    }
-
-    fn mark_ready(&mut self, processor_id: &str) {
-        if self.last_error.is_some() {
-            tracing::info!(processor_id = %processor_id, "sink connector ready");
-        }
-        self.ready = true;
-        self.last_error = None;
-        self.drop_logged = false;
-    }
-
-    fn record_ready_error(&mut self, processor_id: &str, stats: &ProcessorStats, message: String) {
-        let should_report = self.last_error.as_ref() != Some(&message);
-        if should_report {
-            tracing::warn!(
-                processor_id = %processor_id,
-                error = %message,
-                "sink connector ready error"
-            );
-            stats.record_error(message.clone());
-        }
-        self.last_error = Some(message);
-        self.drop_logged = false;
-    }
-
-    fn should_drop_data(&mut self, processor_id: &str, stats: &ProcessorStats) -> bool {
-        if self.ready {
-            return false;
-        }
-        if !self.drop_logged {
-            let message = self
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "sink connector not ready".to_string());
-            tracing::warn!(
-                processor_id = %processor_id,
-                error = %message,
-                "sink connector not ready; dropping data"
-            );
-            stats.record_error(message);
-            self.drop_logged = true;
-        }
-        true
-    }
-}
 
 enum ControlAction {
     Continue,
@@ -275,12 +211,6 @@ impl SinkProcessor {
         connector.close().await
     }
 
-    fn new_ready_interval() -> tokio::time::Interval {
-        let mut interval = interval_at(Instant::now(), SINK_READY_RETRY_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        interval
-    }
-
     async fn attempt_ready_with_timeout(
         connector: &mut ConnectorBinding,
         timeout_duration: Duration,
@@ -320,7 +250,6 @@ impl SinkProcessor {
     async fn handle_input_item(
         processor_id: &str,
         stats: &ProcessorStats,
-        ready_state: &mut ReadyState,
         connector: &mut ConnectorBinding,
         forwarding: SinkForwarding<'_>,
         data: StreamData,
@@ -331,16 +260,6 @@ impl SinkProcessor {
         }
         match data {
             StreamData::EncodedDelivery { flags, bytes } => {
-                if !ready_state.is_ready()
-                    && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
-                        .await
-                        .is_ok()
-                {
-                    ready_state.mark_ready(processor_id);
-                }
-                if ready_state.should_drop_data(processor_id, stats) {
-                    return Ok(false);
-                }
                 let handle_start = std::time::Instant::now();
                 match connector.handle_delivery(flags, bytes.as_ref()).await {
                     Ok(completed) => {
@@ -376,16 +295,6 @@ impl SinkProcessor {
                 }
             }
             StreamData::Collection(collection) => {
-                if !ready_state.is_ready()
-                    && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
-                        .await
-                        .is_ok()
-                {
-                    ready_state.mark_ready(processor_id);
-                }
-                if ready_state.should_drop_data(processor_id, stats) {
-                    return Ok(false);
-                }
                 let in_rows = collection.num_rows() as u64;
                 let handle_start = std::time::Instant::now();
                 if let Err(err) = Self::handle_collection(connector, collection.as_ref()).await {
@@ -441,10 +350,7 @@ impl Processor for SinkProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -456,18 +362,33 @@ impl Processor for SinkProcessor {
         let stats = Arc::clone(&self.stats);
 
         let Some(mut connector) = self.connector.take() else {
-            return spawner.spawn(async {
-                Err(ProcessorError::InvalidConfiguration(
-                    "sink connector missing".to_string(),
-                ))
-            });
+            return ProcessorStart::failed(
+                spawner,
+                ProcessorError::InvalidConfiguration("sink connector missing".to_string()),
+            );
         };
         let processor_id = self.id.clone();
         tracing::info!(processor_id = %processor_id, "sink processor starting");
 
-        spawner.spawn(async move {
-            let mut ready_state = ReadyState::new();
-            let mut ready_interval = Self::new_ready_interval();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let handle = spawner.spawn(async move {
+            match Self::attempt_ready_with_timeout(&mut connector, SINK_READY_TIMEOUT).await {
+                Ok(()) => {
+                    tracing::info!(processor_id = %processor_id, "sink connector ready");
+                    let _ = ready_tx.send(Ok(()));
+                }
+                Err(message) => {
+                    tracing::warn!(
+                        processor_id = %processor_id,
+                        error = %message,
+                        "sink connector ready error"
+                    );
+                    stats.record_error(message.clone());
+                    let err = ProcessorError::ProcessingError(message);
+                    let _ = ready_tx.send(Err(err.clone()));
+                    return Err(err);
+                }
+            }
             loop {
                 tokio::select! {
                     biased;
@@ -486,26 +407,12 @@ impl Processor for SinkProcessor {
                             ControlAction::Stop => return Ok(()),
                         };
                     }
-                    _ = ready_interval.tick(), if !ready_state.is_ready() => {
-                        match Self::attempt_ready_with_timeout(
-                            &mut connector,
-                            SINK_READY_TIMEOUT,
-                        )
-                        .await
-                        {
-                            Ok(()) => ready_state.mark_ready(&processor_id),
-                            Err(message) => {
-                                ready_state.record_ready_error(&processor_id, stats.as_ref(), message);
-                            }
-                        }
-                    }
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
                                 if Self::handle_input_item(
                                     &processor_id,
                                     stats.as_ref(),
-                                    &mut ready_state,
                                     &mut connector,
                                     SinkForwarding {
                                         forward_data,
@@ -532,7 +439,8 @@ impl Processor for SinkProcessor {
                     }
                 }
             }
-        })
+        });
+        ProcessorStart::with_ready(handle, ready_rx)
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

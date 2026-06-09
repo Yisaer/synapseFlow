@@ -8,7 +8,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{
-    ControlSignal, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStats, StreamData,
+    ControlSignal, MetricKind, MetricSpec, Processor, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
@@ -61,10 +61,7 @@ impl Processor for EmptySuppressProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -91,7 +88,7 @@ impl Processor for EmptySuppressProcessor {
             kind: MetricKind::Counter,
         });
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -183,7 +180,7 @@ impl Processor for EmptySuppressProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

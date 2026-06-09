@@ -6,7 +6,9 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::collections::VecDeque;
@@ -98,10 +100,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
         self.id()
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -116,7 +115,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let stats = Arc::clone(&self.stats);
         let len_secs = self.len_secs;
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut window_state = ProcessingWindowState::new(
                 len_secs,
                 Arc::clone(&physical),
@@ -222,7 +221,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
             }
 
             Ok(())
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

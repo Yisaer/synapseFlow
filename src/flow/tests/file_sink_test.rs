@@ -100,6 +100,7 @@ async fn memory_source_feeds_file_sink_pipeline() {
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline");
 
     instance
@@ -192,6 +193,7 @@ async fn file_sink_rolls_files_by_common_batch_count() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     instance

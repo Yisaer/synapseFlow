@@ -19,9 +19,9 @@ use crate::processor::{
     CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, FilterProcessor, Ingress,
     InstantControlSignal, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
-    ProcessorError, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
-    SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkProcessor,
-    SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
+    ProcessorError, ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor,
+    SamplerProcessor, SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor,
+    SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
     StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TumblingWindowProcessor,
     WatermarkProcessor,
 };
@@ -34,8 +34,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
+
+const PROCESSOR_START_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub(crate) struct SharedStreamPipelineOptions {
@@ -383,10 +385,7 @@ impl PlanProcessor {
     }
 
     /// Start the processor
-    pub fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    pub fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         match self {
             PlanProcessor::Aggregation(p) => p.start(spawner),
             PlanProcessor::DataSource(p) => p.start(spawner),
@@ -617,66 +616,129 @@ impl ProcessorPipeline {
         })
     }
 
-    /// Start all processors in the pipeline. Subsequent calls are no-ops.
-    pub fn start(&mut self) {
-        if !self.handles.is_empty() {
-            return;
+    async fn await_processor_ready(
+        processor_id: &str,
+        processor_kind: &'static str,
+        start: &mut ProcessorStart,
+    ) -> Result<(), ProcessorError> {
+        let Some(ready) = start.take_ready() else {
+            return Ok(());
+        };
+        match timeout(PROCESSOR_START_READY_TIMEOUT, ready).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => Err(ProcessorError::ChannelClosed),
+            Err(_) => Err(ProcessorError::ProcessingError(format!(
+                "processor `{processor_id}` ({processor_kind}) startup readiness timeout"
+            ))),
         }
+    }
+
+    async fn start_processor(
+        &mut self,
+        processor_id: String,
+        processor_kind: &'static str,
+        mut start: ProcessorStart,
+        flow_instance_id: Arc<str>,
+        pipeline_id: String,
+    ) -> Result<(), ProcessorError> {
+        if let Err(err) =
+            Self::await_processor_ready(&processor_id, processor_kind, &mut start).await
+        {
+            start.handle.abort();
+            let _ = start.handle.await;
+            return Err(err);
+        }
+        self.handles.push(Self::wrap_processor_handle(
+            &self.spawner,
+            flow_instance_id,
+            pipeline_id,
+            processor_id,
+            processor_kind,
+            start.handle,
+        ));
+        Ok(())
+    }
+
+    async fn abort_started_processors(&mut self) {
+        while let Some(handle) = self.handles.pop() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    /// Start all processors in the pipeline. Subsequent calls are no-ops.
+    pub async fn start(&mut self) -> Result<(), ProcessorError> {
+        if !self.handles.is_empty() {
+            return Ok(());
+        }
+        if let Err(err) = self.start_inner().await {
+            self.abort_started_processors().await;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn start_inner(&mut self) -> Result<(), ProcessorError> {
         let flow_instance_id = Arc::clone(&self.flow_instance_id);
         let pipeline_id = self.pipeline_id.clone();
-        // Start from downstream to upstream so that consumers are ready before producers.
+
         if let Some(result_sink) = &mut self.result_sink {
             let processor_id = result_sink.id().to_string();
-            let handle = result_sink.start(&self.spawner);
-            self.handles.push(Self::wrap_processor_handle(
-                &self.spawner,
-                Arc::clone(&flow_instance_id),
-                pipeline_id.clone(),
+            let start = result_sink.start(&self.spawner);
+            self.start_processor(
                 processor_id,
                 "result_collect",
-                handle,
-            ));
+                start,
+                Arc::clone(&flow_instance_id),
+                pipeline_id.clone(),
+            )
+            .await?;
         }
+
         let len = self.middle_processors.len();
         for idx in (0..len).rev() {
             if !matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
                 let processor_id = self.middle_processors[idx].id().to_string();
                 let processor_kind = self.middle_processors[idx].kind();
-                let handle = self.middle_processors[idx].start(&self.spawner);
-                self.handles.push(Self::wrap_processor_handle(
-                    &self.spawner,
-                    Arc::clone(&flow_instance_id),
-                    pipeline_id.clone(),
+                let start = self.middle_processors[idx].start(&self.spawner);
+                self.start_processor(
                     processor_id,
                     processor_kind,
-                    handle,
-                ));
+                    start,
+                    Arc::clone(&flow_instance_id),
+                    pipeline_id.clone(),
+                )
+                .await?;
             }
         }
+
         for idx in (0..len).rev() {
             if matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
                 let processor_id = self.middle_processors[idx].id().to_string();
                 let processor_kind = self.middle_processors[idx].kind();
-                let handle = self.middle_processors[idx].start(&self.spawner);
-                self.handles.push(Self::wrap_processor_handle(
-                    &self.spawner,
-                    Arc::clone(&flow_instance_id),
-                    pipeline_id.clone(),
+                let start = self.middle_processors[idx].start(&self.spawner);
+                self.start_processor(
                     processor_id,
                     processor_kind,
-                    handle,
-                ));
+                    start,
+                    Arc::clone(&flow_instance_id),
+                    pipeline_id.clone(),
+                )
+                .await?;
             }
         }
-        let handle = self.control_source.start(&self.spawner);
-        self.handles.push(Self::wrap_processor_handle(
-            &self.spawner,
+
+        let processor_id = self.control_source.id().to_string();
+        let start = self.control_source.start(&self.spawner);
+        self.start_processor(
+            processor_id,
+            "control_source",
+            start,
             flow_instance_id,
             pipeline_id,
-            self.control_source.id().to_string(),
-            "control_source",
-            handle,
-        ));
+        )
+        .await
     }
 
     pub async fn send_ingress(&self, item: Ingress) -> Result<(), ProcessorError> {

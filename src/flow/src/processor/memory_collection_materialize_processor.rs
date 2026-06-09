@@ -8,7 +8,9 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::output_row_accessor::OutputRowAccessor;
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::collections::BTreeSet;
@@ -120,10 +122,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let data_receivers = std::mem::take(&mut self.inputs);
         let mut input_streams = fan_in_streams(data_receivers);
@@ -142,7 +141,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
 
         tracing::info!(processor_id = %id, "memory collection materialize starting");
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -250,7 +249,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

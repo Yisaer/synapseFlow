@@ -6,7 +6,9 @@ use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
@@ -157,10 +159,7 @@ impl Processor for StreamingStateAggregationProcessor {
         self.id()
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -175,7 +174,7 @@ impl Processor for StreamingStateAggregationProcessor {
         let stats = Arc::clone(&self.stats);
         let state_window = Arc::clone(&self.state_window);
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut partitions: HashMap<Option<String>, PartitionAggState> = HashMap::new();
             loop {
                 tokio::select! {
@@ -388,7 +387,7 @@ impl Processor for StreamingStateAggregationProcessor {
             }
 
             Ok(())
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

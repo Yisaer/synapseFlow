@@ -6,7 +6,9 @@ use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
@@ -149,12 +151,9 @@ impl Processor for StreamingSlidingAggregationProcessor {
         self.id()
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         if let Err(e) = self.validate_supported_aggregates() {
-            return spawner.spawn(async move { Err(e) });
+            return ProcessorStart::failed(spawner, e);
         }
 
         let id = self.id.clone();
@@ -172,7 +171,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let delay_secs = self.delay_secs;
         let stats = Arc::clone(&self.stats);
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut windows: VecDeque<IncAggWindow> = VecDeque::new();
 
             fn to_epoch_secs(ts: SystemTime) -> Result<u64, ProcessorError> {
@@ -524,7 +523,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
             }
 
             Ok(())
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

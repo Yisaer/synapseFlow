@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         instance
             .start_pipeline(&pipeline_id)
+            .await
             .unwrap_or_else(|_| panic!("failed to start pipeline for SQL: {engine_sql}"));
 
         instance

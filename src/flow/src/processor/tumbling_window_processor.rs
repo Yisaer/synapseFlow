@@ -8,8 +8,8 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{
-    ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStats,
-    StreamData,
+    ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStart,
+    ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use std::collections::VecDeque;
@@ -74,10 +74,7 @@ impl Processor for TumblingWindowProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -97,7 +94,7 @@ impl Processor for TumblingWindowProcessor {
             Arc::clone(&stats),
         );
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -191,7 +188,7 @@ impl Processor for TumblingWindowProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

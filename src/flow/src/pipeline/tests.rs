@@ -243,8 +243,8 @@ fn shared_stream_two_pipelines_project_different_columns() {
             .take_output()
             .expect("pipeline_bc should expose output receiver");
 
-        pipeline_ab.start();
-        pipeline_bc.start();
+        pipeline_ab.start().await.expect("start pipeline_ab");
+        pipeline_bc.start().await.expect("start pipeline_bc");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         handle

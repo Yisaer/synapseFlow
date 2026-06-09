@@ -7,7 +7,7 @@ use crate::planner::physical::{
     AggregateCall, PhysicalPlan, PhysicalStreamingAggregation, StreamingWindowSpec,
 };
 use crate::processor::base::{default_channel_capacities, ProcessorChannelCapacities};
-use crate::processor::{Processor, ProcessorError, ProcessorStats};
+use crate::processor::{Processor, ProcessorError, ProcessorStart, ProcessorStats};
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use sqlparser::ast::Expr;
@@ -137,10 +137,7 @@ impl Processor for StreamingAggregationProcessor {
         }
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         match self {
             StreamingAggregationProcessor::Count(p) => p.start(spawner),
             StreamingAggregationProcessor::Tumbling(p) => p.start(spawner),

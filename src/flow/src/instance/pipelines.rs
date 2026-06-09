@@ -19,8 +19,8 @@ impl FlowInstance {
     }
 
     /// Start a pipeline by identifier.
-    pub fn start_pipeline(&self, id: &str) -> Result<(), PipelineError> {
-        self.pipeline_manager.start_pipeline(id)
+    pub async fn start_pipeline(&self, id: &str) -> Result<(), PipelineError> {
+        self.pipeline_manager.start_pipeline(id).await
     }
 
     /// Stop a pipeline by identifier.

@@ -77,6 +77,7 @@ async fn nng_pubsub_source_feeds_memory_sink_pipeline() {
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline");
 
     sleep(Duration::from_millis(150)).await;
@@ -150,6 +151,7 @@ async fn memory_source_feeds_nng_pubsub_sink_pipeline() {
         .expect("create pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start pipeline");
 
     instance

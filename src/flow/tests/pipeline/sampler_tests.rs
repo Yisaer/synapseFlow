@@ -205,7 +205,7 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in 1..=5 {
@@ -265,7 +265,7 @@ async fn sampler_latest_flushes_buffer_on_close() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in [10, 20] {
@@ -341,7 +341,7 @@ async fn sampler_latest_before_filter_and_projection() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in [12, 5] {
@@ -418,7 +418,7 @@ async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in [12, 5] {
@@ -492,7 +492,7 @@ async fn sampler_latest_before_row_diff_delta_output() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in [1, 2] {
@@ -585,7 +585,7 @@ async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in [1, 2] {
@@ -711,7 +711,7 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
     let interval_settle = interval + Duration::from_millis(60);
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for value in [1, 2] {
@@ -834,7 +834,7 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for payload in [
@@ -906,7 +906,7 @@ async fn sampler_packer_flushes_buffer_on_close() {
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start();
+    pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     for payload in [r#"{"x": 7}"#.as_bytes(), r#"{"y": 9}"#.as_bytes()] {

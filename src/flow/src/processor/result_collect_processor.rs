@@ -5,7 +5,9 @@
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use parking_lot::Mutex;
@@ -148,10 +150,7 @@ impl Processor for ResultCollectProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         async fn forward_to_output_bus(
             output: &mpsc::Sender<StreamData>,
             processor_id: &str,
@@ -189,7 +188,7 @@ impl Processor for ResultCollectProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "result collect processor starting");
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let output = match output {
                 Ok(output) => output,
                 Err(e) => return Err(e),
@@ -245,7 +244,7 @@ impl Processor for ResultCollectProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

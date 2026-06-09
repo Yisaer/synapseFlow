@@ -287,33 +287,52 @@ impl PipelineManager {
     }
 
     /// Start the pipeline runtime if not already running.
-    pub fn start_pipeline(&self, pipeline_id: &str) -> Result<(), PipelineError> {
+    pub async fn start_pipeline(&self, pipeline_id: &str) -> Result<(), PipelineError> {
+        let mut pipeline = {
+            let mut guard = self.pipelines.write();
+            let entry = guard
+                .get_mut(pipeline_id)
+                .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+            if matches!(entry.status, PipelineStatus::Running) {
+                return Ok(());
+            }
+
+            if entry.pipeline.is_none() {
+                let definition = Arc::clone(&entry.definition);
+                let registries = self.registries.read().clone();
+                let (pipeline, streams) =
+                    build_pipeline_runtime(&definition, &self.catalog, &self.context, &registries)
+                        .map_err(PipelineError::BuildFailure)?;
+                entry.pipeline = Some(pipeline);
+                entry.streams = streams;
+            }
+
+            entry
+                .pipeline
+                .take()
+                .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?
+        };
+
+        let start_result = pipeline
+            .start()
+            .await
+            .map_err(|err| PipelineError::Runtime(err.to_string()));
+
         let mut guard = self.pipelines.write();
         let entry = guard
             .get_mut(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
-        if matches!(entry.status, PipelineStatus::Running) {
-            return Ok(());
+        match start_result {
+            Ok(()) => {
+                entry.pipeline = Some(pipeline);
+                entry.status = PipelineStatus::Running;
+                Ok(())
+            }
+            Err(err) => {
+                entry.pipeline = None;
+                Err(err)
+            }
         }
-
-        if entry.pipeline.is_none() {
-            let definition = Arc::clone(&entry.definition);
-            // Clone registries outside the write lock to avoid borrowing conflicts
-            let registries = self.registries.read().clone();
-            let (pipeline, streams) =
-                build_pipeline_runtime(&definition, &self.catalog, &self.context, &registries)
-                    .map_err(PipelineError::BuildFailure)?;
-            entry.pipeline = Some(pipeline);
-            entry.streams = streams;
-        }
-
-        let pipeline = entry
-            .pipeline
-            .as_mut()
-            .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?;
-        pipeline.start();
-        entry.status = PipelineStatus::Running;
-        Ok(())
     }
 
     pub async fn stop_pipeline(

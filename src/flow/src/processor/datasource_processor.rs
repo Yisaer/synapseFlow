@@ -9,12 +9,14 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use datatypes::Schema;
-use futures::stream::StreamExt;
+use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -54,7 +56,7 @@ impl ConnectorBinding {
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
         spawner: &TaskSpawner,
-    ) -> broadcast::Receiver<StreamData> {
+    ) -> Result<broadcast::Receiver<StreamData>, ProcessorError> {
         let (sender, receiver) = broadcast::channel(data_channel_capacity);
         let processor_id = processor_id.to_string();
         let connector_id = self.connector.id().to_string();
@@ -69,7 +71,7 @@ impl ConnectorBinding {
                     "connector subscribe error"
                 );
                 stats.record_error(message);
-                return receiver;
+                return Err(Self::connector_error(self.connector.id(), err));
             }
         };
 
@@ -129,7 +131,7 @@ impl ConnectorBinding {
             );
         }));
 
-        receiver
+        Ok(receiver)
     }
 
     async fn shutdown(&mut self) -> Result<(), ProcessorError> {
@@ -228,7 +230,7 @@ impl DataSourceProcessor {
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
         spawner: &TaskSpawner,
-    ) -> Vec<broadcast::Receiver<StreamData>> {
+    ) -> Result<Vec<broadcast::Receiver<StreamData>>, ProcessorError> {
         connectors
             .iter_mut()
             .map(|binding| {
@@ -250,6 +252,25 @@ impl DataSourceProcessor {
         }
         Ok(())
     }
+
+    async fn forward_data(
+        processor_id: &str,
+        output: &broadcast::Sender<StreamData>,
+        channel_capacity: usize,
+        stats: &ProcessorStats,
+        data: StreamData,
+    ) -> Result<(), ProcessorError> {
+        log_received_data(processor_id, &data);
+        if let Some(rows) = data.num_rows_hint() {
+            stats.record_in(rows);
+        }
+        let out_rows = data.num_rows_hint();
+        send_with_backpressure(output, channel_capacity, data, Some(stats)).await?;
+        if let Some(rows) = out_rows {
+            stats.record_out(rows);
+        }
+        Ok(())
+    }
 }
 
 impl Processor for DataSourceProcessor {
@@ -257,10 +278,7 @@ impl Processor for DataSourceProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
@@ -273,13 +291,18 @@ impl Processor for DataSourceProcessor {
         let stream_name = self.stream_name.clone();
         let mut base_inputs = std::mem::take(&mut self.inputs);
         let mut connectors = std::mem::take(&mut self.connectors);
-        let connector_inputs = Self::activate_connectors(
+        let connector_inputs = match Self::activate_connectors(
             &mut connectors,
             &processor_id,
             channel_capacities.data,
             &stats,
             spawner,
-        );
+        ) {
+            Ok(inputs) => inputs,
+            Err(err) => {
+                return ProcessorStart::failed(spawner, err);
+            }
+        };
         base_inputs.extend(connector_inputs);
         let mut input_streams = fan_in_streams(base_inputs);
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -291,7 +314,9 @@ impl Processor for DataSourceProcessor {
             stream = %stream_name,
             "data source starting"
         );
-        spawner.spawn(async move {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let handle = spawner.spawn(async move {
+            let _ = ready_tx.send(Ok(()));
             let mut connectors = connectors;
             loop {
                 tokio::select! {
@@ -329,24 +354,7 @@ impl Processor for DataSourceProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
-                                log_received_data(&processor_id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
-                                }
-                                let is_terminal = data.is_terminal();
-                                let out_rows = data.num_rows_hint();
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    data,
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
-                                if let Some(rows) = out_rows {
-                                    stats.record_out(rows);
-                                }
-
-                                if is_terminal {
+                                if data.is_terminal() {
                                     tracing::info!(
                                         processor_id = %processor_id,
                                         plan = %plan_label,
@@ -354,6 +362,29 @@ impl Processor for DataSourceProcessor {
                                         "received StreamEnd (data)"
                                     );
                                     Self::shutdown_connectors(&mut connectors).await?;
+                                    while let Some(Some(Ok(pending))) =
+                                        input_streams.next().now_or_never()
+                                    {
+                                        if pending.is_terminal() {
+                                            continue;
+                                        }
+                                        Self::forward_data(
+                                            &processor_id,
+                                            &output,
+                                            channel_capacities.data,
+                                            stats.as_ref(),
+                                            pending,
+                                        )
+                                        .await?;
+                                    }
+                                    Self::forward_data(
+                                        &processor_id,
+                                        &output,
+                                        channel_capacities.data,
+                                        stats.as_ref(),
+                                        data,
+                                    )
+                                    .await?;
                                     tracing::info!(
                                         processor_id = %processor_id,
                                         plan = %plan_label,
@@ -362,6 +393,14 @@ impl Processor for DataSourceProcessor {
                                     );
                                     return Ok(());
                                 }
+                                Self::forward_data(
+                                    &processor_id,
+                                    &output,
+                                    channel_capacities.data,
+                                    stats.as_ref(),
+                                    data,
+                                )
+                                .await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 log_broadcast_lagged(
@@ -385,7 +424,8 @@ impl Processor for DataSourceProcessor {
                     }
                 }
             }
-        })
+        });
+        ProcessorStart::with_ready(handle, ready_rx)
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

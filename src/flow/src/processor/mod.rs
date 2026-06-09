@@ -44,8 +44,8 @@ pub mod watermark_processor;
 
 pub use aggregation_processor::AggregationProcessor;
 pub use barrier_processor::BarrierProcessor;
-pub(crate) use base::Processor;
 pub use base::ProcessorError;
+pub(crate) use base::{Processor, ProcessorStart};
 pub use batch_processor::BatchProcessor;
 pub use collection_layout_normalize_processor::CollectionLayoutNormalizeProcessor;
 pub use compute_processor::ComputeProcessor;

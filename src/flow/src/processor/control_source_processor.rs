@@ -8,7 +8,8 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{
-    BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData,
+    BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats,
+    StreamData,
 };
 use crate::runtime::TaskSpawner;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -129,10 +130,7 @@ impl Processor for ControlSourceProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let input_result = self.ingress.take().ok_or_else(|| {
             ProcessorError::InvalidConfiguration(
                 "ControlSourceProcessor ingress must be set before starting".to_string(),
@@ -146,7 +144,7 @@ impl Processor for ControlSourceProcessor {
         tracing::info!(processor_id = %processor_id, "control source processor starting");
         let channel_capacities = self.channel_capacities;
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let input = match input_result {
                 Ok(input) => input,
                 Err(e) => return Err(e),
@@ -216,7 +214,7 @@ impl Processor for ControlSourceProcessor {
             )
             .await?;
             Ok(())
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

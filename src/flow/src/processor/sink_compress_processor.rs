@@ -10,7 +10,9 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::EncodedDeliveryFlags;
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use bytes::Bytes;
 use futures::stream::StreamExt;
@@ -79,10 +81,7 @@ impl Processor for SinkCompressProcessor {
         &self.id
     }
 
-    fn start(
-        &mut self,
-        spawner: &TaskSpawner,
-    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -93,19 +92,20 @@ impl Processor for SinkCompressProcessor {
         let mut writer = match self.take_writer() {
             Ok(Some(w)) => w,
             Ok(None) => {
-                return spawner.spawn(async {
-                    Err(ProcessorError::ProcessingError(
+                return ProcessorStart::failed(
+                    spawner,
+                    ProcessorError::ProcessingError(
                         "sink compress processor already started".into(),
-                    ))
-                });
+                    ),
+                );
             }
-            Err(err) => return spawner.spawn(async move { Err(err) }),
+            Err(err) => return ProcessorStart::failed(spawner, err),
         };
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "sink compress processor starting");
 
-        spawner.spawn(async move {
+        ProcessorStart::ready(spawner.spawn(async move {
             let mut delivery = CompressDelivery::default();
             // The upstream encoder always flushes (sends END to the data channel) before
             // forwarding the terminal control signal. With biased select, both branches can
@@ -253,7 +253,7 @@ impl Processor for SinkCompressProcessor {
                     }
                 }
             }
-        })
+        }))
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {

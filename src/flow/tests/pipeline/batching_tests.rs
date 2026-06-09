@@ -57,6 +57,7 @@ async fn run_batch_case(case: BatchCase) {
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let columns = case
@@ -153,6 +154,7 @@ async fn run_batch_bytes_case(case: BatchBytesCase) {
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
 
     let columns = case
@@ -307,6 +309,7 @@ async fn sink_encoder_flushes_partial_batch_on_graceful_stop() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let columns = input_data
@@ -416,6 +419,7 @@ async fn multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sin
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let columns = input_data
@@ -517,6 +521,7 @@ async fn delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones(
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     let timeout_duration = Duration::from_secs(5);

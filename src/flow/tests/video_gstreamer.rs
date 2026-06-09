@@ -216,6 +216,7 @@ async fn video_rtsp_smoke_records_through_flow_instance_pipeline() {
         .expect("create video pipeline");
     instance
         .start_pipeline(pipeline_id)
+        .await
         .expect("start video pipeline");
 
     tokio::time::sleep(Duration::from_secs(RUN_SECONDS)).await;

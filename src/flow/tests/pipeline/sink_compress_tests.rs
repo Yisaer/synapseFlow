@@ -98,6 +98,7 @@ async fn memory_source_gzip_compress_file_sink_roundtrips() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     instance
@@ -198,6 +199,7 @@ async fn memory_source_zstd_compress_file_sink_roundtrips() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     instance
@@ -297,6 +299,7 @@ async fn gzip_compress_batch_count_matches_uncompressed_delivery_count() {
         .expect("create pipeline");
     instance
         .start_pipeline(&pipeline_id)
+        .await
         .expect("start pipeline");
 
     instance
