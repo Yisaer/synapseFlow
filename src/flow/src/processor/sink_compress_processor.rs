@@ -714,11 +714,11 @@ mod tests {
         assert!(result.is_err() || saw_error, "expected error or abort");
     }
 
-    // coverage-covers: sink.compress.gzip_delivery
     // Regression test: encoder always sends END to the data channel before forwarding
     // the control terminal. With biased select the control branch could win when both
     // are ready simultaneously, causing abort_in_flight to discard a complete delivery.
     // The fix parks the terminal until the data loop drains the END.
+    // coverage-covers: sink.compress.gzip_delivery
     #[tokio::test]
     async fn end_and_control_terminal_simultaneous_does_not_abort_delivery() {
         let mut processor = gzip_processor("drain_race");

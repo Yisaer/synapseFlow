@@ -25,6 +25,7 @@ pub mod physical_sampler;
 pub mod physical_shared_stream;
 pub mod physical_sink_compress;
 pub mod physical_sink_encoder;
+pub mod physical_sink_encrypt;
 pub mod physical_source_change_gate;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
@@ -56,6 +57,7 @@ pub use physical_sampler::PhysicalSampler;
 pub use physical_shared_stream::PhysicalSharedStream;
 pub use physical_sink_compress::PhysicalSinkCompress;
 pub use physical_sink_encoder::PhysicalSinkEncoder;
+pub use physical_sink_encrypt::PhysicalSinkEncrypt;
 pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
@@ -89,6 +91,7 @@ pub enum PhysicalPlan {
 
     IncSinkEncoder(PhysicalIncSinkEncoder),
     SinkCompress(PhysicalSinkCompress),
+    SinkEncrypt(PhysicalSinkEncrypt),
 
     StreamingAggregation(PhysicalStreamingAggregation),
     ResultCollect(PhysicalResultCollect),
@@ -133,6 +136,7 @@ impl PhysicalPlan {
 
             PhysicalPlan::IncSinkEncoder(plan) => plan.base.children(),
             PhysicalPlan::SinkCompress(plan) => plan.base.children(),
+            PhysicalPlan::SinkEncrypt(plan) => plan.base.children(),
 
             PhysicalPlan::StreamingAggregation(plan) => plan.base.children(),
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
@@ -172,6 +176,7 @@ impl PhysicalPlan {
 
             PhysicalPlan::IncSinkEncoder(_) => "PhysicalIncSinkEncoder",
             PhysicalPlan::SinkCompress(_) => "PhysicalSinkCompress",
+            PhysicalPlan::SinkEncrypt(_) => "PhysicalSinkEncrypt",
 
             PhysicalPlan::StreamingAggregation(_) => "PhysicalStreamingAggregation",
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
@@ -210,6 +215,7 @@ impl PhysicalPlan {
 
             PhysicalPlan::IncSinkEncoder(plan) => plan.base.index(),
             PhysicalPlan::SinkCompress(plan) => plan.base.index(),
+            PhysicalPlan::SinkEncrypt(plan) => plan.base.index(),
 
             PhysicalPlan::StreamingAggregation(plan) => plan.base.index(),
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
@@ -269,6 +275,7 @@ impl PhysicalPlan {
 
             PhysicalPlan::IncSinkEncoder(plan) => &mut plan.base.children,
             PhysicalPlan::SinkCompress(plan) => &mut plan.base.children,
+            PhysicalPlan::SinkEncrypt(plan) => &mut plan.base.children,
 
             PhysicalPlan::StreamingAggregation(plan) => &mut plan.base.children,
             PhysicalPlan::ResultCollect(plan) => &mut plan.base.children,

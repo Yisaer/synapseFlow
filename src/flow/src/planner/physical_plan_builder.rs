@@ -17,8 +17,9 @@ use crate::planner::physical::{
     PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
     PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSinkCompress, PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSourceChangeGate,
-    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalSinkCompress, PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt,
+    PhysicalSourceChangeGate, PhysicalStatefulFunction, StatefulCall, WatermarkConfig,
+    WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -1237,6 +1238,18 @@ fn add_regular_encoder_with_builder(
         connector.encoder.kind(),
         crate::planner::sink::SinkEncoderKind::None
     ) {
+        if connector.compression.is_some() {
+            return Err(format!(
+                "sink `{}` with encoder.type=none does not support delivery compression",
+                sink.sink_id
+            ));
+        }
+        if connector.encryption.is_some() {
+            return Err(format!(
+                "sink `{}` with encoder.type=none does not support delivery encryption",
+                sink.sink_id
+            ));
+        }
         let connector_config = connector.connector.clone();
         let mut sink_input = encoder_input;
 
@@ -1306,17 +1319,32 @@ fn add_regular_encoder_with_builder(
         );
         let encoder_node: Arc<PhysicalPlan> = Arc::new(PhysicalPlan::SinkEncoder(encoder));
 
-        // Insert PhysicalSinkCompress between encoder and connector when configured.
-        let compress_or_encoder_node = if let Some(codec) = connector.compression.clone() {
+        // Insert delivery transforms in fixed order: encoder -> compress -> encrypt -> connector.
+        let mut delivery_node = if let Some(codec) = connector.compression.clone() {
             let compress_index = builder.allocate_index();
             let compress = PhysicalSinkCompress::new(encoder_node, compress_index, codec);
             Arc::new(PhysicalPlan::SinkCompress(compress))
         } else {
             encoder_node
         };
+        if let Some(encryption) = connector.encryption.clone() {
+            let key_bits = encryption
+                .validate_and_resolve_key_bits()
+                .map_err(|err| err.to_string())?;
+            let encrypt_index = builder.allocate_index();
+            let encrypt = PhysicalSinkEncrypt::new(
+                delivery_node,
+                encrypt_index,
+                encryption.algorithm,
+                encryption.key_id,
+                key_bits,
+                encryption.key,
+            );
+            delivery_node = Arc::new(PhysicalPlan::SinkEncrypt(encrypt));
+        }
 
         Ok((
-            compress_or_encoder_node,
+            delivery_node,
             PhysicalSinkConnector::new(
                 sink.sink_id.clone(),
                 sink.forward_to_result,

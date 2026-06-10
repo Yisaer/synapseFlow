@@ -1,4 +1,4 @@
-use crate::codec::CompressionCodec;
+use crate::codec::{CompressionCodec, SinkEncryptionConfig};
 use crate::connector::sink::file::FileSinkConfig;
 use crate::connector::sink::kuksa::KuksaSinkConfig;
 use crate::connector::sink::kura::KuraSinkConfig;
@@ -148,6 +148,7 @@ pub struct PipelineSinkConnector {
     pub connector: SinkConnectorConfig,
     pub encoder: SinkEncoderConfig,
     pub compression: Option<CompressionCodec>,
+    pub encryption: Option<SinkEncryptionConfig>,
 }
 
 impl PipelineSinkConnector {
@@ -161,11 +162,17 @@ impl PipelineSinkConnector {
             connector,
             encoder,
             compression: None,
+            encryption: None,
         }
     }
 
     pub fn with_compression(mut self, compression: Option<CompressionCodec>) -> Self {
         self.compression = compression;
+        self
+    }
+
+    pub fn with_encryption(mut self, encryption: Option<SinkEncryptionConfig>) -> Self {
+        self.encryption = encryption;
         self
     }
 }
@@ -176,6 +183,8 @@ impl fmt::Debug for PipelineSinkConnector {
             .field("connector_id", &self.connector_id)
             .field("connector", &self.connector)
             .field("encoder", &self.encoder)
+            .field("compression", &self.compression)
+            .field("encryption", &self.encryption)
             .finish()
     }
 }

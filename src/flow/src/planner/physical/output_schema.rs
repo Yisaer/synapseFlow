@@ -70,6 +70,7 @@ impl PhysicalPlan {
             | PhysicalPlan::SinkEncoder(_)
             | PhysicalPlan::IncSinkEncoder(_)
             | PhysicalPlan::SinkCompress(_)
+            | PhysicalPlan::SinkEncrypt(_)
             | PhysicalPlan::ResultCollect(_)
             | PhysicalPlan::TumblingWindow(_)
             | PhysicalPlan::CountWindow(_)

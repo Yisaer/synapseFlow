@@ -27,3 +27,6 @@ mod video_smoke_tests;
 
 #[path = "pipeline/sink_compress_tests.rs"]
 mod sink_compress_tests;
+
+#[path = "pipeline/sink_encrypt_tests.rs"]
+mod sink_encrypt_tests;

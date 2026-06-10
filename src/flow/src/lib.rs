@@ -32,9 +32,11 @@ pub use catalog::{
     VideoRtspTransport, VideoStreamProps,
 };
 pub use codec::{
-    CodecError, CompressError, CompressWriter, CompressionCodec, DecoderRegistry, EncodeError,
-    EncoderRegistry, JsonDecoder, JsonEncoder, Merger, MergerRegistry, ProtoDescriptorBundle,
-    ProtoFieldInfo, ProtobufDecoder, RecordDecoder, SinkEncoder, SinkEncoderFactory,
+    AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec,
+    DecoderRegistry, EncodeError, EncoderRegistry, EncryptError, EncryptWriter,
+    EncryptionAlgorithm, InlineEncryptionKey, JsonDecoder, JsonEncoder, Merger, MergerRegistry,
+    ProtoDescriptorBundle, ProtoFieldInfo, ProtobufDecoder, RecordDecoder, SecretBytes,
+    SecretEncoding, SinkEncoder, SinkEncoderFactory, SinkEncryptionConfig,
 };
 pub use datatypes::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type,

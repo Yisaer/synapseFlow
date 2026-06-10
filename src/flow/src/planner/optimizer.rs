@@ -1205,6 +1205,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::SinkCompress(new))
         }
+        PhysicalPlan::SinkEncrypt(encrypt) => {
+            let mut new = encrypt.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::SinkEncrypt(new))
+        }
         PhysicalPlan::StreamingAggregation(agg) => {
             let mut new = agg.clone();
             new.base.children = children;

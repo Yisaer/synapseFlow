@@ -83,3 +83,17 @@ features:
     doc_refs:
       - docs/runtime/sinks/delivery/compress.md
     status: active
+
+  - id: sink.encrypt.aes_gcm_delivery
+    title: AES-GCM encryption delivery transform
+    summary: Apply AES-GCM authenticated encryption to sink delivery output via PhysicalSinkEncrypt.
+    doc_refs:
+      - docs/runtime/sinks/delivery/encrypt.md
+    status: active
+
+  - id: sink.encrypt.inline_key_config
+    title: Sink encryption inline key config
+    summary: Decode inline sink encryption key material while keeping key bytes out of explain output, logs, and errors.
+    doc_refs:
+      - docs/runtime/sinks/delivery/encrypt.md
+    status: active

@@ -1,3 +1,7 @@
+use flow::codec::{
+    CompressionCodec, EncryptionAlgorithm, InlineEncryptionKey, SecretEncoding,
+    SinkEncryptionConfig,
+};
 use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::{SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig};
 use flow::planner::sink::{
@@ -251,6 +255,8 @@ pub struct CreatePipelineSinkRequest {
     pub encoder: EncoderConfigRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<SinkOutputConfigRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SinkDeliveryConfigRequest>,
 }
 
 impl CreatePipelineSinkRequest {
@@ -352,6 +358,79 @@ impl SinkOutputConfigRequest {
 pub struct SinkDeltaOutputConfigRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SinkDeliveryConfigRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compression: Option<SinkCompressionConfigRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<SinkEncryptionConfigRequest>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SinkCompressionConfigRequest {
+    pub codec: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+}
+
+impl SinkCompressionConfigRequest {
+    pub(super) fn to_compression_codec(&self) -> Result<CompressionCodec, String> {
+        match self.codec.trim().to_ascii_lowercase().as_str() {
+            "gzip" => match self.level {
+                Some(level) if !(0..=9).contains(&level) => Err(format!(
+                    "invalid delivery.compression.level `{level}` for gzip"
+                )),
+                Some(level) => Ok(CompressionCodec::gzip_with_level(level as u32)),
+                None => Ok(CompressionCodec::gzip()),
+            },
+            "zstd" => Ok(match self.level {
+                Some(level) => CompressionCodec::zstd_with_level(level),
+                None => CompressionCodec::zstd(),
+            }),
+            other => Err(format!(
+                "invalid delivery.compression.codec `{other}` (expected gzip|zstd)"
+            )),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SinkEncryptionConfigRequest {
+    pub algorithm: String,
+    pub key_id: String,
+    pub key: InlineEncryptionKeyRequest,
+}
+
+impl SinkEncryptionConfigRequest {
+    pub(super) fn to_encryption_config(&self) -> Result<SinkEncryptionConfig, String> {
+        let algorithm = EncryptionAlgorithm::try_from(self.algorithm.as_str())
+            .map_err(|err| err.to_string())?;
+        let key_id = self.key_id.trim();
+        if key_id.is_empty() {
+            return Err("delivery.encryption.key_id must be non-empty".to_string());
+        }
+        let encoding =
+            SecretEncoding::try_from(self.key.encoding.as_str()).map_err(|err| err.to_string())?;
+        let config = SinkEncryptionConfig::from_inline_key(
+            algorithm,
+            key_id.to_string(),
+            InlineEncryptionKey::new(self.key.value.clone(), encoding),
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(config)
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InlineEncryptionKeyRequest {
+    pub value: String,
+    pub encoding: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]

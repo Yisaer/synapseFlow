@@ -472,10 +472,20 @@ pub(crate) fn build_pipeline_definition(
             return Err("video sink does not support output.mode=delta".to_string());
         }
 
-        let sink_definition = sink_definition
+        let mut sink_definition = sink_definition
             .with_encoder(encoder_config)
             .with_output(output_config)
             .with_common_props(sink_req.common.to_common_props());
+        if let Some(delivery) = sink_req.delivery.as_ref() {
+            if let Some(compression) = delivery.compression.as_ref() {
+                sink_definition =
+                    sink_definition.with_compression(compression.to_compression_codec()?);
+            }
+            if let Some(encryption) = delivery.encryption.as_ref() {
+                sink_definition =
+                    sink_definition.with_encryption(encryption.to_encryption_config()?);
+            }
+        }
         sinks.push(sink_definition);
     }
     let options = PipelineOptions {
@@ -1070,6 +1080,109 @@ mod tests {
         assert_eq!(file.filename_suffix, ".json");
         assert_eq!(file.retention.max_file_count, 10);
         assert_eq!(file.retention.max_file_age_days, 7);
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_wires_delivery_encryption_and_compression() {
+        let instance = test_instance();
+        let key = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=";
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "file",
+                    "props": {
+                        "path": "/tmp/veloflux-file-sink-test",
+                        "filename_suffix": ".json.gz.vfe"
+                    },
+                    "delivery": {
+                        "compression": {
+                            "codec": "gzip"
+                        },
+                        "encryption": {
+                            "algorithm": "aes-gcm",
+                            "key_id": "sink-aes-v1",
+                            "key": {
+                                "value": key,
+                                "encoding": "base64"
+                            }
+                        }
+                    },
+                    "encoder": {
+                        "type": "json"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let sink = &definition.sinks()[0];
+        assert!(matches!(
+            sink.compression,
+            Some(flow::codec::CompressionCodec::Gzip { .. })
+        ));
+        let encryption = sink.encryption.as_ref().expect("encryption");
+        assert_eq!(encryption.algorithm.as_str(), "aes-gcm");
+        assert_eq!(encryption.key_id, "sink-aes-v1");
+        assert_eq!(encryption.validate_and_resolve_key_bits().unwrap(), 256);
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_invalid_delivery_key_without_leaking_value() {
+        let instance = test_instance();
+        let raw_key = "this-is-not-valid-base64";
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "file",
+                    "props": {
+                        "path": "/tmp/veloflux-file-sink-test"
+                    },
+                    "delivery": {
+                        "encryption": {
+                            "algorithm": "aes-gcm",
+                            "key_id": "sink-aes-v1",
+                            "key": {
+                                "value": raw_key,
+                                "encoding": "base64"
+                            }
+                        }
+                    },
+                    "encoder": {
+                        "type": "json"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let err =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("invalid key should fail");
+        assert!(!err.contains(raw_key), "error leaked raw key: {err}");
+        assert!(err.contains("invalid base64 inline encryption key"));
     }
 
     #[tokio::test]

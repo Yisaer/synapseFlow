@@ -680,7 +680,8 @@ fn build_sinks_from_definition(
                     SinkConnectorConfig::Mqtt(config),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -703,7 +704,8 @@ fn build_sinks_from_definition(
                     }),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -735,7 +737,8 @@ fn build_sinks_from_definition(
                     }),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -767,7 +770,8 @@ fn build_sinks_from_definition(
                     }),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -831,7 +835,8 @@ fn build_sinks_from_definition(
                     }),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -865,7 +870,8 @@ fn build_sinks_from_definition(
                     )),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -902,7 +908,8 @@ fn build_sinks_from_definition(
                     }),
                     sink.encoder.clone(),
                 )
-                .with_compression(sink.compression.clone());
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
                     .with_output(sink.output.clone());
@@ -934,7 +941,8 @@ fn build_sinks_from_definition(
                         SinkConnectorConfig::NngPubSub(config),
                         sink.encoder.clone(),
                     )
-                    .with_compression(sink.compression.clone());
+                    .with_compression(sink.compression.clone())
+                    .with_encryption(sink.encryption.clone());
                     let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                         .with_common_props(sink.common.clone())
                         .with_output(sink.output.clone());

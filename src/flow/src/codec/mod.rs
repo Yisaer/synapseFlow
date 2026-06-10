@@ -1,6 +1,7 @@
 pub mod compress;
 pub mod decoder;
 pub mod encoder;
+pub mod encrypt;
 pub mod merger;
 pub mod registry;
 pub mod video;
@@ -12,6 +13,10 @@ pub use decoder::{
     CodecError, JsonDecoder, RecordDecoder,
 };
 pub use encoder::{EncodeError, JsonEncoder, ProtobufEncoder, SinkEncoder, SinkEncoderFactory};
+pub use encrypt::{
+    AesGcmStreamWriter, EncryptError, EncryptWriter, EncryptionAlgorithm, InlineEncryptionKey,
+    SecretBytes, SecretEncoding, SinkEncryptionConfig,
+};
 pub use merger::Merger;
 pub use registry::{DecoderRegistry, EncoderRegistry, MergerRegistry};
 pub use video::{

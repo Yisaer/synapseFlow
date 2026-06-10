@@ -15,7 +15,7 @@ separated.
 
 ## Layer Model
 
-At a high level, sink-side delivery in veloFlux is split into three layers:
+At a high level, sink-side delivery in veloFlux is split into four layers:
 
 1. **Sink connector**
    - Delivers the final payload to an external system or in-process destination.
@@ -25,7 +25,11 @@ At a high level, sink-side delivery in veloFlux is split into three layers:
    - Converts a `Collection` into bytes when the connector expects bytes payloads.
    - Examples: `json`, `none`.
 
-3. **Common sink properties**
+3. **Delivery transforms**
+   - Transform encoded delivery bytes before they reach the connector.
+   - Examples: gzip/zstd compression and AES-GCM encryption.
+
+4. **Common sink properties**
    - Planner-managed sink-side behavior shared across connectors.
    - Today this mainly means sink batching.
 
@@ -73,6 +77,8 @@ Current transform support:
 See also:
 
 - [Encoder Transform](encoders/encoder_transform.md)
+- [Delivery Compression](delivery/compress.md)
+- [Delivery Encryption](delivery/encrypt.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)
 - [Omit If Empty](output/omit_if_empty.md)
 - [Row Diff Output](output/row_diff_output.md)

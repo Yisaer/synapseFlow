@@ -23,3 +23,20 @@ interactions:
       - sink.compress.zstd_delivery
       - sink.connector.file_output
     status: active
+
+  - id: sink.encoder_aes_file_delivery
+    title: Encoder + AES encrypt + file connector delivery
+    summary: Validate that encoder output passes through AES encryption and is correctly written by the file connector.
+    features:
+      - sink.encrypt.aes_gcm_delivery
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.encoder_gzip_aes_file_delivery
+    title: Encoder + gzip compress + AES encrypt + file connector delivery
+    summary: Validate that compressed encoder output passes through AES encryption and is correctly written by the file connector.
+    features:
+      - sink.compress.gzip_delivery
+      - sink.encrypt.aes_gcm_delivery
+      - sink.connector.file_output
+    status: active

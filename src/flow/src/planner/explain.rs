@@ -933,6 +933,11 @@ fn build_physical_node_with_prefix(
                 info.push(format!("level={}", level));
             }
         }
+        PhysicalPlan::SinkEncrypt(encrypt) => {
+            info.push(format!("algorithm={}", encrypt.algorithm.as_str()));
+            info.push(format!("key_bits={}", encrypt.key_bits));
+            info.push(format!("key_id={}", encrypt.key_id));
+        }
         PhysicalPlan::SinkEncoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));

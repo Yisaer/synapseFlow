@@ -4,7 +4,10 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::codec::{DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder};
+use crate::codec::{
+    AesGcmStreamWriter, DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder,
+    SinkEncryptionConfig,
+};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::base::{
@@ -21,9 +24,9 @@ use crate::processor::{
     InstantControlSignal, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
     ProcessorError, ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor,
     SamplerProcessor, SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor,
-    SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
-    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TumblingWindowProcessor,
-    WatermarkProcessor,
+    SinkEncryptProcessor, SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor,
+    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
+    TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -87,6 +90,8 @@ pub(crate) enum PlanProcessor {
     SinkEncoder(SinkEncoderProcessor),
     /// Sink compress processor applying delivery-boundary compression
     SinkCompress(SinkCompressProcessor),
+    /// Sink encrypt processor applying delivery-boundary encryption
+    SinkEncrypt(SinkEncryptProcessor),
     /// Streaming aggregation combining window + aggregation
     StreamingAggregation(StreamingAggregationProcessor),
     /// Watermark processor used to drive time progression
@@ -304,6 +309,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.id(),
             PlanProcessor::SinkEncoder(p) => p.id(),
             PlanProcessor::SinkCompress(p) => p.id(),
+            PlanProcessor::SinkEncrypt(p) => p.id(),
             PlanProcessor::StreamingAggregation(p) => p.id(),
             PlanProcessor::Watermark(p) => p.id(),
             PlanProcessor::TumblingWindow(p) => p.id(),
@@ -335,6 +341,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(_) => "batch",
             PlanProcessor::SinkEncoder(_) => "sink_encoder",
             PlanProcessor::SinkCompress(_) => "sink_compress",
+            PlanProcessor::SinkEncrypt(_) => "sink_encrypt",
             PlanProcessor::StreamingAggregation(_) => "streaming_aggregation",
             PlanProcessor::Watermark(_) => "watermark",
             PlanProcessor::TumblingWindow(_) => "tumbling_window",
@@ -372,6 +379,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.set_stats(stats),
             PlanProcessor::SinkEncoder(p) => p.set_stats(stats),
             PlanProcessor::SinkCompress(p) => p.set_stats(stats),
+            PlanProcessor::SinkEncrypt(p) => p.set_stats(stats),
             PlanProcessor::StreamingAggregation(p) => p.set_stats(stats),
             PlanProcessor::Watermark(p) => p.set_stats(stats),
             PlanProcessor::TumblingWindow(p) => p.set_stats(stats),
@@ -404,6 +412,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.start(spawner),
             PlanProcessor::SinkEncoder(p) => p.start(spawner),
             PlanProcessor::SinkCompress(p) => p.start(spawner),
+            PlanProcessor::SinkEncrypt(p) => p.start(spawner),
             PlanProcessor::StreamingAggregation(p) => p.start(spawner),
             PlanProcessor::Watermark(p) => p.start(spawner),
             PlanProcessor::TumblingWindow(p) => p.start(spawner),
@@ -436,6 +445,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.subscribe_output(),
             PlanProcessor::SinkEncoder(p) => p.subscribe_output(),
             PlanProcessor::SinkCompress(p) => p.subscribe_output(),
+            PlanProcessor::SinkEncrypt(p) => p.subscribe_output(),
             PlanProcessor::StreamingAggregation(p) => p.subscribe_output(),
             PlanProcessor::Watermark(p) => p.subscribe_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_output(),
@@ -468,6 +478,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.subscribe_control_output(),
             PlanProcessor::SinkEncoder(p) => p.subscribe_control_output(),
             PlanProcessor::SinkCompress(p) => p.subscribe_control_output(),
+            PlanProcessor::SinkEncrypt(p) => p.subscribe_control_output(),
             PlanProcessor::StreamingAggregation(p) => p.subscribe_control_output(),
             PlanProcessor::Watermark(p) => p.subscribe_control_output(),
             PlanProcessor::TumblingWindow(p) => p.subscribe_control_output(),
@@ -500,6 +511,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.add_input(receiver),
             PlanProcessor::SinkEncoder(p) => p.add_input(receiver),
             PlanProcessor::SinkCompress(p) => p.add_input(receiver),
+            PlanProcessor::SinkEncrypt(p) => p.add_input(receiver),
             PlanProcessor::StreamingAggregation(p) => p.add_input(receiver),
             PlanProcessor::Watermark(p) => p.add_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_input(receiver),
@@ -532,6 +544,7 @@ impl PlanProcessor {
             PlanProcessor::Batch(p) => p.add_control_input(receiver),
             PlanProcessor::SinkEncoder(p) => p.add_control_input(receiver),
             PlanProcessor::SinkCompress(p) => p.add_control_input(receiver),
+            PlanProcessor::SinkEncrypt(p) => p.add_control_input(receiver),
             PlanProcessor::StreamingAggregation(p) => p.add_control_input(receiver),
             PlanProcessor::Watermark(p) => p.add_control_input(receiver),
             PlanProcessor::TumblingWindow(p) => p.add_control_input(receiver),
@@ -1223,6 +1236,30 @@ fn create_processor_from_plan_node(
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SinkCompress(processor),
+            ))
+        }
+        PhysicalPlan::SinkEncrypt(encrypt) => {
+            let config = SinkEncryptionConfig {
+                algorithm: encrypt.algorithm,
+                key_id: encrypt.key_id.clone(),
+                key_bits: encrypt.key_bits,
+                key: Arc::clone(&encrypt.key),
+            };
+            let writer = AesGcmStreamWriter::from_config(&config)
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            if writer.key_bits() != encrypt.key_bits {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "sink encrypt key_bits mismatch for key_id `{}`",
+                    encrypt.key_id
+                )));
+            }
+            let processor = SinkEncryptProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Box::new(writer),
+                channel_capacities,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::SinkEncrypt(processor),
             ))
         }
         PhysicalPlan::SinkEncoder(encoder) => {
