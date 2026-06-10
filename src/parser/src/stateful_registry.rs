@@ -4,7 +4,7 @@ pub trait StatefulRegistry: Send + Sync {
     fn is_stateful_function(&self, name: &str) -> bool;
 }
 
-pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 11] = [
+pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 13] = [
     "acc_avg",
     "acc_count",
     "acc_max",
@@ -13,6 +13,8 @@ pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 11] = [
     "change_capture",
     "change_to",
     "changed_col",
+    "consecutive_count",
+    "consecutive_start",
     "had_changed",
     "lag",
     "latest",
@@ -57,6 +59,8 @@ mod tests {
         assert!(registry.is_stateful_function("change_capture"));
         assert!(registry.is_stateful_function("change_to"));
         assert!(registry.is_stateful_function("changed_col"));
+        assert!(registry.is_stateful_function("consecutive_count"));
+        assert!(registry.is_stateful_function("consecutive_start"));
         assert!(registry.is_stateful_function("had_changed"));
         assert!(registry.is_stateful_function("lag"));
         assert!(registry.is_stateful_function("latest"));

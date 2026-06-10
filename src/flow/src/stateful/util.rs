@@ -7,6 +7,20 @@ pub fn bool_arg(name: &str, value: &Value) -> Result<bool, String> {
     }
 }
 
+/// Resolve a per-row boolean *condition* argument.
+///
+/// Unlike [`bool_arg`] (used for static `ignore_null` config literals), the
+/// `condition` of the `consecutive_*` functions is an arbitrary expression
+/// evaluated every row. A `NULL` condition means "the condition does not hold"
+/// and is treated as `false`; any non-boolean value is a hard error.
+pub fn bool_condition(name: &str, value: &Value) -> Result<bool, String> {
+    match value {
+        Value::Bool(v) => Ok(*v),
+        Value::Null => Ok(false),
+        other => Err(format!("{name} must be bool, got {other:?}")),
+    }
+}
+
 pub fn normalize_state_value(value: &Value) -> Option<Value> {
     if value.is_null() {
         None

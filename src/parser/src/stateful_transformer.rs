@@ -602,6 +602,22 @@ fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), 
             }
             validate_bool_literal(&args[0], "change_capture() first argument")?;
         }
+        "consecutive_count" if args.len() != 1 => {
+            return Err(format!(
+                "stateful function '{}' expects exactly 1 argument, got {}",
+                func_name,
+                args.len()
+            ));
+        }
+        "consecutive_count" => {}
+        "consecutive_start" if args.len() != 2 => {
+            return Err(format!(
+                "stateful function '{}' expects exactly 2 arguments, got {}",
+                func_name,
+                args.len()
+            ));
+        }
+        "consecutive_start" => {}
         "lag" => {
             if args.is_empty() || args.len() > 3 {
                 return Err(format!(

@@ -57,6 +57,8 @@ Built-in stateful functions currently include:
 - `change_capture`
 - `changed_col`
 - `had_changed`
+- `consecutive_count`
+- `consecutive_start`
 - `acc_sum`
 - `acc_max`
 - `acc_min`
@@ -226,6 +228,59 @@ SELECT change_capture(true, ts, status) AS last_change_ts FROM stream
 
 ```sql
 SELECT change_capture(true, ts, status, 1) AS activated_at FROM stream
+```
+
+### `consecutive_count`
+
+Signature:
+
+```sql
+consecutive_count(condition)
+```
+
+Semantics:
+
+- Returns the number of consecutive rows, ending at the current row, for which the boolean
+  `condition` has been `true`.
+- Resets to `0` on any row where `condition` is `false`.
+- A `NULL` `condition` is treated as `false` (resets the run). A non-boolean `condition` is a
+  runtime error.
+- The first matching row returns `1`.
+- When `should_apply = false` (gated out by `FILTER (WHERE …)`), returns the current count and does
+  not advance state.
+
+Example:
+
+```sql
+SELECT consecutive_count(spi > 5) AS streak FROM stream
+```
+
+### `consecutive_start`
+
+Signature:
+
+```sql
+consecutive_start(condition, value)
+```
+
+Semantics:
+
+- When `condition` *starts* being continuously `true`, captures `value` from that first row and
+  returns it on every subsequent row while `condition` stays `true`.
+- Returns `NULL` while `condition` is `false`, and clears the captured start so the next true run
+  captures afresh.
+- The captured `value` is taken on the rising edge only — it is **not** updated on later rows of the
+  same run (so it reports the *start*, not the latest, value).
+- A `NULL` `condition` is treated as `false`. A non-boolean `condition` is a runtime error. The
+  captured `value` may itself be `NULL`.
+- The return type follows the type of `value`.
+- When `should_apply = false` (gated out by `FILTER (WHERE …)`), returns the currently held value
+  and does not advance state.
+
+Example:
+
+```sql
+SELECT consecutive_start(spi > 5, ts) AS run_start FROM stream
 ```
 
 ### `acc_sum`, `acc_max`, `acc_min`, `acc_count`, `acc_avg`

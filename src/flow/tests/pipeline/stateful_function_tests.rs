@@ -1719,6 +1719,158 @@ async fn stateful_function_table_driven() {
             wait_after_send: Duration::from_millis(0),
             close_before_read: false,
         },
+        StatefulCase {
+            name: "consecutive_count_counts_true_run_and_resets",
+            sql: "SELECT consecutive_count(a > 5) AS c FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(10),
+                    Value::Int64(20),
+                    Value::Int64(3),
+                    Value::Int64(20),
+                    Value::Int64(30),
+                    Value::Int64(1),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 6,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "c".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "consecutive_start_holds_run_start_and_clears_on_false",
+            sql: "SELECT consecutive_start(a > 5, ts) AS s FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(3),
+                        Value::Int64(40),
+                        Value::Int64(50),
+                    ],
+                ),
+                (
+                    "ts".to_string(),
+                    vec![
+                        Value::Int64(100),
+                        Value::Int64(200),
+                        Value::Int64(300),
+                        Value::Int64(400),
+                        Value::Int64(500),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "s".to_string(),
+                    expected_values: vec![
+                        Value::Int64(100),
+                        Value::Int64(100),
+                        Value::Null,
+                        Value::Int64(400),
+                        Value::Int64(400),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            // A filtered-out row whose condition is false must NOT reset the run:
+            // if it did, the final row would recapture ts=300 instead of holding 100.
+            name: "consecutive_start_filter_freezes_state",
+            sql: "SELECT consecutive_start(a > 5, ts) FILTER (WHERE flag = 1) AS s FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(3), Value::Int64(40)],
+                ),
+                (
+                    "ts".to_string(),
+                    vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![Value::Int64(1), Value::Int64(0), Value::Int64(1)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 3,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "s".to_string(),
+                    expected_values: vec![
+                        Value::Int64(100),
+                        Value::Int64(100),
+                        Value::Int64(100),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            // Regression for the eKuiper empty-key collision: two consecutive_start
+            // calls in one statement must keep independent state.
+            name: "consecutive_start_multiple_calls_are_independent",
+            sql: "SELECT consecutive_start(a > 5, ts) AS s1, consecutive_start(b > 5, ts) AS s2 FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(3), Value::Int64(10)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(3), Value::Int64(10), Value::Int64(10)],
+                ),
+                (
+                    "ts".to_string(),
+                    vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 3,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "s1".to_string(),
+                        expected_values: vec![
+                            Value::Int64(100),
+                            Value::Null,
+                            Value::Int64(300),
+                        ],
+                    },
+                    ColumnCheck {
+                        expected_name: "s2".to_string(),
+                        expected_values: vec![
+                            Value::Null,
+                            Value::Int64(200),
+                            Value::Int64(200),
+                        ],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
     ];
 
     for case in cases {

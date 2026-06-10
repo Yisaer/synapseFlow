@@ -346,3 +346,26 @@ fn case_16_acc_functions_reject_two_argument_form() {
         .expect_err("acc two-argument form should be rejected");
     assert!(err.contains("expects either 1 argument or 3 arguments"));
 }
+
+#[test]
+fn case_17_consecutive_arguments_validation() {
+    // consecutive_count requires exactly 1 argument.
+    let err = parse_sql("SELECT consecutive_count(a > 5, b) FROM stream")
+        .expect_err("consecutive_count requires exactly 1 argument");
+    assert!(err.contains("expects exactly 1 argument"));
+
+    parse_sql("SELECT consecutive_count(a > 5) FROM stream")
+        .expect("consecutive_count 1-arg form should parse");
+
+    // consecutive_start requires exactly 2 arguments.
+    let err = parse_sql("SELECT consecutive_start(a > 5) FROM stream")
+        .expect_err("consecutive_start requires exactly 2 arguments");
+    assert!(err.contains("expects exactly 2 arguments"));
+
+    let err = parse_sql("SELECT consecutive_start(a > 5, ts, extra) FROM stream")
+        .expect_err("consecutive_start requires exactly 2 arguments");
+    assert!(err.contains("expects exactly 2 arguments"));
+
+    parse_sql("SELECT consecutive_start(a > 5, ts) FROM stream")
+        .expect("consecutive_start 2-arg form should parse");
+}
