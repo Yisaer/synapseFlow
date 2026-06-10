@@ -113,6 +113,7 @@ impl PipelineBenchEnv {
                     .expect("create pipeline");
                 instance
                     .start_pipeline(&pipeline_id)
+                    .await
                     .expect("start pipeline");
 
                 instance
