@@ -1518,6 +1518,207 @@ async fn stateful_function_table_driven() {
             wait_after_send: Duration::from_millis(200),
             close_before_read: true,
         },
+        StatefulCase {
+            name: "change_to_emits_on_transition_to_target",
+            sql: "SELECT change_to(true, a, 2) AS hit FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(1),
+                    Value::Int64(2),
+                    Value::Int64(2),
+                    Value::Int64(3),
+                    Value::Int64(2),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "hit".to_string(),
+                    expected_values: vec![
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "change_to_filter_freezes_state",
+            sql: "SELECT change_to(true, a, 2) FILTER (WHERE flag = 1) AS hit FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                        Value::Int64(2),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "hit".to_string(),
+                    expected_values: vec![
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "change_capture_holds_value_on_any_monitor_change",
+            sql: "SELECT change_capture(true, a, b) AS cap FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                        Value::Int64(50),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "cap".to_string(),
+                    expected_values: vec![
+                        Value::Int64(10),
+                        Value::Int64(10),
+                        Value::Int64(30),
+                        Value::Int64(30),
+                        Value::Int64(50),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "change_capture_captures_only_on_change_to_target",
+            sql: "SELECT change_capture(true, a, b, 2) AS cap FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                        Value::Int64(50),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "cap".to_string(),
+                    expected_values: vec![
+                        Value::Null,
+                        Value::Int64(20),
+                        Value::Int64(20),
+                        Value::Int64(20),
+                        Value::Int64(50),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "change_capture_filter_holds_and_freezes_state",
+            sql: "SELECT change_capture(true, a, b) FILTER (WHERE flag = 1) AS cap FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                        Value::Int64(3),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "cap".to_string(),
+                    expected_values: vec![
+                        Value::Int64(10),
+                        Value::Int64(10),
+                        Value::Int64(10),
+                        Value::Int64(40),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
     ];
 
     for case in cases {

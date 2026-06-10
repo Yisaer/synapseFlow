@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use super::{
     AccAvgFunction, AccCountFunction, AccMaxFunction, AccMinFunction, AccSumFunction,
-    ChangedColFunction, HadChangedFunction, LagFunction, LatestFunction,
+    ChangeCaptureFunction, ChangeToFunction, ChangedColFunction, HadChangedFunction, LagFunction,
+    LatestFunction,
 };
 
 pub struct StatefulEvalInput<'a> {
@@ -72,6 +73,8 @@ impl StatefulFunctionRegistry {
         let _ = self.register_function(Arc::new(AccMaxFunction::new()));
         let _ = self.register_function(Arc::new(AccMinFunction::new()));
         let _ = self.register_function(Arc::new(AccSumFunction::new()));
+        let _ = self.register_function(Arc::new(ChangeCaptureFunction::new()));
+        let _ = self.register_function(Arc::new(ChangeToFunction::new()));
         let _ = self.register_function(Arc::new(ChangedColFunction::new()));
         let _ = self.register_function(Arc::new(HadChangedFunction::new()));
         let _ = self.register_function(Arc::new(LagFunction::new()));

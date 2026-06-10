@@ -161,6 +161,8 @@ Examples:
 - `latest` keeps the latest accepted non-NULL value
 - `changed_col` keeps one previous value and emits on change
 - `had_changed` keeps one previous value per tracked argument position
+- `change_to` keeps one previous value and emits true only on transition to a target
+- `change_capture` holds the value captured when a monitored expression changes
 
 The runtime registry rejects duplicate registrations, which is stricter than the current scalar and
 aggregate registries. That behavior is useful because stateful semantics are especially sensitive to

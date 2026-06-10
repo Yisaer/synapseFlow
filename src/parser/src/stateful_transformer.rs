@@ -582,6 +582,26 @@ fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), 
             }
             validate_bool_literal(&args[0], "had_changed() first argument")?;
         }
+        "change_to" => {
+            if args.len() != 3 {
+                return Err(format!(
+                    "stateful function '{}' expects exactly 3 arguments, got {}",
+                    func_name,
+                    args.len()
+                ));
+            }
+            validate_bool_literal(&args[0], "change_to() first argument")?;
+        }
+        "change_capture" => {
+            if args.len() != 3 && args.len() != 4 {
+                return Err(format!(
+                    "stateful function '{}' expects 3 or 4 arguments, got {}",
+                    func_name,
+                    args.len()
+                ));
+            }
+            validate_bool_literal(&args[0], "change_capture() first argument")?;
+        }
         "lag" => {
             if args.is_empty() || args.len() > 3 {
                 return Err(format!(

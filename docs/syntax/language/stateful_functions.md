@@ -53,6 +53,8 @@ Built-in stateful functions currently include:
 
 - `lag`
 - `latest`
+- `change_to`
+- `change_capture`
 - `changed_col`
 - `had_changed`
 - `acc_sum`
@@ -157,6 +159,73 @@ Example:
 
 ```sql
 SELECT had_changed(true, status, code) AS changed FROM stream
+```
+
+### `change_to`
+
+Signature:
+
+```sql
+change_to(ignore_null, value, target)
+```
+
+Semantics:
+
+- Returns `true` only on the row where `value` *transitions to* `target` —
+  i.e. `value` equals `target` **and** differs from the previous accepted value.
+- Returns `false` while `value` stays at `target` on later rows.
+- `ignore_null` is a static boolean literal configuration parameter.
+- The first accepted row is treated as changed, so it returns `true` if `value`
+  already equals `target`.
+- `target` may be any expression; equality is type-coerced (e.g. an `int32`
+  column matches an integer literal target). A `NULL` `target` never matches.
+- When `ignore_null = true`, a `NULL` `value` returns `false` and does not update
+  the tracked state.
+- When `should_apply = false` (gated out by `FILTER (WHERE …)`), returns `false`
+  and does not update the tracked state.
+
+Examples:
+
+```sql
+SELECT change_to(true, status, 1) AS became_active FROM stream
+```
+
+```sql
+SELECT change_to(true, status, 1) FILTER (WHERE flag = 1) AS became_active FROM stream
+```
+
+### `change_capture`
+
+Signature:
+
+```sql
+change_capture(ignore_null, capture, monitor [, target])
+```
+
+Semantics:
+
+- Captures the value of `capture` at the moment `monitor` changes, then holds and
+  returns that captured value on subsequent rows until the next capture.
+- When `target` is omitted, captures on any change of `monitor`.
+- When `target` is provided, captures only when `monitor` changes **to** `target`.
+  Equality is type-coerced; a `NULL` `target` never matches.
+- `ignore_null` is a static boolean literal configuration parameter.
+- Returns `NULL` until the first capture occurs.
+- The first accepted row counts as a change of `monitor`.
+- `ignore_null` applies to `monitor` only: when `ignore_null = true`, a `NULL`
+  `monitor` is ignored (no capture, tracked state frozen). The captured value
+  itself may be `NULL`.
+- When `should_apply = false` (gated out by `FILTER (WHERE …)`), returns the held
+  value and does not update the tracked state.
+
+Examples:
+
+```sql
+SELECT change_capture(true, ts, status) AS last_change_ts FROM stream
+```
+
+```sql
+SELECT change_capture(true, ts, status, 1) AS activated_at FROM stream
 ```
 
 ### `acc_sum`, `acc_max`, `acc_min`, `acc_count`, `acc_avg`

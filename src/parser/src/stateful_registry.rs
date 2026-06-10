@@ -4,12 +4,14 @@ pub trait StatefulRegistry: Send + Sync {
     fn is_stateful_function(&self, name: &str) -> bool;
 }
 
-pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 9] = [
+pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 11] = [
     "acc_avg",
     "acc_count",
     "acc_max",
     "acc_min",
     "acc_sum",
+    "change_capture",
+    "change_to",
     "changed_col",
     "had_changed",
     "lag",
@@ -52,6 +54,8 @@ mod tests {
     #[test]
     fn default_registry_includes_builtin_stateful_functions() {
         let registry = default_stateful_registry();
+        assert!(registry.is_stateful_function("change_capture"));
+        assert!(registry.is_stateful_function("change_to"));
         assert!(registry.is_stateful_function("changed_col"));
         assert!(registry.is_stateful_function("had_changed"));
         assert!(registry.is_stateful_function("lag"));

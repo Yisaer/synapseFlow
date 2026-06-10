@@ -305,7 +305,43 @@ fn case_13_changed_functions_ignore_null_must_be_literal() {
 }
 
 #[test]
-fn case_14_acc_functions_reject_two_argument_form() {
+fn case_14_change_to_arguments_validation() {
+    let err = parse_sql("SELECT change_to(true, status) FROM stream")
+        .expect_err("change_to requires exactly 3 arguments");
+    assert!(err.contains("expects exactly 3 arguments"));
+
+    let err = parse_sql("SELECT change_to(true, status, 1, 2) FROM stream")
+        .expect_err("change_to requires exactly 3 arguments");
+    assert!(err.contains("expects exactly 3 arguments"));
+
+    let err = parse_sql("SELECT change_to(flag, status, 1) FROM stream")
+        .expect_err("change_to ignore_null should be literal");
+    assert!(err.contains("change_to() first argument must be a boolean literal"));
+}
+
+#[test]
+fn case_15_change_capture_arguments_validation() {
+    let err = parse_sql("SELECT change_capture(true, ts) FROM stream")
+        .expect_err("change_capture requires 3 or 4 arguments");
+    assert!(err.contains("expects 3 or 4 arguments"));
+
+    let err = parse_sql("SELECT change_capture(true, ts, status, 1, 2) FROM stream")
+        .expect_err("change_capture requires 3 or 4 arguments");
+    assert!(err.contains("expects 3 or 4 arguments"));
+
+    // 3- and 4-argument forms are both accepted.
+    parse_sql("SELECT change_capture(true, ts, status) FROM stream")
+        .expect("change_capture 3-arg form should parse");
+    parse_sql("SELECT change_capture(true, ts, status, 1) FROM stream")
+        .expect("change_capture 4-arg form should parse");
+
+    let err = parse_sql("SELECT change_capture(flag, ts, status) FROM stream")
+        .expect_err("change_capture ignore_null should be literal");
+    assert!(err.contains("change_capture() first argument must be a boolean literal"));
+}
+
+#[test]
+fn case_16_acc_functions_reject_two_argument_form() {
     let err = parse_sql("SELECT acc_sum(a, start) FROM stream")
         .expect_err("acc two-argument form should be rejected");
     assert!(err.contains("expects either 1 argument or 3 arguments"));
