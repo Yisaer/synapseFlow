@@ -7,3 +7,4 @@ pub use pipeline::StopMode;
 pub use pipeline::StopOptions;
 
 pub use stream::StreamCreateRequest;
+pub use stream::StreamUpsertRequest;

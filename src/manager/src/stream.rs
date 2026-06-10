@@ -3,6 +3,7 @@ use crate::audit::ResourceMutationLog;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::AppState;
 use crate::storage_bridge;
+use crate::storage_bridge::{stored_stream_from_request, stream_definition_from_stored};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -86,6 +87,25 @@ impl CreateStreamRequest {
             None => {}
         }
     }
+}
+
+/// Request body for `PUT /streams/:name`.
+///
+/// Immutable fields (`name`, `type`) are carried forward from the existing
+/// stream definition.  The `shared` flag may be changed from `false` to `true`
+/// (converting a private stream into a shared stream), but the reverse
+/// (`true` → `false`) is not supported.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct UpsertStreamRequest {
+    pub schema: SchemaConfigRequest,
+    pub props: StreamPropsRequest,
+    pub decoder: DecoderConfigRequest,
+    #[serde(default)]
+    pub shared: Option<bool>,
+    #[serde(default)]
+    pub eventtime: Option<EventtimeConfigRequest>,
+    #[serde(default)]
+    pub sampler: Option<SamplerConfig>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -805,6 +825,222 @@ pub async fn shared_stream_stats_handler(
     let response = into_shared_stream_stats_response(&flow_instance_id, stats);
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+pub async fn upsert_stream_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<UpsertStreamRequest>,
+) -> impl IntoResponse {
+    let name = name.trim().to_string();
+    let audit = ResourceMutationLog::new("stream", "update", name.as_str(), None);
+    let _permit = match state.try_acquire_stream_op(&name).await {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => return stream_busy_response(&name),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let old_stored = match state.storage.get_stream(&name) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            let err = format!("stream {name} not found");
+            audit.log_failure(&err);
+            return (StatusCode::NOT_FOUND, err).into_response();
+        }
+        Err(err) => {
+            let err = format!("failed to read stream {name} from storage: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+
+    let old_req: CreateStreamRequest = match serde_json::from_str(&old_stored.raw_json) {
+        Ok(req) => req,
+        Err(err) => {
+            let err = format!("decode stored stream {name}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+
+    // Determine effective shared flag.
+    let new_shared = req.shared.unwrap_or(old_req.shared);
+    if old_req.shared && !new_shared {
+        let err =
+            format!("stream {name}: converting a shared stream to non-shared is not supported");
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
+    // For shared streams (existing or newly converted): reject if any running
+    // pipeline references this stream.
+    if new_shared {
+        let mut running_pipelines = Vec::new();
+        for (_, instance) in state.instances.instances_snapshot() {
+            for snapshot in instance.list_pipelines() {
+                if snapshot.streams.iter().any(|s| s == &name)
+                    && snapshot.status == flow::pipeline::PipelineStatus::Running
+                {
+                    running_pipelines.push(snapshot.definition.id().to_string());
+                }
+            }
+        }
+        if !running_pipelines.is_empty() {
+            running_pipelines.sort();
+            running_pipelines.dedup();
+            let err = format!(
+                "shared stream {name} has running pipelines: {}. Stop them before updating.",
+                running_pipelines.join(", ")
+            );
+            audit.log_failure(&err);
+            return (StatusCode::CONFLICT, err).into_response();
+        }
+    }
+
+    // Build new CreateStreamRequest — keep immutable fields from the old definition.
+    let mut new_req = CreateStreamRequest {
+        name: old_req.name.clone(),
+        stream_type: old_req.stream_type.clone(),
+        shared: new_shared,
+        schema: req.schema,
+        props: req.props,
+        decoder: req.decoder,
+        eventtime: req.eventtime,
+        sampler: req.sampler,
+    };
+    new_req.normalize();
+
+    // ── Full validation (same checks as create) ──
+    let schema = match build_schema_from_request(&new_req) {
+        Ok(s) => s,
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+
+    let stream_props = match build_stream_props(&new_req.stream_type, &new_req.props) {
+        Ok(props) => props,
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+
+    let decoder_registry = state.instances.default_instance().decoder_registry();
+    let decoder = match build_stream_decoder(&new_req, decoder_registry.as_ref()) {
+        Ok(config) => config,
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+    if let Err(err) = validate_stream_decoder_config(&new_req, &decoder) {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+    if let StreamProps::Memory(memory_props) = &stream_props {
+        if let Err(err) = validate_memory_stream_topic(&new_req, memory_props) {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+        if let Err(err) =
+            validate_memory_stream_binding(&new_req, memory_props, &decoder, &state.storage)
+        {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    }
+
+    // Persist updated spec.
+    let new_stored = match stored_stream_from_request(&new_req) {
+        Ok(stored) => stored,
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+    // Delete old entry first, so create won't hit AlreadyExists.
+    if let Err(err) = state.storage.delete_stream(&name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to remove old stored stream {name}: {err}"),
+        )
+            .into_response();
+    }
+    if let Err(err) = state.storage.create_stream(new_stored) {
+        // Best-effort restore the old entry.
+        let _ = state.storage.create_stream(old_stored.clone());
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist updated stream {name}: {err}"),
+        )
+            .into_response();
+    }
+
+    // Build new definition.
+    let mut definition = StreamDefinition::new(
+        new_req.name.clone(),
+        Arc::new(schema),
+        stream_props,
+        decoder,
+    );
+    if let Some(cfg) = &new_req.eventtime {
+        definition = definition.with_eventtime(EventtimeDefinition::new(
+            cfg.column.clone(),
+            cfg.eventtime_type.clone(),
+        ));
+    }
+    if let Some(sampler) = &new_req.sampler {
+        definition = definition.with_sampler(sampler.clone());
+    }
+
+    // Replace on every instance.
+    let mut replaced_instances = Vec::new();
+    for (_, instance) in state.instances.instances_snapshot() {
+        match instance
+            .replace_stream(definition.clone(), new_req.shared)
+            .await
+        {
+            Ok(_) => {
+                replaced_instances.push(instance);
+            }
+            Err(err) => {
+                // Best-effort rollback: restore the old definition on instances
+                // that already accepted the replacement.
+                let decoder_registry = state.instances.default_instance().decoder_registry();
+                if let Ok(old_def) =
+                    stream_definition_from_stored(&old_stored, decoder_registry.as_ref())
+                {
+                    for instance in replaced_instances {
+                        let _ = instance
+                            .replace_stream(old_def.clone(), old_req.shared)
+                            .await;
+                    }
+                }
+                // Restore old storage entry.
+                let _ = state.storage.delete_stream(&name);
+                let _ = state.storage.create_stream(old_stored);
+                return map_flow_instance_error(err);
+            }
+        }
+    }
+
+    audit.log_success();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": name,
+            "spec_version": 2
+        })),
+    )
+        .into_response()
 }
 
 pub async fn delete_stream_handler(

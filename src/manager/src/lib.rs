@@ -98,7 +98,10 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/import", post(import::import_storage_handler))
         .route("/storage/export", get(export::export_storage_handler))
-        .route("/streams/:name", delete(stream::delete_stream_handler))
+        .route(
+            "/streams/:name",
+            delete(stream::delete_stream_handler).put(stream::upsert_stream_handler),
+        )
         .route(
             "/schemas",
             post(schema::handler::create_schema_handler).get(schema::handler::list_schemas_handler),

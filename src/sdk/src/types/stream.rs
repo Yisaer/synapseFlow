@@ -31,4 +31,36 @@ impl StreamCreateRequest {
             decoder: serde_json::json!({ "type": "json", "props": {} }),
         }
     }
+
+    pub fn mock_non_shared_i64_value(name: impl Into<String>) -> Self {
+        let mut req = Self::mock_shared_i64_value(name);
+        req.shared = false;
+        req
+    }
+}
+
+/// Request body for `PUT /streams/:name`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamUpsertRequest {
+    pub schema: JsonValue,
+    pub props: JsonValue,
+    pub decoder: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<bool>,
+}
+
+impl StreamUpsertRequest {
+    pub fn from_create(req: &StreamCreateRequest) -> Self {
+        Self {
+            schema: req.schema.clone(),
+            props: req.props.clone(),
+            decoder: req.decoder.clone(),
+            shared: Some(req.shared),
+        }
+    }
+
+    pub fn with_shared(mut self, shared: bool) -> Self {
+        self.shared = Some(shared);
+        self
+    }
 }

@@ -140,6 +140,52 @@ impl FlowInstance {
         }
     }
 
+    /// Replace a stream definition and optionally rebuild its shared runtime.
+    ///
+    /// Unlike `create_stream`, this does not check whether pipelines reference the
+    /// stream.  Callers MUST verify that the update is safe (e.g. no running
+    /// pipelines are consuming a shared stream) before calling this method.
+    ///
+    /// For non-shared streams the catalog entry is swapped and running pipelines are
+    /// unaffected (they hold their own source connectors).  For shared streams the
+    /// existing shared runtime is torn down and recreated; any active subscribers
+    /// will have their channels closed.
+    pub async fn replace_stream(
+        &self,
+        definition: StreamDefinition,
+        shared: bool,
+    ) -> Result<StreamRuntimeInfo, FlowInstanceError> {
+        self.validate_stream_definition(&definition)?;
+
+        // Drop existing shared runtime if registered.
+        if self
+            .shared_stream_registry
+            .is_registered(definition.id())
+            .await
+        {
+            self.shared_stream_registry
+                .drop_stream(definition.id())
+                .await?;
+        }
+        self.shared_mock_source_handles
+            .lock()
+            .remove(definition.id());
+
+        // Swap the catalog entry (upsert overwrites regardless of prior existence).
+        let stored = self.catalog.upsert(definition);
+
+        let shared_info = if shared {
+            Some(self.ensure_shared_stream(stored.clone()).await?)
+        } else {
+            None
+        };
+
+        Ok(StreamRuntimeInfo {
+            definition: stored,
+            shared_info,
+        })
+    }
+
     /// Delete a stream definition and its shared runtime (if registered).
     pub async fn delete_stream(&self, name: &str) -> Result<(), FlowInstanceError> {
         let pipelines_using_stream = self
