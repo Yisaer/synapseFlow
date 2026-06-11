@@ -5,11 +5,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use datatypes::{Schema, Value};
 use flow::{
     codec::CodecError,
     model::{Message, Tuple},
+    planner::decode_projection::DecodeProjection,
 };
 use tracing::trace;
 
@@ -23,24 +25,60 @@ pub struct CanFrame<'a> {
     pub payload: &'a [u8],
 }
 
+/// Resolved per-signal numeric decode plan.
+///
+/// Computed once at decoder/schema construction time so the decode hot path is
+/// a single match using native-width integer arithmetic.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalNumeric {
+    /// `factor == 1, offset == 0`, value fits `i64`. `signed` selects sign extension.
+    IdentityI64 { signed: bool },
+    /// `factor == 1, offset == 0`, unsigned value that exceeds `i64`.
+    IdentityU64,
+    /// Integer scaling whose intermediate product and result fit `i64`.
+    ScaledI64 {
+        factor: i64,
+        offset: i64,
+        signed: bool,
+    },
+    /// Integer scaling whose non-negative result fits `u64` but exceeds `i64`.
+    ScaledU64 {
+        factor: i64,
+        offset: i64,
+        signed: bool,
+    },
+    /// Fractional scaling, or integer scaling that cannot stay in integer range.
+    F64 {
+        factor: f64,
+        offset: f64,
+        precision: u32,
+        signed: bool,
+    },
+}
+
+impl SignalNumeric {
+    pub fn datatype(&self) -> datatypes::ConcreteDatatype {
+        use datatypes::ConcreteDatatype;
+        match self {
+            SignalNumeric::IdentityI64 { .. } | SignalNumeric::ScaledI64 { .. } => {
+                ConcreteDatatype::Int64(datatypes::Int64Type)
+            }
+            SignalNumeric::IdentityU64 | SignalNumeric::ScaledU64 { .. } => {
+                ConcreteDatatype::Uint64(datatypes::Uint64Type)
+            }
+            SignalNumeric::F64 { .. } => ConcreteDatatype::Float64(datatypes::Float64Type),
+        }
+    }
+}
+
 /// Specification for decoding a single CAN signal.
 pub struct SignalSpec {
     pub col_index: usize,
     pub start: u32,
     pub length: u32,
     pub is_big_endian: bool,
-    pub is_signed: bool,
-    pub factor: f64,
-    pub offset: f64,
-    /// Pre-computed precision (decimal places) for rounding.
-    /// Calculated once at initialization to avoid expensive string formatting during decode.
-    pub precision: u32,
-    /// True if factor and offset are both integers, allowing integer math.
-    pub use_integer_math: bool,
-    /// Pre-computed integer factor (only valid if use_integer_math is true)
-    pub factor_int: i64,
-    /// Pre-computed integer offset (only valid if use_integer_math is true)
-    pub offset_int: i64,
+    /// Resolved numeric decode plan (sign + scale handling), computed at init time.
+    pub numeric: SignalNumeric,
     /// True if this signal is the multiplexer selector
     pub is_multiplexer: bool,
     /// True if this signal is multiplexed (only decoded when multiplexer matches)
@@ -61,6 +99,30 @@ pub struct MessageSpec {
     /// True if any signal in this message is a multiplexer.
     /// Pre-computed at init time to skip multiplexer search for non-multiplex messages.
     pub has_multiplexer: bool,
+    /// Dense per-decoder index used as a key into per-decode scratch tables
+    /// (e.g. the seen-message set in [`CanDecoder::decode_frames`]).
+    pub msg_index: usize,
+}
+
+#[derive(Clone)]
+enum RequiredColumns {
+    All,
+    Mask(Arc<[bool]>),
+}
+
+impl RequiredColumns {
+    #[inline]
+    fn includes(&self, col_index: usize) -> bool {
+        match self {
+            RequiredColumns::All => true,
+            RequiredColumns::Mask(mask) => mask[col_index],
+        }
+    }
+}
+
+struct ProjectionCache {
+    version: u64,
+    required: RequiredColumns,
 }
 
 /// CAN decoder that converts CAN frames into Tuple values based on DBC schema.
@@ -76,9 +138,12 @@ pub struct CanDecoder {
     source_name: Arc<str>,
     keys: Arc<[Arc<str>]>,
     messages: HashMap<u16, MessageSpec>,
+    /// Number of distinct `msg_index` values; sizes per-decode scratch tables.
+    message_count: usize,
     ts_index: Option<usize>,
     /// Cached Null value to avoid allocating new Arc on every decode
     null_value: Arc<Value>,
+    projection_cache: Mutex<Option<ProjectionCache>>,
 }
 
 impl CanDecoder {
@@ -113,6 +178,7 @@ impl CanDecoder {
         let ts_index = name_to_index.get("ts").copied();
 
         let mut messages = HashMap::new();
+        let mut next_msg_index = 0usize;
         for bus in dbc.buses {
             let bus_name = bus.name.unwrap_or_else(|| format!("Bus{}", bus.id));
             for msg in bus.messages {
@@ -133,12 +199,7 @@ impl CanDecoder {
                     };
                     let factor = sig.scale.unwrap_or(1.0);
                     let offset = sig.offset.unwrap_or(0.0);
-                    // Pre-compute precision to avoid expensive string formatting during decode
-                    let precision = calculate_precision(factor, offset);
-                    // Check if we can use integer math (both factor and offset are whole numbers)
-                    let use_integer_math = is_integer_value(factor) && is_integer_value(offset);
-                    let factor_int = factor as i64;
-                    let offset_int = offset as i64;
+                    let numeric = classify_signal(sig.length, sig.is_signed, factor, offset);
                     // Clamp bounds: only when enabled, the DBC range is valid
                     // (max > min; min == max means "no range"), and the signal is
                     // not the multiplexer selector (clamping it could corrupt
@@ -156,13 +217,7 @@ impl CanDecoder {
                         start: sig.start,
                         length: sig.length,
                         is_big_endian: sig.is_big_endian,
-                        is_signed: sig.is_signed,
-                        factor,
-                        offset,
-                        precision,
-                        use_integer_math,
-                        factor_int,
-                        offset_int,
+                        numeric,
                         is_multiplexer: sig.is_multiplexer,
                         is_multiplexed: sig.is_multiplexed,
                         multiplexer_value: sig.multiplexer_value,
@@ -181,11 +236,14 @@ impl CanDecoder {
                 }
                 // Pre-compute if this message has a multiplexer signal
                 let has_multiplexer = signals.iter().any(|s| s.is_multiplexer);
+                let msg_index = next_msg_index;
+                next_msg_index += 1;
                 messages.insert(
                     can_id,
                     MessageSpec {
                         signals,
                         has_multiplexer,
+                        msg_index,
                     },
                 );
             }
@@ -195,9 +253,51 @@ impl CanDecoder {
             source_name: Arc::<str>::from(source_name),
             keys: Arc::from(keys),
             messages,
+            message_count: next_msg_index,
             ts_index,
             null_value: Arc::new(Value::Null),
+            projection_cache: Mutex::new(None),
         })
+    }
+
+    fn required_columns(&self, projection: Option<&DecodeProjection>) -> RequiredColumns {
+        let Some(projection) = projection else {
+            return RequiredColumns::All;
+        };
+
+        let mut cache = self
+            .projection_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.as_ref()
+            && cached.version == projection.version()
+        {
+            return cached.required.clone();
+        }
+
+        let columns = projection.columns();
+        let required = if columns.len() >= self.keys.len()
+            && self
+                .keys
+                .iter()
+                .all(|key| columns.contains_key(key.as_ref()))
+        {
+            RequiredColumns::All
+        } else {
+            RequiredColumns::Mask(
+                self.keys
+                    .iter()
+                    .map(|key| columns.contains_key(key.as_ref()))
+                    .collect::<Vec<bool>>()
+                    .into(),
+            )
+        };
+
+        *cache = Some(ProjectionCache {
+            version: projection.version(),
+            required: required.clone(),
+        });
+        required
     }
 
     /// Decode a list of CAN frames into a Tuple.
@@ -212,19 +312,13 @@ impl CanDecoder {
     pub fn decode_frames(
         &self,
         frames: Vec<CanFrame<'_>>,
-        projection: Option<&flow::planner::decode_projection::DecodeProjection>,
+        projection: Option<&DecodeProjection>,
     ) -> Option<Tuple> {
         if frames.is_empty() {
             return None;
         }
 
-        // Optimization: Pre-calculate a mask of required columns to avoid hash lookups in the hot loop
-        let required_mask = projection.map(|proj| {
-            self.keys
-                .iter()
-                .map(|key| proj.column(key).is_some())
-                .collect::<Vec<bool>>()
-        });
+        let required_columns = self.required_columns(projection);
 
         let mut values: Vec<Option<Value>> = vec![None; self.keys.len()];
 
@@ -232,59 +326,93 @@ impl CanDecoder {
             values[ts_idx] = Some(Value::Int64(frames[0].timestamp as i64));
         }
 
-        for frame in frames {
-            if let Some(spec) = self.messages.get(&frame.can_id) {
-                // Step 1: Find and decode the multiplexer signal to get current mux value
-                // (only if this message has any multiplexer signals)
-                let mut multiplexer_value: Option<i64> = None;
-                if spec.has_multiplexer {
-                    for signal in &spec.signals {
-                        if signal.is_multiplexer {
-                            let val = decode_signal(frame.payload, signal);
-                            if let Value::Int64(v) = val {
-                                multiplexer_value = Some(v);
-                            }
-                            // Store the multiplexer value if it's required by projection
-                            if required_mask
-                                .as_ref()
-                                .is_none_or(|mask| mask[signal.col_index])
-                            {
-                                values[signal.col_index] = Some(val);
-                            }
-                            break;
-                        }
-                    }
-                }
+        // A packed window typically repeats the same message many times (a
+        // typical replay averages several frames per can_id per window), and
+        // only the newest occurrence survives "last frame wins" semantics.
+        // Iterate in reverse and decode each message (or, for multiplexed
+        // messages, each (message, mux value) pair) only once — the first
+        // occurrence seen in reverse is the newest frame. This matches the
+        // eKuiper SPI converter, whose Merging step keeps the last frame per
+        // can_id (and per mux value for multiplexed messages) before decoding.
+        let mut seen_messages = vec![false; self.message_count];
+        // (msg_index, mux value) pairs already decoded. Multiplexed messages
+        // are rare and carry few distinct mux values per window, so a linear
+        // scan beats a hash set here.
+        let mut seen_mux: Vec<(usize, Option<i64>)> = Vec::new();
 
-                // Step 2: Decode all signals, but skip multiplexed signals that don't match
-                for signal in &spec.signals {
-                    // Skip multiplexer signal (already decoded above)
-                    if signal.is_multiplexer {
-                        continue;
-                    }
-
-                    // Check projection mask: Skip if not required
-                    if let Some(mask) = &required_mask
-                        && !mask[signal.col_index]
-                    {
-                        continue;
-                    }
-
-                    // Skip multiplexed signals that don't match the current multiplexer value
-                    if signal.is_multiplexed
-                        && signal
-                            .multiplexer_value
-                            .is_some_and(|v| multiplexer_value != Some(v))
-                    {
-                        // Don't decode this signal - leave as Null
-                        continue;
-                    }
-
-                    let v = decode_signal(frame.payload, signal);
-                    values[signal.col_index] = Some(v);
-                }
-            } else {
+        for frame in frames.iter().rev() {
+            let Some(spec) = self.messages.get(&frame.can_id) else {
                 trace!(can_id = frame.can_id, "frame spec not found for can_id");
+                continue;
+            };
+
+            if !spec.has_multiplexer {
+                if seen_messages[spec.msg_index] {
+                    continue;
+                }
+                seen_messages[spec.msg_index] = true;
+
+                for signal in &spec.signals {
+                    if !required_columns.includes(signal.col_index) {
+                        continue;
+                    }
+                    values[signal.col_index] = Some(decode_signal(frame.payload, signal));
+                }
+                continue;
+            }
+
+            // Multiplexed message: decode the multiplexer selector to get the
+            // current mux value, then decode this (message, mux value) pair at
+            // most once. Columns are written only when still empty so that the
+            // newest frame (visited first in reverse) wins.
+            let mut multiplexer_value: Option<i64> = None;
+            for signal in &spec.signals {
+                if signal.is_multiplexer {
+                    let val = decode_signal(frame.payload, signal);
+                    multiplexer_value = match &val {
+                        Value::Int64(v) => Some(*v),
+                        Value::Uint64(v) => i64::try_from(*v).ok(),
+                        _ => None,
+                    };
+                    if required_columns.includes(signal.col_index)
+                        && values[signal.col_index].is_none()
+                    {
+                        values[signal.col_index] = Some(val);
+                    }
+                    break;
+                }
+            }
+
+            let mux_key = (spec.msg_index, multiplexer_value);
+            if seen_mux.contains(&mux_key) {
+                continue;
+            }
+            seen_mux.push(mux_key);
+
+            for signal in &spec.signals {
+                // Skip multiplexer signal (already decoded above)
+                if signal.is_multiplexer {
+                    continue;
+                }
+
+                // Check projection mask: Skip if not required
+                if !required_columns.includes(signal.col_index) {
+                    continue;
+                }
+
+                // Skip multiplexed signals that don't match the current multiplexer value
+                if signal.is_multiplexed
+                    && signal
+                        .multiplexer_value
+                        .is_some_and(|v| multiplexer_value != Some(v))
+                {
+                    // Don't decode this signal - leave as Null
+                    continue;
+                }
+
+                if values[signal.col_index].is_none() {
+                    values[signal.col_index] = Some(decode_signal(frame.payload, signal));
+                }
             }
         }
 
@@ -317,6 +445,10 @@ impl CanDecoder {
 }
 
 /// Decode a single signal from CAN frame payload.
+///
+/// Hot path: a single dispatch on the pre-resolved [`SignalNumeric`] plan, using
+/// native-width integer arithmetic. Clamp remains applied after scaling so this
+/// keeps the existing DBC range semantics.
 pub fn decode_signal(payload: &[u8], spec: &SignalSpec) -> Value {
     let raw = extract_bits(
         payload,
@@ -324,43 +456,140 @@ pub fn decode_signal(payload: &[u8], spec: &SignalSpec) -> Value {
         spec.length as usize,
         spec.is_big_endian,
     );
-    let val = if spec.is_signed {
-        sign_extend(raw, spec.length as usize)
-    } else {
-        raw as i64
-    };
+    let length = spec.length as usize;
 
-    // Apply scaling: physical_value = raw_value * factor + offset
-    let value = if spec.factor == 1.0 && spec.offset == 0.0 {
-        // No scaling needed
-        Value::Int64(val)
-    } else if spec.use_integer_math {
-        // Integer scaling - use pure integer arithmetic (faster, no precision loss)
-        // Use checked arithmetic to handle potential overflow
-        match val
-            .checked_mul(spec.factor_int)
-            .and_then(|v| v.checked_add(spec.offset_int))
-        {
-            Some(result) => Value::Int64(result),
-            None => {
-                // Overflow - fall back to float
-                let physical_value = val as f64 * spec.factor + spec.offset;
-                Value::Float64(round_to_precision(physical_value, spec.precision))
-            }
+    let value = match spec.numeric {
+        SignalNumeric::IdentityI64 { signed } => {
+            let v = if signed {
+                sign_extend(raw, length)
+            } else {
+                raw as i64
+            };
+            Value::Int64(v)
         }
-    } else {
-        // Fractional scaling - use floating point with precision rounding
-        let physical_value = val as f64 * spec.factor + spec.offset;
-        let rounded_value = round_to_precision(physical_value, spec.precision);
-        Value::Float64(rounded_value)
+        SignalNumeric::IdentityU64 => Value::Uint64(raw),
+        SignalNumeric::ScaledI64 {
+            factor,
+            offset,
+            signed,
+        } => {
+            let r = if signed {
+                sign_extend(raw, length)
+            } else {
+                raw as i64
+            };
+            Value::Int64(r * factor + offset)
+        }
+        SignalNumeric::ScaledU64 {
+            factor,
+            offset,
+            signed,
+        } => {
+            let r = if signed {
+                i128::from(sign_extend(raw, length))
+            } else {
+                i128::from(raw)
+            };
+            Value::Uint64((r * i128::from(factor) + i128::from(offset)) as u64)
+        }
+        SignalNumeric::F64 {
+            factor,
+            offset,
+            precision,
+            signed,
+        } => {
+            let r = if signed {
+                sign_extend(raw, length) as f64
+            } else {
+                raw as f64
+            };
+            Value::Float64(round_to_precision(r * factor + offset, precision))
+        }
     };
 
     clamp_to_dbc_range(value, spec.clamp_min, spec.clamp_max)
 }
 
+/// Raw value range `[min, max]` for a signal, expressed in `i128`.
+fn raw_range_i128(length: u32, is_signed: bool) -> Option<(i128, i128)> {
+    if length == 0 || length > 64 {
+        return None;
+    }
+    if is_signed {
+        let half = 1i128 << (length - 1);
+        Some((-half, half - 1))
+    } else {
+        Some((0, (1i128 << length) - 1))
+    }
+}
+
+/// Resolve a signal's numeric decode plan from its DBC attributes.
+pub fn classify_signal(length: u32, is_signed: bool, factor: f64, offset: f64) -> SignalNumeric {
+    let precision = calculate_precision(factor, offset);
+    let float = || SignalNumeric::F64 {
+        factor,
+        offset,
+        precision,
+        signed: is_signed,
+    };
+
+    if !is_integer_value(factor) || !is_integer_value(offset) {
+        return float();
+    }
+
+    let factor_i = factor as i64;
+    let offset_i = offset as i64;
+    let identity = factor_i == 1 && offset_i == 0;
+
+    let Some((raw_min, raw_max)) = raw_range_i128(length, is_signed) else {
+        return float();
+    };
+
+    let f = i128::from(factor_i);
+    let o = i128::from(offset_i);
+    let (Some(m1), Some(m2)) = (raw_min.checked_mul(f), raw_max.checked_mul(f)) else {
+        return float();
+    };
+    let (Some(p1), Some(p2)) = (m1.checked_add(o), m2.checked_add(o)) else {
+        return float();
+    };
+    let mmin = m1.min(m2);
+    let mmax = m1.max(m2);
+    let pmin = p1.min(p2);
+    let pmax = p1.max(p2);
+
+    const I64_MIN: i128 = i64::MIN as i128;
+    const I64_MAX: i128 = i64::MAX as i128;
+    const U64_MAX: i128 = u64::MAX as i128;
+
+    if mmin >= I64_MIN && mmax <= I64_MAX && pmin >= I64_MIN && pmax <= I64_MAX {
+        if identity {
+            SignalNumeric::IdentityI64 { signed: is_signed }
+        } else {
+            SignalNumeric::ScaledI64 {
+                factor: factor_i,
+                offset: offset_i,
+                signed: is_signed,
+            }
+        }
+    } else if pmin >= 0 && pmax <= U64_MAX {
+        if identity {
+            SignalNumeric::IdentityU64
+        } else {
+            SignalNumeric::ScaledU64 {
+                factor: factor_i,
+                offset: offset_i,
+                signed: is_signed,
+            }
+        }
+    } else {
+        float()
+    }
+}
+
 /// Clamp a decoded physical value to the DBC `[min, max]` range, matching
 /// eKuiper's `can_dbc` behaviour. A no-op when both bounds are `None`. The value
-/// type (Int64 / Float64) is preserved.
+/// type (Int64 / Uint64 / Float64) is preserved.
 #[inline]
 fn clamp_to_dbc_range(value: Value, min: Option<f64>, max: Option<f64>) -> Value {
     if min.is_none() && max.is_none() {
@@ -405,6 +634,22 @@ fn clamp_to_dbc_range(value: Value, min: Option<f64>, max: Option<f64>) -> Value
             Value::Int64(out)
         }
         Value::Float64(v) => Value::Float64(clamp(v)),
+        Value::Uint64(v) => {
+            let mut out = v;
+            if let Some(mn) = min {
+                let lo = if mn <= 0.0 { 0 } else { mn.ceil() as u64 };
+                if out < lo {
+                    out = lo;
+                }
+            }
+            if let Some(mx) = max {
+                let hi = mx.floor() as u64;
+                if out > hi {
+                    out = hi;
+                }
+            }
+            Value::Uint64(out)
+        }
         other => other,
     }
 }
@@ -708,6 +953,114 @@ mod tests {
         assert_eq!(*ts, Value::Int64(1720765705290));
     }
 
+    /// Repeated frames of the same (non-multiplex) message: only the last
+    /// frame's values survive, exactly as the previous forward-overwrite
+    /// semantics produced.
+    #[test]
+    fn test_repeated_frames_last_wins() {
+        let decoder = get_test_decoder();
+
+        // sim.json bus 1, msg 586 -> can_id 0x124A; Mess0_Sig1 is big-endian,
+        // start bit 1, length 10: byte0 bits [1:0] (high) + byte1 (low).
+        let payload_old = [0x00u8, 0x01, 0, 0, 0, 0, 0, 0]; // Sig1 = 1
+        let payload_new = [0x00u8, 0x02, 0, 0, 0, 0, 0, 0]; // Sig1 = 2
+        let frames = vec![
+            CanFrame {
+                timestamp: 1,
+                can_id: 0x124A,
+                payload: &payload_old,
+            },
+            CanFrame {
+                timestamp: 2,
+                can_id: 0x124A,
+                payload: &payload_new,
+            },
+        ];
+
+        let tuple = decoder.decode_frames(frames, None).expect("decode");
+        let sig1 = tuple.value_by_name("can", "Mess0_Sig1").expect("Sig1");
+        assert_eq!(*sig1, Value::Int64(2), "last frame must win");
+    }
+
+    /// Repeated frames of a multiplexed message with the same mux value:
+    /// the newest frame's values win.
+    #[test]
+    fn test_repeated_mux_frames_last_wins() {
+        let decoder = get_multiplex_decoder();
+
+        // mux=1 frames; err_count = bits 4-15.
+        let payload_old = [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11]; // err_count 1344
+        let payload_new = [0x01u8, 0x99, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11]; // err_count 2448
+        let frames = vec![
+            CanFrame {
+                timestamp: 1,
+                can_id: 0x00C8,
+                payload: &payload_old,
+            },
+            CanFrame {
+                timestamp: 2,
+                can_id: 0x00C8,
+                payload: &payload_new,
+            },
+        ];
+
+        let tuple = decoder.decode_frames(frames, None).expect("decode");
+        let err = tuple
+            .value_by_name("mul", "SENSOR_SONARS_err_count")
+            .expect("err_count");
+        assert_eq!(*err, Value::Int64(2448), "last frame must win");
+        let mux1 = tuple
+            .value_by_name("mul", "SENSOR_SONARS_mux1")
+            .expect("mux1");
+        assert_eq!(*mux1, Value::Int64(1));
+    }
+
+    /// Frames with different mux values both contribute their groups; shared
+    /// (non-multiplexed) signals and the selector come from the last frame.
+    #[test]
+    fn test_mux_groups_merge_across_frames() {
+        let decoder = get_multiplex_decoder();
+
+        let payload_g1 = [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11]; // mux=1, err_count 1344
+        let payload_g0 = [0x00u8, 0x24, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11]; // mux=0, err_count 576
+        let frames = vec![
+            CanFrame {
+                timestamp: 1,
+                can_id: 0x00C8,
+                payload: &payload_g1,
+            },
+            CanFrame {
+                timestamp: 2,
+                can_id: 0x00C8,
+                payload: &payload_g0,
+            },
+        ];
+
+        let tuple = decoder.decode_frames(frames, None).expect("decode");
+
+        // Selector and shared signal come from the last frame (mux=0).
+        let mux = tuple
+            .value_by_name("mul", "SENSOR_SONARS_mux")
+            .expect("mux");
+        assert_eq!(*mux, Value::Int64(0));
+        let err = tuple
+            .value_by_name("mul", "SENSOR_SONARS_err_count")
+            .expect("err_count");
+        assert_eq!(*err, Value::Int64(576));
+
+        // Group 0 from the last frame.
+        let left = tuple
+            .value_by_name("mul", "SENSOR_SONARS_left")
+            .expect("left");
+        assert_eq!(*left, Value::Float64(86.9));
+
+        // Group 1 preserved from the earlier frame.
+        let no_filt_left = tuple
+            .value_by_name("mul", "SENSOR_SONARS_no_filt_left")
+            .expect("no_filt_left");
+        assert_eq!(*no_filt_left, Value::Float64(86.9));
+    }
+
     #[test]
     fn test_extract_bits_little_endian() {
         // Test little-endian bit extraction
@@ -759,13 +1112,7 @@ mod tests {
             start: 0,
             length: 8,
             is_big_endian: false,
-            is_signed: false,
-            factor: 0.5,
-            offset: 0.0,
-            precision: 1,
-            use_integer_math: false,
-            factor_int: 0,
-            offset_int: 0,
+            numeric: classify_signal(8, false, 0.5, 0.0),
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
@@ -784,13 +1131,7 @@ mod tests {
             start: 0,
             length: 8,
             is_big_endian: false,
-            is_signed: true,
-            factor: 1.0,
-            offset: 0.0,
-            precision: 0,
-            use_integer_math: true,
-            factor_int: 1,
-            offset_int: 0,
+            numeric: classify_signal(8, true, 1.0, 0.0),
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
@@ -811,13 +1152,7 @@ mod tests {
             start: 0,
             length: 16,
             is_big_endian: false,
-            is_signed: false,
-            factor: 1.0,
-            offset: -20000.0,
-            precision: 0,
-            use_integer_math: true,
-            factor_int: 1,
-            offset_int: -20000,
+            numeric: classify_signal(16, false, 1.0, -20000.0),
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
@@ -838,13 +1173,7 @@ mod tests {
             start: 0,
             length: 8,
             is_big_endian: false,
-            is_signed: false,
-            factor: 2.0,
-            offset: 0.0,
-            precision: 0,
-            use_integer_math: true,
-            factor_int: 2,
-            offset_int: 0,
+            numeric: classify_signal(8, false, 2.0, 0.0),
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
@@ -864,13 +1193,7 @@ mod tests {
             start: 0,
             length: 16,
             is_big_endian: false,
-            is_signed: false,
-            factor: 1.0,
-            offset: 0.0,
-            precision: 0,
-            use_integer_math: true,
-            factor_int: 1,
-            offset_int: 0,
+            numeric: classify_signal(16, false, 1.0, 0.0),
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
@@ -1135,5 +1458,28 @@ mod tests {
             Value::Null,
             "no_filt_left should be Null if not projected"
         );
+
+        let full_columns: Vec<String> = decoder
+            .keys()
+            .iter()
+            .map(|key| key.as_ref().to_string())
+            .collect();
+        let full_projection =
+            DecodeProjection::from_top_level_columns_with_version(full_columns.as_slice(), 2);
+
+        let full_tuple = decoder
+            .decode_frames(frames.clone(), Some(&full_projection))
+            .expect("full projection should decode");
+        let unprojected_tuple = decoder
+            .decode_frames(frames, None)
+            .expect("unprojected decode should decode");
+
+        for key in decoder.keys().iter() {
+            assert_eq!(
+                full_tuple.value_by_name("mul", key.as_ref()),
+                unprojected_tuple.value_by_name("mul", key.as_ref()),
+                "full projection should match unprojected decode for {key}"
+            );
+        }
     }
 }

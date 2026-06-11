@@ -6,10 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use can_dbc::{ByteOrder, MultiplexIndicator};
-use flow::{ColumnSchema, ConcreteDatatype, Float64Type, Int64Type, ProtoDescriptorBundle, Schema};
+use flow::{ColumnSchema, ConcreteDatatype, Int64Type, ProtoDescriptorBundle, Schema};
 use manager::register_schema;
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
+
+use crate::decoder::can::classify_signal;
 
 /// Register a schema parser that converts DBC JSON into a Schema.
 pub fn register_dbc_schema() {
@@ -308,14 +310,8 @@ pub fn schema_from_dbc(stream_name: &str, dbc: &DbcJson, pattern: Option<&str>) 
                     format_signal_name(pattern, &bus_name, &frame_id, &msg._name, &signal.name);
                 let factor = signal.scale.unwrap_or(1.0);
                 let offset = signal.offset.unwrap_or(0.0);
-                // Use Int64 if both factor and offset are integers (no precision loss)
-                // Otherwise use Float64 for fractional scaling
-                let is_integer_scaling = factor.fract() == 0.0 && offset.fract() == 0.0;
-                let datatype = if is_integer_scaling {
-                    ConcreteDatatype::Int64(Int64Type)
-                } else {
-                    ConcreteDatatype::Float64(Float64Type)
-                };
+                let datatype =
+                    classify_signal(signal.length, signal.is_signed, factor, offset).datatype();
                 columns.push(ColumnSchema::new(
                     stream_name.to_string(),
                     col_name,
