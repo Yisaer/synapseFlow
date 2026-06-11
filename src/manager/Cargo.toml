@@ -27,6 +27,8 @@ veloflux_metrics = { path = "../metrics" }
 protox = "0.6"
 prost = "0.12"
 prost-types = "0.12"
+cron = "0.12"
+chrono = "0.4"
 
 [dev-dependencies]
 tower = "0.5"

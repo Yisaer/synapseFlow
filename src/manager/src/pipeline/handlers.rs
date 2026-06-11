@@ -83,7 +83,9 @@ fn stream_refs_busy_response(streams: &BTreeSet<String>) -> axum::response::Resp
 
 fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
     match state.map(|s| s.desired_state) {
-        Some(StoredPipelineDesiredState::Running) => "running".to_string(),
+        Some(
+            StoredPipelineDesiredState::Running | StoredPipelineDesiredState::RunningScheduled(_),
+        ) => "running".to_string(),
         _ => "stopped".to_string(),
     }
 }
@@ -510,7 +512,10 @@ pub async fn upsert_pipeline_handler(
             .into_response();
     }
 
-    if matches!(old_desired_state, StoredPipelineDesiredState::Running) {
+    if matches!(
+        old_desired_state,
+        StoredPipelineDesiredState::Running | StoredPipelineDesiredState::RunningScheduled(_)
+    ) {
         if let Err(err) = state
             .storage
             .put_pipeline_run_state(StoredPipelineRunState {
@@ -599,10 +604,19 @@ pub async fn get_pipeline_handler(
         }
     };
 
+    let schedule_status = spec.options.schedule.as_ref().map(|s| {
+        let scheduled_until_ms = run_state.as_ref().and_then(|rs| match rs.desired_state {
+            storage::StoredPipelineDesiredState::RunningScheduled(until_ms) => Some(until_ms),
+            _ => None,
+        });
+        super::scheduler::compute_schedule_status(s, scheduled_until_ms)
+    });
+
     Json(GetPipelineResponse {
         id: id.clone(),
         status: stored_state_label(run_state),
         spec,
+        schedule_status,
     })
     .into_response()
 }
@@ -833,6 +847,9 @@ pub async fn stop_pipeline_handler(
     };
     let timeout = Duration::from_millis(query.timeout_ms);
 
+    // Set desired_state to Stopped (not RunningScheduled) on manual stop
+    // so the patrol scheduler does not re-start the pipeline within the
+    // same scheduling window.
     if let Err(err) = state
         .storage
         .put_pipeline_run_state(StoredPipelineRunState {
@@ -1105,6 +1122,7 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
+            0,
         )
         .expect("build app state");
 
@@ -1174,6 +1192,7 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
+            0,
         )
         .expect("build app state");
 
@@ -1243,6 +1262,7 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
+            0,
         )
         .expect("build app state");
 
@@ -1294,6 +1314,7 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
+            0,
         )
         .expect("build app state");
 

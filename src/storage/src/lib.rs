@@ -86,6 +86,9 @@ pub struct StoredPipeline {
 pub enum StoredPipelineDesiredState {
     Stopped,
     Running,
+    /// Running because of a scheduler auto-start. The i64 is the
+    /// unix timestamp (ms) at which the scheduler should auto-stop.
+    RunningScheduled(i64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

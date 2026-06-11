@@ -49,12 +49,23 @@ pub struct UpsertPipelineRequest {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
+pub struct PipelineScheduleRequest {
+    /// 5-field cron expression: "min hour dom month dow".
+    pub cron: String,
+    /// How long each scheduled run lasts, in seconds.
+    /// Must be greater than 0.
+    pub duration_secs: u64,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct PipelineOptionsRequest {
     #[serde(rename = "data_channel_capacity")]
     pub data_channel_capacity: usize,
     #[serde(default)]
     pub eventtime: EventtimeOptionsRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<PipelineScheduleRequest>,
 }
 
 impl Default for PipelineOptionsRequest {
@@ -62,6 +73,7 @@ impl Default for PipelineOptionsRequest {
         Self {
             data_channel_capacity: 16,
             eventtime: EventtimeOptionsRequest::default(),
+            schedule: None,
         }
     }
 }
@@ -91,6 +103,27 @@ pub struct GetPipelineResponse {
     pub id: String,
     pub status: String,
     pub spec: CreatePipelineRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_status: Option<ScheduleStatus>,
+}
+
+/// Scheduling status for a pipeline (returned in GET response).
+#[derive(Serialize)]
+pub struct ScheduleStatus {
+    pub cron: String,
+    pub duration_secs: u64,
+    /// Whether current time falls within an active scheduling window.
+    pub in_window: bool,
+    /// Timestamp of the last (or current) cron fire, in RFC 3339 UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_fire_at: Option<String>,
+    /// Timestamp of the next cron fire, in RFC 3339 UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_fire_at: Option<String>,
+    /// Timestamp when the current scheduled run will be auto-stopped, in RFC 3339 UTC.
+    /// Only present when in_window is true and the run was started by the scheduler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_stop_at: Option<String>,
 }
 
 #[derive(Serialize)]

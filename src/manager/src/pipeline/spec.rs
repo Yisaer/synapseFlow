@@ -137,6 +137,16 @@ pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(),
     if req.options.data_channel_capacity == 0 {
         return Err("options.data_channel_capacity must be greater than 0".to_string());
     }
+    if let Some(schedule) = &req.options.schedule {
+        if schedule.cron.trim().is_empty() {
+            return Err("options.schedule.cron must not be empty".to_string());
+        }
+        if schedule.duration_secs == 0 {
+            return Err("options.schedule.duration_secs must be greater than 0".to_string());
+        }
+        crate::pipeline::scheduler::validate_cron_expression(&schedule.cron)
+            .map_err(|err| format!("invalid options.schedule.cron: {err}"))?;
+    }
     Ok(())
 }
 
@@ -488,12 +498,18 @@ pub(crate) fn build_pipeline_definition(
         }
         sinks.push(sink_definition);
     }
+    let schedule = req
+        .options
+        .schedule
+        .as_ref()
+        .map(|s| flow::pipeline::PipelineScheduleConfig::new(s.cron.trim(), s.duration_secs));
     let options = PipelineOptions {
         data_channel_capacity: req.options.data_channel_capacity,
         eventtime: flow::pipeline::EventtimeOptions {
             enabled: req.options.eventtime.enabled,
             late_tolerance: Duration::from_millis(req.options.eventtime.late_tolerance_ms),
         },
+        schedule,
     };
     Ok(
         PipelineDefinition::new(req.id.clone(), req.sql.clone(), sinks)

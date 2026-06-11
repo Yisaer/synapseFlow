@@ -428,6 +428,7 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![sample_default_instance_spec()],
+            0,
         )
         .unwrap();
 

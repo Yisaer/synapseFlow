@@ -23,7 +23,7 @@ impl EnvBinding {
     }
 }
 
-const ENV_BINDINGS: [EnvBinding; 15] = [
+const ENV_BINDINGS: [EnvBinding; 16] = [
     EnvBinding::new(
         "VELOFLUX_LOGGING__OUTPUT",
         "logging.output",
@@ -98,6 +98,11 @@ const ENV_BINDINGS: [EnvBinding; 15] = [
         "VELOFLUX_SERVER__MANAGER_ADDR",
         "server.manager_addr",
         set_server_manager_addr,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_SERVER__PIPELINE_PATROL_INTERVAL_SECS",
+        "server.pipeline_patrol_interval_secs",
+        set_pipeline_patrol_interval_secs,
     ),
 ];
 
@@ -283,5 +288,14 @@ fn set_server_manager_addr(
     raw: &str,
 ) -> ConfigResult<()> {
     config.server.manager_addr = Some(raw.to_string());
+    Ok(())
+}
+
+fn set_pipeline_patrol_interval_secs(
+    config: &mut AppConfig,
+    binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.server.pipeline_patrol_interval_secs = parse_env::<u64>(binding, raw)?;
     Ok(())
 }

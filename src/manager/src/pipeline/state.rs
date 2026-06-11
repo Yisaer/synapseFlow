@@ -6,10 +6,14 @@ use crate::instances::{
 use crate::startup::StartupPhase;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 use storage::StorageManager;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const STREAM_SHARED_REF_PERMITS: u32 = 1024;
+
+/// Default patrol interval for the pipeline scheduler, in seconds.
+pub const DEFAULT_PATROL_INTERVAL_SECS: u64 = 15;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +31,7 @@ impl AppState {
         instance: flow::FlowInstance,
         storage: StorageManager,
         flow_instances: Vec<FlowInstanceSpec>,
+        patrol_interval_secs: u64,
     ) -> Result<Self, String> {
         let instances = FlowInstances::new(instance);
         let storage = Arc::new(storage);
@@ -66,10 +71,26 @@ impl AppState {
             }
         }
 
-        Ok(Self {
+        let app_state = Self {
             declared_instances: Arc::new(declared_instances),
             ..state
-        })
+        };
+
+        // Spawn the pipeline patrol scheduler.
+        if patrol_interval_secs > 0 {
+            app_state.spawn_scheduler(patrol_interval_secs);
+        }
+
+        Ok(app_state)
+    }
+
+    fn spawn_scheduler(&self, interval_secs: u64) {
+        let storage = Arc::clone(&self.storage);
+        let instances = self.instances.clone();
+        tokio::spawn(async move {
+            super::scheduler::run_patrol(storage, instances, Duration::from_secs(interval_secs))
+                .await;
+        });
     }
 
     pub fn is_declared_instance(&self, id: &str) -> bool {

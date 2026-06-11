@@ -122,6 +122,8 @@ pub struct ServerOptions {
     pub cpu_profile_freq_hz: Option<i32>,
     /// Metrics polling interval in seconds (feature-gated); if None, uses default.
     pub metrics_poll_interval_secs: Option<u64>,
+    /// Pipeline patrol scheduler interval in seconds. 0 disables.
+    pub pipeline_patrol_interval_secs: Option<u64>,
     /// Declared flow instances loaded from config.
     pub flow_instances: Vec<manager::FlowInstanceSpec>,
 }
@@ -133,6 +135,7 @@ pub struct ServerContext {
     storage: StorageManager,
     manager_addr: String,
     flow_instances: Vec<manager::FlowInstanceSpec>,
+    pipeline_patrol_interval_secs: u64,
     runtime_guards: ServerRuntimeGuards,
 }
 
@@ -211,11 +214,14 @@ pub async fn init(
         "startup phase"
     );
 
+    let pipeline_patrol_interval_secs = opts.pipeline_patrol_interval_secs.unwrap_or(15);
+
     Ok(ServerContext {
         instance,
         storage,
         manager_addr,
         flow_instances: opts.flow_instances,
+        pipeline_patrol_interval_secs,
         runtime_guards: ServerRuntimeGuards {
             #[cfg(feature = "metrics")]
             _metrics_exporter: metrics_exporter,
@@ -252,6 +258,7 @@ where
     let instance = ctx.instance;
     let storage = ctx.storage;
     let manager_addr = ctx.manager_addr;
+    let patrol_interval_secs = ctx.pipeline_patrol_interval_secs;
 
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let (manager_shutdown_tx, manager_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -264,6 +271,7 @@ where
             let _ = manager_shutdown_rx.await;
         },
         startup_tx,
+        patrol_interval_secs,
     );
     tokio::pin!(manager_future);
     tokio::pin!(shutdown);

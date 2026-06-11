@@ -513,10 +513,30 @@ impl PipelineDefinition {
     }
 }
 
+/// Cron-based schedule configuration for automatic pipeline start/stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineScheduleConfig {
+    /// 5-field cron expression: "min hour dom month dow"
+    pub cron: String,
+    /// How long the pipeline runs after each cron trigger, in seconds.
+    /// Must be greater than 0.
+    pub duration_secs: u64,
+}
+
+impl PipelineScheduleConfig {
+    pub fn new(cron: impl Into<String>, duration_secs: u64) -> Self {
+        Self {
+            cron: cron.into(),
+            duration_secs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineOptions {
     pub data_channel_capacity: usize,
     pub eventtime: EventtimeOptions,
+    pub schedule: Option<PipelineScheduleConfig>,
 }
 
 impl Default for PipelineOptions {
@@ -524,6 +544,7 @@ impl Default for PipelineOptions {
         Self {
             data_channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             eventtime: EventtimeOptions::default(),
+            schedule: None,
         }
     }
 }

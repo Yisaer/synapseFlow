@@ -160,8 +160,16 @@ impl Default for MetricsConfig {
 #[serde(default)]
 pub struct ServerConfig {
     pub manager_addr: Option<String>,
+    /// Pipeline patrol scheduler interval in seconds. 0 disables the scheduler.
+    /// Default: 15.
+    #[serde(default = "default_patrol_interval_secs")]
+    pub pipeline_patrol_interval_secs: u64,
     #[serde(default = "default_flow_instances")]
     pub flow_instances: Vec<FlowInstanceSpec>,
+}
+
+fn default_patrol_interval_secs() -> u64 {
+    15
 }
 
 fn default_flow_instances() -> Vec<FlowInstanceSpec> {
@@ -175,6 +183,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             manager_addr: Some(crate::server::DEFAULT_MANAGER_ADDR.to_string()),
+            pipeline_patrol_interval_secs: default_patrol_interval_secs(),
             flow_instances: default_flow_instances(),
         }
     }
@@ -218,6 +227,7 @@ impl AppConfig {
         if let Some(secs) = self.metrics.poll_interval_secs {
             opts.metrics_poll_interval_secs = Some(secs);
         }
+        opts.pipeline_patrol_interval_secs = Some(self.server.pipeline_patrol_interval_secs);
         if let Some(addr) = self.server.manager_addr.as_ref() {
             opts.manager_addr = Some(addr.clone());
         }

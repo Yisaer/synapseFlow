@@ -318,8 +318,13 @@ mod tests {
 
     fn build_state(temp_dir: &TempDir, flow_instances: Vec<crate::FlowInstanceSpec>) -> AppState {
         let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
-        AppState::new(crate::new_default_flow_instance(), storage, flow_instances)
-            .expect("build app state")
+        AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            flow_instances,
+            0,
+        )
+        .expect("build app state")
     }
 
     #[tokio::test]
