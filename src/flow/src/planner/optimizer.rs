@@ -57,12 +57,10 @@ struct StreamingAggregationRewrite {
 /// This is a topology rewrite rule and is intentionally applied as the last physical optimization.
 struct InsertBarrierForFanIn;
 
-/// Rule: fuse `PhysicalBatch -> PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`
-/// when the encoder supports streaming delivery.
+/// Rule: fuse `PhysicalBatch -> PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`.
 ///
 /// This eliminates one data-pass between BatchProcessor and SinkEncoderProcessor
-/// for streaming-capable encoders (e.g. json, protobuf). Non-streaming encoders
-/// (future Parquet) keep the two-node chain intact.
+/// for registered `SinkEncoder` implementations.
 struct StreamingEncoderRewrite;
 
 /// Rule: detect shared `Project` nodes that are pure `ColumnRef::ByIndex` projections
@@ -208,20 +206,17 @@ impl PhysicalOptRule for StreamingEncoderRewrite {
     fn optimize(
         &self,
         plan: Arc<PhysicalPlan>,
-        encoder_registry: &EncoderRegistry,
+        _encoder_registry: &EncoderRegistry,
     ) -> Arc<PhysicalPlan> {
-        fuse_streaming_encoder(plan, encoder_registry)
+        fuse_streaming_encoder(plan)
     }
 }
 
-fn fuse_streaming_encoder(
-    plan: Arc<PhysicalPlan>,
-    encoder_registry: &EncoderRegistry,
-) -> Arc<PhysicalPlan> {
+fn fuse_streaming_encoder(plan: Arc<PhysicalPlan>) -> Arc<PhysicalPlan> {
     let children: Vec<Arc<PhysicalPlan>> = plan
         .children()
         .iter()
-        .map(|child| fuse_streaming_encoder(Arc::clone(child), encoder_registry))
+        .map(|child| fuse_streaming_encoder(Arc::clone(child)))
         .collect();
 
     match plan.as_ref() {
@@ -232,12 +227,6 @@ fn fuse_streaming_encoder(
             }
             let first_child = &children[0];
             if !matches!(first_child.as_ref(), PhysicalPlan::Batch(_)) {
-                return rebuild_with_children(plan.as_ref(), children);
-            }
-
-            let encoder_kind = encoder.encoder.kind_str();
-            if !encoder_registry.supports_streaming(encoder_kind) {
-                // Encoder does not support streaming, keep PhysicalBatch -> SinkEncoder intact
                 return rebuild_with_children(plan.as_ref(), children);
             }
 
@@ -812,7 +801,9 @@ fn build_node_and_consumer_maps(
         for child in plan.children() {
             let child_index = child.get_plan_index();
             let child_consumers = match plan.as_ref() {
-                PhysicalPlan::EmptySuppress(_) => inherited_consumers.clone(),
+                PhysicalPlan::EmptySuppress(_) | PhysicalPlan::Batch(_) => {
+                    inherited_consumers.clone()
+                }
                 PhysicalPlan::RowDiff(row_diff) => vec![ProjectConsumer::RowDiff {
                     row_diff_index: row_diff.base.index(),
                 }],
@@ -1107,6 +1098,145 @@ fn allocate_index(next: &mut i64) -> i64 {
     let index = *next;
     *next += 1;
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::encoder::{EncodeError, SinkEncoder, SinkEncoderFactory};
+    use crate::model::Collection;
+    use crate::planner::physical::{
+        output_schema::OutputSchema, PhysicalBatch, PhysicalDataSource, PhysicalProject,
+        PhysicalSinkEncoder,
+    };
+    use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
+    use bytes::Bytes;
+    use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+    use serde_json::Map as JsonMap;
+
+    struct TestEncoderFactory;
+
+    impl SinkEncoderFactory for TestEncoderFactory {
+        fn id(&self) -> &str {
+            "test_by_index"
+        }
+
+        fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
+            Ok(Box::new(TestEncoder))
+        }
+
+        fn supports_index_lazy_materialization(&self) -> bool {
+            true
+        }
+
+        fn with_by_index_projection(
+            self: Arc<Self>,
+            _spec: Arc<ByIndexProjection>,
+        ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
+            Ok(self)
+        }
+
+        fn with_output_schema(
+            self: Arc<Self>,
+            _output_schema: Arc<OutputSchema>,
+        ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
+            Ok(self)
+        }
+    }
+
+    struct TestEncoder;
+
+    impl SinkEncoder for TestEncoder {
+        fn begin_delivery(&mut self) -> Result<Option<Bytes>, EncodeError> {
+            Ok(None)
+        }
+
+        fn append(&mut self, _record: &dyn Collection) -> Result<Option<Bytes>, EncodeError> {
+            Ok(None)
+        }
+
+        fn finish_delivery(&mut self) -> Result<Option<Bytes>, EncodeError> {
+            Ok(None)
+        }
+    }
+
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "s".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "s".to_string(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]))
+    }
+
+    #[test]
+    fn by_index_projection_rewrite_treats_batch_as_transparent() {
+        let registry = EncoderRegistry::new();
+        registry.register_encoder_with_caps(
+            "test_by_index",
+            Arc::new(|_config| Ok(Arc::new(TestEncoderFactory) as Arc<dyn SinkEncoderFactory>)),
+            true,
+        );
+
+        let source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
+            "s".to_string(),
+            None,
+            test_schema(),
+            None,
+            0,
+        )));
+        let project = Arc::new(PhysicalPlan::Project(PhysicalProject::new(
+            vec![PhysicalProjectField::new(
+                "a",
+                sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("a")),
+                ScalarExpr::Column(ColumnRef::ByIndex {
+                    source_name: "s".to_string(),
+                    column_index: 0,
+                }),
+            )],
+            vec![source],
+            1,
+        )));
+        let batch = Arc::new(PhysicalPlan::Batch(PhysicalBatch::new(
+            vec![project],
+            2,
+            "sink".to_string(),
+            CommonSinkProps {
+                batch_count: Some(10),
+                batch_duration: None,
+            },
+        )));
+        let encoder = Arc::new(PhysicalPlan::SinkEncoder(PhysicalSinkEncoder::new(
+            vec![batch],
+            3,
+            "sink".to_string(),
+            SinkEncoderConfig::new("test_by_index", JsonMap::new()),
+            CommonSinkProps::default(),
+        )));
+
+        let optimized = rewrite_by_index_projection_into_encoder(encoder, &registry);
+        let PhysicalPlan::SinkEncoder(encoder) = optimized.as_ref() else {
+            panic!("expected sink encoder");
+        };
+        assert!(
+            encoder.by_index_projection.is_some(),
+            "encoder should receive by-index projection through Batch"
+        );
+        let PhysicalPlan::Batch(batch) = encoder.base.children()[0].as_ref() else {
+            panic!("expected batch child");
+        };
+        let PhysicalPlan::Project(project) = batch.base.children()[0].as_ref() else {
+            panic!("expected project child");
+        };
+        assert!(project.passthrough_messages);
+        assert!(project.fields.is_empty());
+    }
 }
 
 fn rebuild_with_children(

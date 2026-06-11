@@ -1999,8 +1999,8 @@ fn plan_explain_shows_protobuf_decoder() {
     );
 }
 
-/// Helper: build a sink with a custom (non-streaming) encoder and batching.
-fn build_mock_non_streaming_sink_with_batch(
+/// Helper: build a sink with a custom buffering encoder and batching.
+fn build_mock_buffering_encoder_sink_with_batch(
     sink_id: &'static str,
     encoder_kind: &'static str,
     batch_count: usize,
@@ -2017,22 +2017,23 @@ fn build_mock_non_streaming_sink_with_batch(
     PipelineSink::new(sink_id, connector).with_common_props(common)
 }
 
-/// Verify explain output for three batching scenarios:
-/// 1. json encoder + batch → batch embedded in PhysicalSinkEncoder
+/// Verify explain output for batching scenarios:
+/// 1. json encoder + batch → batch embedded in PhysicalIncSinkEncoder
 /// 2. kuksa sink (encoder=none) + batch → PhysicalBatch before PhysicalDataSink
-/// 3. mock non-streaming encoder + batch → PhysicalBatch → PhysicalSinkEncoder (not fused)
+/// 3. buffering encoder + batch → batch embedded in PhysicalIncSinkEncoder
+/// 4. by-index buffering encoder + batch → by-index projection on PhysicalIncSinkEncoder
 #[test]
 fn plan_explain_batch_table_driven() {
     use flow::codec::{EncodeError, SinkEncoder, SinkEncoderFactory};
-    use flow::planner::physical::output_schema::OutputSchema;
+    use flow::planner::physical::{output_schema::OutputSchema, ByIndexProjection};
     use std::sync::Arc;
 
-    // ── Mock non-streaming encoder ──
-    struct MockNonStreamingEncoderFactory {
+    let encoder_registry = flow::EncoderRegistry::with_builtin_encoders();
+    struct MockBufferingEncoderFactory {
         id: String,
     }
 
-    impl SinkEncoderFactory for MockNonStreamingEncoderFactory {
+    impl SinkEncoderFactory for MockBufferingEncoderFactory {
         fn id(&self) -> &str {
             &self.id
         }
@@ -2043,6 +2044,17 @@ fn plan_explain_batch_table_driven() {
             ))
         }
 
+        fn supports_index_lazy_materialization(&self) -> bool {
+            self.id == "mock_by_index_buffering_encoder"
+        }
+
+        fn with_by_index_projection(
+            self: Arc<Self>,
+            _spec: Arc<ByIndexProjection>,
+        ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
+            Ok(self)
+        }
+
         fn with_output_schema(
             self: Arc<Self>,
             _output_schema: Arc<OutputSchema>,
@@ -2051,17 +2063,22 @@ fn plan_explain_batch_table_driven() {
         }
     }
 
-    // ── Build registries with mock non-streaming encoder ──
-    let encoder_registry = flow::EncoderRegistry::with_builtin_encoders();
-    encoder_registry.register_encoder_with_all_caps(
-        "mock_non_streaming",
+    encoder_registry.register_encoder(
+        "mock_buffering_encoder",
         Arc::new(|_config| {
-            Ok(Arc::new(MockNonStreamingEncoderFactory {
-                id: "mock_non_streaming".into(),
+            Ok(Arc::new(MockBufferingEncoderFactory {
+                id: "mock_buffering_encoder".into(),
             }) as Arc<dyn SinkEncoderFactory>)
         }),
-        false, // supports_by_index_projection
-        false, // supports_streaming
+    );
+    encoder_registry.register_encoder_with_caps(
+        "mock_by_index_buffering_encoder",
+        Arc::new(|_config| {
+            Ok(Arc::new(MockBufferingEncoderFactory {
+                id: "mock_by_index_buffering_encoder".into(),
+            }) as Arc<dyn SinkEncoderFactory>)
+        }),
+        true,
     );
 
     let registries = flow::PipelineRegistries::new(
@@ -2110,6 +2127,7 @@ fn plan_explain_batch_table_driven() {
         sql: &'static str,
         sinks: Vec<PipelineSink>,
         expected: &'static str,
+        required_fragments: &'static [&'static str],
         covers: &'static [&'static str],
     }
 
@@ -2119,6 +2137,7 @@ fn plan_explain_batch_table_driven() {
             sql: "SELECT a, b FROM stream_ab",
             sinks: vec![build_nop_json_sink("json_sink", Some(10))],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=json_sink","connector=nop","encoder=json","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[]","passthrough_messages=true"],"operator":"PhysicalProject"}],"id":"PhysicalIncSinkEncoder_5","info":["sink_id=json_sink","encoder=json","batch_count=10","by_index_projection=[stream_ab#0->a; stream_ab#1->b]"],"operator":"PhysicalIncSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=json_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+            required_fragments: &[],
             covers: &[
                 "sink.output.batching",
                 "planner.physical.streaming_encoder_rewrite_fuses_batch",
@@ -2129,23 +2148,52 @@ fn plan_explain_batch_table_driven() {
             sql: "SELECT a, b FROM stream_ab",
             sinks: vec![build_kuksa_sink_with_batch("kuksa_sink", 10)],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=kuksa_sink","connector=kuksa","encoder=none","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; b]"],"operator":"PhysicalProject"}],"id":"PhysicalBatch_4","info":["sink_id=kuksa_sink","batch_count=10"],"operator":"PhysicalBatch"}],"id":"PhysicalDataSink_3","info":["sink_id=kuksa_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            required_fragments: &[],
             covers: &[
                 "sink.output.batching",
                 "planner.physical.external_batch_for_none_encoder",
             ],
         },
         Case {
-            name: "non_streaming_encoder_with_batch_keeps_physical_batch",
+            name: "buffering_encoder_with_batch_embeds_in_sink_encoder",
             sql: "SELECT a, b FROM stream_ab",
-            sinks: vec![build_mock_non_streaming_sink_with_batch(
+            sinks: vec![build_mock_buffering_encoder_sink_with_batch(
                 "mock_sink",
-                "mock_non_streaming",
+                "mock_buffering_encoder",
                 1000,
             )],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=mock_sink","connector=nop","encoder=mock_non_streaming","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; b]"],"operator":"PhysicalProject"}],"id":"PhysicalBatch_4","info":["sink_id=mock_sink","batch_count=1000"],"operator":"PhysicalBatch"}],"id":"PhysicalSinkEncoder_5","info":["sink_id=mock_sink","encoder=mock_non_streaming"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=mock_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: "",
+            required_fragments: &[
+                "\"operator\":\"PhysicalIncSinkEncoder\"",
+                "encoder=mock_buffering_encoder",
+                "batch_count=1000",
+            ],
             covers: &[
                 "sink.output.batching",
-                "planner.physical.external_batch_for_non_streaming_encoder",
+                "planner.physical.streaming_encoder_rewrite_fuses_buffering_encoder_batch",
+            ],
+        },
+        Case {
+            name: "by_index_buffering_encoder_rewrites_through_batch",
+            sql: "SELECT a, b FROM stream_ab",
+            sinks: vec![build_mock_buffering_encoder_sink_with_batch(
+                "mock_by_index_sink",
+                "mock_by_index_buffering_encoder",
+                1000,
+            )],
+            expected: "",
+            required_fragments: &[
+                "\"operator\":\"PhysicalIncSinkEncoder\"",
+                "fields=[]",
+                "passthrough_messages=true",
+                "encoder=mock_by_index_buffering_encoder",
+                "batch_count=1000",
+                "by_index_projection=[stream_ab#0->a; stream_ab#1->b]",
+            ],
+            covers: &[
+                "sink.output.batching",
+                "planner.physical.by_index_projection_into_encoder_rewrite",
+                "planner.physical.batch_transparent_for_by_index_projection",
             ],
         },
     ];
@@ -2157,6 +2205,16 @@ fn plan_explain_batch_table_driven() {
             case.name
         );
         let got = explain_for_registries(case.sql, case.sinks.clone(), &registries);
-        assert_eq!(got, case.expected, "case={}", case.name);
+        if !case.expected.is_empty() {
+            assert_eq!(got, case.expected, "case={}", case.name);
+        }
+        for fragment in case.required_fragments {
+            assert!(
+                got.contains(fragment),
+                "case={} missing expected fragment `{}` in {got}",
+                case.name,
+                fragment
+            );
+        }
     }
 }

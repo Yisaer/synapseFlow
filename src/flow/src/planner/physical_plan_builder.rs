@@ -1045,10 +1045,9 @@ fn build_sink_chain_with_builder(
     }
 
     // Create PhysicalBatch for ALL sinks with batching enabled.
-    // For streaming encoders (json), StreamingEncoderRewrite will later fuse
+    // For regular SinkEncoder branches, StreamingEncoderRewrite will later fuse
     // PhysicalBatch → PhysicalSinkEncoder into PhysicalIncSinkEncoder.
-    // For encoder=none (kuksa/kura/video) and non-streaming encoders (future Parquet),
-    // the PhysicalBatch stays as a standalone node.
+    // For encoder=none (kuksa/kura/video), the PhysicalBatch stays as a standalone node.
     let encoder_input = if sink.common.is_batching_enabled() {
         let batch_index = builder.allocate_index();
         Arc::new(PhysicalPlan::Batch(PhysicalBatch::new(
@@ -1308,8 +1307,8 @@ fn add_regular_encoder_with_builder(
         let encoder_index = builder.allocate_index();
         // PhysicalSinkEncoder always runs in Immediate mode.
         // Batching is handled by either:
-        // - PhysicalBatch (standalone, for encoder=none or non-streaming encoders), or
-        // - PhysicalIncSinkEncoder (fused by StreamingEncoderRewrite, for streaming encoders).
+        // - PhysicalBatch (standalone, for encoder=none), or
+        // - PhysicalIncSinkEncoder (fused by StreamingEncoderRewrite, for regular encoders).
         let encoder = PhysicalSinkEncoder::new(
             vec![encoder_input],
             encoder_index,

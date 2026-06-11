@@ -503,19 +503,20 @@ Current implementation note:
 Batching remains a sink-side flush policy. Row diff should run before batching.
 
 The physical plan builder inserts a `PhysicalBatch` node when batching is
-configured. For streaming encoders the `StreamingEncoderRewrite` optimizer rule
-fuses `PhysicalBatch → PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`.
+configured. For standard `SinkEncoder` implementations the
+`StreamingEncoderRewrite` optimizer rule fuses
+`PhysicalBatch → PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`.
 
-Result (streaming encoder):
+Result (registered encoder):
 
 ```text
 Project -> RowDiff -> PhysicalIncSinkEncoder(encoder=json, batch_count=…) -> SinkConnector
 ```
 
-Result (non-streaming encoder):
+Result (`encoder=none`):
 
 ```text
-Project -> RowDiff -> PhysicalBatch -> PhysicalSinkEncoder -> SinkConnector
+Project -> RowDiff -> PhysicalBatch -> PhysicalDataSink
 ```
 
 ### With JSON encoding
