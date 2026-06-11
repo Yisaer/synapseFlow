@@ -47,6 +47,12 @@ pub struct SignalSpec {
     pub is_multiplexed: bool,
     /// The multiplexer value that activates this signal (only valid if is_multiplexed is true)
     pub multiplexer_value: Option<i64>,
+    /// Lower bound for clamping the physical value to the DBC range.
+    /// `None` disables clamping (range unspecified, clamping turned off, or a
+    /// multiplexer selector signal which must never be clamped).
+    pub clamp_min: Option<f64>,
+    /// Upper bound for clamping the physical value to the DBC range.
+    pub clamp_max: Option<f64>,
 }
 
 /// Specification for a CAN message containing multiple signals.
@@ -90,6 +96,7 @@ impl CanDecoder {
         schema: Arc<Schema>,
         dbc: DbcJson,
         pattern: Option<String>,
+        clamp_to_range: bool,
     ) -> Result<Self, CodecError> {
         let source_name: String = source_name.into();
         // Default to simple signal name if no pattern provided
@@ -132,6 +139,18 @@ impl CanDecoder {
                     let use_integer_math = is_integer_value(factor) && is_integer_value(offset);
                     let factor_int = factor as i64;
                     let offset_int = offset as i64;
+                    // Clamp bounds: only when enabled, the DBC range is valid
+                    // (max > min; min == max means "no range"), and the signal is
+                    // not the multiplexer selector (clamping it could corrupt
+                    // multiplex matching).
+                    let (clamp_min, clamp_max) = match (sig.min, sig.max) {
+                        (Some(mn), Some(mx))
+                            if clamp_to_range && !sig.is_multiplexer && mx > mn =>
+                        {
+                            (Some(mn), Some(mx))
+                        }
+                        _ => (None, None),
+                    };
                     signals.push(SignalSpec {
                         col_index,
                         start: sig.start,
@@ -147,6 +166,8 @@ impl CanDecoder {
                         is_multiplexer: sig.is_multiplexer,
                         is_multiplexed: sig.is_multiplexed,
                         multiplexer_value: sig.multiplexer_value,
+                        clamp_min,
+                        clamp_max,
                     });
                 }
                 // Warn if duplicate CAN ID found (same bus + frame ID)
@@ -310,7 +331,7 @@ pub fn decode_signal(payload: &[u8], spec: &SignalSpec) -> Value {
     };
 
     // Apply scaling: physical_value = raw_value * factor + offset
-    if spec.factor == 1.0 && spec.offset == 0.0 {
+    let value = if spec.factor == 1.0 && spec.offset == 0.0 {
         // No scaling needed
         Value::Int64(val)
     } else if spec.use_integer_math {
@@ -332,6 +353,59 @@ pub fn decode_signal(payload: &[u8], spec: &SignalSpec) -> Value {
         let physical_value = val as f64 * spec.factor + spec.offset;
         let rounded_value = round_to_precision(physical_value, spec.precision);
         Value::Float64(rounded_value)
+    };
+
+    clamp_to_dbc_range(value, spec.clamp_min, spec.clamp_max)
+}
+
+/// Clamp a decoded physical value to the DBC `[min, max]` range, matching
+/// eKuiper's `can_dbc` behaviour. A no-op when both bounds are `None`. The value
+/// type (Int64 / Float64) is preserved.
+#[inline]
+fn clamp_to_dbc_range(value: Value, min: Option<f64>, max: Option<f64>) -> Value {
+    if min.is_none() && max.is_none() {
+        return value;
+    }
+    let clamp = |x: f64| {
+        let mut x = x;
+        if let Some(mn) = min
+            && x < mn
+        {
+            x = mn;
+        }
+        if let Some(mx) = max
+            && x > mx
+        {
+            x = mx;
+        }
+        x
+    };
+    match value {
+        // Clamp integers in integer space: routing the value through f64 would
+        // lose precision above 2^53 (e.g. 64-bit signals). Bounds may be
+        // fractional (an integer signal can still have a non-integer DBC
+        // min/max), so use ceil(min) / floor(max) — never plain truncation — so
+        // the clamped integer always stays within [min, max]. `f64 as i64`
+        // saturates, so a u64-range upper bound becomes i64::MAX (effectively no
+        // upper clamp, correct since the true bound exceeds i64 — see #65).
+        Value::Int64(v) => {
+            let mut out = v;
+            if let Some(mn) = min {
+                let lo = mn.ceil() as i64;
+                if out < lo {
+                    out = lo;
+                }
+            }
+            if let Some(mx) = max {
+                let hi = mx.floor() as i64;
+                if out > hi {
+                    out = hi;
+                }
+            }
+            Value::Int64(out)
+        }
+        Value::Float64(v) => Value::Float64(clamp(v)),
+        other => other,
     }
 }
 
@@ -475,11 +549,125 @@ mod tests {
     use super::*;
     use crate::schema::dbc::{load_dbc_json, schema_from_dbc};
 
+    #[test]
+    fn clamp_preserves_type_and_bounds() {
+        // no bounds -> untouched
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(999), None, None),
+            Value::Int64(999)
+        );
+        // integer clamp to max / min, type preserved
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(215), Some(-40.0), Some(210.0)),
+            Value::Int64(210)
+        );
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(-1), Some(0.0), Some(100.0)),
+            Value::Int64(0)
+        );
+        // float clamp, type preserved
+        assert_eq!(
+            clamp_to_dbc_range(Value::Float64(5.11), Some(0.0), Some(5.0)),
+            Value::Float64(5.0)
+        );
+    }
+
+    #[test]
+    fn clamp_int64_with_fractional_bounds_uses_ceil_floor() {
+        // Integer value, fractional bounds: result must stay within [min, max].
+        // max = 5.5 -> floor -> 5 ; min = 2.5 -> ceil -> 3
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(6), Some(2.5), Some(5.5)),
+            Value::Int64(5)
+        );
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(2), Some(2.5), Some(5.5)),
+            Value::Int64(3)
+        );
+        // negative max = -2.5 -> floor -> -3 (truncation would wrongly give -2)
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(-2), None, Some(-2.5)),
+            Value::Int64(-3)
+        );
+        // in-range value untouched
+        assert_eq!(
+            clamp_to_dbc_range(Value::Int64(4), Some(2.5), Some(5.5)),
+            Value::Int64(4)
+        );
+    }
+
+    #[test]
+    fn clamp_int64_above_2pow53_is_exact() {
+        // Large in-range integer must pass through unchanged (no f64 round-trip
+        // precision loss). 9_007_199_254_740_993 = 2^53 + 1 is not representable
+        // exactly as f64.
+        let v = 9_007_199_254_740_993_i64;
+        let out = clamp_to_dbc_range(Value::Int64(v), Some(0.0), Some(i64::MAX as f64));
+        assert_eq!(out, Value::Int64(v));
+    }
+
+    #[test]
+    fn can_decoder_selects_clamp_bounds() {
+        use crate::schema::dbc::{BusJson, DbcJson, MessageJson, SignalJson};
+        fn sig(name: &str, mux: bool, min: Option<f64>, max: Option<f64>) -> SignalJson {
+            SignalJson {
+                name: name.to_string(),
+                start: 0,
+                length: 8,
+                scale: Some(1.0),
+                offset: Some(0.0),
+                is_big_endian: false,
+                is_signed: false,
+                is_multiplexer: mux,
+                is_multiplexed: false,
+                multiplexer_value: None,
+                min,
+                max,
+            }
+        }
+        let dbc = DbcJson {
+            buses: vec![BusJson {
+                name: Some("B".into()),
+                id: 0,
+                messages: vec![MessageJson {
+                    _name: "M".into(),
+                    id: 1,
+                    frame_id: "0x1".into(),
+                    _length: 8,
+                    signals: vec![
+                        sig("Normal", false, Some(-40.0), Some(210.0)),
+                        sig("Mux", true, Some(0.0), Some(7.0)),
+                        sig("NoRange", false, Some(0.0), Some(0.0)),
+                    ],
+                }],
+            }],
+        };
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let find = |dec: &CanDecoder, name: &str| -> (Option<f64>, Option<f64>) {
+            let specs = &dec.messages()[&1u16].signals; // can_id = (bus 0 << 12) | id 1
+            let s = specs
+                .iter()
+                .find(|s| dec.keys()[s.col_index].as_ref() == name)
+                .expect("signal in specs");
+            (s.clamp_min, s.clamp_max)
+        };
+
+        // clamp enabled (default)
+        let dec = CanDecoder::new("can", schema.clone(), dbc.clone(), None, true).unwrap();
+        assert_eq!(find(&dec, "Normal"), (Some(-40.0), Some(210.0))); // valid range -> set
+        assert_eq!(find(&dec, "Mux"), (None, None)); // multiplexer selector -> never clamped
+        assert_eq!(find(&dec, "NoRange"), (None, None)); // min == max -> no range
+
+        // clamp disabled -> nothing clamps
+        let dec = CanDecoder::new("can", schema, dbc, None, false).unwrap();
+        assert_eq!(find(&dec, "Normal"), (None, None));
+    }
+
     fn get_test_decoder() -> CanDecoder {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
-        CanDecoder::new("can", schema.clone(), dbc.clone(), None).expect("build decoder")
+        CanDecoder::new("can", schema.clone(), dbc.clone(), None, true).expect("build decoder")
     }
 
     #[test]
@@ -581,6 +769,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            clamp_min: None,
+            clamp_max: None,
         };
         let payload = [100u8];
         let value = decode_signal(&payload, &spec);
@@ -604,6 +794,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            clamp_min: None,
+            clamp_max: None,
         };
         // 0xFF = -1 in signed 8-bit
         let payload = [0xFFu8];
@@ -629,6 +821,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            clamp_min: None,
+            clamp_max: None,
         };
         // Raw value 20500 -> 20500 - 20000 = 500
         let payload = [0xF4, 0x50]; // 20724 in little-endian
@@ -654,6 +848,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            clamp_min: None,
+            clamp_max: None,
         };
         let payload = [50u8];
         let value = decode_signal(&payload, &spec);
@@ -678,6 +874,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            clamp_min: None,
+            clamp_max: None,
         };
         let payload = [0x34, 0x12]; // 0x1234 in little-endian
         let value = decode_signal(&payload, &spec);
@@ -738,7 +936,7 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
         let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
-        CanDecoder::new("mul", schema.clone(), dbc.clone(), None).expect("build decoder")
+        CanDecoder::new("mul", schema.clone(), dbc.clone(), None, true).expect("build decoder")
     }
 
     /// Test multiplex group1 (mux=1): Should decode no_filt_* signals, NOT group0 signals

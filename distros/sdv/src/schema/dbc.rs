@@ -99,6 +99,13 @@ pub struct SignalJson {
     /// The multiplexer value that activates this signal (only valid if is_multiplexed is true).
     #[serde(rename = "multiplexerValue")]
     pub multiplexer_value: Option<i64>,
+    /// Minimum physical value from the DBC (`physical = raw * scale + offset`).
+    /// Used for optional range clamping. `min == max` means "no range".
+    #[serde(default)]
+    pub min: Option<f64>,
+    /// Maximum physical value from the DBC. Used for optional range clamping.
+    #[serde(default)]
+    pub max: Option<f64>,
 }
 
 /// Load CAN schema from a file or directory. Auto-detects format:
@@ -224,6 +231,18 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                             }
                         };
 
+                    // can-dbc always carries min/max as f64; the DBC "no range"
+                    // convention is `[0|0]` (and can-dbc has no None). Map a
+                    // valid range to Some, and treat a zero-width/no range as
+                    // None. (`None` and `Some(0.0)/Some(0.0)` are equivalent
+                    // downstream anyway: CanDecoder::new's `max > min` guard
+                    // turns `[0|0]` into no-clamp.)
+                    let (min, max) = if sig.max > sig.min {
+                        (Some(sig.min), Some(sig.max))
+                    } else {
+                        (None, None)
+                    };
+
                     SignalJson {
                         name: sig.name().to_string(),
                         start: sig.start_bit as u32,
@@ -235,6 +254,8 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                         is_multiplexer,
                         is_multiplexed,
                         multiplexer_value,
+                        min,
+                        max,
                     }
                 })
                 .collect();
@@ -424,6 +445,8 @@ mod tests {
                         is_multiplexer: false,
                         is_multiplexed: false,
                         multiplexer_value: None,
+                        min: None,
+                        max: None,
                     }],
                 }],
             }],
@@ -459,6 +482,8 @@ mod tests {
                         is_multiplexer: false,
                         is_multiplexed: false,
                         multiplexer_value: None,
+                        min: None,
+                        max: None,
                     }],
                 }],
             }],

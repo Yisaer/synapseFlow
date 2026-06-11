@@ -75,8 +75,24 @@ pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
                 .and_then(JsonValue::as_str)
                 .map(|s| s.to_string());
 
-            GbfDecoder::new(stream_name, schema.clone(), gbf_schema, dbc, pattern)
-                .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
+            // Clamp decoded values to the DBC min/max range (default true, to
+            // match eKuiper's can_dbc). Set `clamp_to_range: false` to keep raw
+            // out-of-range physical values.
+            let clamp_to_range = config
+                .props()
+                .get("clamp_to_range")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(true);
+
+            GbfDecoder::new(
+                stream_name,
+                schema.clone(),
+                gbf_schema,
+                dbc,
+                pattern,
+                clamp_to_range,
+            )
+            .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
         }),
     );
 }
@@ -95,8 +111,9 @@ impl GbfDecoder {
         gbf_schema: GbfSchema,
         dbc: crate::schema::dbc::DbcJson,
         pattern: Option<String>,
+        clamp_to_range: bool,
     ) -> Result<Self, CodecError> {
-        let can_decoder = CanDecoder::new(source_name, schema, dbc, pattern)?;
+        let can_decoder = CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range)?;
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
 
         Ok(Self {
@@ -211,7 +228,7 @@ mod tests {
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
         let gbf_schema = get_test_schema();
-        GbfDecoder::new("can", schema.clone(), gbf_schema, dbc.clone(), None)
+        GbfDecoder::new("can", schema.clone(), gbf_schema, dbc.clone(), None, true)
             .expect("build decoder")
     }
 

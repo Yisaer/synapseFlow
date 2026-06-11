@@ -9,7 +9,7 @@ fn get_multiplex_decoder() -> CanDecoder {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
     let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
     let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
-    CanDecoder::new("mul", schema.clone(), dbc.clone(), None).expect("build decoder")
+    CanDecoder::new("mul", schema.clone(), dbc.clone(), None, true).expect("build decoder")
 }
 
 fn bench_decoder_projection(c: &mut Criterion) {

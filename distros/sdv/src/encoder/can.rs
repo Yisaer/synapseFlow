@@ -270,6 +270,8 @@ mod tests {
                             is_multiplexer: false,
                             is_multiplexed: false,
                             multiplexer_value: None,
+                            min: None,
+                            max: None,
                         },
                         SignalJson {
                             name: "Sig2".to_string(),
@@ -282,6 +284,8 @@ mod tests {
                             is_multiplexer: false,
                             is_multiplexed: false,
                             multiplexer_value: None,
+                            min: None,
+                            max: None,
                         },
                     ],
                 }],
@@ -351,6 +355,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            min: None,
+            max: None,
         });
 
         // Big endian
@@ -372,6 +378,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            min: None,
+            max: None,
         });
 
         signals.push(SignalJson {
@@ -385,6 +393,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            min: None,
+            max: None,
         });
 
         let msg = MessageJson {
@@ -463,6 +473,8 @@ mod tests {
             is_multiplexer: false,
             is_multiplexed: false,
             multiplexer_value: None,
+            min: None,
+            max: None,
         }];
 
         let msg = MessageJson {
@@ -509,6 +521,8 @@ mod tests {
                 is_multiplexer: false,
                 is_multiplexed: false,
                 multiplexer_value: None,
+                min: None,
+                max: None,
             },
             SignalJson {
                 name: "Multiplexed".to_string(),
@@ -521,6 +535,8 @@ mod tests {
                 is_multiplexer: false,
                 is_multiplexed: true, // Should be skipped
                 multiplexer_value: Some(1),
+                min: None,
+                max: None,
             },
         ];
 
