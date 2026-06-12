@@ -15,7 +15,9 @@ mod processor;
 mod runtime;
 mod shared_stream;
 
-use prometheus::{Gauge, GaugeVec, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec};
+use prometheus::{
+    Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+};
 
 pub fn set_default_flow_instance_id(id: &str) {
     flow_instance::set_default_id(id);
@@ -155,4 +157,68 @@ pub fn runtime_heap_in_use_bytes() -> &'static IntGauge {
 
 pub fn runtime_heap_in_allocator_bytes() -> &'static IntGauge {
     runtime::heap_in_allocator_bytes()
+}
+
+// ── Child metric handle wrappers ────────────────────────────────────────────
+//
+// These wrap prometheus child handles so callers can cache the result of
+// `with_label_values` without depending on prometheus concrete types.
+// Each wrapper exposes only the operations needed for the recorded metric kind.
+
+/// A cached handle for one label combination of an `IntCounterVec`.
+#[derive(Debug, Clone)]
+pub struct ChildCounter {
+    inner: IntCounter,
+}
+
+impl ChildCounter {
+    pub fn inc_by(&self, delta: u64) {
+        self.inner.inc_by(delta);
+    }
+
+    pub fn inc(&self) {
+        self.inner.inc();
+    }
+
+    pub fn bind(vec: &IntCounterVec, labels: &[&str]) -> Self {
+        Self {
+            inner: vec.with_label_values(labels),
+        }
+    }
+}
+
+/// A cached handle for one label combination of a `HistogramVec`.
+#[derive(Debug, Clone)]
+pub struct ChildHistogram {
+    inner: Histogram,
+}
+
+impl ChildHistogram {
+    pub fn observe(&self, v: f64) {
+        self.inner.observe(v);
+    }
+
+    pub fn bind(vec: &HistogramVec, labels: &[&str]) -> Self {
+        Self {
+            inner: vec.with_label_values(labels),
+        }
+    }
+}
+
+/// A cached handle for one label combination of an `IntGaugeVec`.
+#[derive(Debug, Clone)]
+pub struct ChildGauge {
+    inner: IntGauge,
+}
+
+impl ChildGauge {
+    pub fn set(&self, v: i64) {
+        self.inner.set(v);
+    }
+
+    pub fn bind(vec: &IntGaugeVec, labels: &[&str]) -> Self {
+        Self {
+            inner: vec.with_label_values(labels),
+        }
+    }
 }

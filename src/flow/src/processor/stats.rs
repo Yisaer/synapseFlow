@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::RwLock;
+use veloflux_metrics::{ChildCounter, ChildGauge, ChildHistogram};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,23 +35,66 @@ pub struct GaugeHandle {
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     processor_id: Arc<str>,
     entry: Arc<MetricEntry>,
+    /// Cached prometheus child gauge, resolved once on first `set()`.
+    gauge: OnceLock<ChildGauge>,
 }
 
 impl GaugeHandle {
     pub fn set(&self, value: u64) {
         self.entry.value.store(value, Ordering::Relaxed);
-        let Some(pipeline_id) = self.pipeline_id.get() else {
+        let prom_value = i64::try_from(value).unwrap_or(i64::MAX);
+        let Some(gauge) = self.resolved_gauge() else {
             return;
         };
-        let prom_value = i64::try_from(value).unwrap_or(i64::MAX);
-        veloflux_metrics::processor_custom_gauge()
-            .with_label_values(&[
-                self.flow_instance_id.as_ref(),
-                pipeline_id.as_ref(),
-                self.processor_id.as_ref(),
-                self.entry.id,
-            ])
-            .set(prom_value);
+        gauge.set(prom_value);
+    }
+
+    fn resolved_gauge(&self) -> Option<&ChildGauge> {
+        let pipeline_id = self.pipeline_id.get()?;
+        Some(self.gauge.get_or_init(|| {
+            ChildGauge::bind(
+                veloflux_metrics::processor_custom_gauge(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.processor_id.as_ref(),
+                    self.entry.id,
+                ],
+            )
+        }))
+    }
+}
+
+/// Bundle of cached prometheus child handles for the standard processor metrics.
+/// Resolved once when `pipeline_id` is first known; after that the per-batch
+/// record path does a plain atomic add / histogram observe with no label-map lookup.
+#[derive(Debug)]
+struct BoundMetrics {
+    in_counter: ChildCounter,
+    out_counter: ChildCounter,
+    error_counter: ChildCounter,
+    handle_duration: ChildHistogram,
+    backpressure_counter: ChildCounter,
+}
+
+impl BoundMetrics {
+    fn new(labels: &[&str; 3]) -> Self {
+        Self {
+            in_counter: ChildCounter::bind(veloflux_metrics::processor_records_in_total(), labels),
+            out_counter: ChildCounter::bind(
+                veloflux_metrics::processor_records_out_total(),
+                labels,
+            ),
+            error_counter: ChildCounter::bind(veloflux_metrics::processor_errors_total(), labels),
+            handle_duration: ChildHistogram::bind(
+                veloflux_metrics::processor_handle_duration_seconds(),
+                labels,
+            ),
+            backpressure_counter: ChildCounter::bind(
+                veloflux_metrics::processor_send_backpressure_waits_total(),
+                labels,
+            ),
+        }
     }
 }
 
@@ -60,22 +104,32 @@ pub struct CounterHandle {
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     processor_id: Arc<str>,
     entry: Arc<MetricEntry>,
+    /// Cached prometheus child counter, resolved once on first `inc_by()`.
+    counter: OnceLock<ChildCounter>,
 }
 
 impl CounterHandle {
     pub fn inc_by(&self, delta: u64) {
         self.entry.value.fetch_add(delta, Ordering::Relaxed);
-        let Some(pipeline_id) = self.pipeline_id.get() else {
+        let Some(counter) = self.resolved_counter() else {
             return;
         };
-        veloflux_metrics::processor_custom_counter_total()
-            .with_label_values(&[
-                self.flow_instance_id.as_ref(),
-                pipeline_id.as_ref(),
-                self.processor_id.as_ref(),
-                self.entry.id,
-            ])
-            .inc_by(delta);
+        counter.inc_by(delta);
+    }
+
+    fn resolved_counter(&self) -> Option<&ChildCounter> {
+        let pipeline_id = self.pipeline_id.get()?;
+        Some(self.counter.get_or_init(|| {
+            ChildCounter::bind(
+                veloflux_metrics::processor_custom_counter_total(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.processor_id.as_ref(),
+                    self.entry.id,
+                ],
+            )
+        }))
     }
 }
 
@@ -90,6 +144,10 @@ pub struct ProcessorStats {
     error_count: AtomicU64,
     last_error: RwLock<Option<Arc<str>>>,
     metrics: RwLock<BTreeMap<&'static str, Arc<MetricEntry>>>,
+    /// Cached prometheus child handles for standard processor metrics.
+    /// Resolved lazily on the first record call that observes a set `pipeline_id`;
+    /// the labels are fixed for the lifetime of this processor.
+    bound_metrics: OnceLock<BoundMetrics>,
 }
 
 impl ProcessorStats {
@@ -108,7 +166,29 @@ impl ProcessorStats {
             error_count: AtomicU64::new(0),
             last_error: RwLock::new(None),
             metrics: RwLock::new(BTreeMap::new()),
+            bound_metrics: OnceLock::new(),
         }
+    }
+
+    /// Labels for this processor's prometheus child metrics, available once the
+    /// pipeline id is assigned. Returns `None` before then (metrics are skipped).
+    fn metric_labels(&self) -> Option<[&str; 3]> {
+        let pipeline_id = self.pipeline_id.get()?;
+        Some([
+            self.flow_instance_id.as_ref(),
+            pipeline_id.as_ref(),
+            self.processor_id.as_ref(),
+        ])
+    }
+
+    /// Returns the cached `BoundMetrics` handle, resolving it once when
+    /// `pipeline_id` is first observed.
+    fn bound_metrics(&self) -> Option<&BoundMetrics> {
+        let labels = self.metric_labels()?;
+        Some(
+            self.bound_metrics
+                .get_or_init(|| BoundMetrics::new(&labels)),
+        )
     }
 
     pub fn set_pipeline_id(&self, pipeline_id: &str) {
@@ -122,6 +202,7 @@ impl ProcessorStats {
             pipeline_id: Arc::clone(&self.pipeline_id),
             processor_id: Arc::clone(&self.processor_id),
             entry,
+            gauge: OnceLock::new(),
         }
     }
 
@@ -132,6 +213,7 @@ impl ProcessorStats {
             pipeline_id: Arc::clone(&self.pipeline_id),
             processor_id: Arc::clone(&self.processor_id),
             entry,
+            counter: OnceLock::new(),
         }
     }
 
@@ -184,27 +266,15 @@ impl ProcessorStats {
 
     pub fn record_in(&self, rows: u64) {
         self.records_in.fetch_add(rows, Ordering::Relaxed);
-        if let Some(pipeline_id) = self.pipeline_id.get() {
-            veloflux_metrics::processor_records_in_total()
-                .with_label_values(&[
-                    self.flow_instance_id.as_ref(),
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                ])
-                .inc_by(rows);
+        if let Some(bound) = self.bound_metrics() {
+            bound.in_counter.inc_by(rows);
         }
     }
 
     pub fn record_out(&self, rows: u64) {
         self.records_out.fetch_add(rows, Ordering::Relaxed);
-        if let Some(pipeline_id) = self.pipeline_id.get() {
-            veloflux_metrics::processor_records_out_total()
-                .with_label_values(&[
-                    self.flow_instance_id.as_ref(),
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                ])
-                .inc_by(rows);
+        if let Some(bound) = self.bound_metrics() {
+            bound.out_counter.inc_by(rows);
         }
     }
 
@@ -245,14 +315,8 @@ impl ProcessorStats {
 
     pub fn record_error_count(&self, count: u64, message: impl Into<String>) {
         self.error_count.fetch_add(count, Ordering::Relaxed);
-        if let Some(pipeline_id) = self.pipeline_id.get() {
-            veloflux_metrics::processor_errors_total()
-                .with_label_values(&[
-                    self.flow_instance_id.as_ref(),
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                ])
-                .inc_by(count);
+        if let Some(bound) = self.bound_metrics() {
+            bound.error_counter.inc_by(count);
         }
         let message: String = message.into();
         let mut guard = self.last_error.write();
@@ -265,28 +329,15 @@ impl ProcessorStats {
         //   recommended definition is end-to-end wall time including the send wait.
         // - For processors that enqueue/update local state and emit asynchronously, the recommended
         //   definition is local work time only, excluding any later flush/send work.
-        if let Some(pipeline_id) = self.pipeline_id.get() {
-            veloflux_metrics::processor_handle_duration_seconds()
-                .with_label_values(&[
-                    self.flow_instance_id.as_ref(),
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                ])
-                .observe(duration.as_secs_f64());
+        if let Some(bound) = self.bound_metrics() {
+            bound.handle_duration.observe(duration.as_secs_f64());
         }
     }
 
     pub fn record_send_backpressure_wait_tick(&self) {
-        let Some(pipeline_id) = self.pipeline_id.get() else {
-            return;
-        };
-        veloflux_metrics::processor_send_backpressure_waits_total()
-            .with_label_values(&[
-                self.flow_instance_id.as_ref(),
-                pipeline_id.as_ref(),
-                self.processor_id.as_ref(),
-            ])
-            .inc();
+        if let Some(bound) = self.bound_metrics() {
+            bound.backpressure_counter.inc();
+        }
     }
 
     pub fn clear_last_error(&self) {
