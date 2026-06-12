@@ -13,7 +13,6 @@ use flow::codec::encoder::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use flow::model::{Collection, Tuple};
 use flow::planner::physical::ByIndexProjection;
 use flow::planner::physical::output_schema::OutputSchema;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// Columnar CSV JSON Encoder that accumulates records incrementally.
@@ -171,28 +170,42 @@ impl ColumnarAggregator {
             }
         }
 
-        let mut i = 0;
+        let mut buffers = self.column_buffers.iter_mut();
         // Affiliate columns first
         if let Some(aff) = tuple.affiliate() {
             for (_, value) in aff.entries() {
-                if i < self.column_buffers.len() {
-                    write_value_to_buffer(value, &mut self.column_buffers[i]);
-                    self.column_buffers[i].push(',');
-                }
-                i += 1;
+                let Some(buf) = buffers.next() else { break };
+                write_value_to_buffer(value, buf);
+                buf.push(',');
             }
         }
-        // Then projected columns by index (no iteration over all columns!)
+        // Then projected columns by index. Projection columns are grouped by source
+        // (SQL declaration order), so resolve `source_name -> message` once per source
+        // run instead of scanning every message for every column (was O(columns x
+        // messages) of string compares per row; now O(columns)).
+        let messages = tuple.messages();
+        let mut cur_src: Option<&str> = None;
+        let mut cur_msg: Option<usize> = None;
         for col in columns {
-            if i < self.column_buffers.len() {
-                if let Some(value) =
-                    tuple.value_by_index(col.source_name.as_ref(), col.column_index)
-                {
-                    write_value_to_buffer(value, &mut self.column_buffers[i]);
-                }
-                self.column_buffers[i].push(',');
+            let Some(buf) = buffers.next() else { break };
+            let src = col.source_name.as_ref();
+            if cur_src != Some(src) {
+                cur_src = Some(src);
+                cur_msg = messages.iter().position(|m| m.source() == src);
             }
-            i += 1;
+            // Fast path: the source's first message. value_by_index returns
+            // Some(&Null) for in-range nulls and None only when column_index is out
+            // of range for that first message (schema mismatch, or the value lives in
+            // a later same-source message). On None, fall back to the full scan, which
+            // matches the original tuple.value_by_index semantics exactly.
+            let value = match cur_msg.and_then(|mi| messages[mi].value_by_index(col.column_index)) {
+                Some(value) => Some(value),
+                None => tuple.value_by_index(src, col.column_index),
+            };
+            if let Some(value) = value {
+                write_value_to_buffer(value, buf);
+            }
+            buf.push(',');
         }
     }
 
@@ -301,12 +314,13 @@ fn write_value_to_buffer(value: &Value, buffer: &mut String) {
             }
         }
         Value::Float32(v) => {
-            // write! to String is infallible
-            let _ = write!(buffer, "{v}");
+            // ryu is ~2x faster than the core::fmt float path on float-dense payloads.
+            let mut b = ryu::Buffer::new();
+            buffer.push_str(b.format(*v));
         }
         Value::Float64(v) => {
-            // write! to String is infallible
-            let _ = write!(buffer, "{v}");
+            let mut b = ryu::Buffer::new();
+            buffer.push_str(b.format(*v));
         }
         Value::Int8(v) => {
             let mut b = itoa::Buffer::new();

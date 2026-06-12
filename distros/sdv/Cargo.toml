@@ -23,6 +23,7 @@ serde_json = "1"
 datatypes = { path = "../../src/datatypes" }
 tracing = "0.1.44"
 itoa = "1"
+ryu = "1"
 
 chrono = "=0.4.38"  # Pin to version before quarter() method was added
 can-dbc = "7"
