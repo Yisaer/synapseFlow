@@ -353,8 +353,10 @@ async fn sampler_latest_before_filter_and_projection() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let filtered = recv_next_json(&mut output, Duration::from_millis(400)).await;
-    assert_eq!(filtered, serde_json::json!([]));
+    // A sampled value that fails the WHERE predicate now produces no output at all
+    // (the filter emits nothing instead of an empty collection), so nothing is sent
+    // downstream for the non-passing sample.
+    assert_no_output(&mut output, Duration::from_millis(400)).await;
 
     pipeline
         .send_stream_data(

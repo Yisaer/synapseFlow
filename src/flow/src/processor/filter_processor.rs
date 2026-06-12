@@ -153,20 +153,34 @@ impl Processor for FilterProcessor {
                                         let handle_start = std::time::Instant::now();
                                         match apply_filter(collection.as_ref(), &filter_expr) {
                                             Ok(filtered_collection) => {
-                                                let filtered_data = StreamData::collection(filtered_collection);
-                                                let out_rows = filtered_data.num_rows_hint();
-                                                let send_res = send_with_backpressure(
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    filtered_data,
-                                                    Some(stats.as_ref()),
-                                                )
-                                                .await;
-                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                send_res?;
-                                                if let Some(rows) = out_rows {
-                                                    stats.record_out(rows);
+                                                let out_rows = filtered_collection.num_rows();
+                                                // A filter that matches nothing emits nothing
+                                                // (standard WHERE semantics, like eKuiper): skip
+                                                // broadcasting the empty collection so downstream
+                                                // stages (project, suppress, sink) and their
+                                                // broadcast channels don't run for it. For
+                                                // event-detection rules the predicate rejects
+                                                // almost every row, so forwarding empties was the
+                                                // dominant per-row broadcast cost. Watermarks,
+                                                // control, and the graceful-end barrier ride other
+                                                // StreamData arms and still propagate, so graceful
+                                                // close is unaffected.
+                                                if out_rows == 0 {
+                                                    stats.record_handle_duration(handle_start.elapsed());
+                                                } else {
+                                                    let filtered_data =
+                                                        StreamData::collection(filtered_collection);
+                                                    let send_res = send_with_backpressure(
+                                                        &output,
+                                                        channel_capacities.data,
+                                                        filtered_data,
+                                                        Some(stats.as_ref()),
+                                                    )
+                                                    .await;
+                                                    // Handle duration includes downstream send/backpressure time.
+                                                    stats.record_handle_duration(handle_start.elapsed());
+                                                    send_res?;
+                                                    stats.record_out(out_rows as u64);
                                                 }
                                             }
                                             Err(e) => {

@@ -146,6 +146,35 @@ pub async fn recv_next_json(
     }
 }
 
+/// Receive the next JSON output, or return `fallback` if nothing arrives within
+/// `timeout_duration`. Used for empty results: a predicate that matches nothing now
+/// emits no output at all (the empty collection is dropped at the filter), so "no
+/// output" and "an explicit empty collection" are both valid representations of an
+/// empty result.
+pub async fn recv_next_json_or(
+    output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
+    timeout_duration: Duration,
+    fallback: JsonValue,
+) -> JsonValue {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match timeout(remaining, output.recv()).await {
+            Err(_) => return fallback,
+            Ok(Ok(MemoryData::Bytes(payload))) => {
+                return serde_json::from_slice(payload.as_ref()).expect("invalid JSON payload")
+            }
+            Ok(Ok(MemoryData::Collection(_))) => {
+                panic!("unexpected collection payload on bytes topic")
+            }
+            Ok(Err(RecvError::Lagged(_))) => continue,
+            Ok(Err(RecvError::Closed)) => return fallback,
+        }
+    }
+}
+
 pub async fn assert_no_json_output(
     output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
     timeout_duration: Duration,

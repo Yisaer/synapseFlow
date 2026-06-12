@@ -22,7 +22,7 @@ use super::common::ColumnCheck;
 use super::common::{
     assert_no_json_output, build_expected_json, declare_memory_input_output_topics,
     install_memory_stream_schema, install_memory_stream_schema_with_name, make_memory_topics,
-    normalize_json, publish_input_collection, recv_next_json,
+    normalize_json, publish_input_collection, recv_next_json, recv_next_json_or,
 };
 use super::common::{declare_memory_input_output_topics_with_output_kind, recv_next_collection};
 
@@ -87,7 +87,6 @@ async fn run_test_case(test_case: TestCase) {
         timeout_duration,
     )
     .await;
-    let actual = recv_next_json(&mut output, timeout_duration).await;
     assert_eq!(
         test_case.expected_columns,
         test_case.column_checks.len(),
@@ -96,6 +95,14 @@ async fn run_test_case(test_case: TestCase) {
     );
     let expected: JsonValue =
         build_expected_json(test_case.expected_rows, &test_case.column_checks);
+    // An empty result (e.g. a WHERE that matches nothing) now emits no output at
+    // all — the filter drops the empty collection instead of broadcasting it — so
+    // accept either no output or an explicit empty collection.
+    let actual = if test_case.expected_rows == 0 {
+        recv_next_json_or(&mut output, timeout_duration, expected.clone()).await
+    } else {
+        recv_next_json(&mut output, timeout_duration).await
+    };
     assert_eq!(
         normalize_json(actual),
         normalize_json(expected),
@@ -208,7 +215,6 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
     )
     .await;
 
-    let actual = recv_next_json(&mut output, timeout_duration).await;
     assert_eq!(
         test_case.expected_columns,
         test_case.column_checks.len(),
@@ -217,6 +223,14 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
     );
     let expected: JsonValue =
         build_expected_json(test_case.expected_rows, &test_case.column_checks);
+    // An empty result (e.g. a WHERE that matches nothing) now emits no output at
+    // all — the filter drops the empty collection instead of broadcasting it — so
+    // accept either no output or an explicit empty collection.
+    let actual = if test_case.expected_rows == 0 {
+        recv_next_json_or(&mut output, timeout_duration, expected.clone()).await
+    } else {
+        recv_next_json(&mut output, timeout_duration).await
+    };
     assert_eq!(
         normalize_json(actual),
         normalize_json(expected),
