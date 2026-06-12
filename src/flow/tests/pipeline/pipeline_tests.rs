@@ -1168,6 +1168,119 @@ async fn pipeline_table_driven_queries() {
                 },
             ],
         },
+        // ========== Cross-type numeric equality (SQL eval layer) ==========
+        TestCase {
+            name: "where_float64_eq_int64_literal",
+            sql: "SELECT * FROM stream WHERE speed = 0",
+            input_data: vec![
+                (
+                    "speed".to_string(),
+                    vec![
+                        Value::Float64(0.0),
+                        Value::Float64(1.0),
+                        Value::Float64(0.5),
+                    ],
+                ),
+                (
+                    "name".to_string(),
+                    vec![
+                        Value::String("a".into()),
+                        Value::String("b".into()),
+                        Value::String("c".into()),
+                    ],
+                ),
+            ],
+            expected_rows: 1,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "speed".to_string(),
+                    expected_values: vec![Value::Float64(0.0)],
+                },
+                ColumnCheck {
+                    expected_name: "name".to_string(),
+                    expected_values: vec![Value::String("a".into())],
+                },
+            ],
+        },
+        TestCase {
+            name: "where_float64_neq_int64_literal",
+            sql: "SELECT * FROM stream WHERE speed != 1",
+            input_data: vec![
+                (
+                    "speed".to_string(),
+                    vec![
+                        Value::Float64(0.0),
+                        Value::Float64(1.0),
+                        Value::Float64(2.0),
+                    ],
+                ),
+                (
+                    "id".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                    ],
+                ),
+            ],
+            expected_rows: 2,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "speed".to_string(),
+                    expected_values: vec![Value::Float64(0.0), Value::Float64(2.0)],
+                },
+                ColumnCheck {
+                    expected_name: "id".to_string(),
+                    expected_values: vec![Value::Int64(1), Value::Int64(3)],
+                },
+            ],
+        },
+        TestCase {
+            name: "simple_case_operand_cross_type",
+            sql: "SELECT CASE speed WHEN 0 THEN 'zero' WHEN 1 THEN 'one' ELSE 'other' END AS label FROM stream",
+            input_data: vec![(
+                "speed".to_string(),
+                vec![
+                    Value::Float64(0.0),
+                    Value::Float64(1.0),
+                    Value::Float64(2.0),
+                ],
+            )],
+            expected_rows: 3,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "label".to_string(),
+                expected_values: vec![
+                    Value::String("zero".into()),
+                    Value::String("one".into()),
+                    Value::String("other".into()),
+                ],
+            }],
+        },
+        TestCase {
+            name: "array_contains_cross_type_numeric",
+            sql: "SELECT array_contains(array_create(speed), 0) AS found FROM stream",
+            input_data: vec![(
+                "speed".to_string(),
+                vec![
+                    Value::Float64(0.0),
+                    Value::Float64(1.0),
+                    Value::Float64(2.0),
+                ],
+            )],
+            expected_rows: 3,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "found".to_string(),
+                expected_values: vec![
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(false),
+                ],
+            }],
+        },
     ];
 
     for test_case in test_cases {

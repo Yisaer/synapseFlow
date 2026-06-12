@@ -1,12 +1,10 @@
-use std::cmp::Ordering;
-
 use super::util::{bool_arg, normalize_state_value};
 use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
-use crate::expr::value_compare::compare_values;
+use crate::expr::value_compare;
 use datatypes::{ConcreteDatatype, Value};
 
 pub struct ChangeCaptureFunction;
@@ -143,7 +141,7 @@ impl StatefulFunctionInstance for ChangeCaptureInstance {
 
         if changed {
             let to_target = match input.args.get(3) {
-                Some(target) => compare_values(monitor, target) == Some(Ordering::Equal),
+                Some(target) => value_compare::values_equal(monitor, target),
                 None => true,
             };
             if to_target {

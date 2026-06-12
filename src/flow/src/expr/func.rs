@@ -320,7 +320,9 @@ impl BinaryFunc {
                 } else if left.is_null() || right.is_null() {
                     Ok(Value::Bool(false))
                 } else {
-                    Ok(Value::Bool(left == right))
+                    Ok(Value::Bool(super::value_compare::values_equal(
+                        &left, &right,
+                    )))
                 }
             }
             Self::NotEq => {
@@ -330,7 +332,9 @@ impl BinaryFunc {
                 } else if left.is_null() || right.is_null() {
                     Ok(Value::Bool(true))
                 } else {
-                    Ok(Value::Bool(left != right))
+                    Ok(Value::Bool(!super::value_compare::values_equal(
+                        &left, &right,
+                    )))
                 }
             }
             Self::Lt => Ok(Value::Bool(
@@ -1242,6 +1246,57 @@ mod tests {
                 .eval_binary(Value::Int64(42), Value::Int64(43))
                 .unwrap(),
             Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn eq_coerces_across_numeric_types() {
+        // Float vs int literal must compare by value (regression: a Float64
+        // signal compared with an integer literal, e.g. `speed = 0`).
+        let t = Value::Bool(true);
+        let f = Value::Bool(false);
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Float64(0.0), Value::Int64(0))
+                .unwrap(),
+            t
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Int64(1), Value::Float64(1.0))
+                .unwrap(),
+            t
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Float64(0.5), Value::Int64(0))
+                .unwrap(),
+            f
+        );
+        assert_eq!(
+            BinaryFunc::NotEq
+                .eval_binary(Value::Float64(0.0), Value::Int64(0))
+                .unwrap(),
+            f
+        );
+        // same-type equality still works
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Int64(3), Value::Int64(3))
+                .unwrap(),
+            t
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::String("a".into()), Value::String("a".into()))
+                .unwrap(),
+            t
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::String("a".into()), Value::String("b".into()))
+                .unwrap(),
+            f
         );
     }
 

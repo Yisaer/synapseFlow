@@ -1,12 +1,10 @@
-use std::cmp::Ordering;
-
 use super::util::{bool_arg, normalize_state_value};
 use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
-use crate::expr::value_compare::compare_values;
+use crate::expr::value_compare;
 use datatypes::{BooleanType, ConcreteDatatype, Value};
 
 pub struct ChangeToFunction;
@@ -126,7 +124,7 @@ impl StatefulFunctionInstance for ChangeToInstance {
         let changed = self.previous != normalized;
         self.previous = normalized;
 
-        let hit = changed && compare_values(value, target) == Some(Ordering::Equal);
+        let hit = changed && value_compare::values_equal(value, target);
         Ok(Value::Bool(hit))
     }
 }
@@ -274,7 +272,7 @@ mod tests {
         let mut instance = function.create_instance();
 
         // ignore_null=false: NULL participates as a value, target is NULL ->
-        // NULL never matches via compare_values, but state advances to NULL.
+        // NULL never matches via values_equal, but state advances to NULL.
         assert_eq!(
             eval(
                 &mut instance,

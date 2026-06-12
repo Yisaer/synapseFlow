@@ -2,9 +2,8 @@ use super::helpers::*;
 use crate::catalog::FunctionDef;
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
-use crate::expr::value_compare::compare_values;
+use crate::expr::value_compare;
 use datatypes::{ConcreteDatatype, ListValue, Value};
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -222,32 +221,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
     if left.is_null() || right.is_null() {
         return left.is_null() && right.is_null();
     }
-
-    if left == right {
-        return true;
-    }
-
-    if is_numeric_value(left) && is_numeric_value(right) {
-        return compare_values(left, right) == Some(Ordering::Equal);
-    }
-
-    false
-}
-
-fn is_numeric_value(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Float32(_)
-            | Value::Float64(_)
-            | Value::Int8(_)
-            | Value::Int16(_)
-            | Value::Int32(_)
-            | Value::Int64(_)
-            | Value::Uint8(_)
-            | Value::Uint16(_)
-            | Value::Uint32(_)
-            | Value::Uint64(_)
-    )
+    value_compare::values_equal(left, right)
 }
 
 fn array_value_with_datatype(items: Vec<Value>, datatype: Arc<ConcreteDatatype>) -> Value {
