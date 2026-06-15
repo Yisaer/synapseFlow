@@ -293,8 +293,8 @@ jobs:
           toolchain: ${{ matrix.sanitizer == 'stack' && 'stable' || 'nightly-2026-04-29' }}
           components: rust-src
 
-      - name: Install lld
-        run: sudo apt-get update && sudo apt-get install -y lld
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lld protobuf-compiler
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

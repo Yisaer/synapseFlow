@@ -166,8 +166,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (expected_multiset, expect_output) = match window_mode {
                 WindowMode::None => {
                     let diff = multiset_diff(&current_multiset, &previous_results);
+                    let is_empty = diff.is_empty();
                     previous_results = current_multiset;
-                    (diff, true)
+                    (diff, !is_empty)
                 }
                 WindowMode::Count { size } => {
                     let should_emit = (row_index + 1) % size == 0;
@@ -176,7 +177,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         HashMap::new()
                     };
-                    (expected, should_emit)
+                    let expected_empty = expected.is_empty();
+                    (expected, should_emit && !expected_empty)
                 }
             };
 
