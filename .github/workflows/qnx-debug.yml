@@ -119,6 +119,8 @@ jobs:
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
           QNX_BASELINE: ${{ inputs.qnx_baseline || 'com.qnx.qnx800' }}
           QNX_MIRROR_BASELINE: ${{ inputs.qnx_mirror_baseline || 'qnx800' }}
+          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
+          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -126,15 +128,24 @@ jobs:
             -addLicenseKey "$QNX_LICENSE_KEY" \
             -listLicenseKeys
 
+          if [ -z "$QNX_MYQNX_USER" ] || [ -z "$QNX_MYQNX_PASSWORD" ]; then
+            echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD secrets are required to mirror QNX SDP packages." >&2
+            exit 1
+          fi
+
           "$QNX_QSC_BIN" \
-            -mirrorBaseline "$QNX_MIRROR_BASELINE"
+            -mirrorBaseline "$QNX_MIRROR_BASELINE" \
+            -myqnx.user "$QNX_MYQNX_USER" \
+            -myqnx.password "$QNX_MYQNX_PASSWORD"
 
           "$QNX_QSC_BIN" \
             -cleanInstall \
             -destination "$QNX_INSTALL_DIR" \
             -installBaseline "$QNX_BASELINE" \
             -useInstallationVariant lic.buildserver=true \
-            -listLicenseKeys
+            -listLicenseKeys \
+            -myqnx.user "$QNX_MYQNX_USER" \
+            -myqnx.password "$QNX_MYQNX_PASSWORD"
 
       - name: Locate QNX environment
         run: |
