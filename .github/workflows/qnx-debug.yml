@@ -1,0 +1,178 @@
+name: QNX Debug Build
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      qnx_target:
+        description: QNX Rust target to build
+        required: true
+        default: x86_64-pc-nto-qnx800
+        type: choice
+        options:
+          - x86_64-pc-nto-qnx800
+          - aarch64-unknown-nto-qnx800
+      qnx_baseline:
+        description: QNX SDP baseline package
+        required: true
+        default: com.qnx.qnx800
+        type: string
+      qsc_installer_url:
+        description: QNX Software Center Linux installer URL
+        required: true
+        default: https://www.qnx.com/download/download/79441/qnx-setup-2.0.4-202501021438-linux.run
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_HOME: /home/runner/.cargo
+  CARGO_INCREMENTAL: 0
+  QNX_INSTALL_DIR: /home/runner/qnx800
+  QNX_QSC_DIR: /home/runner/qnxsoftwarecenter
+  QNX_RUST_TOOLCHAIN: qnx
+
+jobs:
+  qnx-debug-build:
+    name: QNX debug build (${{ inputs.qnx_target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            m4 \
+            protobuf-compiler \
+            unzip
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: qnx-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            qnx-cargo-${{ runner.os }}-
+
+      - name: Install QNX Software Center
+        env:
+          QSC_INSTALLER_URL: ${{ inputs.qsc_installer_url }}
+        run: |
+          set -euo pipefail
+
+          installer="$RUNNER_TEMP/qnx-setup-linux.run"
+          curl --fail --location --retry 3 --output "$installer" "$QSC_INSTALLER_URL"
+          if file "$installer" | grep -qiE 'html|text'; then
+            echo "Downloaded QNX Software Center installer does not look executable." >&2
+            echo "Check qsc_installer_url or provide an authenticated QNX installer URL." >&2
+            file "$installer" >&2
+            exit 1
+          fi
+          chmod +x "$installer"
+
+          "$installer" force-override disable-auto-start agree-to-license-terms "$QNX_QSC_DIR"
+
+          qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"
+          if [ ! -x "$qsc_bin" ]; then
+            qsc_bin="$(find "$QNX_QSC_DIR" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
+          fi
+          if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
+            echo "qnxsoftwarecenter_clt was not found under $QNX_QSC_DIR" >&2
+            find "$QNX_QSC_DIR" -maxdepth 4 -type f | sort >&2
+            exit 1
+          fi
+
+          qsc_dir="$(dirname "$qsc_bin")"
+          echo "$qsc_dir" >> "$GITHUB_PATH"
+          echo "QNX_QSC_BIN=$qsc_bin" >> "$GITHUB_ENV"
+
+      - name: Install QNX SDP
+        env:
+          QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
+          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          QNX_BASELINE: ${{ inputs.qnx_baseline }}
+        run: |
+          set -euo pipefail
+
+          "$QNX_QSC_BIN" \
+            -addLicenseKey "$QNX_LICENSE_KEY" \
+            -listLicenseKeys
+
+          "$QNX_QSC_BIN" \
+            -cleanInstall \
+            -destination "$QNX_INSTALL_DIR" \
+            -installBaseline "$QNX_BASELINE" \
+            -useInstallationVariant lic.buildserver=true \
+            -listLicenseKeys
+
+      - name: Locate QNX environment
+        run: |
+          set -euo pipefail
+
+          env_script="$(find "$QNX_INSTALL_DIR" -type f -name qnxsdp-env.sh | head -n 1)"
+          if [ -z "$env_script" ]; then
+            echo "qnxsdp-env.sh was not found under $QNX_INSTALL_DIR" >&2
+            find "$QNX_INSTALL_DIR" -maxdepth 4 -type f | sort >&2
+            exit 1
+          fi
+
+          echo "QNX_ENV_SCRIPT=$env_script" >> "$GITHUB_ENV"
+
+      - name: Link QNX Rust toolchain
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "$QNX_ENV_SCRIPT"
+
+          rustc_path="$(command -v rustc)"
+          rust_root="$(dirname "$(dirname "$rustc_path")")"
+          rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$rust_root"
+
+          cargo +"$QNX_RUST_TOOLCHAIN" -V
+          rustc +"$QNX_RUST_TOOLCHAIN" -Vv
+
+      - name: Build veloFlux debug binary for QNX
+        env:
+          QNX_TARGET: ${{ inputs.qnx_target }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "$QNX_ENV_SCRIPT"
+
+          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN --target $QNX_TARGET"
+
+      - name: Inspect QNX binary
+        env:
+          QNX_TARGET: ${{ inputs.qnx_target }}
+        run: |
+          set -euo pipefail
+
+          bin="target/$QNX_TARGET/debug/veloflux"
+          test -x "$bin"
+          file "$bin"
+
+      - name: Upload QNX debug binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-qnx-${{ inputs.qnx_target }}-debug
+          path: target/${{ inputs.qnx_target }}/debug/veloflux
+          if-no-files-found: error
