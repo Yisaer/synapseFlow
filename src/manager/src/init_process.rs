@@ -184,6 +184,7 @@ mod tests {
             decoder: DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 

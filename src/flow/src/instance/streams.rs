@@ -268,6 +268,7 @@ impl FlowInstance {
                 let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
                 config.flow_instance_id = Arc::<str>::from(self.id.as_str());
                 config.set_decoder(definition.decoder().clone());
+                config.use_projected_messages = definition.use_projected_messages();
                 struct MqttSharedStreamConnectorFactory {
                     stream_id: String,
                     flow_instance_id: Arc<str>,
@@ -355,6 +356,7 @@ impl FlowInstance {
             StreamProps::Mock(_) => {
                 let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
                 config.set_decoder(definition.decoder().clone());
+                config.use_projected_messages = definition.use_projected_messages();
 
                 struct MockSharedStreamConnectorFactory {
                     stream_id: String,

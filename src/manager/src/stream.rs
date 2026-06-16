@@ -53,6 +53,10 @@ pub struct CreateStreamRequest {
     pub eventtime: Option<EventtimeConfigRequest>,
     #[serde(default)]
     pub sampler: Option<SamplerConfig>,
+    /// When true, the shared stream decoder produces projected (sparse) messages
+    /// instead of full-width dense messages. Default is false.
+    #[serde(default)]
+    pub use_projected_messages: bool,
 }
 
 fn stream_busy_response(name: &str) -> axum::response::Response {
@@ -106,6 +110,8 @@ pub struct UpsertStreamRequest {
     pub eventtime: Option<EventtimeConfigRequest>,
     #[serde(default)]
     pub sampler: Option<SamplerConfig>,
+    #[serde(default)]
+    pub use_projected_messages: bool,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -480,6 +486,8 @@ pub struct StreamDefinitionSpec {
     pub eventtime: Option<EventtimeConfigRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampler: Option<SamplerConfig>,
+    #[serde(default)]
+    pub use_projected_messages: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -600,6 +608,7 @@ pub async fn create_stream_handler(
     if let Some(sampler) = &req.sampler {
         definition = definition.with_sampler(sampler.clone());
     }
+    definition = definition.with_projected_messages(req.use_projected_messages);
 
     let mut created = Vec::new();
     let mut first_info = None;
@@ -749,6 +758,7 @@ pub async fn describe_stream_handler(
                 eventtime_type: eventtime.eventtime_type().to_string(),
             }),
         sampler: definition.sampler().cloned(),
+        use_projected_messages: definition.use_projected_messages(),
     };
 
     (
@@ -913,6 +923,7 @@ pub async fn upsert_stream_handler(
         decoder: req.decoder,
         eventtime: req.eventtime,
         sampler: req.sampler,
+        use_projected_messages: req.use_projected_messages,
     };
     new_req.normalize();
 
@@ -1000,6 +1011,7 @@ pub async fn upsert_stream_handler(
     if let Some(sampler) = &new_req.sampler {
         definition = definition.with_sampler(sampler.clone());
     }
+    definition = definition.with_projected_messages(new_req.use_projected_messages);
 
     // Replace on every instance.
     let mut replaced_instances = Vec::new();
@@ -1822,6 +1834,7 @@ mod tests {
             decoder: DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 
@@ -1859,6 +1872,7 @@ mod tests {
             decoder: DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 
@@ -1899,6 +1913,7 @@ mod tests {
             decoder: DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 
@@ -1925,6 +1940,7 @@ mod tests {
             decoder: DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 

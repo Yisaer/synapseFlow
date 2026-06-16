@@ -37,7 +37,7 @@ jobs:
       - name: Run Criterion benches
         run: |
           set -euo pipefail
-          cargo bench --bench pipeline_e2e
+          cargo bench --bench pipeline_e2e --bench shared_stream_projected
 
       - name: Render bench summary
         run: |

@@ -3,12 +3,113 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+/// Layout mapping between source-schema logical indices and compact physical indices
+/// for projected (sparse) messages.
+///
+/// This struct is cheaply clonable via `Arc`; it is shared across all messages
+/// decoded within the same projection generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedLayout {
+    /// source-schema logical index -> compact physical index.
+    /// `None` means the column is not materialised in this message.
+    pub logical_to_physical: Arc<[Option<usize>]>,
+    /// compact physical index -> source-schema logical index.
+    /// Provides O(1) iteration over materialised columns for `entries()`.
+    pub physical_to_logical: Arc<[usize]>,
+}
+
+impl ProjectedLayout {
+    /// Build a projected layout from a full source-schema key list and a set of
+    /// actively-decoded column names.
+    pub fn from_active_columns(schema_keys: &[Arc<str>], active_columns: &[String]) -> Self {
+        let n = schema_keys.len();
+        let mut logical_to_physical = vec![None; n];
+        let mut physical_to_logical = Vec::with_capacity(active_columns.len());
+        for col_name in active_columns {
+            if let Some(logical_idx) = schema_keys
+                .iter()
+                .position(|k| k.as_ref() == col_name.as_str())
+            {
+                logical_to_physical[logical_idx] = Some(physical_to_logical.len());
+                physical_to_logical.push(logical_idx);
+            }
+        }
+        ProjectedLayout {
+            logical_to_physical: Arc::from(logical_to_physical),
+            physical_to_logical: Arc::from(physical_to_logical),
+        }
+    }
+
+    /// Number of materialised (decoded) columns in this layout.
+    pub fn materialised_count(&self) -> usize {
+        self.physical_to_logical.len()
+    }
+}
+
+/// Physical value storage for a [`Message`].
+#[derive(Debug)]
+pub enum MessageValues {
+    /// Default dense representation: `values[i]` maps directly to source-schema column `i`.
+    Dense(Vec<Arc<Value>>),
+    /// Projected/sparse representation: only actively-decoded columns are stored.
+    /// Column lookups go through [`ProjectedLayout::logical_to_physical`].
+    Projected {
+        values: Vec<Arc<Value>>,
+        layout: Arc<ProjectedLayout>,
+    },
+}
+
+/// Iterator over [`Message`] entries, avoiding heap allocation through a concrete enum.
+pub enum MessageEntries<'a> {
+    /// Full source-schema iteration (Dense).
+    Dense(std::iter::Zip<std::slice::Iter<'a, Arc<str>>, std::slice::Iter<'a, Arc<Value>>>),
+    /// Materialised-columns-only iteration (Projected).
+    Projected {
+        keys: &'a [Arc<str>],
+        values: &'a [Arc<Value>],
+        logical_to_physical: &'a [Option<usize>],
+        physical_to_logical: std::slice::Iter<'a, usize>,
+    },
+}
+
+impl<'a> Iterator for MessageEntries<'a> {
+    type Item = (&'a str, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            MessageEntries::Dense(iter) => iter.next().map(|(k, v)| (k.as_ref(), v.as_ref())),
+            MessageEntries::Projected {
+                keys,
+                values,
+                logical_to_physical,
+                physical_to_logical,
+            } => {
+                let logical = physical_to_logical.next()?;
+                let phys = logical_to_physical[*logical].expect(
+                    "physical_to_logical entry must have a valid logical_to_physical mapping",
+                );
+                Some((keys[*logical].as_ref(), values[phys].as_ref()))
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            MessageEntries::Dense(iter) => iter.size_hint(),
+            MessageEntries::Projected {
+                physical_to_logical,
+                ..
+            } => physical_to_logical.size_hint(),
+        }
+    }
+}
+
 /// Immutable data from a single source.
 #[derive(Debug)]
 pub struct Message {
     source: Arc<str>,
     keys: Arc<[Arc<str>]>,
-    values: Vec<Arc<Value>>,
+    values: MessageValues,
 }
 
 impl Message {
@@ -29,7 +130,33 @@ impl Message {
         Self {
             source: source.into(),
             keys,
-            values,
+            values: MessageValues::Dense(values),
+        }
+    }
+
+    /// Create a projected message with compact values and a shared layout.
+    ///
+    /// `keys` must represent the full source-schema logical keys (same as for
+    /// [`new_shared_keys`]). `compact_values` contains only the actively-decoded
+    /// columns. `layout` maps between logical and physical indices.
+    pub fn new_projected(
+        source: impl Into<Arc<str>>,
+        keys: Arc<[Arc<str>]>,
+        compact_values: Vec<Arc<Value>>,
+        layout: Arc<ProjectedLayout>,
+    ) -> Self {
+        debug_assert_eq!(
+            compact_values.len(),
+            layout.materialised_count(),
+            "compact_values length must match layout materialised count"
+        );
+        Self {
+            source: source.into(),
+            keys,
+            values: MessageValues::Projected {
+                values: compact_values,
+                layout,
+            },
         }
     }
 
@@ -37,15 +164,45 @@ impl Message {
         &self.source
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.keys
-            .iter()
-            .zip(self.values.iter())
-            .map(|(k, v)| (k.as_ref(), v.as_ref()))
+    /// Returns the number of stored value slots (dense width or compact width).
+    pub fn values_len(&self) -> usize {
+        match &self.values {
+            MessageValues::Dense(v) => v.len(),
+            MessageValues::Projected { values, .. } => values.len(),
+        }
     }
 
+    /// Return the source-schema logical index for the given column name, if present.
+    pub fn key_index(&self, column: &str) -> Option<usize> {
+        self.keys.iter().position(|k| k.as_ref() == column)
+    }
+
+    /// Iterate over decoded columns.
+    ///
+    /// - Dense: yields all source-schema columns.
+    /// - Projected: yields **only** materialised (actively-decoded) columns.
+    pub fn entries(&self) -> MessageEntries<'_> {
+        match &self.values {
+            MessageValues::Dense(v) => MessageEntries::Dense(self.keys.iter().zip(v.iter())),
+            MessageValues::Projected { values, layout } => MessageEntries::Projected {
+                keys: &self.keys,
+                values,
+                logical_to_physical: &layout.logical_to_physical,
+                physical_to_logical: layout.physical_to_logical.iter(),
+            },
+        }
+    }
+
+    /// Look up a (key, value) pair by source-schema logical `index`.
     pub fn entry_by_index(&self, index: usize) -> Option<(&Arc<str>, &Arc<Value>)> {
-        self.keys.get(index).zip(self.values.get(index))
+        match &self.values {
+            MessageValues::Dense(v) => self.keys.get(index).zip(v.get(index)),
+            MessageValues::Projected { values, layout } => {
+                let phys = layout.logical_to_physical.get(index).copied()??;
+                let value = values.get(phys)?;
+                self.keys.get(index).map(|k| (k, value))
+            }
+        }
     }
 
     pub fn entry_by_name(&self, column: &str) -> Option<(&Arc<str>, &Arc<Value>)> {
@@ -55,15 +212,24 @@ impl Message {
             .and_then(|idx| self.entry_by_index(idx))
     }
 
+    /// Look up a value by source-schema column name.
     pub fn value(&self, column: &str) -> Option<&Value> {
-        self.keys
-            .iter()
-            .position(|k| k.as_ref() == column)
-            .and_then(|idx| self.values.get(idx).map(|v| v.as_ref()))
+        let idx = self.keys.iter().position(|k| k.as_ref() == column)?;
+        self.value_by_index(idx)
     }
 
+    /// Look up a value by source-schema logical `index`.
+    ///
+    /// For projected messages this goes through [`ProjectedLayout::logical_to_physical`].
+    /// If the column was not decoded in this projection generation, `None` is returned.
     pub fn value_by_index(&self, index: usize) -> Option<&Value> {
-        self.values.get(index).map(|v| v.as_ref())
+        match &self.values {
+            MessageValues::Dense(v) => v.get(index).map(|v| v.as_ref()),
+            MessageValues::Projected { values, layout } => {
+                let phys = layout.logical_to_physical.get(index).copied()??;
+                values.get(phys).map(|v: &Arc<Value>| v.as_ref())
+            }
+        }
     }
 }
 
@@ -229,7 +395,7 @@ impl Tuple {
             .as_ref()
             .map(|aff| aff.index.len())
             .unwrap_or(0);
-        let msg_len: usize = self.messages.iter().map(|msg| msg.values.len()).sum();
+        let msg_len: usize = self.messages.iter().map(|msg| msg.values_len()).sum();
         aff_len + msg_len
     }
 

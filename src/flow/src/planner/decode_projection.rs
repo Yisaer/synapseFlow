@@ -1,4 +1,6 @@
+use crate::model::ProjectedLayout;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldPathSegment {
@@ -64,6 +66,10 @@ pub enum ProjectionNode {
 pub struct DecodeProjection {
     version: u64,
     columns: BTreeMap<String, ProjectionNode>,
+    /// Pre-computed projected layout for the schema this projection applies to.
+    /// Set by the shared stream when decoding columns change; `None` for other
+    /// usage (e.g. planner projections that don't need sparse messages).
+    projected_layout: Option<Arc<ProjectedLayout>>,
 }
 
 impl DecodeProjection {
@@ -71,6 +77,17 @@ impl DecodeProjection {
     /// refresh any cached decode state.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Attach a pre-computed projected layout for sparse message output.
+    pub fn with_projected_layout(mut self, layout: Arc<ProjectedLayout>) -> Self {
+        self.projected_layout = Some(layout);
+        self
+    }
+
+    /// The projected layout, if one was attached.
+    pub fn projected_layout(&self) -> Option<&Arc<ProjectedLayout>> {
+        self.projected_layout.as_ref()
     }
 
     pub fn columns(&self) -> &BTreeMap<String, ProjectionNode> {
@@ -91,6 +108,7 @@ impl DecodeProjection {
         let mut projection = Self {
             version,
             columns: BTreeMap::new(),
+            projected_layout: None,
         };
         for column in columns {
             projection.mark_column_all(column);
@@ -171,6 +189,7 @@ impl Default for DecodeProjection {
         Self {
             version: 1,
             columns: BTreeMap::new(),
+            projected_layout: None,
         }
     }
 }

@@ -79,6 +79,9 @@ uuid = "1"
 name = "pipeline_e2e"
 harness = false
 
+[[bench]]
+name = "shared_stream_projected"
+harness = false
 [[bin]]
 name = "veloflux"
 path = "src/main.rs"

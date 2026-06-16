@@ -1081,6 +1081,7 @@ mod tests {
             decoder: crate::stream::DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 
@@ -1100,6 +1101,7 @@ mod tests {
             decoder: crate::stream::DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 

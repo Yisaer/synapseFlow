@@ -2,6 +2,7 @@ use crate::backpressure_hub::BackpressureHub;
 use crate::catalog::StreamDecoderConfig;
 use crate::codec::{MergerRegistry, RecordDecoder};
 use crate::connector::SourceConnector;
+use crate::model::ProjectedLayout;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::processor::base::{
@@ -282,6 +283,9 @@ pub struct SharedStreamConfig {
     pub connector: Option<SharedStreamConnectorSpec>,
     pub channel_capacity: usize,
     pub sampler: Option<SamplerConfig>,
+    /// When true, the shared stream decoder produces projected (sparse) messages
+    /// instead of full-width dense messages. Default is false (backward-compatible).
+    pub use_projected_messages: bool,
 }
 
 impl SharedStreamConfig {
@@ -294,6 +298,7 @@ impl SharedStreamConfig {
             connector: None,
             channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             sampler: None,
+            use_projected_messages: false,
         }
     }
 
@@ -351,6 +356,11 @@ impl SharedStreamConfig {
 
     pub fn set_sampler(&mut self, sampler: SamplerConfig) {
         self.sampler = Some(sampler);
+    }
+
+    pub fn with_projected_messages(mut self, enabled: bool) -> Self {
+        self.use_projected_messages = enabled;
+        self
     }
 }
 
@@ -461,6 +471,7 @@ struct SharedStreamInner {
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
     sampler: Option<SamplerConfig>,
+    use_projected_messages: bool,
     merger_registry: Arc<MergerRegistry>,
     spawner: TaskSpawner,
     runtime_lock: Mutex<()>,
@@ -541,6 +552,7 @@ impl SharedStreamInner {
             connector,
             channel_capacity,
             sampler,
+            use_projected_messages,
         } = config;
         let data_channel_capacity = normalize_channel_capacity(channel_capacity);
         let control_channel_capacity = DEFAULT_CONTROL_CHANNEL_CAPACITY;
@@ -585,6 +597,7 @@ impl SharedStreamInner {
             connector_id,
             connector_factory,
             sampler,
+            use_projected_messages,
             merger_registry,
             spawner,
             runtime_lock: Mutex::new(()),
@@ -623,10 +636,19 @@ impl SharedStreamInner {
         guard.decoding_columns = applied.clone();
 
         let next_version = guard.decode_projection.version().saturating_add(1);
-        guard.decode_projection = Arc::new(DecodeProjection::from_top_level_columns_with_version(
-            applied.as_slice(),
-            next_version,
-        ));
+        let mut projection =
+            DecodeProjection::from_top_level_columns_with_version(applied.as_slice(), next_version);
+        if self.use_projected_messages {
+            let schema_keys: Vec<Arc<str>> = self
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|col| Arc::<str>::from(col.name.as_str()))
+                .collect();
+            let layout = Arc::new(ProjectedLayout::from_active_columns(&schema_keys, &applied));
+            projection = projection.with_projected_layout(layout);
+        }
+        guard.decode_projection = Arc::new(projection);
     }
 
     async fn ensure_started(self: &Arc<Self>) -> Result<(), SharedStreamError> {

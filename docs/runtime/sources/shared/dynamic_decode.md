@@ -161,3 +161,124 @@ This guarantees the decoder applied the projection needed by the pipeline.
    - Removing the last consumer must stop the running shared-stream runtime instance without
      removing the shared stream definition.
    - A slow consumer must backpressure shared-stream fan-out instead of losing messages.
+
+---
+
+# Projected (Sparse) Message Encoding
+
+## Motivation
+
+Dynamic decode projection already ensures the shared stream decoder only **decodes** the union of
+required columns across active consumers. However, the resulting `Message` values container was
+still **dense** (full source-schema width), with un-decoded slots filled with `Value::Null`:
+
+- For schemas like CAN / GBF with hundreds of columns, even when only 3 columns are actively
+  decoded, every `Message` allocates, initialises, writes, and drops a full-width `Vec<Arc<Value>>`.
+- Downstream processors and encoders iterate across this full-width structure, paying per-message
+  cost proportional to schema width rather than active column count.
+
+Projected message encoding addresses this by introducing a **sparse physical representation**
+while keeping the source-schema logical index space unchanged.
+
+## Design
+
+### `ProjectedLayout`
+
+A shared mapping table computed once per projection generation:
+
+```rust
+pub struct ProjectedLayout {
+    /// source-schema logical index → compact physical index (None = not decoded)
+    pub logical_to_physical: Arc<[Option<usize>]>,
+    /// compact physical index → source-schema logical index
+    pub physical_to_logical: Arc<[usize]>,
+}
+```
+
+### `MessageValues`
+
+```rust
+pub enum MessageValues {
+    /// Default: values[i] = source-schema column i (existing behaviour).
+    Dense(Vec<Arc<Value>>),
+    /// Sparse: only actively-decoded columns stored.
+    Projected {
+        values: Vec<Arc<Value>>,
+        layout: Arc<ProjectedLayout>,
+    },
+}
+```
+
+### Key invariants
+
+- **`keys` stays full source-schema width.** `Message.keys` always represents the complete source
+  schema, regardless of physical storage mode.
+- **`entry_by_index(index)` and `value_by_index(index)` accept source-schema logical indices.**
+  For projected messages, the lookup translates via `logical_to_physical[index]`.
+- **`entries()` enumerates only materialised columns** for projected messages. It does not
+  full-expand to schema width.
+- **No per-row allocation.** The `ProjectedLayout` is built once when the active decode projection
+  changes and shared via `Arc` across all messages within the same generation.
+- **Layout lifecycle is per-generation.** Each time the active decode columns change
+  (pipeline attach/detach), a new `ProjectedLayout` is computed and attached to a new
+  `DecodeProjection`. Messages decoded with the old layout retain a reference to it, so
+  in-flight messages in processor queues are never mis-interpreted.
+
+### Example
+
+Source schema `[a, b, c]` (logical indices 0, 1, 2):
+
+| Event | Active decode | layout.logical_to_physical | Message values |
+|---|---|---|---|
+| A starts (needs a) | `[a]` | `[Some(0), None, None]` | `[a_val]` |
+| B starts (needs b) | `[a, b]` | `[Some(0), Some(1), None]` | `[a_val, b_val]` |
+| C starts (needs c) | `[a, b, c]` | `[Some(0), Some(1), Some(2)]` | `[a_val, b_val, c_val]` |
+| B stops | `[a, c]` | `[Some(0), None, Some(1)]` | `[a_val, c_val]` |
+
+Access semantics for `layout_v4` (`[a, c]`):
+- `value_by_index(0)` → physical 0 → `a_val`
+- `value_by_index(1)` → `None` (column b not decoded)
+- `value_by_index(2)` → physical 1 → `c_val`
+
+### Layout computation
+
+The `ProjectedLayout` is computed inside `SharedStreamInner::set_applied_decoding_columns`, which
+is called every time a pipeline attaches or detaches (changing the union required columns). It is
+stored on the `DecodeProjection` via `with_projected_layout()`. The decoder reads it from the
+projection; if present it produces `MessageValues::Projected`, otherwise it falls back to Dense.
+
+This means the layout is recomputed only when the column set changes — not on every inbound
+payload.
+
+## Feature flag
+
+The optimisation is gated by `SharedStreamConfig.use_projected_messages` (default `false`).
+
+When enabled, the shared stream runtime attaches the projected layout to the decode projection.
+The decoder then outputs compact `MessageValues::Projected`. When disabled, the existing
+full-width Dense behaviour is preserved.
+
+Exposed via REST API:
+
+```json
+{
+  "name": "my_stream",
+  "type": "mqtt",
+  "shared": true,
+  "use_projected_messages": true,
+  ...
+}
+```
+
+## Compatibility
+
+- **`ColumnRef::ByIndex(source, index)`** continues to work unchanged. The index space is the
+  full source schema.
+- **Encoders** using `ByIndexProjection` access columns via `value_by_index(logical_index)` and
+  are unaffected.
+- **Encoders** iterating `Tuple::entries()` see only materialised columns in projected mode —
+  this is the intended behaviour (avoids full-width traversal).
+- **`collection_layout_normalize`** and **`output_row_accessor`** use `key_index()` to resolve
+  source-schema logical indices, working correctly for both Dense and Projected.
+- **Non-decoded columns** return `None` from `value_by_index` / `value`, matching the semantics
+  of "column was never decoded" rather than "decoded as Null".

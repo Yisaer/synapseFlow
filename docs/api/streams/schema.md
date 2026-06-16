@@ -71,6 +71,9 @@ Note: current implementation does not populate `shared_stream` in this endpoint.
 - `decoder: { type: string, props: object }`
 - `props: object` (connector-specific stream properties)
 - Optional: `eventtime: { column: string, type: string }`
+- `use_projected_messages: boolean` (default `false`; when `true`, the shared stream decoder
+  produces sparse messages that only store actively-decoded columns. See
+  `docs/runtime/sources/shared/dynamic_decode.md` for details.)
 
 ### `SharedStreamItem`
 
