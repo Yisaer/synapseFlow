@@ -1,6 +1,11 @@
 name: QNX SDP Image
 
 on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - .github/qnx-sdp-image/**
+      - .github/workflows/qnx-sdp-image.yml
   workflow_dispatch:
     inputs:
       image_tag:
