@@ -97,7 +97,15 @@ jobs:
             --output "$RUNNER_TEMP/qnx-login-response.html" \
             https://www.qnx.com/account/login.html
 
-          curl --fail --location --retry 3 --cookie "$cookie_jar" --output "$installer" "$QSC_INSTALLER_URL"
+          curl --fail --location --ipv4 \
+            --connect-timeout 30 \
+            --retry 6 \
+            --retry-delay 10 \
+            --retry-max-time 420 \
+            --retry-all-errors \
+            --cookie "$cookie_jar" \
+            --output "$installer" \
+            "$QSC_INSTALLER_URL"
           if file "$installer" | grep -qiE 'html|text'; then
             echo "Downloaded QNX Software Center installer does not look executable." >&2
             echo "Check qsc_installer_url or the QNX download credentials." >&2
