@@ -18,10 +18,10 @@ on:
         required: true
         default: com.qnx.qnx800
         type: string
-      qsc_installer_url:
-        description: QNX Software Center Linux installer URL
+      qnx_mirror_baseline:
+        description: QNX SDP mirror baseline id
         required: true
-        default: https://www.qnx.com/download/download/79441/qnx-setup-2.0.4-202501021438-linux.run
+        default: qnx800
         type: string
 
 concurrency:
@@ -37,7 +37,7 @@ env:
   QNX_QSC_DIR: /home/runner/qnxsoftwarecenter
   QNX_RUST_TOOLCHAIN: qnx
   QNX_DEFAULT_BASELINE: com.qnx.qnx800
-  QNX_DEFAULT_INSTALLER_URL: https://www.qnx.com/download/download/79441/qnx-setup-2.0.4-202501021438-linux.run
+  QNX_DEFAULT_MIRROR_BASELINE: qnx800
   QNX_DEFAULT_TARGET: x86_64-pc-nto-qnx800
 
 jobs:
@@ -118,12 +118,16 @@ jobs:
           QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
           QNX_BASELINE: ${{ inputs.qnx_baseline || 'com.qnx.qnx800' }}
+          QNX_MIRROR_BASELINE: ${{ inputs.qnx_mirror_baseline || 'qnx800' }}
         run: |
           set -euo pipefail
 
           "$QNX_QSC_BIN" \
             -addLicenseKey "$QNX_LICENSE_KEY" \
             -listLicenseKeys
+
+          "$QNX_QSC_BIN" \
+            -mirrorBaseline "$QNX_MIRROR_BASELINE"
 
           "$QNX_QSC_BIN" \
             -cleanInstall \
