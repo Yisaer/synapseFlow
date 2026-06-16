@@ -165,8 +165,21 @@ jobs:
           # shellcheck disable=SC1090
           source "$QNX_ENV_SCRIPT"
 
-          rustc_path="$(command -v rustc)"
-          rust_root="$(dirname "$(dirname "$rustc_path")")"
+          rust_root=""
+          while IFS= read -r rustc_path; do
+            candidate="$(dirname "$(dirname "$rustc_path")")"
+            if [ -x "$candidate/bin/rustc" ] && [ -d "$candidate/lib/rustlib" ]; then
+              rust_root="$candidate"
+              break
+            fi
+          done < <(find "$QNX_HOST" "$QNX_INSTALL_DIR" -type f -name rustc -perm -111 | sort)
+
+          if [ -z "$rust_root" ]; then
+            echo "QNX Rust toolchain was not found under $QNX_HOST or $QNX_INSTALL_DIR" >&2
+            find "$QNX_HOST" "$QNX_INSTALL_DIR" -type f \( -name rustc -o -name cargo \) | sort >&2
+            exit 1
+          fi
+
           rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$rust_root"
 
           cargo +"$QNX_RUST_TOOLCHAIN" -V
