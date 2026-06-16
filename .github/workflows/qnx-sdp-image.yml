@@ -30,6 +30,9 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-sdp
+  QNX_SDP_IMAGE_TAG: ${{ inputs.image_tag || '8.0' }}
+  QNX_BASELINE: ${{ inputs.qnx_baseline || 'com.qnx.qnx800' }}
+  QNX_MIRROR_BASELINE: ${{ inputs.qnx_mirror_baseline || 'qnx800' }}
 
 jobs:
   build-qnx-sdp-image:
@@ -60,11 +63,11 @@ jobs:
           file: .github/qnx-sdp-image/Dockerfile
           push: true
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
+            ${{ env.IMAGE_NAME }}:${{ env.QNX_SDP_IMAGE_TAG }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           build-args: |
-            QNX_BASELINE=${{ inputs.qnx_baseline }}
-            QNX_MIRROR_BASELINE=${{ inputs.qnx_mirror_baseline }}
+            QNX_BASELINE=${{ env.QNX_BASELINE }}
+            QNX_MIRROR_BASELINE=${{ env.QNX_MIRROR_BASELINE }}
           secrets: |
             qnx_installer_token=${{ secrets.QNX_INSTALLER_TOKEN }}
             qnx_license_key=${{ secrets.QNX_LICENSE_KEY }}
