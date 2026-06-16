@@ -142,7 +142,6 @@ jobs:
             -cleanInstall \
             -destination "$QNX_INSTALL_DIR" \
             -installBaseline "$QNX_BASELINE" \
-            -useInstallationVariant lic.buildserver=true \
             -listLicenseKeys \
             -myqnx.user "$QNX_MYQNX_USER" \
             -myqnx.password "$QNX_MYQNX_PASSWORD"
