@@ -36,10 +36,13 @@ env:
   QNX_INSTALL_DIR: /home/runner/qnx800
   QNX_QSC_DIR: /home/runner/qnxsoftwarecenter
   QNX_RUST_TOOLCHAIN: qnx
+  QNX_DEFAULT_BASELINE: com.qnx.qnx800
+  QNX_DEFAULT_INSTALLER_URL: https://www.qnx.com/download/download/79441/qnx-setup-2.0.4-202501021438-linux.run
+  QNX_DEFAULT_TARGET: x86_64-pc-nto-qnx800
 
 jobs:
   qnx-debug-build:
-    name: QNX debug build (${{ inputs.qnx_target }})
+    name: QNX debug build (${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -75,7 +78,7 @@ jobs:
 
       - name: Install QNX Software Center
         env:
-          QSC_INSTALLER_URL: ${{ inputs.qsc_installer_url }}
+          QSC_INSTALLER_URL: ${{ inputs.qsc_installer_url || 'https://www.qnx.com/download/download/79441/qnx-setup-2.0.4-202501021438-linux.run' }}
         run: |
           set -euo pipefail
 
@@ -109,7 +112,7 @@ jobs:
         env:
           QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
-          QNX_BASELINE: ${{ inputs.qnx_baseline }}
+          QNX_BASELINE: ${{ inputs.qnx_baseline || 'com.qnx.qnx800' }}
         run: |
           set -euo pipefail
 
@@ -152,7 +155,7 @@ jobs:
 
       - name: Build veloFlux debug binary for QNX
         env:
-          QNX_TARGET: ${{ inputs.qnx_target }}
+          QNX_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
@@ -162,7 +165,7 @@ jobs:
 
       - name: Inspect QNX binary
         env:
-          QNX_TARGET: ${{ inputs.qnx_target }}
+          QNX_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
         run: |
           set -euo pipefail
 
@@ -173,6 +176,6 @@ jobs:
       - name: Upload QNX debug binary
         uses: actions/upload-artifact@v4
         with:
-          name: veloflux-qnx-${{ inputs.qnx_target }}-debug
-          path: target/${{ inputs.qnx_target }}/debug/veloflux
+          name: veloflux-qnx-${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}-debug
+          path: target/${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}/debug/veloflux
           if-no-files-found: error
