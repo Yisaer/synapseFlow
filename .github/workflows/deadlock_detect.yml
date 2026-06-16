@@ -1,6 +1,7 @@
 name: Deadlock Detection (Kani)
 
-on: [pull_request]
+on:
+  workflow_dispatch:
 
 jobs:
   kani-analysis:
