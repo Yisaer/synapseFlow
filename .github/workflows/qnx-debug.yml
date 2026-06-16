@@ -78,37 +78,20 @@ jobs:
 
       - name: Install QNX Software Center
         env:
-          QSC_INSTALLER_URL: ${{ inputs.qsc_installer_url || 'https://www.qnx.com/download/download/79441/qnx-setup-2.0.4-202501021438-linux.run' }}
-          QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
-          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          GH_TOKEN: ${{ secrets.QNX_INSTALLER_TOKEN }}
         run: |
           set -euo pipefail
 
           installer="$RUNNER_TEMP/qnx-setup-linux.run"
-          cookie_jar="$RUNNER_TEMP/qnx-download-cookies.txt"
-          auth_return="/account/authenticate.html?id=79441&redirect=https%3A%2F%2Fsupport7.qnx.com%2Fdownload%2Fdownload%2F79441%2Fqnx-setup-2.0.4-202501021438-linux.run"
-
-          curl --fail --silent --show-error --location \
-            --cookie-jar "$cookie_jar" \
-            --form "userlogin=$QNX_SERIAL_NUMBER" \
-            --form "password=$QNX_LICENSE_KEY" \
-            --form "returnaddress=$auth_return" \
-            --request POST \
-            --output "$RUNNER_TEMP/qnx-login-response.html" \
-            https://www.qnx.com/account/login.html
-
-          curl --fail --location --ipv4 \
-            --connect-timeout 30 \
-            --retry 6 \
-            --retry-delay 10 \
-            --retry-max-time 420 \
-            --retry-all-errors \
-            --cookie "$cookie_jar" \
-            --output "$installer" \
-            "$QSC_INSTALLER_URL"
+          gh release download qnx-sdp-8-installer \
+            --repo Yisaer/qnx-private-assets \
+            --pattern qnx-setup-2.0.4-202501021438-linux.run \
+            --dir "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/qnx-setup-2.0.4-202501021438-linux.run" "$installer"
+          echo "5695a0ec8a1fd91840753b2cba86a9325f6052d4f69c757166cc61b09bcbe507  $installer" | sha256sum --check
           if file "$installer" | grep -qiE 'html|text'; then
             echo "Downloaded QNX Software Center installer does not look executable." >&2
-            echo "Check qsc_installer_url or the QNX download credentials." >&2
+            echo "Check the qnx-private-assets release asset." >&2
             file "$installer" >&2
             exit 1
           fi
