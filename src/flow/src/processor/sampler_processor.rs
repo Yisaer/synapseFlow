@@ -26,6 +26,8 @@ use tokio::time::{interval, MissedTickBehavior};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::codec::{Merger, MergerRegistry};
+use crate::shared_stream::AppliedDecodeState;
+use datatypes::Schema;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackerProps {
@@ -97,6 +99,10 @@ pub struct SamplerProcessor {
     config: SamplerConfig,
     stats: Arc<ProcessorStats>,
     merger_registry: Option<Arc<MergerRegistry>>,
+    /// Output schema used to build a fused (decode-capable) Packer merger.
+    merger_schema: Option<Arc<Schema>>,
+    /// Shared decode state for projection pushdown into the fused decode path.
+    applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
 }
 
 impl SamplerProcessor {
@@ -121,6 +127,8 @@ impl SamplerProcessor {
             config,
             stats: Arc::new(ProcessorStats::default()),
             merger_registry: None,
+            merger_schema: None,
+            applied_decode_state: None,
         }
     }
 
@@ -135,6 +143,21 @@ impl SamplerProcessor {
 
     pub fn set_merger_registry(&mut self, registry: Arc<MergerRegistry>) {
         self.merger_registry = Some(registry);
+    }
+
+    /// Provide the output schema used to construct a Packer merger (required for
+    /// mergers that build an embedded decoder for the fused path).
+    pub fn set_merger_schema(&mut self, schema: Arc<Schema>) {
+        self.merger_schema = Some(schema);
+    }
+
+    /// Provide shared decode state so the fused decode path can apply the
+    /// current column projection.
+    pub(crate) fn set_applied_decode_state(
+        &mut self,
+        state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
+    ) {
+        self.applied_decode_state = Some(state);
     }
 }
 
@@ -164,12 +187,19 @@ impl Processor for SamplerProcessor {
         );
 
         let merger_registry = self.merger_registry.clone();
+        let merger_schema = self.merger_schema.clone();
+        let applied_decode_state = self.applied_decode_state.clone();
 
         ProcessorStart::ready(spawner.spawn(async move {
             let mut ticker = interval(emit_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            let mut strategy_state = StrategyState::new(strategy, merger_registry)?;
+            let mut strategy_state = StrategyState::new(
+                strategy,
+                merger_registry,
+                merger_schema,
+                applied_decode_state,
+            )?;
             let mut control_active = control_active;
 
             loop {
@@ -281,14 +311,23 @@ impl Processor for SamplerProcessor {
 }
 
 enum StrategyState {
-    Latest { latest: Option<StreamData> },
-    Packer { merger: Box<dyn Merger> },
+    Latest {
+        latest: Option<StreamData>,
+    },
+    Packer {
+        merger: Box<dyn Merger>,
+        /// Shared decode state for projection pushdown when the merger supports
+        /// fused decode. `None` falls back to decoding all columns.
+        applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
+    },
 }
 
 impl StrategyState {
     fn new(
         strategy: SamplingStrategy,
         registry: Option<Arc<MergerRegistry>>,
+        schema: Option<Arc<Schema>>,
+        applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
     ) -> Result<Self, ProcessorError> {
         match strategy {
             SamplingStrategy::Latest => Ok(StrategyState::Latest { latest: None }),
@@ -298,11 +337,17 @@ impl StrategyState {
                         "Packer strategy requires MergerRegistry".to_string(),
                     )
                 })?;
+                let schema = schema.ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(
+                        "Packer strategy requires an output schema".to_string(),
+                    )
+                })?;
                 let merger_instance = registry
-                    .instantiate(&props.merger.merger_type, &props.merger.props)
+                    .instantiate(&props.merger.merger_type, &props.merger.props, schema)
                     .map_err(|e| ProcessorError::InvalidConfiguration(e.to_string()))?;
                 Ok(StrategyState::Packer {
                     merger: merger_instance,
+                    applied_decode_state,
                 })
             }
         }
@@ -314,7 +359,7 @@ impl StrategyState {
                 *latest = Some(data);
                 Ok(())
             }
-            StrategyState::Packer { merger } => match data {
+            StrategyState::Packer { merger, .. } => match data {
                 StreamData::Bytes(bytes) => merger
                     .merge(&bytes)
                     .map_err(|e| ProcessorError::ProcessingError(e.to_string())),
@@ -329,14 +374,35 @@ impl StrategyState {
     fn on_tick(&mut self) -> Option<StreamData> {
         match self {
             StrategyState::Latest { latest } => latest.take(),
-            StrategyState::Packer { merger } => match merger.trigger() {
-                Ok(Some(bytes)) if !bytes.is_empty() => Some(StreamData::bytes(bytes)),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::error!(error = ?e, "merger trigger error");
-                    None
+            StrategyState::Packer {
+                merger,
+                applied_decode_state,
+            } => {
+                if merger.supports_fused_decode() {
+                    // Fused path: decode accumulated frames directly to a
+                    // collection, skipping the binary re-encode + re-parse.
+                    let projection = applied_decode_state
+                        .as_ref()
+                        .map(|state| Arc::clone(&state.read().decode_projection));
+                    match merger.trigger_decoded(projection.as_deref()) {
+                        Ok(Some(collection)) => Some(StreamData::collection(collection)),
+                        Ok(None) => None,
+                        Err(e) => {
+                            tracing::error!(error = ?e, "merger trigger_decoded error");
+                            None
+                        }
+                    }
+                } else {
+                    match merger.trigger() {
+                        Ok(Some(bytes)) if !bytes.is_empty() => Some(StreamData::bytes(bytes)),
+                        Ok(_) => None,
+                        Err(e) => {
+                            tracing::error!(error = ?e, "merger trigger error");
+                            None
+                        }
+                    }
                 }
-            },
+            }
         }
     }
 

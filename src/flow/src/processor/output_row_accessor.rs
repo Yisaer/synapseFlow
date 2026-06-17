@@ -262,15 +262,16 @@ fn resolve_getters(columns: &[OutputRowColumn], sample: &Tuple) -> Vec<ResolvedG
                     if msg.source() != source_name.as_ref() {
                         return None;
                     }
-                    // Resolve the source-schema logical index via key_index().
-                    // This is O(n) on schema width but only runs once per column during
-                    // resolve; it is correct for both Dense and Projected messages.
-                    msg.key_index(column_name.as_ref()).map(|key_idx| {
-                        ResolvedGetter::MessageByIndex {
-                            msg_idx,
-                            key_idx,
-                            expected_source: Arc::clone(source_name),
-                            expected_key: Arc::clone(column_name),
+                    msg.entries().enumerate().find_map(|(key_idx, (key, _))| {
+                        if key == column_name.as_ref() {
+                            Some(ResolvedGetter::MessageByIndex {
+                                msg_idx,
+                                key_idx,
+                                expected_source: Arc::clone(source_name),
+                                expected_key: Arc::clone(column_name),
+                            })
+                        } else {
+                            None
                         }
                     })
                 })
@@ -333,21 +334,23 @@ fn fallback_value(
                 if msg.source() != source_name.as_ref() {
                     return None;
                 }
-                // Use key_index() for the source-schema logical index.
-                // This is correct for both Dense and Projected messages.
-                msg.key_index(column_name.as_ref()).and_then(|key_idx| {
-                    msg.value_by_index(key_idx).map(|value| {
-                        (
-                            Arc::new(value.clone()),
-                            ResolvedGetter::MessageByIndex {
-                                msg_idx,
-                                key_idx,
-                                expected_source: Arc::clone(source_name),
-                                expected_key: Arc::clone(column_name),
-                            },
-                        )
+                msg.entries()
+                    .enumerate()
+                    .find_map(|(key_idx, (key, value))| {
+                        if key == column_name.as_ref() {
+                            Some((
+                                Arc::new(value.clone()),
+                                ResolvedGetter::MessageByIndex {
+                                    msg_idx,
+                                    key_idx,
+                                    expected_source: Arc::clone(source_name),
+                                    expected_key: Arc::clone(column_name),
+                                },
+                            ))
+                        } else {
+                            None
+                        }
                     })
-                })
             }),
     }
 }

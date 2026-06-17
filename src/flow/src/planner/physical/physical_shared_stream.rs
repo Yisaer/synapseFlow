@@ -5,12 +5,35 @@ use datatypes::Schema;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
+pub struct PhysicalSharedStreamRequirement {
+    columns: Vec<String>,
+    slot_version: u64,
+}
+
+impl PhysicalSharedStreamRequirement {
+    pub fn new(columns: Vec<String>, slot_version: u64) -> Self {
+        Self {
+            columns,
+            slot_version,
+        }
+    }
+
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    pub fn slot_version(&self) -> u64 {
+        self.slot_version
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PhysicalSharedStream {
     pub base: BasePhysicalPlan,
     stream_name: String,
     alias: Option<String>,
     schema: Arc<Schema>,
-    required_columns: Vec<String>,
+    requirement: PhysicalSharedStreamRequirement,
     decoder: StreamDecoderConfig,
     explain_ingest_plan: Option<Arc<PhysicalPlan>>,
 }
@@ -20,7 +43,7 @@ impl PhysicalSharedStream {
         stream_name: String,
         alias: Option<String>,
         schema: Arc<Schema>,
-        required_columns: Vec<String>,
+        requirement: PhysicalSharedStreamRequirement,
         decoder: StreamDecoderConfig,
         explain_ingest_plan: Option<Arc<PhysicalPlan>>,
         index: i64,
@@ -31,7 +54,7 @@ impl PhysicalSharedStream {
             stream_name,
             alias,
             schema,
-            required_columns,
+            requirement,
             decoder,
             explain_ingest_plan,
         }
@@ -50,7 +73,11 @@ impl PhysicalSharedStream {
     }
 
     pub fn required_columns(&self) -> &[String] {
-        &self.required_columns
+        self.requirement.columns()
+    }
+
+    pub fn required_slot_version(&self) -> u64 {
+        self.requirement.slot_version()
     }
 
     pub fn decoder(&self) -> &StreamDecoderConfig {

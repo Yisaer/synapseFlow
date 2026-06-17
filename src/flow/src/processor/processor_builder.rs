@@ -1113,6 +1113,7 @@ fn create_processor_from_plan_node(
                 channel_capacities,
             );
             processor.set_required_columns(shared.required_columns().to_vec());
+            processor.set_required_slot_version(shared.required_slot_version());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
             ))
@@ -1464,6 +1465,24 @@ fn create_processor_from_plan_node(
             if let crate::processor::SamplingStrategy::Packer { .. } = &sampler.strategy {
                 let registry = context.merger_registry()?;
                 processor.set_merger_registry(registry);
+                // The Packer merger may build an embedded decoder for the fused
+                // decode path, which needs the stream's output schema. Derive it
+                // from the sampler's input (the datasource/decoder child).
+                let schema = sampler
+                    .base
+                    .children
+                    .first()
+                    .and_then(sampler_input_schema)
+                    .ok_or_else(|| {
+                        ProcessorError::InvalidConfiguration(
+                            "Packer sampler requires a schema-bearing input".to_string(),
+                        )
+                    })?;
+                processor.set_merger_schema(schema);
+                // Share decode state for projection pushdown into fused decode.
+                if let Some(opts) = context.shared_stream() {
+                    processor.set_applied_decode_state(Arc::clone(&opts.applied_decode_state));
+                }
             } else if let Ok(registry) = context.merger_registry() {
                 processor.set_merger_registry(registry);
             }
@@ -1471,6 +1490,18 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Sampler(processor),
             ))
         }
+    }
+}
+
+/// Return the `datatypes::Schema` produced by a sampler input node, if the node
+/// carries one (datasource / decoder / shared-stream). Used to build a fused
+/// Packer merger that needs the stream's output schema.
+fn sampler_input_schema(plan: &Arc<PhysicalPlan>) -> Option<Arc<datatypes::Schema>> {
+    match plan.as_ref() {
+        PhysicalPlan::DataSource(ds) => Some(ds.schema()),
+        PhysicalPlan::Decoder(dec) => Some(dec.schema()),
+        PhysicalPlan::SharedStream(ss) => Some(ss.schema()),
+        _ => None,
     }
 }
 

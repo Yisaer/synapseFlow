@@ -52,7 +52,6 @@ pub fn stream_definition_from_stored(
     if let Some(sampler) = &req.sampler {
         definition = definition.with_sampler(sampler.clone());
     }
-    definition = definition.with_projected_messages(req.use_projected_messages);
     Ok(definition)
 }
 
@@ -457,7 +456,6 @@ mod tests {
             decoder: crate::stream::DecoderConfigRequest::default(),
             eventtime: None,
             sampler: None,
-            use_projected_messages: false,
         }
     }
 

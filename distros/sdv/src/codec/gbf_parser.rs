@@ -410,10 +410,27 @@ impl GbfParser {
 
     /// Parse a single packet into timestamp and frames based on the schema.
     pub fn parse_packet(&self, packet: &[u8]) -> Result<(u64, Vec<GbfFrame>), CodecError> {
+        let mut frames = Vec::new();
+        let timestamp = self.parse_packet_with(packet, &mut |can_id, payload| {
+            frames.push(GbfFrame {
+                can_id,
+                payload: payload.to_vec(),
+            });
+        })?;
+        Ok((timestamp, frames))
+    }
+
+    /// Parse a packet, invoking `sink(can_id, payload)` for each frame without
+    /// allocating a per-frame payload buffer. Returns the packet timestamp. Each
+    /// payload slice borrows from `packet` and is only valid for that call.
+    pub fn parse_packet_with<F: FnMut(u32, &[u8])>(
+        &self,
+        packet: &[u8],
+        sink: &mut F,
+    ) -> Result<u64, CodecError> {
         let mut cursor = 0;
         let mut context = vec![0u64; self.packet_def.storage_size];
         let mut timestamp = 0u64;
-        let mut frames = Vec::new();
 
         for field in &self.packet_def.fields {
             if cursor >= packet.len() {
@@ -555,7 +572,7 @@ impl GbfParser {
                     let seq_end = cursor.saturating_add(seq_len).min(packet.len());
 
                     if let Some(def) = item_def {
-                        frames = self.parse_frames(&packet[cursor..seq_end], def)?;
+                        self.parse_frames_into(&packet[cursor..seq_end], def, sink)?;
                     }
                     cursor = seq_end;
                 }
@@ -568,18 +585,18 @@ impl GbfParser {
             }
         }
 
-        Ok((timestamp, frames))
+        Ok(timestamp)
     }
 
-    /// Parse frames from a sequence buffer.
-    fn parse_frames(
+    /// Parse frames from a sequence buffer, invoking `sink(can_id, payload)` for
+    /// each frame without allocating a per-frame payload buffer. Each payload
+    /// slice borrows from `buffer` and is only valid for that invocation.
+    fn parse_frames_into<F: FnMut(u32, &[u8])>(
         &self,
         buffer: &[u8],
         frame_type: &OptTypeDef,
-    ) -> Result<Vec<GbfFrame>, CodecError> {
-        // Estimate capacity: assume minimum 4 bytes per frame
-        let estimated_frames = (buffer.len() / 4).max(16);
-        let mut frames = Vec::with_capacity(estimated_frames);
+        sink: &mut F,
+    ) -> Result<(), CodecError> {
         let mut cursor = 0;
 
         // Pre-allocate context once, reuse for each frame
@@ -766,10 +783,7 @@ impl GbfParser {
             if frame_cursor > cursor
                 && let Some(cid) = can_id
             {
-                frames.push(GbfFrame {
-                    can_id: cid,
-                    payload: buffer[payload_start..payload_start + payload_len].to_vec(),
-                });
+                sink(cid, &buffer[payload_start..payload_start + payload_len]);
             }
 
             if frame_cursor == cursor {
@@ -778,7 +792,7 @@ impl GbfParser {
             cursor = frame_cursor;
         }
 
-        Ok(frames)
+        Ok(())
     }
 
     /// Calculate the size of fixed header fields before the sequence.

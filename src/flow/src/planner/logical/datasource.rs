@@ -15,10 +15,14 @@ pub struct DataSource {
     pub decoder: StreamDecoderConfig,
     pub schema: Arc<Schema>,
     pub decode_projection: Option<DecodeProjection>,
-    /// For shared sources, this stores the per-pipeline required top-level columns as a
-    /// projection view (column name list). The full `schema` is preserved to keep
-    /// `ColumnRef::ByIndex` semantics stable.
+    /// For shared sources, this stores the per-pipeline required top-level columns.
+    ///
+    /// When VF-56 slot-schema projection is enabled, this is the planned slot-schema
+    /// column list and `schema` is also slot-ordered. Otherwise this is the legacy
+    /// dynamic decode requirement while `schema` keeps the full source layout.
     pub shared_required_schema: Option<Vec<String>>,
+    /// Slot-schema version used when this shared source was planned.
+    pub shared_slot_version: Option<u64>,
     pub source_input: SourceInputConfig,
     pub eventtime: Option<EventtimeDefinition>,
     pub sampler: Option<SamplerConfig>,
@@ -44,6 +48,7 @@ impl DataSource {
             schema,
             decode_projection: None,
             shared_required_schema: None,
+            shared_slot_version: None,
             source_input: SourceInputConfig::default(),
             eventtime,
             sampler,

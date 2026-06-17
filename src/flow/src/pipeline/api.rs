@@ -537,6 +537,8 @@ pub struct PipelineOptions {
     pub data_channel_capacity: usize,
     pub eventtime: EventtimeOptions,
     pub schedule: Option<PipelineScheduleConfig>,
+    #[doc(hidden)]
+    pub shared_slice_projection_enabled: Option<bool>,
 }
 
 impl Default for PipelineOptions {
@@ -545,6 +547,7 @@ impl Default for PipelineOptions {
             data_channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             eventtime: EventtimeOptions::default(),
             schedule: None,
+            shared_slice_projection_enabled: None,
         }
     }
 }

@@ -386,6 +386,8 @@ pub fn explain_pipeline_with_options(
         &schema_binding,
         &crate::planner::LogicalOptimizerOptions {
             eventtime_enabled: options.eventtime.enabled,
+            shared_slice_registry: shared_stream_registry,
+            shared_slice_projection_enabled: options.shared_slice_projection_enabled,
         },
     );
     if options.eventtime.enabled {
@@ -452,6 +454,8 @@ pub(crate) fn explain_pipeline_definition_with_options(
         &schema_binding,
         &crate::planner::LogicalOptimizerOptions {
             eventtime_enabled: options.eventtime.enabled,
+            shared_slice_registry: shared_stream_registry,
+            shared_slice_projection_enabled: options.shared_slice_projection_enabled,
         },
     );
     if options.eventtime.enabled {

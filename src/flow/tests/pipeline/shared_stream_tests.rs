@@ -3,12 +3,16 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::{MemoryData, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
-use flow::pipeline::{MemorySinkProps, PipelineDefinition};
+use flow::pipeline::{MemorySinkProps, PipelineDefinition, PipelineOptions};
 use flow::processor::SamplerConfig;
 use flow::FlowInstance;
 use flow::SharedStreamStatus;
-use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use flow::{
+    CreatePipelineRequest, ExplainPipelineTarget, PipelineStopMode, SinkDefinition, SinkProps,
+    SinkType,
+};
 use serde_json::{json, Value as JsonValue};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 
@@ -95,15 +99,39 @@ fn create_memory_sink_pipeline(
     sql: &str,
     output_topic: &str,
 ) {
+    create_memory_sink_pipeline_with_options(
+        instance,
+        pipeline_id,
+        sql,
+        output_topic,
+        PipelineOptions::default(),
+    );
+}
+
+fn create_memory_sink_pipeline_with_options(
+    instance: &FlowInstance,
+    pipeline_id: &str,
+    sql: &str,
+    output_topic: &str,
+    options: PipelineOptions,
+) {
     let sink = SinkDefinition::new(
         "mem_sink",
         SinkType::Memory,
         SinkProps::Memory(MemorySinkProps::new(output_topic.to_string())),
     );
-    let pipeline = PipelineDefinition::new(pipeline_id.to_string(), sql, vec![sink]);
+    let pipeline =
+        PipelineDefinition::new(pipeline_id.to_string(), sql, vec![sink]).with_options(options);
     instance
         .create_pipeline(CreatePipelineRequest::new(pipeline))
         .expect("create pipeline");
+}
+
+fn shared_slice_pipeline_options() -> PipelineOptions {
+    PipelineOptions {
+        shared_slice_projection_enabled: Some(true),
+        ..PipelineOptions::default()
+    }
 }
 
 async fn recv_until_json(
@@ -207,7 +235,7 @@ async fn wait_for_shared_stream_decoding_columns(
     let expected_decoding_columns = expected_decoding_columns
         .iter()
         .map(|name| (*name).to_string())
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
     let deadline = Instant::now() + timeout_duration;
     loop {
         let info = instance
@@ -216,8 +244,13 @@ async fn wait_for_shared_stream_decoding_columns(
             .expect("get shared stream")
             .shared_info
             .expect("shared stream info");
+        let actual_decoding_columns = info
+            .decoding_columns
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if info.subscriber_count == expected_subscriber_count
-            && info.decoding_columns == expected_decoding_columns
+            && actual_decoding_columns == expected_decoding_columns
         {
             return;
         }
@@ -588,60 +621,70 @@ async fn shared_stream_decode_projection_survives_consumer_lifecycle_changes() {
 
 // coverage-covers: source.shared.dynamic_decode
 #[tokio::test]
-async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
+async fn shared_stream_slot_schema_wildcard_expands_and_detach_keeps_slots() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
     .expect("create flow instance");
-    let stream_name = "shared_stream_wildcard";
+    let stream_name = "shared_stream_slot_schema_wildcard";
     install_shared_mock_json_stream(&instance, stream_name).await;
 
-    let (_, output_topic_a) = make_memory_topics(
+    let (_, output_topic_c) = make_memory_topics(
         "pipeline_shared_stream",
-        "shared_stream_wildcard_consumer_forces_full_decode_until_it_stops_a",
+        "shared_stream_slot_schema_wildcard_expands_and_detach_keeps_slots_c",
     );
     let (_, output_topic_all) = make_memory_topics(
         "pipeline_shared_stream",
-        "shared_stream_wildcard_consumer_forces_full_decode_until_it_stops_all",
+        "shared_stream_slot_schema_wildcard_expands_and_detach_keeps_slots_all",
     );
-    declare_output_topic(&instance, &output_topic_a);
+    declare_output_topic(&instance, &output_topic_c);
     declare_output_topic(&instance, &output_topic_all);
 
-    let mut output_a = instance
-        .open_memory_subscribe_bytes(&output_topic_a)
-        .expect("subscribe pipeline a output");
+    let mut output_c = instance
+        .open_memory_subscribe_bytes(&output_topic_c)
+        .expect("subscribe pipeline c output");
     let mut output_all = instance
         .open_memory_subscribe_bytes(&output_topic_all)
         .expect("subscribe wildcard output");
 
-    let pipeline_a_id = "shared_stream_wildcard_pipeline_a";
-    let pipeline_all_id = "shared_stream_wildcard_pipeline_all";
-    create_memory_sink_pipeline(
+    let pipeline_c_id = "shared_stream_slot_schema_wildcard_pipeline_c";
+    let pipeline_all_id = "shared_stream_slot_schema_wildcard_pipeline_all";
+    create_memory_sink_pipeline_with_options(
         &instance,
-        pipeline_a_id,
-        &format!("SELECT a FROM {stream_name}"),
-        &output_topic_a,
-    );
-    create_memory_sink_pipeline(
-        &instance,
-        pipeline_all_id,
-        &format!("SELECT * FROM {stream_name}"),
-        &output_topic_all,
+        pipeline_c_id,
+        &format!("SELECT c FROM {stream_name}"),
+        &output_topic_c,
+        shared_slice_pipeline_options(),
     );
 
     instance
-        .start_pipeline(pipeline_a_id)
+        .start_pipeline(pipeline_c_id)
         .await
-        .expect("start pipeline a");
+        .expect("start pipeline c");
     wait_for_shared_stream_decoding_columns(
         &instance,
         stream_name,
         1,
-        &["a"],
+        &["c"],
         Duration::from_secs(5),
     )
     .await;
 
+    create_memory_sink_pipeline_with_options(
+        &instance,
+        pipeline_all_id,
+        &format!("SELECT * FROM {stream_name}"),
+        &output_topic_all,
+        shared_slice_pipeline_options(),
+    );
+    let explain = instance
+        .explain_pipeline(ExplainPipelineTarget::Id(pipeline_all_id))
+        .expect("explain wildcard pipeline")
+        .to_pretty_string();
+    assert!(
+        explain.contains("schema=[c, a, b]"),
+        "SELECT * should plan against slot order after a prior narrow slot:\n{explain}"
+    );
     instance
         .start_pipeline(pipeline_all_id)
         .await
@@ -650,7 +693,7 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
         &instance,
         stream_name,
         2,
-        &["a", "b", "c"],
+        &["c", "a", "b"],
         Duration::from_secs(5),
     )
     .await;
@@ -660,10 +703,10 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
         .await
         .expect("send wildcard-phase shared mock payload");
 
-    let actual_a = recv_next_json(&mut output_a, Duration::from_secs(5)).await;
+    let actual_c = recv_next_json(&mut output_c, Duration::from_secs(5)).await;
     let actual_all = recv_next_json(&mut output_all, Duration::from_secs(5)).await;
-    assert_eq!(actual_a, json!([{"a": 1}]));
-    assert_eq!(actual_all, json!([{"a": 1, "b": 2, "c": 3}]));
+    assert_eq!(actual_c, json!([{"c": 3}]));
+    assert_eq!(actual_all, json!([{"c": 3, "a": 1, "b": 2}]));
 
     instance
         .stop_pipeline(
@@ -677,7 +720,7 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
         &instance,
         stream_name,
         1,
-        &["a"],
+        &["c"],
         Duration::from_secs(5),
     )
     .await;
@@ -691,10 +734,104 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
         .await
         .expect("send post-wildcard shared mock payload");
 
-    let actual_a_after_fallback = recv_next_json(&mut output_a, Duration::from_secs(5)).await;
-    assert_eq!(actual_a_after_fallback, json!([{"a": 4}]));
+    let actual_c_after_detach = recv_next_json(&mut output_c, Duration::from_secs(5)).await;
+    assert_eq!(actual_c_after_detach, json!([{"c": 6}]));
 
-    stop_and_delete_pipeline(&instance, pipeline_a_id).await;
+    stop_and_delete_pipeline(&instance, pipeline_c_id).await;
+    instance
+        .delete_stream(stream_name)
+        .await
+        .expect("delete shared stream");
+}
+
+// coverage-covers: source.shared.dynamic_decode
+#[tokio::test]
+async fn shared_stream_slot_schema_full_consumer_first_keeps_later_narrow_reads_correct() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let stream_name = "shared_stream_slot_schema_full_first";
+    install_shared_mock_json_stream(&instance, stream_name).await;
+
+    let (_, output_topic_all) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_slot_schema_full_consumer_first_keeps_later_narrow_reads_correct_all",
+    );
+    let (_, output_topic_b) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_slot_schema_full_consumer_first_keeps_later_narrow_reads_correct_b",
+    );
+    declare_output_topic(&instance, &output_topic_all);
+    declare_output_topic(&instance, &output_topic_b);
+
+    let mut output_all = instance
+        .open_memory_subscribe_bytes(&output_topic_all)
+        .expect("subscribe wildcard output");
+    let mut output_b = instance
+        .open_memory_subscribe_bytes(&output_topic_b)
+        .expect("subscribe pipeline b output");
+
+    let pipeline_all_id = "shared_stream_slot_schema_full_first_pipeline_all";
+    let pipeline_b_id = "shared_stream_slot_schema_full_first_pipeline_b";
+    create_memory_sink_pipeline_with_options(
+        &instance,
+        pipeline_all_id,
+        &format!("SELECT * FROM {stream_name}"),
+        &output_topic_all,
+        shared_slice_pipeline_options(),
+    );
+    create_memory_sink_pipeline_with_options(
+        &instance,
+        pipeline_b_id,
+        &format!("SELECT b FROM {stream_name}"),
+        &output_topic_b,
+        shared_slice_pipeline_options(),
+    );
+
+    instance
+        .start_pipeline(pipeline_all_id)
+        .await
+        .expect("start wildcard pipeline");
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        1,
+        &["a", "b", "c"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .start_pipeline(pipeline_b_id)
+        .await
+        .expect("start pipeline b");
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        2,
+        &["a", "b", "c"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":7,"b":8,"c":9}"#.as_ref())
+        .await
+        .expect("send full-first shared mock payload");
+
+    assert_eq!(
+        recv_next_json(&mut output_all, Duration::from_secs(5)).await,
+        json!([{"a": 7, "b": 8, "c": 9}])
+    );
+    assert_eq!(
+        recv_next_json(&mut output_b, Duration::from_secs(5)).await,
+        json!([{"b": 8}]),
+        "later narrow consumer should read from the already-expanded slot schema",
+    );
+
+    stop_and_delete_pipeline(&instance, pipeline_b_id).await;
+    stop_and_delete_pipeline(&instance, pipeline_all_id).await;
     instance
         .delete_stream(stream_name)
         .await

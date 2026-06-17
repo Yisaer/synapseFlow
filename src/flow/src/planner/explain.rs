@@ -1324,7 +1324,9 @@ mod tests {
     #[test]
     fn test_shared_stream_ingest_decoder_shows_decode_applied_snapshot() {
         use crate::catalog::StreamDecoderConfig;
-        use crate::planner::physical::{PhysicalPlan, PhysicalSharedStream};
+        use crate::planner::physical::{
+            PhysicalPlan, PhysicalSharedStream, PhysicalSharedStreamRequirement,
+        };
         use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
         use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
         use std::collections::HashMap;
@@ -1354,7 +1356,7 @@ mod tests {
             stream_name.to_string(),
             None,
             Arc::clone(&schema),
-            vec!["a".to_string()],
+            PhysicalSharedStreamRequirement::new(vec!["a".to_string()], 0),
             StreamDecoderConfig::json(),
             Some(ingest_plan),
             0,

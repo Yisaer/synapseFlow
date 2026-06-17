@@ -6,6 +6,8 @@
 //! Decoder to produce RecordBatches.
 
 use crate::codec::CodecError;
+use crate::model::Collection;
+use crate::planner::decode_projection::DecodeProjection;
 
 /// Trait for merging raw byte data into accumulated state and triggering emission.
 ///
@@ -23,4 +25,29 @@ pub trait Merger: Send + Sync {
     /// Returns `Ok(Some(bytes))` if there is data to emit,
     /// `Ok(None)` if no data accumulated, or `Err` on failure.
     fn trigger(&mut self) -> Result<Option<Vec<u8>>, CodecError>;
+
+    /// Whether this merger can decode accumulated data directly into a
+    /// [`Collection`] via [`Merger::trigger_decoded`], skipping the
+    /// re-encode + re-parse round-trip through [`Merger::trigger`].
+    ///
+    /// When `true`, the sampler calls [`Merger::trigger_decoded`] on tick and
+    /// emits a `Collection` instead of `Bytes`; the downstream decoder node
+    /// then forwards the already-decoded collection unchanged.
+    fn supports_fused_decode(&self) -> bool {
+        false
+    }
+
+    /// Trigger emission, decoding the accumulated data directly into a
+    /// [`Collection`] (skipping the binary round-trip).
+    ///
+    /// `projection`, when present, restricts the decoded columns. Returns
+    /// `Ok(None)` when nothing accumulated. The default implementation returns
+    /// `Ok(None)`; only mergers reporting [`Merger::supports_fused_decode`] need
+    /// to override it.
+    fn trigger_decoded(
+        &mut self,
+        _projection: Option<&DecodeProjection>,
+    ) -> Result<Option<Box<dyn Collection>>, CodecError> {
+        Ok(None)
+    }
 }

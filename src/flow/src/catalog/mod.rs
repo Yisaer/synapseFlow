@@ -197,9 +197,6 @@ pub struct StreamDefinition {
     eventtime: Option<EventtimeDefinition>,
     /// Optional sampler configuration for stream-level downsampling.
     sampler: Option<SamplerConfig>,
-    /// When true, the shared stream decoder produces projected (sparse) messages
-    /// instead of full-width dense messages. Default is false.
-    use_projected_messages: bool,
 }
 
 /// Event-time configuration for a stream.
@@ -249,13 +246,7 @@ impl StreamDefinition {
             decoder,
             eventtime: None,
             sampler: None,
-            use_projected_messages: false,
         }
-    }
-
-    pub fn with_projected_messages(mut self, enabled: bool) -> Self {
-        self.use_projected_messages = enabled;
-        self
     }
 
     pub fn with_eventtime(mut self, eventtime: EventtimeDefinition) -> Self {
@@ -290,10 +281,6 @@ impl StreamDefinition {
 
     pub fn eventtime(&self) -> Option<&EventtimeDefinition> {
         self.eventtime.as_ref()
-    }
-
-    pub fn use_projected_messages(&self) -> bool {
-        self.use_projected_messages
     }
 
     pub fn sampler(&self) -> Option<&SamplerConfig> {

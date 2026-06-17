@@ -510,6 +510,7 @@ pub(crate) fn build_pipeline_definition(
             late_tolerance: Duration::from_millis(req.options.eventtime.late_tolerance_ms),
         },
         schedule,
+        shared_slice_projection_enabled: None,
     };
     Ok(
         PipelineDefinition::new(req.id.clone(), req.sql.clone(), sinks)

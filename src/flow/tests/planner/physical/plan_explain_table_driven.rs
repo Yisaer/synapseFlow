@@ -1735,6 +1735,7 @@ fn explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive()
     };
     let optimizer_options = flow::planner::LogicalOptimizerOptions {
         eventtime_enabled: true,
+        ..Default::default()
     };
 
     let select_stmt = parse_sql("SELECT a FROM stream_eventtime").expect("parse sql");

@@ -3,7 +3,7 @@
 pub mod proto;
 pub mod proto_bundle;
 
-use crate::model::{CollectionError, Message, ProjectedLayout, RecordBatch, Tuple};
+use crate::model::{CollectionError, Message, RecordBatch, Tuple};
 use crate::planner::decode_projection::{DecodeProjection, ProjectionNode};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -13,6 +13,7 @@ use datatypes::{
     TimestampValue, Value,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Errors that can occur while decoding payloads.
@@ -147,89 +148,91 @@ impl JsonDecoder {
         rows: Vec<JsonMap<String, JsonValue>>,
         decode_projection: Option<&DecodeProjection>,
     ) -> Result<Vec<Tuple>, CodecError> {
-        let mut tuples = Vec::with_capacity(rows.len());
-
-        // When the decode projection carries a pre-computed projected layout,
-        // produce compact MessageValues::Projected instead of full-width Dense.
-        // The layout is attached by the shared stream when decoding columns change.
-        let projected_layout: Option<Arc<ProjectedLayout>> =
-            decode_projection.and_then(|p| p.projected_layout().cloned());
-        let use_projected = projected_layout.is_some();
-
-        for mut row in rows {
-            let message = if use_projected {
-                // Projected path: only decode actively-projected columns.
-                let projection = decode_projection.expect("projection must be Some");
-                let layout = projected_layout
-                    .as_ref()
-                    .expect("projected layout must be built");
-                let mut values = Vec::with_capacity(layout.materialised_count());
-                for column in self.schema.column_schemas().iter() {
-                    if let Some(node) = projection.column(column.name.as_str()) {
-                        let value = row
-                            .remove(&column.name)
-                            .map(|json| {
+        if let Some(output_slots) =
+            decode_projection.and_then(|projection| projection.output_slots())
+        {
+            let columns_by_name: HashMap<&str, _> = self
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|column| (column.name.as_str(), column))
+                .collect();
+            let mut tuples = Vec::with_capacity(rows.len());
+            for mut row in rows {
+                let mut values = Vec::with_capacity(output_slots.len());
+                for slot in output_slots.iter() {
+                    let Some(column) = columns_by_name.get(slot.as_ref()) else {
+                        values.push(Arc::new(Value::Null));
+                        continue;
+                    };
+                    let projection_node =
+                        decode_projection.and_then(|p| p.column(column.name.as_str()));
+                    let value = projection_node
+                        .and_then(|node| {
+                            row.remove(&column.name).map(|json| {
                                 json_to_value_with_datatype_and_projection(
                                     &json,
                                     &column.data_type,
                                     Some(node),
                                 )
                             })
-                            .unwrap_or(Value::Null);
-                        values.push(Arc::new(value));
-                    } else {
-                        let _ = row.remove(&column.name);
-                    }
-                }
-                Arc::new(Message::new_projected(
-                    Arc::clone(&self.stream_name),
-                    Arc::clone(&self.schema_keys),
-                    values,
-                    Arc::clone(layout),
-                ))
-            } else {
-                // Dense path: full-width values (existing behaviour).
-                let mut values = Vec::with_capacity(self.schema_keys.len());
-                for column in self.schema.column_schemas().iter() {
-                    let projection_node =
-                        decode_projection.and_then(|p| p.column(column.name.as_str()));
-                    let value = match decode_projection {
-                        Some(_) => {
-                            if let Some(node) = projection_node {
-                                row.remove(&column.name)
-                                    .map(|json| {
-                                        json_to_value_with_datatype_and_projection(
-                                            &json,
-                                            &column.data_type,
-                                            Some(node),
-                                        )
-                                    })
-                                    .unwrap_or(Value::Null)
-                            } else {
-                                let _ = row.remove(&column.name);
-                                Value::Null
-                            }
-                        }
-                        None => row
-                            .remove(&column.name)
-                            .map(|json| {
-                                json_to_value_with_datatype_and_projection(
-                                    &json,
-                                    &column.data_type,
-                                    None,
-                                )
-                            })
-                            .unwrap_or(Value::Null),
-                    };
+                        })
+                        .unwrap_or(Value::Null);
                     values.push(Arc::new(value));
                 }
-                Arc::new(Message::new_shared_keys(
+                drop(row);
+                let message = Arc::new(Message::new_shared_keys(
                     Arc::clone(&self.stream_name),
-                    Arc::clone(&self.schema_keys),
+                    Arc::clone(output_slots),
                     values,
-                ))
-            };
+                ));
+                tuples.push(Tuple::new(vec![message]));
+            }
+            return Ok(tuples);
+        }
+
+        let mut tuples = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            let mut values = Vec::with_capacity(self.schema_keys.len());
+            for column in self.schema.column_schemas().iter() {
+                let projection_node =
+                    decode_projection.and_then(|p| p.column(column.name.as_str()));
+                let value = match decode_projection {
+                    Some(_) => {
+                        if let Some(node) = projection_node {
+                            row.remove(&column.name)
+                                .map(|json| {
+                                    json_to_value_with_datatype_and_projection(
+                                        &json,
+                                        &column.data_type,
+                                        Some(node),
+                                    )
+                                })
+                                .unwrap_or(Value::Null)
+                        } else {
+                            let _ = row.remove(&column.name);
+                            Value::Null
+                        }
+                    }
+                    None => row
+                        .remove(&column.name)
+                        .map(|json| {
+                            json_to_value_with_datatype_and_projection(
+                                &json,
+                                &column.data_type,
+                                None,
+                            )
+                        })
+                        .unwrap_or(Value::Null),
+                };
+                values.push(Arc::new(value));
+            }
             drop(row);
+            let message = Arc::new(Message::new_shared_keys(
+                Arc::clone(&self.stream_name),
+                Arc::clone(&self.schema_keys),
+                values,
+            ));
             tuples.push(Tuple::new(vec![message]));
         }
         Ok(tuples)
@@ -664,6 +667,52 @@ mod tests {
         let payload = br#"[{"amount":10},{"amount":20}]"#.as_ref();
         let rows = decoder.decode(payload).expect("decode batch").into_rows();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn json_decoder_keeps_output_slots_when_projection_prunes_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "orders".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "orders".to_string(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+        let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
+        let projection =
+            DecodeProjection::from_top_level_columns_with_version(&["a".to_string()], 1)
+                .with_output_slots(Arc::from(vec![
+                    Arc::<str>::from("a"),
+                    Arc::<str>::from("b"),
+                ]));
+
+        let tuple = decoder
+            .decode_with_projection(br#"{"a":10,"b":20}"#, Some(&projection))
+            .expect("decode batch")
+            .into_rows()
+            .into_iter()
+            .next()
+            .expect("one row");
+
+        let message = tuple.messages.first().expect("one message");
+        assert_eq!(
+            message
+                .entry_by_index(0)
+                .map(|(key, value)| (key.as_ref(), value.as_ref())),
+            Some(("a", &Value::Int64(10)))
+        );
+        assert_eq!(
+            message
+                .entry_by_index(1)
+                .map(|(key, value)| (key.as_ref(), value.as_ref())),
+            Some(("b", &Value::Null))
+        );
+        assert_eq!(message.entry_by_index(2), None);
     }
 
     #[test]

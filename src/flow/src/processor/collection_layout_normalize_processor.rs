@@ -117,12 +117,9 @@ fn normalize_collection(
             saw_non_single_message = true;
         }
         if let Some(msg) = sample.messages().first() {
-            // Build key_indices mapping schema position -> source-schema logical index.
-            // Use key_index() instead of entries().enumerate() so the stored index works
-            // for both Dense and Projected messages (where compact position != logical index).
-            for (pos, col_key) in schema_keys.iter().enumerate() {
-                if let Some(logical_idx) = msg.key_index(col_key.as_ref()) {
-                    key_indices[pos] = Some(logical_idx);
+            for (idx, (key, _)) in msg.entries().enumerate() {
+                if let Some(pos) = schema_pos.get(key).copied() {
+                    key_indices[pos] = Some(idx);
                 }
             }
         } else {

@@ -1,4 +1,3 @@
-use crate::model::ProjectedLayout;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -66,10 +65,12 @@ pub enum ProjectionNode {
 pub struct DecodeProjection {
     version: u64,
     columns: BTreeMap<String, ProjectionNode>,
-    /// Pre-computed projected layout for the schema this projection applies to.
-    /// Set by the shared stream when decoding columns change; `None` for other
-    /// usage (e.g. planner projections that don't need sparse messages).
-    projected_layout: Option<Arc<ProjectedLayout>>,
+    /// VF-56: when set, the decoder emits a narrow, slot-ordered output row whose
+    /// index space is exactly this list (slot == position), instead of a full-width
+    /// schema-ordered row. `None` keeps the legacy full-width behavior. Carried here
+    /// because the consumer decode path already reads this projection per-decode, so
+    /// the slice width tracks the union live (append-only) with no extra plumbing.
+    output_slots: Option<Arc<[Arc<str>]>>,
 }
 
 impl DecodeProjection {
@@ -77,17 +78,6 @@ impl DecodeProjection {
     /// refresh any cached decode state.
     pub fn version(&self) -> u64 {
         self.version
-    }
-
-    /// Attach a pre-computed projected layout for sparse message output.
-    pub fn with_projected_layout(mut self, layout: Arc<ProjectedLayout>) -> Self {
-        self.projected_layout = Some(layout);
-        self
-    }
-
-    /// The projected layout, if one was attached.
-    pub fn projected_layout(&self) -> Option<&Arc<ProjectedLayout>> {
-        self.projected_layout.as_ref()
     }
 
     pub fn columns(&self) -> &BTreeMap<String, ProjectionNode> {
@@ -108,12 +98,24 @@ impl DecodeProjection {
         let mut projection = Self {
             version,
             columns: BTreeMap::new(),
-            projected_layout: None,
+            output_slots: None,
         };
         for column in columns {
             projection.mark_column_all(column);
         }
         projection
+    }
+
+    /// Slot-ordered output columns (VF-56). When `Some`, the decoder emits a narrow
+    /// row whose width and order match this list (slot == index).
+    pub fn output_slots(&self) -> Option<&Arc<[Arc<str>]>> {
+        self.output_slots.as_ref()
+    }
+
+    /// Attach a slot-ordered output layout (VF-56 shared-stream slice projection).
+    pub fn with_output_slots(mut self, slots: Arc<[Arc<str>]>) -> Self {
+        self.output_slots = Some(slots);
+        self
     }
 
     pub fn mark_field_path_used(&mut self, path: &FieldPath) {
@@ -189,7 +191,7 @@ impl Default for DecodeProjection {
         Self {
             version: 1,
             columns: BTreeMap::new(),
-            projected_layout: None,
+            output_slots: None,
         }
     }
 }

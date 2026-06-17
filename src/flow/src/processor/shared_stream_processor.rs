@@ -19,6 +19,7 @@ pub struct SharedStreamProcessor {
     stream_name: String,
     pipeline_id: Option<String>,
     required_columns: Vec<String>,
+    required_slot_version: u64,
     registry: Arc<SharedStreamRegistry>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
@@ -57,6 +58,7 @@ impl SharedStreamProcessor {
             stream_name,
             pipeline_id: None,
             required_columns: Vec::new(),
+            required_slot_version: 0,
             registry,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
@@ -76,6 +78,10 @@ impl SharedStreamProcessor {
     /// This is used to coordinate dynamic projection decode in the shared stream runtime.
     pub fn set_required_columns(&mut self, required_columns: Vec<String>) {
         self.required_columns = required_columns;
+    }
+
+    pub fn set_required_slot_version(&mut self, required_slot_version: u64) {
+        self.required_slot_version = required_slot_version;
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -102,6 +108,7 @@ impl Processor for SharedStreamProcessor {
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         let required_columns = std::mem::take(&mut self.required_columns);
+        let required_slot_version = self.required_slot_version;
         let registry = Arc::clone(&self.registry);
         let pipeline_id = self
             .pipeline_id
@@ -116,20 +123,16 @@ impl Processor for SharedStreamProcessor {
             );
             let consumer_id = format!("{pipeline_id}-{processor_id}");
             let mut subscription = registry
-                .subscribe(&stream_name, consumer_id.clone())
+                .subscribe_with_requirements(
+                    &stream_name,
+                    consumer_id.clone(),
+                    required_columns.clone(),
+                    required_slot_version,
+                )
                 .await
                 .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
 
-            if !required_columns.is_empty() {
-                registry
-                    .set_consumer_required_columns(
-                        &stream_name,
-                        &consumer_id,
-                        required_columns.clone(),
-                    )
-                    .await
-                    .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-
+            if !required_columns.is_empty() || required_slot_version > 0 {
                 let required: HashSet<String> = required_columns.into_iter().collect();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
@@ -138,12 +141,12 @@ impl Processor for SharedStreamProcessor {
                         .await
                         .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
                     let applied: HashSet<String> = info.decoding_columns.into_iter().collect();
-                    if required.is_subset(&applied) {
+                    if required.is_subset(&applied) && info.slot_version >= required_slot_version {
                         break;
                     }
                     if Instant::now() >= deadline {
                         return Err(ProcessorError::ProcessingError(format!(
-                            "shared stream decoder not ready for consumer {consumer_id}: required columns not applied"
+                            "shared stream decoder not ready for consumer {consumer_id}: required columns or slot version not applied"
                         )));
                     }
                     sleep(Duration::from_millis(20)).await;

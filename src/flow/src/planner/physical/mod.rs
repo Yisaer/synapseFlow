@@ -54,7 +54,7 @@ pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_row_diff::PhysicalRowDiff;
 pub use physical_sampler::PhysicalSampler;
-pub use physical_shared_stream::PhysicalSharedStream;
+pub use physical_shared_stream::{PhysicalSharedStream, PhysicalSharedStreamRequirement};
 pub use physical_sink_compress::PhysicalSinkCompress;
 pub use physical_sink_encoder::PhysicalSinkEncoder;
 pub use physical_sink_encrypt::PhysicalSinkEncrypt;

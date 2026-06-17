@@ -17,9 +17,9 @@ use crate::planner::physical::{
     PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
     PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSinkCompress, PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt,
-    PhysicalSourceChangeGate, PhysicalStatefulFunction, StatefulCall, WatermarkConfig,
-    WatermarkStrategy,
+    PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
+    PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
+    StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -798,7 +798,10 @@ fn create_physical_data_source_with_builder(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
                 Arc::clone(&schema),
-                required_columns,
+                PhysicalSharedStreamRequirement::new(
+                    required_columns,
+                    logical_ds.shared_slot_version.unwrap_or(0),
+                ),
                 logical_ds.decoder().clone(),
                 Some(explain_ingest_plan),
                 index,

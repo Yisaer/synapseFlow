@@ -2,7 +2,6 @@ use crate::backpressure_hub::BackpressureHub;
 use crate::catalog::StreamDecoderConfig;
 use crate::codec::{MergerRegistry, RecordDecoder};
 use crate::connector::SourceConnector;
-use crate::model::ProjectedLayout;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::processor::base::{
@@ -17,6 +16,7 @@ use crate::runtime::TaskSpawner;
 use datatypes::Schema;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
@@ -65,9 +65,78 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
     }
 }
 
+/// Append-only column→slot registry for a shared stream's output slot schema (VF-56).
+///
+/// Slots are assigned the first time a column is referenced by any consumer and
+/// are **never reassigned or compacted**. This is what lets a consumer's
+/// `ColumnRef::ByIndex`, resolved at plan time, stay valid as later consumers
+/// attach: existing slots never move, new columns append at the tail, and a detach
+/// never shrinks the slot schema.
+///
+/// Note the slot schema (output row layout) is independent from the parse
+/// *whitelist* (which signals the decoder actually parses, = the live union of
+/// consumers' required columns). The whitelist shrinks on detach — the decoder
+/// stops parsing columns no surviving consumer needs — while the slot schema stays
+/// at its high-water-mark width and a freed column is emitted as Null at its stable
+/// slot. See `set_applied_decoding_columns`.
+///
+/// Lives behind a synchronous lock so the (sync) planner can resolve slots without
+/// awaiting the async stream map.
+#[derive(Debug, Default)]
+pub(crate) struct SliceRegistry {
+    name_to_slot: HashMap<Arc<str>, u32>,
+    /// slot index → column name (insertion order == slot order).
+    keys: Vec<Arc<str>>,
+    /// Bumped on every new slot assignment so the decoder can rebuild its slice
+    /// layout lazily.
+    version: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SliceRegistrySnapshot {
+    pub keys: Arc<[Arc<str>]>,
+    pub version: u64,
+}
+
+impl SliceRegistry {
+    /// Return the column's slot, assigning the next free slot if unseen (append-only).
+    pub(crate) fn get_or_assign(&mut self, name: &str) -> u32 {
+        if let Some(&slot) = self.name_to_slot.get(name) {
+            return slot;
+        }
+        let slot = self.keys.len() as u32;
+        let arc: Arc<str> = Arc::from(name);
+        self.name_to_slot.insert(Arc::clone(&arc), slot);
+        self.keys.push(arc);
+        self.version += 1;
+        slot
+    }
+
+    /// Assign the given columns in order, then return a slot-ordered snapshot.
+    pub(crate) fn assign_all<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> SliceRegistrySnapshot {
+        for name in names {
+            self.get_or_assign(name);
+        }
+        self.snapshot()
+    }
+
+    pub(crate) fn snapshot(&self) -> SliceRegistrySnapshot {
+        SliceRegistrySnapshot {
+            keys: Arc::from(self.keys.to_vec()),
+            version: self.version,
+        }
+    }
+}
+
 /// Central registry that tracks shared source streams that are owned by the process.
 pub struct SharedStreamRegistry {
     streams: RwLock<HashMap<String, Arc<SharedStreamInner>>>,
+    /// Per-stream append-only slice registries, kept in a **synchronous** side map
+    /// (populated at `create_stream`) so plan-time slot resolution needs no `await`.
+    slice_registries: SyncRwLock<HashMap<String, Arc<SyncRwLock<SliceRegistry>>>>,
     spawner: TaskSpawner,
     merger_registry: Arc<MergerRegistry>,
 }
@@ -84,9 +153,26 @@ impl SharedStreamRegistry {
     ) -> Self {
         Self {
             streams: RwLock::new(HashMap::new()),
+            slice_registries: SyncRwLock::new(HashMap::new()),
             spawner,
             merger_registry,
         }
+    }
+
+    /// Get (or lazily create) the append-only slice registry for a stream.
+    ///
+    /// Synchronous so the planner can resolve consumer slots at plan time. The
+    /// entry is created on first access; `create_stream` also seeds it.
+    pub(crate) fn slice_registry(&self, name: &str) -> Arc<SyncRwLock<SliceRegistry>> {
+        if let Some(reg) = self.slice_registries.read().get(name) {
+            return Arc::clone(reg);
+        }
+        let mut guard = self.slice_registries.write();
+        Arc::clone(
+            guard
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(SyncRwLock::new(SliceRegistry::default()))),
+        )
     }
 
     /// Create and start a new shared stream.
@@ -104,10 +190,22 @@ impl SharedStreamRegistry {
             return Err(SharedStreamError::AlreadyExists(config.stream_name));
         }
 
+        // Resolve the canonical slice registry first (the planner may have already
+        // created and assigned slots into it via `slice_registry()`), then hand that
+        // SAME Arc to the inner so the planner and the runtime decoder can never
+        // diverge onto two registries (VF-56). `or_insert_with` adopts an existing
+        // entry instead of overwriting it.
+        let slice_registry = Arc::clone(
+            self.slice_registries
+                .write()
+                .entry(config.stream_name.clone())
+                .or_insert_with(|| Arc::new(SyncRwLock::new(SliceRegistry::default()))),
+        );
         let inner = SharedStreamInner::new(
             config,
             self.spawner.clone(),
             Arc::clone(&self.merger_registry),
+            slice_registry,
         )?;
         let info = inner.snapshot().await;
         streams.insert(info.name.clone(), inner);
@@ -198,10 +296,43 @@ impl SharedStreamRegistry {
         entry.register_consumer(consumer_id.into()).await
     }
 
+    /// Register a consumer after applying its shared-stream decode requirement.
+    ///
+    /// Slot-schema consumers must not receive rows emitted before their required output slot
+    /// schema is active. This path updates the shared decode state first and only attaches the
+    /// receiver to the fan-out hub afterwards.
+    pub async fn subscribe_with_requirements(
+        &self,
+        name: &str,
+        consumer_id: impl Into<String>,
+        required_columns: Vec<String>,
+        required_slot_version: u64,
+    ) -> Result<SharedStreamSubscription, SharedStreamError> {
+        let entry = {
+            let guard = self.streams.read().await;
+            guard
+                .get(name)
+                .cloned()
+                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
+        };
+        let consumer_id = consumer_id.into();
+        entry.ensure_started().await?;
+        entry
+            .apply_consumer_requirement(&consumer_id, required_columns, required_slot_version > 0)
+            .await?;
+        match entry.register_consumer(consumer_id.clone()).await {
+            Ok(subscription) => Ok(subscription),
+            Err(err) => {
+                entry.remove_consumer_requirement(&consumer_id).await;
+                Err(err)
+            }
+        }
+    }
+
     /// Update the required columns for a registered consumer.
     ///
-    /// This does not change what is currently decoded yet; it only updates registry state and
-    /// recomputes the union required columns. The decoder will apply it in a later step.
+    /// This updates registry state, recomputes the union required columns, and applies the
+    /// shared decoder projection immediately.
     pub async fn set_consumer_required_columns(
         &self,
         name: &str,
@@ -216,8 +347,19 @@ impl SharedStreamRegistry {
                 .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
         };
         entry
-            .set_consumer_required_columns(consumer_id, required_columns)
+            .set_registered_consumer_required_columns(consumer_id, required_columns)
             .await
+    }
+
+    /// Enable VF-56 slot-schema output for this shared stream.
+    pub async fn enable_slot_schema_projection(&self, name: &str) -> Result<(), SharedStreamError> {
+        self.streams
+            .read()
+            .await
+            .get(name)
+            .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
+            .enable_slot_schema_projection();
+        Ok(())
     }
 
     /// Return the current union required columns across all registered consumers.
@@ -283,9 +425,6 @@ pub struct SharedStreamConfig {
     pub connector: Option<SharedStreamConnectorSpec>,
     pub channel_capacity: usize,
     pub sampler: Option<SamplerConfig>,
-    /// When true, the shared stream decoder produces projected (sparse) messages
-    /// instead of full-width dense messages. Default is false (backward-compatible).
-    pub use_projected_messages: bool,
 }
 
 impl SharedStreamConfig {
@@ -298,7 +437,6 @@ impl SharedStreamConfig {
             connector: None,
             channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             sampler: None,
-            use_projected_messages: false,
         }
     }
 
@@ -357,11 +495,6 @@ impl SharedStreamConfig {
     pub fn set_sampler(&mut self, sampler: SamplerConfig) {
         self.sampler = Some(sampler);
     }
-
-    pub fn with_projected_messages(mut self, enabled: bool) -> Self {
-        self.use_projected_messages = enabled;
-        self
-    }
 }
 
 /// Runtime status for a shared stream.
@@ -387,6 +520,8 @@ pub struct SharedStreamInfo {
     /// This is used by pipelines to wait until the shared decoder has applied a required
     /// projection before the pipeline starts consuming data.
     pub decoding_columns: Vec<String>,
+    /// Slot-schema version applied by the shared decoder.
+    pub slot_version: u64,
 }
 
 /// Processor stats snapshot for one shared stream's internal ingest pipeline.
@@ -401,6 +536,7 @@ pub struct SharedStreamProcessorStats {
 pub(crate) struct AppliedDecodeState {
     pub decoding_columns: Vec<String>,
     pub decode_projection: Arc<DecodeProjection>,
+    pub slot_version: u64,
 }
 
 /// Handle returned to pipeline consumers.
@@ -471,11 +607,15 @@ struct SharedStreamInner {
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
     sampler: Option<SamplerConfig>,
-    use_projected_messages: bool,
     merger_registry: Arc<MergerRegistry>,
     spawner: TaskSpawner,
     runtime_lock: Mutex<()>,
     applied_decode_state: Arc<SyncRwLock<AppliedDecodeState>>,
+    /// Append-only output-slice registry (VF-56). Shared (same `Arc`) with the
+    /// `SharedStreamRegistry.slice_registries` entry so the planner and the runtime
+    /// decoder agree on slot assignments.
+    slice_registry: Arc<SyncRwLock<SliceRegistry>>,
+    slot_schema_projection_enabled: AtomicBool,
     data_hub: Arc<BackpressureHub<StreamData>>,
     control_hub: Arc<BackpressureHub<ControlSignal>>,
     handles: Mutex<SharedStreamHandles>,
@@ -543,6 +683,7 @@ impl SharedStreamInner {
         config: SharedStreamConfig,
         spawner: TaskSpawner,
         merger_registry: Arc<MergerRegistry>,
+        slice_registry: Arc<SyncRwLock<SliceRegistry>>,
     ) -> Result<Arc<Self>, SharedStreamError> {
         let SharedStreamConfig {
             stream_name,
@@ -552,7 +693,6 @@ impl SharedStreamInner {
             connector,
             channel_capacity,
             sampler,
-            use_projected_messages,
         } = config;
         let data_channel_capacity = normalize_channel_capacity(channel_capacity);
         let control_channel_capacity = DEFAULT_CONTROL_CHANNEL_CAPACITY;
@@ -583,6 +723,7 @@ impl SharedStreamInner {
         let applied_decode_state = Arc::new(SyncRwLock::new(AppliedDecodeState {
             decoding_columns: initial_decoding_columns,
             decode_projection,
+            slot_version: 0,
         }));
 
         let data_hub = Arc::new(BackpressureHub::new(data_channel_capacity));
@@ -597,11 +738,12 @@ impl SharedStreamInner {
             connector_id,
             connector_factory,
             sampler,
-            use_projected_messages,
             merger_registry,
             spawner,
             runtime_lock: Mutex::new(()),
             applied_decode_state: Arc::clone(&applied_decode_state),
+            slice_registry,
+            slot_schema_projection_enabled: AtomicBool::new(false),
             data_hub,
             control_hub,
             handles: Mutex::new(SharedStreamHandles {
@@ -624,29 +766,53 @@ impl SharedStreamInner {
         &self.name
     }
 
+    fn enable_slot_schema_projection(&self) {
+        self.slot_schema_projection_enabled
+            .store(true, Ordering::Release);
+    }
+
     /// Atomically update the shared stream decoding columns and its cached decode projection.
     ///
     /// This avoids rebuilding the projection on the decoder hot path. The projection version is
     /// bumped only when the applied decoding columns actually change.
     fn set_applied_decoding_columns(&self, applied: Vec<String>) {
+        // VF-56: the parse whitelist and the output slot schema are two independent
+        // things. `applied` is the *whitelist* — the live union of consumers'
+        // required columns — and it shrinks when a consumer detaches. The slot
+        // schema comes from the append-only slot registry and never shrinks, so a
+        // surviving consumer's plan-time `ColumnRef::ByIndex` stays valid. We decode
+        // only the union but still emit the full fixed-width slot row: a freed
+        // column (in the slot schema, no longer in the union) becomes a Null at its
+        // stable slot position. The union is always a subset of the slot keys
+        // (every slot key came from some consumer's used columns; see
+        // `build_shared_slice_schema`), so every decoded column lands in a slot.
+        let slot_snapshot = {
+            let reg = self.slice_registry.read();
+            reg.snapshot()
+        };
+        let slot_keys = if self.slot_schema_projection_enabled.load(Ordering::Acquire)
+            && !slot_snapshot.keys.is_empty()
+        {
+            Some(Arc::clone(&slot_snapshot.keys))
+        } else {
+            None
+        };
+
         let mut guard = self.applied_decode_state.write();
-        if guard.decoding_columns == applied {
+        if guard.decoding_columns == applied && guard.slot_version == slot_snapshot.version {
             return;
         }
         guard.decoding_columns = applied.clone();
+        guard.slot_version = slot_snapshot.version;
 
         let next_version = guard.decode_projection.version().saturating_add(1);
+        // Whitelist (what to parse) = the union; slot schema (output layout) = the
+        // append-only registry keys. Built from independent inputs so a detach
+        // narrows the parse set without disturbing slot positions.
         let mut projection =
             DecodeProjection::from_top_level_columns_with_version(applied.as_slice(), next_version);
-        if self.use_projected_messages {
-            let schema_keys: Vec<Arc<str>> = self
-                .schema
-                .column_schemas()
-                .iter()
-                .map(|col| Arc::<str>::from(col.name.as_str()))
-                .collect();
-            let layout = Arc::new(ProjectedLayout::from_active_columns(&schema_keys, &applied));
-            projection = projection.with_projected_layout(layout);
+        if let Some(slots) = slot_keys {
+            projection = projection.with_output_slots(slots);
         }
         guard.decode_projection = Arc::new(projection);
     }
@@ -779,7 +945,10 @@ impl SharedStreamInner {
 
     async fn snapshot(&self) -> SharedStreamInfo {
         let state = self.state.lock().await;
-        let decoding_columns = self.applied_decode_state.read().decoding_columns.clone();
+        let applied = self.applied_decode_state.read();
+        let decoding_columns = applied.decoding_columns.clone();
+        let slot_version = applied.slot_version;
+        drop(applied);
         SharedStreamInfo {
             name: self.name.clone(),
             schema: Arc::clone(&self.schema),
@@ -788,6 +957,7 @@ impl SharedStreamInner {
             connector_id: self.connector_id.clone(),
             subscriber_count: state.subscribers.len(),
             decoding_columns,
+            slot_version,
         }
     }
 
@@ -866,19 +1036,35 @@ impl SharedStreamInner {
         })
     }
 
-    async fn set_consumer_required_columns(
+    async fn set_registered_consumer_required_columns(
         &self,
         consumer_id: &str,
         required_columns: Vec<String>,
     ) -> Result<Vec<String>, SharedStreamError> {
-        let mut state = self.state.lock().await;
-        if !state.subscribers.contains(consumer_id) {
-            self.record_error_metric("consumer");
-            return Err(SharedStreamError::Internal(format!(
-                "consumer {consumer_id} not registered for {}",
-                self.name()
-            )));
+        {
+            let state = self.state.lock().await;
+            if !state.subscribers.contains(consumer_id) {
+                self.record_error_metric("consumer");
+                return Err(SharedStreamError::Internal(format!(
+                    "consumer {consumer_id} not registered for {}",
+                    self.name()
+                )));
+            }
         }
+        self.apply_consumer_requirement(consumer_id, required_columns, false)
+            .await
+    }
+
+    async fn apply_consumer_requirement(
+        &self,
+        consumer_id: &str,
+        required_columns: Vec<String>,
+        enable_slot_schema_projection: bool,
+    ) -> Result<Vec<String>, SharedStreamError> {
+        if enable_slot_schema_projection {
+            self.enable_slot_schema_projection();
+        }
+        let mut state = self.state.lock().await;
         state
             .consumer_required_columns
             .insert(consumer_id.to_string(), required_columns);
@@ -909,6 +1095,37 @@ impl SharedStreamInner {
         };
         self.set_applied_decoding_columns(applied);
         Ok(union)
+    }
+
+    async fn remove_consumer_requirement(&self, consumer_id: &str) {
+        let mut state = self.state.lock().await;
+        state.consumer_required_columns.remove(consumer_id);
+
+        let union_set: HashSet<String> = state
+            .consumer_required_columns
+            .values()
+            .flat_map(|cols| cols.iter().cloned())
+            .collect();
+
+        let union: Vec<String> = self
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .filter(|name| union_set.contains(name))
+            .collect();
+
+        state.union_required_columns = union.clone();
+        let applied = if union.is_empty() {
+            self.schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect()
+        } else {
+            union
+        };
+        self.set_applied_decoding_columns(applied);
     }
 
     async fn union_required_columns(&self) -> Vec<String> {
@@ -1004,6 +1221,29 @@ impl SharedStreamInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn slice_registry_assigns_append_only_stable_slots() {
+        let mut reg = SliceRegistry::default();
+        // First-seen order defines slots; repeats reuse.
+        assert_eq!(reg.get_or_assign("A"), 0);
+        assert_eq!(reg.get_or_assign("C"), 1);
+        assert_eq!(reg.get_or_assign("A"), 0, "repeat reuses slot");
+        assert_eq!(reg.version, 2, "version bumps only on new assignment");
+
+        // A later consumer's new column appends at the tail; existing slots never move.
+        assert_eq!(reg.get_or_assign("B"), 2);
+        assert_eq!(reg.name_to_slot.get("A").copied(), Some(0));
+        assert_eq!(reg.name_to_slot.get("C").copied(), Some(1));
+        let snapshot = reg.snapshot();
+        assert_eq!(snapshot.keys.len(), 3);
+        assert_eq!(
+            snapshot.keys.iter().map(|k| k.as_ref()).collect::<Vec<_>>(),
+            vec!["A", "C", "B"],
+            "keys are slot-ordered (insertion order), not schema/alpha order"
+        );
+        assert_eq!(reg.name_to_slot.get("missing").copied(), None);
+    }
+
     use crate::codec::JsonDecoder;
     use crate::connector::MockSourceConnector;
     use crate::runtime::TaskSpawner;
@@ -1128,6 +1368,139 @@ mod tests {
         assert!(union.is_empty());
 
         registry.drop_stream(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detach_shrinks_whitelist_but_keeps_slot_schema() {
+        // VF-56: with slot-schema projection enabled, a detach must narrow the
+        // parse whitelist (decoding_columns) to the surviving union while leaving
+        // the append-only slot schema (slot_version / output slot layout) untouched,
+        // so the remaining consumer's by-index slots stay valid.
+        let registry = SharedStreamRegistry::new(test_spawner());
+        let name = format!("shared_stream_detach_slot_test_{}", Uuid::new_v4().simple());
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                name.clone(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                name.clone(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+        let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
+        let decoder = Arc::new(JsonDecoder::new(
+            name.clone(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
+
+        let config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema))
+            .with_connector(Box::new(connector), decoder);
+        registry.create_stream(config).await.unwrap();
+        registry
+            .enable_slot_schema_projection(&name)
+            .await
+            .expect("enable slot schema");
+
+        let sub_a = registry
+            .subscribe(&name, "consumer_a")
+            .await
+            .expect("subscribe consumer_a");
+        let sub_b = registry
+            .subscribe(&name, "consumer_b")
+            .await
+            .expect("subscribe consumer_b");
+
+        // Plan-time slot assignment: both columns get stable append-only slots.
+        registry
+            .slice_registry(&name)
+            .write()
+            .assign_all(["a", "b"]);
+
+        registry
+            .set_consumer_required_columns(&name, "consumer_a", vec!["a".to_string()])
+            .await
+            .expect("set required columns for a");
+        registry
+            .set_consumer_required_columns(&name, "consumer_b", vec!["b".to_string()])
+            .await
+            .expect("set required columns for b");
+
+        // Both attached: whitelist == union {a,b}; slot schema has 2 slots.
+        let info = registry.get_stream(&name).await.expect("get stream");
+        assert_eq!(
+            info.decoding_columns,
+            vec!["a".to_string(), "b".to_string()],
+            "whitelist is the union of both consumers"
+        );
+        assert_eq!(info.slot_version, 2, "two slots assigned");
+
+        // Detach b: whitelist shrinks to {a}, but the slot schema is unchanged.
+        sub_b.release().await;
+        let info = registry.get_stream(&name).await.expect("get stream");
+        assert_eq!(
+            info.decoding_columns,
+            vec!["a".to_string()],
+            "detach narrows the parse whitelist to the surviving union"
+        );
+        assert_eq!(
+            info.slot_version, 2,
+            "detach must NOT shrink the append-only slot schema"
+        );
+
+        sub_a.release().await;
+        registry.drop_stream(&name).await.ok();
+    }
+
+    #[tokio::test]
+    async fn subscribe_with_requirements_applies_projection_before_attach() {
+        let registry = SharedStreamRegistry::new(test_spawner());
+        let name = format!(
+            "shared_stream_subscribe_requirements_test_{}",
+            Uuid::new_v4().simple()
+        );
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                name.clone(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                name.clone(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+        let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
+        let decoder = Arc::new(JsonDecoder::new(
+            name.clone(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
+
+        let config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema))
+            .with_connector(Box::new(connector), decoder);
+        registry.create_stream(config).await.unwrap();
+        registry
+            .slice_registry(&name)
+            .write()
+            .assign_all(["a", "b"]);
+
+        let sub = registry
+            .subscribe_with_requirements(&name, "consumer_a", vec!["b".to_string()], 2)
+            .await
+            .expect("subscribe with requirements");
+
+        let info = registry.get_stream(&name).await.expect("get stream");
+        assert_eq!(info.subscriber_count, 1);
+        assert_eq!(info.decoding_columns, vec!["b".to_string()]);
+        assert_eq!(info.slot_version, 2);
+
+        sub.release().await;
+        registry.drop_stream(&name).await.ok();
     }
 
     #[tokio::test]

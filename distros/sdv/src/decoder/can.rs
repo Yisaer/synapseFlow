@@ -4,8 +4,35 @@
 //! by various protocol decoders (SPI, raw CAN, etc.) that work with CAN frames.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
+
+/// Identity hasher for the `u16` CAN-id message map. CAN ids are already small,
+/// well-distributed integers, so the default SipHash is pure overhead: it shows
+/// as ~6% (`hash_one`) of the box.home `allcases` decode profile, one lookup per
+/// frame. This mirrors eKuiper's `mapaccess2_fast32`. Keyed exclusively by u16,
+/// so only `write_u16` is exercised; `write` is a defensive fallback.
+#[derive(Default)]
+struct CanIdHasher(u64);
+
+impl Hasher for CanIdHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.0 = i as u64;
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 << 8) | b as u64;
+        }
+    }
+}
+
+type CanIdMap<V> = HashMap<u16, V, BuildHasherDefault<CanIdHasher>>;
 
 use datatypes::{Schema, Value};
 use flow::{
@@ -120,9 +147,23 @@ impl RequiredColumns {
     }
 }
 
+/// VF-56: slot-ordered output layout. When present, [`CanDecoder::decode_frames`]
+/// emits a narrow row whose width/order is `keys` (slot == position) instead of the
+/// full schema, gathering each slot's value from the decoder's full-schema column.
+#[derive(Clone)]
+struct SlotLayout {
+    /// Slot-ordered output column names (the consumer `ByIndex` space).
+    keys: Arc<[Arc<str>]>,
+    /// position in `self.keys` → output slot (`None` if that column is not in the
+    /// output slice). Lets `decode_frames` write decoded values **directly** into
+    /// the narrow slot row, avoiding a full-width scratch + gather pass.
+    col_to_slot: Arc<[Option<usize>]>,
+}
+
 struct ProjectionCache {
     version: u64,
     required: RequiredColumns,
+    slot_layout: Option<SlotLayout>,
 }
 
 /// CAN decoder that converts CAN frames into Tuple values based on DBC schema.
@@ -137,7 +178,7 @@ struct ProjectionCache {
 pub struct CanDecoder {
     source_name: Arc<str>,
     keys: Arc<[Arc<str>]>,
-    messages: HashMap<u16, MessageSpec>,
+    messages: CanIdMap<MessageSpec>,
     /// Number of distinct `msg_index` values; sizes per-decode scratch tables.
     message_count: usize,
     ts_index: Option<usize>,
@@ -177,7 +218,7 @@ impl CanDecoder {
         }
         let ts_index = name_to_index.get("ts").copied();
 
-        let mut messages = HashMap::new();
+        let mut messages = CanIdMap::default();
         let mut next_msg_index = 0usize;
         for bus in dbc.buses {
             let bus_name = bus.name.unwrap_or_else(|| format!("Bus{}", bus.id));
@@ -260,9 +301,12 @@ impl CanDecoder {
         })
     }
 
-    fn required_columns(&self, projection: Option<&DecodeProjection>) -> RequiredColumns {
+    fn projection_state(
+        &self,
+        projection: Option<&DecodeProjection>,
+    ) -> (RequiredColumns, Option<SlotLayout>) {
         let Some(projection) = projection else {
-            return RequiredColumns::All;
+            return (RequiredColumns::All, None);
         };
 
         let mut cache = self
@@ -272,7 +316,7 @@ impl CanDecoder {
         if let Some(cached) = cache.as_ref()
             && cached.version == projection.version()
         {
-            return cached.required.clone();
+            return (cached.required.clone(), cached.slot_layout.clone());
         }
 
         let columns = projection.columns();
@@ -293,11 +337,32 @@ impl CanDecoder {
             )
         };
 
+        // VF-56: build the slot-ordered output layout (full-schema column → slot).
+        let slot_layout = projection.output_slots().map(|slots| {
+            let name_to_col: HashMap<&str, usize> = self
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (k.as_ref(), i))
+                .collect();
+            let mut col_to_slot: Vec<Option<usize>> = vec![None; self.keys.len()];
+            for (slot, name) in slots.iter().enumerate() {
+                if let Some(&col) = name_to_col.get(name.as_ref()) {
+                    col_to_slot[col] = Some(slot);
+                }
+            }
+            SlotLayout {
+                keys: Arc::clone(slots),
+                col_to_slot: col_to_slot.into(),
+            }
+        });
+
         *cache = Some(ProjectionCache {
             version: projection.version(),
             required: required.clone(),
+            slot_layout: slot_layout.clone(),
         });
-        required
+        (required, slot_layout)
     }
 
     /// Decode a list of CAN frames into a Tuple.
@@ -318,12 +383,27 @@ impl CanDecoder {
             return None;
         }
 
-        let required_columns = self.required_columns(projection);
+        let (required_columns, slot_layout) = self.projection_state(projection);
 
-        let mut values: Vec<Option<Value>> = vec![None; self.keys.len()];
+        // Output position for a full-schema column: its slot (VF-56 narrow row) or
+        // the column itself. Decoding writes straight into this position, so the
+        // scratch `values` is sized to the output width (union, not full DBC).
+        let out_idx = |col: usize| -> Option<usize> {
+            match &slot_layout {
+                Some(layout) => layout.col_to_slot[col],
+                None => Some(col),
+            }
+        };
+        let out_width = slot_layout
+            .as_ref()
+            .map(|l| l.keys.len())
+            .unwrap_or(self.keys.len());
+        let mut values: Vec<Option<Value>> = vec![None; out_width];
 
-        if let Some(ts_idx) = self.ts_index {
-            values[ts_idx] = Some(Value::Int64(frames[0].timestamp as i64));
+        if let Some(ts_idx) = self.ts_index
+            && let Some(o) = out_idx(ts_idx)
+        {
+            values[o] = Some(Value::Int64(frames[0].timestamp as i64));
         }
 
         // A packed window typically repeats the same message many times (a
@@ -356,7 +436,9 @@ impl CanDecoder {
                     if !required_columns.includes(signal.col_index) {
                         continue;
                     }
-                    values[signal.col_index] = Some(decode_signal(frame.payload, signal));
+                    if let Some(o) = out_idx(signal.col_index) {
+                        values[o] = Some(decode_signal(frame.payload, signal));
+                    }
                 }
                 continue;
             }
@@ -375,9 +457,10 @@ impl CanDecoder {
                         _ => None,
                     };
                     if required_columns.includes(signal.col_index)
-                        && values[signal.col_index].is_none()
+                        && let Some(o) = out_idx(signal.col_index)
+                        && values[o].is_none()
                     {
-                        values[signal.col_index] = Some(val);
+                        values[o] = Some(val);
                     }
                     break;
                 }
@@ -410,22 +493,30 @@ impl CanDecoder {
                     continue;
                 }
 
-                if values[signal.col_index].is_none() {
-                    values[signal.col_index] = Some(decode_signal(frame.payload, signal));
+                if let Some(o) = out_idx(signal.col_index)
+                    && values[o].is_none()
+                {
+                    values[o] = Some(decode_signal(frame.payload, signal));
                 }
             }
         }
 
-        // Construct final values in column order, fill unwritten with cached Null
+        // `values` is already in output order (narrow slot row under VF-56, else
+        // full schema). Fill unwritten cells with the cached Null Arc — now at most
+        // union-width clones, not full-DBC width.
         let null_arc = &self.null_value;
         let finalized: Vec<Arc<Value>> = values
             .into_iter()
             .map(|opt| opt.map(Arc::new).unwrap_or_else(|| Arc::clone(null_arc)))
             .collect();
+        let out_keys = match &slot_layout {
+            Some(layout) => Arc::clone(&layout.keys),
+            None => Arc::clone(&self.keys),
+        };
 
         let message = Arc::new(Message::new_shared_keys(
             Arc::clone(&self.source_name),
-            Arc::clone(&self.keys),
+            out_keys,
             finalized,
         ));
         Some(Tuple::new(vec![message]))
@@ -433,7 +524,7 @@ impl CanDecoder {
 
     /// Get the message specifications map.
     #[allow(dead_code)]
-    pub fn messages(&self) -> &HashMap<u16, MessageSpec> {
+    fn messages(&self) -> &CanIdMap<MessageSpec> {
         &self.messages
     }
 
@@ -951,6 +1042,54 @@ mod tests {
         let tuple = result.unwrap();
         let ts = tuple.value_by_name("can", "ts").expect("ts not found");
         assert_eq!(*ts, Value::Int64(1720765705290));
+    }
+
+    /// VF-56: with an output slot layout, decode_frames emits a narrow row whose
+    /// width/order is the slot list (slot == index), gathered from full-schema
+    /// columns — the consumer `ByIndex` (== slot) reads it directly.
+    #[test]
+    fn test_decode_frames_slot_layout_emits_narrow_slice() {
+        use flow::planner::decode_projection::DecodeProjection;
+        let decoder = get_test_decoder();
+
+        // Slot order (first-seen / append-only), deliberately NOT schema order:
+        // slot 0 = Mess0_Sig1, slot 1 = ts.
+        let slots: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("Mess0_Sig1"), Arc::from("ts")]);
+        let projection = DecodeProjection::from_top_level_columns_with_version(
+            &["Mess0_Sig1".to_string(), "ts".to_string()],
+            1,
+        )
+        .with_output_slots(Arc::clone(&slots));
+
+        // Mess0 (can_id 0x124A), Sig1 big-endian start 1 len 10 -> byte1=2 => Sig1=2.
+        let payload = [0x00u8, 0x02, 0, 0, 0, 0, 0, 0];
+        let frames = vec![CanFrame {
+            timestamp: 42,
+            can_id: 0x124A,
+            payload: &payload,
+        }];
+
+        let tuple = decoder
+            .decode_frames(frames, Some(&projection))
+            .expect("decode");
+
+        // Width is exactly the slot count (narrow), in slot order.
+        assert_eq!(
+            tuple.value_by_index("can", 1),
+            Some(&Value::Int64(42)),
+            "slot 1 == ts"
+        );
+        assert!(
+            tuple.value_by_index("can", 2).is_none(),
+            "no slot beyond the layout width (narrow row)"
+        );
+        assert_ne!(
+            tuple.value_by_index("can", 0),
+            Some(&Value::Null),
+            "slot 0 == Mess0_Sig1, decoded non-null"
+        );
+        // Name lookup still resolves against the narrow keys.
+        assert_eq!(tuple.value_by_name("can", "ts"), Some(&Value::Int64(42)));
     }
 
     /// Repeated frames of the same (non-multiplex) message: only the last

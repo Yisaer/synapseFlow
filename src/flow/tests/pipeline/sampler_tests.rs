@@ -819,7 +819,7 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
     .expect("create flow instance");
     instance
         .merger_registry()
-        .register("json_object_merge", |_props| {
+        .register("json_object_merge", |_props, _schema| {
             Ok(Box::new(JsonObjectMerger::default()))
         });
     create_stream_with_sampler(
@@ -888,7 +888,7 @@ async fn sampler_packer_flushes_buffer_on_close() {
     .expect("create flow instance");
     instance
         .merger_registry()
-        .register("json_object_merge", |_props| {
+        .register("json_object_merge", |_props, _schema| {
             Ok(Box::new(JsonObjectMerger::default()))
         });
     create_stream_with_sampler(

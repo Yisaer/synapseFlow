@@ -533,6 +533,10 @@ fn build_pipeline_runtime(
                 &schema_binding,
                 &crate::planner::LogicalOptimizerOptions {
                     eventtime_enabled: definition.options().eventtime.enabled,
+                    shared_slice_registry: Some(shared_stream_registry.as_ref()),
+                    shared_slice_projection_enabled: definition
+                        .options()
+                        .shared_slice_projection_enabled,
                 },
             ))
         })?;
