@@ -1732,6 +1732,7 @@ fn explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive()
     let options = PhysicalPlanBuildOptions {
         eventtime_enabled: true,
         eventtime_late_tolerance: Duration::ZERO,
+        shared_slot_versions: HashMap::new(),
     };
     let optimizer_options = flow::planner::LogicalOptimizerOptions {
         eventtime_enabled: true,

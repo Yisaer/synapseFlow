@@ -533,22 +533,36 @@ fn build_pipeline_runtime(
                 &schema_binding,
                 &crate::planner::LogicalOptimizerOptions {
                     eventtime_enabled: definition.options().eventtime.enabled,
-                    shared_slice_registry: Some(shared_stream_registry.as_ref()),
-                    shared_slice_projection_enabled: definition
-                        .options()
-                        .shared_slice_projection_enabled,
                 },
             ))
         })?;
+
+        let slot_projection_enabled = definition
+            .options()
+            .shared_slice_projection_enabled
+            .unwrap_or_else(|| {
+                crate::planner::physical_plan_builder::shared_slice_projection_enabled()
+            });
+        let (slot_versions, slot_binding) = if slot_projection_enabled {
+            crate::planner::apply_shared_stream_slot_schemas(
+                &logical_plan,
+                &pruned_binding,
+                shared_stream_registry.as_ref(),
+                true,
+            )
+        } else {
+            (HashMap::new(), pruned_binding)
+        };
 
         let optimized_plan = build_log.run_phase("build_physical_plan", || {
             let build_options = crate::planner::PhysicalPlanBuildOptions {
                 eventtime_enabled: definition.options().eventtime.enabled,
                 eventtime_late_tolerance: definition.options().eventtime.late_tolerance,
+                shared_slot_versions: slot_versions,
             };
             let physical_plan = crate::planner::create_physical_plan_with_build_options(
                 Arc::clone(&logical_plan),
-                &pruned_binding,
+                &slot_binding,
                 registries,
                 &build_options,
             )?;

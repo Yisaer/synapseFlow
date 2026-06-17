@@ -365,42 +365,49 @@ fn validate_eventtime_enabled(
     Ok(())
 }
 
-pub fn explain_pipeline_with_options(
-    sql: &str,
-    sinks: Vec<PipelineSink>,
-    catalog: &Catalog,
+/// Build the EXPLAIN-time slot-schema binding for shared sources.
+///
+/// Uses the read-only path so that EXPLAIN never mutates the live [`SliceRegistry`];
+/// when slot projection is off or no registry is present, returns the pruned binding
+/// unchanged with an empty slot-version map.
+fn build_explain_binding(
+    pruned_binding: crate::expr::sql_conversion::SchemaBinding,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
+    options: &crate::pipeline::PipelineOptions,
+) -> (
+    HashMap<String, u64>,
+    crate::expr::sql_conversion::SchemaBinding,
+) {
+    let slot_projection_enabled = options.shared_slice_projection_enabled.unwrap_or_else(|| {
+        crate::planner::physical_plan_builder::shared_slice_projection_enabled()
+    });
+    if slot_projection_enabled {
+        if let Some(registry) = shared_stream_registry {
+            return crate::planner::read_shared_stream_slot_schemas(&pruned_binding, registry);
+        }
+    }
+    (HashMap::new(), pruned_binding)
+}
+
+/// Build a [`PipelineExplain`] from the already-optimized logical plan and binding.
+fn build_explain_physical_plan(
+    logical_plan: Arc<LogicalPlan>,
+    pruned_binding: crate::expr::sql_conversion::SchemaBinding,
     shared_stream_registry: Option<&SharedStreamRegistry>,
     registries: &PipelineRegistries,
     options: &crate::pipeline::PipelineOptions,
 ) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql_with_registries(
-        sql,
-        registries.aggregate_registry(),
-        registries.stateful_registry(),
-    )?;
-    let (schema_binding, stream_defs) =
-        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
-    let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
-        Arc::clone(&logical_plan),
-        &schema_binding,
-        &crate::planner::LogicalOptimizerOptions {
-            eventtime_enabled: options.eventtime.enabled,
-            shared_slice_registry: shared_stream_registry,
-            shared_slice_projection_enabled: options.shared_slice_projection_enabled,
-        },
-    );
-    if options.eventtime.enabled {
-        validate_eventtime_enabled(&stream_defs, registries)?;
-    }
+    let (explain_slot_versions, explain_binding) =
+        build_explain_binding(pruned_binding, shared_stream_registry, options);
 
     let build_options = crate::planner::PhysicalPlanBuildOptions {
         eventtime_enabled: options.eventtime.enabled,
         eventtime_late_tolerance: options.eventtime.late_tolerance,
+        shared_slot_versions: explain_slot_versions,
     };
     let physical_plan = crate::planner::create_physical_plan_with_build_options(
         Arc::clone(&logical_plan),
-        &pruned_binding,
+        &explain_binding,
         registries,
         &build_options,
     )?;
@@ -425,6 +432,42 @@ pub fn explain_pipeline_with_options(
             shared_stream_decode_applied,
         },
     ))
+}
+
+pub fn explain_pipeline_with_options(
+    sql: &str,
+    sinks: Vec<PipelineSink>,
+    catalog: &Catalog,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
+    registries: &PipelineRegistries,
+    options: &crate::pipeline::PipelineOptions,
+) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
+    let select_stmt = parser::parse_sql_with_registries(
+        sql,
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )?;
+    let (schema_binding, stream_defs) =
+        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
+    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
+        Arc::clone(&logical_plan),
+        &schema_binding,
+        &crate::planner::LogicalOptimizerOptions {
+            eventtime_enabled: options.eventtime.enabled,
+        },
+    );
+    if options.eventtime.enabled {
+        validate_eventtime_enabled(&stream_defs, registries)?;
+    }
+
+    build_explain_physical_plan(
+        logical_plan,
+        pruned_binding,
+        shared_stream_registry,
+        registries,
+        options,
+    )
 }
 
 pub(crate) fn explain_pipeline_definition_with_options(
@@ -454,43 +497,17 @@ pub(crate) fn explain_pipeline_definition_with_options(
         &schema_binding,
         &crate::planner::LogicalOptimizerOptions {
             eventtime_enabled: options.eventtime.enabled,
-            shared_slice_registry: shared_stream_registry,
-            shared_slice_projection_enabled: options.shared_slice_projection_enabled,
         },
     );
     if options.eventtime.enabled {
         validate_eventtime_enabled(&stream_defs, registries)?;
     }
 
-    let build_options = crate::planner::PhysicalPlanBuildOptions {
-        eventtime_enabled: options.eventtime.enabled,
-        eventtime_late_tolerance: options.eventtime.late_tolerance,
-    };
-    let physical_plan = crate::planner::create_physical_plan_with_build_options(
-        Arc::clone(&logical_plan),
-        &pruned_binding,
-        registries,
-        &build_options,
-    )?;
-    let optimized_plan = optimize_physical_plan(
-        Arc::clone(&physical_plan),
-        registries.encoder_registry().as_ref(),
-        registries.aggregate_registry(),
-    );
-
-    let shared_stream_decode_applied = shared_stream_registry.map_or_else(HashMap::new, |r| {
-        shared_stream_decode_applied_snapshot(&optimized_plan, r)
-    });
-
-    Ok(PipelineExplain::new(
+    build_explain_physical_plan(
         logical_plan,
-        optimized_plan,
-        PipelineExplainConfig {
-            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
-                eventtime_enabled: options.eventtime.enabled,
-                eventtime_late_tolerance_ms: options.eventtime.late_tolerance.as_millis(),
-            }),
-            shared_stream_decode_applied,
-        },
-    ))
+        pruned_binding,
+        shared_stream_registry,
+        registries,
+        options,
+    )
 }

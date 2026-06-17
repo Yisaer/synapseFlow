@@ -14,5 +14,7 @@ pub use logical_optimizer::{
 };
 pub use optimizer::optimize_physical_plan;
 pub use physical_plan_builder::{
-    create_physical_plan, create_physical_plan_with_build_options, PhysicalPlanBuildOptions,
+    apply_shared_stream_slot_schemas, create_physical_plan,
+    create_physical_plan_with_build_options, read_shared_stream_slot_schemas,
+    PhysicalPlanBuildOptions,
 };

@@ -23,16 +23,19 @@ use crate::planner::physical::{
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
+use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
-use datatypes::ConcreteDatatype;
-use std::collections::HashSet;
+use datatypes::{ConcreteDatatype, Schema};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PhysicalPlanBuildOptions {
     pub eventtime_enabled: bool,
     pub eventtime_late_tolerance: Duration,
+    /// Slot versions per shared source, computed by [`apply_shared_stream_slot_schemas`].
+    pub shared_slot_versions: HashMap<String, u64>,
 }
 
 impl Default for PhysicalPlanBuildOptions {
@@ -40,8 +43,177 @@ impl Default for PhysicalPlanBuildOptions {
         Self {
             eventtime_enabled: false,
             eventtime_late_tolerance: Duration::ZERO,
+            shared_slot_versions: HashMap::new(),
         }
     }
+}
+
+/// Feature gate for shared-stream output slice projection (VF-56). Off unless
+/// `VF_SHARED_SLICE_PROJECTION` is `1`/`true`, so the planner + decoder change can
+/// land incrementally without altering default behavior until validated.
+pub(crate) fn shared_slice_projection_enabled() -> bool {
+    std::env::var("VF_SHARED_SLICE_PROJECTION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Build a shared source's binding schema from its append-only slot registry
+/// (VF-56). Registers this consumer's used columns (in full-schema order, for
+/// deterministic slot assignment), then materializes a schema whose column order
+/// IS the slot order — so `Schema::column_index(name)` returns the stable slot,
+/// which becomes the consumer's `ColumnRef::ByIndex`. Width = current union size.
+fn build_shared_slice_schema(
+    registry: &SharedStreamRegistry,
+    entry: &SchemaBindingEntry,
+    used: Option<&HashSet<String>>,
+) -> (Arc<Schema>, u64) {
+    let cols = entry.schema.column_schemas();
+    let reg = registry.slice_registry(&entry.source_name);
+    let snapshot = {
+        let mut guard = reg.write();
+        let names = cols.iter().filter_map(|col| match used {
+            Some(used) if !used.contains(col.name.as_str()) => None,
+            _ => Some(col.name.as_str()),
+        });
+        guard.assign_all(names)
+    };
+    (materialize_slot_schema(cols, &snapshot), snapshot.version)
+}
+
+/// Read-only variant: build slot-ordered schema from the current registry snapshot
+/// without assigning any new slots. Used by EXPLAIN to reflect the live slot layout.
+fn read_shared_slice_schema(
+    registry: &SharedStreamRegistry,
+    entry: &SchemaBindingEntry,
+) -> (Arc<Schema>, u64) {
+    let cols = entry.schema.column_schemas();
+    let reg = registry.slice_registry(&entry.source_name);
+    let snapshot = reg.read().snapshot();
+    // If no slots have been assigned yet, keep the source-order schema.
+    if snapshot.keys.is_empty() {
+        return (Arc::clone(&entry.schema), 0);
+    }
+    (materialize_slot_schema(cols, &snapshot), snapshot.version)
+}
+
+/// Materialize a slot-ordered schema from a set of source columns and a slot snapshot.
+fn materialize_slot_schema(
+    cols: &[datatypes::ColumnSchema],
+    snapshot: &crate::shared_stream::SliceRegistrySnapshot,
+) -> Arc<Schema> {
+    let by_name: HashMap<&str, &datatypes::ColumnSchema> =
+        cols.iter().map(|c| (c.name.as_str(), c)).collect();
+    let slot_cols: Vec<datatypes::ColumnSchema> = snapshot
+        .keys
+        .iter()
+        .filter_map(|k| by_name.get(k.as_ref()).map(|c| (*c).clone()))
+        .collect();
+    Arc::new(Schema::new(slot_cols))
+}
+
+/// Walk the logical plan tree to find the required columns for a shared source.
+///
+/// Relies on `shared_required_schema` being set by `TopLevelColumnPruning` during the
+/// preceding logical pass. Returns the first DataSource match for `source_name` — in the
+/// current planner shape each shared source appears at most once in a logical plan tree.
+fn find_shared_required_columns(plan: &LogicalPlan, source_name: &str) -> Option<Vec<String>> {
+    match plan {
+        LogicalPlan::DataSource(ds) if ds.source_name == source_name => {
+            ds.shared_required_schema().map(|s| s.to_vec())
+        }
+        _ => {
+            for child in plan.children() {
+                if let Some(cols) = find_shared_required_columns(child, source_name) {
+                    return Some(cols);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Apply VF-56 shared-stream slot-schema projection: assign append-only slots for
+/// shared sources and rewrite their `SchemaBinding` entries to slot order.
+///
+/// Returns the slot versions per shared source and the updated `SchemaBinding`.
+/// This runs after logical optimization and before physical plan building, so
+/// the physical plan builder receives a `SchemaBinding` whose shared-source
+/// column indices already reflect stable slot positions.
+///
+/// # Relation to logical rules
+///
+/// The slot rewrite runs **after** all logical optimizer rules (including
+/// `StructFieldPruning` and `ListElementPruning`). Those rules observe the
+/// source-order schema produced by `TopLevelColumnPruning`, not the slot-order
+/// union. This is safe because shared CAN/GBF sources expose only scalar
+/// top-level columns — there are no nested struct/list fields whose decode
+/// projection could differ between the pruned schema and the slot-ordered union.
+pub fn apply_shared_stream_slot_schemas(
+    logical_plan: &LogicalPlan,
+    bindings: &SchemaBinding,
+    registry: &SharedStreamRegistry,
+    projection_enabled: bool,
+) -> (HashMap<String, u64>, SchemaBinding) {
+    let mut slot_versions = HashMap::new();
+    let mut new_entries = Vec::new();
+
+    for entry in bindings.entries() {
+        if entry.kind != SourceBindingKind::Shared || !projection_enabled {
+            new_entries.push(entry.clone());
+            continue;
+        }
+
+        let required = find_shared_required_columns(logical_plan, &entry.source_name);
+        let full_count = entry.schema.column_schemas().len();
+        let used: Option<HashSet<String>> = if required
+            .as_ref()
+            .is_none_or(|r| r.is_empty() || r.len() >= full_count)
+        {
+            None
+        } else {
+            required.map(|r| r.into_iter().collect())
+        };
+
+        let (slice_schema, version) = build_shared_slice_schema(registry, entry, used.as_ref());
+
+        slot_versions.insert(entry.source_name.clone(), version);
+
+        new_entries.push(SchemaBindingEntry {
+            source_name: entry.source_name.clone(),
+            alias: entry.alias.clone(),
+            schema: slice_schema,
+            kind: entry.kind.clone(),
+        });
+    }
+
+    (slot_versions, SchemaBinding::new(new_entries))
+}
+
+/// Read-only variant for EXPLAIN: rewrites shared-source schemas to slot order based
+/// on the current registry snapshot, without assigning any new slots or bumping the
+/// version. When no slots have been assigned yet (snapshot is empty), shared-source
+/// schemas are kept in source order.
+pub fn read_shared_stream_slot_schemas(
+    bindings: &SchemaBinding,
+    registry: &SharedStreamRegistry,
+) -> (HashMap<String, u64>, SchemaBinding) {
+    let mut slot_versions = HashMap::new();
+    let mut new_entries = Vec::new();
+    for entry in bindings.entries() {
+        if entry.kind != SourceBindingKind::Shared {
+            new_entries.push(entry.clone());
+            continue;
+        }
+        let (slice_schema, version) = read_shared_slice_schema(registry, entry);
+        slot_versions.insert(entry.source_name.clone(), version);
+        new_entries.push(SchemaBindingEntry {
+            source_name: entry.source_name.clone(),
+            alias: entry.alias.clone(),
+            schema: slice_schema,
+            kind: entry.kind.clone(),
+        });
+    }
+    (slot_versions, SchemaBinding::new(new_entries))
 }
 
 /// Physical plan builder that manages index allocation and node caching
@@ -49,6 +221,9 @@ pub struct PhysicalPlanBuilder {
     next_index: i64,
     node_cache: std::collections::HashMap<i64, Arc<PhysicalPlan>>,
     memory_collection_materialize_cache: std::collections::HashMap<i64, Arc<PhysicalPlan>>,
+    /// Slot versions per shared source, populated by [`apply_shared_stream_slot_schemas`]
+    /// before physical plan building.
+    shared_slot_versions: HashMap<String, u64>,
 }
 
 impl PhysicalPlanBuilder {
@@ -57,6 +232,7 @@ impl PhysicalPlanBuilder {
             next_index: 0,
             node_cache: std::collections::HashMap::new(),
             memory_collection_materialize_cache: std::collections::HashMap::new(),
+            shared_slot_versions: HashMap::new(),
         }
     }
 
@@ -65,7 +241,13 @@ impl PhysicalPlanBuilder {
             next_index: start_index,
             node_cache: std::collections::HashMap::new(),
             memory_collection_materialize_cache: std::collections::HashMap::new(),
+            shared_slot_versions: HashMap::new(),
         }
+    }
+
+    pub fn with_slot_versions(mut self, slot_versions: HashMap<String, u64>) -> Self {
+        self.shared_slot_versions = slot_versions;
+        self
     }
 
     pub fn allocate_index(&mut self) -> i64 {
@@ -226,7 +408,8 @@ pub fn create_physical_plan_with_build_options(
     registries: &PipelineRegistries,
     options: &PhysicalPlanBuildOptions,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    let mut builder = PhysicalPlanBuilder::new();
+    let mut builder =
+        PhysicalPlanBuilder::new().with_slot_versions(options.shared_slot_versions.clone());
     create_physical_plan_with_builder_cached_with_options(
         logical_plan,
         bindings,
@@ -800,7 +983,11 @@ fn create_physical_data_source_with_builder(
                 Arc::clone(&schema),
                 PhysicalSharedStreamRequirement::new(
                     required_columns,
-                    logical_ds.shared_slot_version.unwrap_or(0),
+                    builder
+                        .shared_slot_versions
+                        .get(&logical_ds.source_name)
+                        .copied()
+                        .unwrap_or(0),
                 ),
                 logical_ds.decoder().clone(),
                 Some(explain_ingest_plan),
@@ -1595,5 +1782,166 @@ mod tests {
             1,
         );
         assert_eq!(sampler.base.children().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod slot_schema_tests {
+    use super::*;
+    use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
+    use crate::planner::logical::DataSource;
+    use crate::shared_stream::SharedStreamRegistry;
+    use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+    use std::sync::Arc;
+
+    fn test_registry() -> SharedStreamRegistry {
+        SharedStreamRegistry::new(crate::runtime::TaskSpawner::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        ))
+    }
+
+    fn test_schema(name: &str, columns: &[&str]) -> Arc<Schema> {
+        Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|col| {
+                    ColumnSchema::new(
+                        name.to_string(),
+                        col.to_string(),
+                        ConcreteDatatype::Int64(Int64Type),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    fn shared_binding_entry(source_name: &str, columns: &[&str]) -> SchemaBindingEntry {
+        SchemaBindingEntry {
+            source_name: source_name.to_string(),
+            alias: None,
+            schema: test_schema(source_name, columns),
+            kind: SourceBindingKind::Shared,
+        }
+    }
+
+    fn make_data_source(
+        source_name: &str,
+        schema: Arc<Schema>,
+        required_columns: Vec<String>,
+    ) -> Arc<LogicalPlan> {
+        let ds = DataSource::new(
+            source_name.to_string(),
+            None,
+            crate::catalog::StreamDecoderConfig::json(),
+            0,
+            schema,
+            None,
+            None,
+        );
+        let mut ds = ds;
+        ds.shared_required_schema = Some(required_columns);
+        Arc::new(LogicalPlan::DataSource(ds))
+    }
+
+    #[test]
+    fn apply_assigns_slots_and_returns_version() {
+        let registry = test_registry();
+        let entry = shared_binding_entry("s1", &["a", "b", "c"]);
+        let bindings = SchemaBinding::new(vec![entry]);
+        let plan = make_data_source(
+            "s1",
+            test_schema("s1", &["a", "b", "c"]),
+            vec!["a".into(), "c".into()],
+        );
+
+        let (versions, new_bindings) =
+            apply_shared_stream_slot_schemas(&plan, &bindings, &registry, true);
+
+        // Slots assigned: a=0, c=1 (source order).
+        let entry = &new_bindings.entries()[0];
+        let col_names: Vec<&str> = entry
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["a", "c"]);
+        assert!(versions.contains_key("s1"));
+        assert!(versions["s1"] > 0);
+    }
+
+    #[test]
+    fn apply_on_disabled_projection_keeps_source_order() {
+        let registry = test_registry();
+        let entry = shared_binding_entry("s1", &["a", "b"]);
+        let bindings = SchemaBinding::new(vec![entry]);
+        let plan = make_data_source("s1", test_schema("s1", &["a", "b"]), vec!["b".into()]);
+
+        let (versions, new_bindings) =
+            apply_shared_stream_slot_schemas(&plan, &bindings, &registry, false);
+
+        // Projection disabled; schema unchanged.
+        let entry = &new_bindings.entries()[0];
+        let col_names: Vec<&str> = entry
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["a", "b"]);
+        assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn read_does_not_assign_new_slots() {
+        let registry = test_registry();
+        let entry = shared_binding_entry("s1", &["x", "y"]);
+        let bindings = SchemaBinding::new(vec![entry.clone()]);
+        let plan = make_data_source("s1", test_schema("s1", &["x", "y"]), vec!["x".into()]);
+
+        // Pre-populate slots via the write path.
+        let (_, _) = apply_shared_stream_slot_schemas(&plan, &bindings, &registry, true);
+        let version_before = registry.slice_registry("s1").read().snapshot().version;
+
+        // Read should not bump version or add slots.
+        let (read_versions, read_bindings) = read_shared_stream_slot_schemas(&bindings, &registry);
+        let version_after = registry.slice_registry("s1").read().snapshot().version;
+        assert_eq!(
+            version_after, version_before,
+            "EXPLAIN must not bump version"
+        );
+        assert!(!read_versions.is_empty());
+        // Schema should reflect the slot order from the write path.
+        let entry = &read_bindings.entries()[0];
+        let col_names: Vec<&str> = entry
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["x"]);
+    }
+
+    #[test]
+    fn read_returns_source_order_when_no_slots_assigned() {
+        let registry = test_registry();
+        let entry = shared_binding_entry("s1", &["p", "q"]);
+        let bindings = SchemaBinding::new(vec![entry.clone()]);
+
+        let (versions, new_bindings) = read_shared_stream_slot_schemas(&bindings, &registry);
+
+        let entry = &new_bindings.entries()[0];
+        let col_names: Vec<&str> = entry
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["p", "q"]);
+        // Version should be 0 when no slots exist.
+        assert_eq!(versions.get("s1").copied().unwrap_or(0), 0);
     }
 }

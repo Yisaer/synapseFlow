@@ -8,7 +8,6 @@ use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
 use crate::planner::sink::SinkConnectorConfig;
-use crate::shared_stream::SharedStreamRegistry;
 use datatypes::Schema;
 use sqlparser::ast::{
     Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName, WindowType,
@@ -35,48 +34,22 @@ pub fn optimize_logical_plan(
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct LogicalOptimizerOptions<'a> {
+pub struct LogicalOptimizerOptions {
     pub eventtime_enabled: bool,
-    /// Shared-stream registry, used to assign append-only output-slice slots for
-    /// shared CAN/GBF sources (VF-56). `None` keeps the legacy full-width schema.
-    /// Actual narrowing is additionally gated by [`shared_slice_projection_enabled`].
-    pub shared_slice_registry: Option<&'a SharedStreamRegistry>,
-    /// Override the VF-56 shared-stream slice projection gate.
-    ///
-    /// `None` uses the process-level `VF_SHARED_SLICE_PROJECTION` environment gate.
-    pub shared_slice_projection_enabled: Option<bool>,
-}
-
-/// Feature gate for shared-stream output slice projection (VF-56). Off unless
-/// `VF_SHARED_SLICE_PROJECTION` is `1`/`true`, so the planner + decoder change can
-/// land incrementally without altering default behavior until validated.
-pub(crate) fn shared_slice_projection_enabled() -> bool {
-    std::env::var("VF_SHARED_SLICE_PROJECTION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 /// Apply logical plan optimizations with extra options (e.g. eventtime).
-pub fn optimize_logical_plan_with_options<'a>(
+pub fn optimize_logical_plan_with_options(
     logical_plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
-    options: &LogicalOptimizerOptions<'a>,
+    options: &LogicalOptimizerOptions,
 ) -> (Arc<LogicalPlan>, SchemaBinding) {
-    let slice_projection_enabled = options
-        .shared_slice_projection_enabled
-        .unwrap_or_else(shared_slice_projection_enabled);
-    let slice_registry = if slice_projection_enabled {
-        options.shared_slice_registry
-    } else {
-        None
-    };
-    let rules: Vec<Box<dyn LogicalOptRule + 'a>> = vec![
+    let rules: Vec<Box<dyn LogicalOptRule>> = vec![
         // Must run before pruning rules; CSE can introduce new expressions whose source columns
         // must be accounted for when pruning schemas.
         Box::new(CommonSubexpressionElimination),
         Box::new(TopLevelColumnPruning {
             eventtime_enabled: options.eventtime_enabled,
-            slice_registry,
         }),
         Box::new(StructFieldPruning),
         Box::new(ListElementPruning),
@@ -1265,12 +1238,11 @@ fn replace_subexpr(expr: &SqlExpr, target_key: &str, replacement: &SqlExpr) -> S
 }
 
 /// Rule: prune unused top-level columns from data sources.
-struct TopLevelColumnPruning<'a> {
+struct TopLevelColumnPruning {
     eventtime_enabled: bool,
-    slice_registry: Option<&'a SharedStreamRegistry>,
 }
 
-impl<'a> LogicalOptRule for TopLevelColumnPruning<'a> {
+impl LogicalOptRule for TopLevelColumnPruning {
     fn name(&self) -> &str {
         "top_level_column_pruning"
     }
@@ -1281,17 +1253,14 @@ impl<'a> LogicalOptRule for TopLevelColumnPruning<'a> {
         bindings: &SchemaBinding,
     ) -> (Arc<LogicalPlan>, SchemaBinding) {
         let mut collector = TopLevelColumnUsageCollector::new(bindings, self.eventtime_enabled);
-        collector.slice_registry = self.slice_registry;
         collector.collect_from_plan(plan.as_ref());
         let pruned = collector.build_pruned_binding();
         let shared_required_schemas = collector.build_shared_required_schemas();
-        let shared_slot_versions = collector.build_shared_slot_versions();
         let updated_plan = apply_pruned_schemas_to_logical(
             plan,
             &pruned,
             &HashMap::new(),
             &shared_required_schemas,
-            &shared_slot_versions,
         );
         (updated_plan, pruned)
     }
@@ -1313,13 +1282,8 @@ impl LogicalOptRule for StructFieldPruning {
         let mut collector = StructFieldUsageCollector::new(bindings);
         collector.collect_from_plan(plan.as_ref());
         let pruned = collector.build_pruned_binding();
-        let updated_plan = apply_pruned_schemas_to_logical(
-            plan,
-            &pruned,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let updated_plan =
+            apply_pruned_schemas_to_logical(plan, &pruned, &HashMap::new(), &HashMap::new());
         (updated_plan, pruned)
     }
 }
@@ -1340,47 +1304,10 @@ impl LogicalOptRule for ListElementPruning {
         let mut collector = ListElementUsageCollector::new(bindings);
         collector.collect_from_plan(plan.as_ref());
         let decode_projections = collector.build_decode_projections();
-        let updated_plan = apply_pruned_schemas_to_logical(
-            plan,
-            bindings,
-            &decode_projections,
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let updated_plan =
+            apply_pruned_schemas_to_logical(plan, bindings, &decode_projections, &HashMap::new());
         (updated_plan, bindings.clone())
     }
-}
-
-/// Build a shared source's binding schema from its append-only slot registry
-/// (VF-56). Registers this consumer's used columns (in full-schema order, for
-/// deterministic slot assignment), then materializes a schema whose column order
-/// IS the slot order — so `Schema::column_index(name)` returns the stable slot,
-/// which becomes the consumer's `ColumnRef::ByIndex`. Width = current union size.
-fn build_shared_slice_schema(
-    registry: &SharedStreamRegistry,
-    entry: &SchemaBindingEntry,
-    used: Option<&HashSet<String>>,
-) -> Arc<Schema> {
-    let cols = entry.schema.column_schemas();
-    let reg = registry.slice_registry(&entry.source_name);
-    let snapshot = {
-        let mut guard = reg.write();
-        let names = cols.iter().filter_map(|col| match used {
-            Some(used) if !used.contains(col.name.as_str()) => None,
-            _ => Some(col.name.as_str()),
-        });
-        guard.assign_all(names)
-    };
-    let by_name: HashMap<&str, &datatypes::ColumnSchema> =
-        cols.iter().map(|c| (c.name.as_str(), c)).collect();
-    // Every slot key came from some consumer's used columns ⊆ this shared schema,
-    // so all keys resolve; order is preserved == slot order.
-    let slot_cols: Vec<datatypes::ColumnSchema> = snapshot
-        .keys
-        .iter()
-        .filter_map(|k| by_name.get(k.as_ref()).map(|c| (*c).clone()))
-        .collect();
-    Arc::new(Schema::new(slot_cols))
 }
 
 /// Collects top-level column usage for pruning decisions.
@@ -1390,9 +1317,6 @@ struct TopLevelColumnUsageCollector<'a> {
     /// Sources for which pruning is disabled (e.g., wildcard or ambiguous)
     prune_disabled: HashSet<String>,
     eventtime_enabled: bool,
-    /// When set (VF-56, gated), shared sources are narrowed to the append-only
-    /// registry's slot-ordered union instead of being kept full-width.
-    slice_registry: Option<&'a SharedStreamRegistry>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1453,7 +1377,6 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             used_columns: HashMap::new(),
             prune_disabled: HashSet::new(),
             eventtime_enabled,
-            slice_registry: None,
         }
     }
 
@@ -1727,31 +1650,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             ) || self.prune_disabled.contains(&entry.source_name)
                 || !self.used_columns.contains_key(&entry.source_name);
 
-            // VF-56 (gated): for shared sources, narrow to the append-only
-            // slot-ordered union instead of keeping the full DBC width. Slots are
-            // stable across consumers, so `column_index` (== slot) never moves.
-            let slice_schema = if matches!(
-                entry.kind,
-                crate::expr::sql_conversion::SourceBindingKind::Shared
-            ) && self.slice_registry.is_some()
-            {
-                self.slice_registry.map(|registry| {
-                    let used = if self.prune_disabled.contains(&entry.source_name) {
-                        None
-                    } else {
-                        self.used_columns
-                            .get(&entry.source_name)
-                            .filter(|used| !used.is_empty())
-                    };
-                    build_shared_slice_schema(registry, entry, used)
-                })
-            } else {
-                None
-            };
-
-            let schema = if let Some(slice_schema) = slice_schema {
-                slice_schema
-            } else if should_keep_full {
+            let schema = if should_keep_full {
                 Arc::clone(&entry.schema)
             } else {
                 let required = &self.used_columns[&entry.source_name];
@@ -1814,27 +1713,6 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             };
 
             out.insert(entry.source_name.clone(), required);
-        }
-        out
-    }
-
-    fn build_shared_slot_versions(&self) -> HashMap<String, u64> {
-        let mut out = HashMap::new();
-        let Some(registry) = self.slice_registry else {
-            return out;
-        };
-        for entry in self.bindings.entries() {
-            if matches!(
-                entry.kind,
-                crate::expr::sql_conversion::SourceBindingKind::Shared
-            ) {
-                let version = registry
-                    .slice_registry(&entry.source_name)
-                    .read()
-                    .snapshot()
-                    .version;
-                out.insert(entry.source_name.clone(), version);
-            }
         }
         out
     }
@@ -2629,7 +2507,6 @@ fn apply_pruned_schemas_to_logical(
     bindings: &SchemaBinding,
     decode_projections: &HashMap<String, DecodeProjection>,
     shared_required_schemas: &HashMap<String, Vec<String>>,
-    shared_slot_versions: &HashMap<String, u64>,
 ) -> Arc<LogicalPlan> {
     let mut cache = HashMap::new();
     apply_pruned_with_cache(
@@ -2637,7 +2514,6 @@ fn apply_pruned_schemas_to_logical(
         bindings,
         decode_projections,
         shared_required_schemas,
-        shared_slot_versions,
         &mut cache,
     )
 }
@@ -2647,7 +2523,6 @@ fn apply_pruned_with_cache(
     bindings: &SchemaBinding,
     decode_projections: &HashMap<String, DecodeProjection>,
     shared_required_schemas: &HashMap<String, Vec<String>>,
-    shared_slot_versions: &HashMap<String, u64>,
     cache: &mut HashMap<i64, Arc<LogicalPlan>>,
 ) -> Arc<LogicalPlan> {
     let idx = plan.get_plan_index();
@@ -2673,14 +2548,9 @@ fn apply_pruned_with_cache(
                 .get(&ds.source_name)
                 .cloned()
                 .or_else(|| ds.shared_required_schema.clone());
-            let shared_slot_version = shared_slot_versions
-                .get(&ds.source_name)
-                .copied()
-                .or(ds.shared_slot_version);
             if Arc::ptr_eq(&schema, &ds.schema)
                 && ds.decode_projection == decode_projection
                 && ds.shared_required_schema == shared_required_schema
-                && ds.shared_slot_version == shared_slot_version
             {
                 plan
             } else {
@@ -2688,7 +2558,6 @@ fn apply_pruned_with_cache(
                 new_ds.schema = schema;
                 new_ds.decode_projection = decode_projection;
                 new_ds.shared_required_schema = shared_required_schema;
-                new_ds.shared_slot_version = shared_slot_version;
                 Arc::new(LogicalPlan::DataSource(new_ds))
             }
         }
@@ -2702,7 +2571,6 @@ fn apply_pruned_with_cache(
                         bindings,
                         decode_projections,
                         shared_required_schemas,
-                        shared_slot_versions,
                         cache,
                     )
                 })
