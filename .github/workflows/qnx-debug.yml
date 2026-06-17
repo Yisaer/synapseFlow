@@ -8,11 +8,11 @@ on:
       qnx_target:
         description: QNX Rust target to build
         required: true
-        default: x86_64-pc-nto-qnx800
+        default: aarch64-unknown-nto-qnx800
         type: choice
         options:
-          - x86_64-pc-nto-qnx800
           - aarch64-unknown-nto-qnx800
+          - x86_64-pc-nto-qnx800
       qnx_baseline:
         description: QNX SDP baseline package
         required: true
@@ -38,11 +38,11 @@ env:
   QNX_RUST_TOOLCHAIN: qnx
   QNX_DEFAULT_BASELINE: com.qnx.qnx800
   QNX_DEFAULT_MIRROR_BASELINE: qnx800
-  QNX_DEFAULT_TARGET: x86_64-pc-nto-qnx800
+  QNX_DEFAULT_TARGET: aarch64-unknown-nto-qnx800
 
 jobs:
   qnx-debug-build:
-    name: QNX debug build (${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }})
+    name: QNX debug build (${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }})
     runs-on: infra-emqx-io-4c
     timeout-minutes: 120
     permissions:
@@ -197,42 +197,25 @@ jobs:
           RUST_VER="$(rustc +"$QNX_RUST_TOOLCHAIN" --version | awk '{print $2}')"
           echo "Version: $RUST_VER"
           echo "Sysroot: $SYSROOT"
-          echo "Installed targets:"
+          echo "Installed targets (with pre-built std):"
           ls -1 "$SYSROOT/lib/rustlib/" 2>/dev/null || true
           echo "Known QNX targets:"
           rustc +"$QNX_RUST_TOOLCHAIN" --print target-list 2>/dev/null | grep -i qnx || true
 
-          # Install rust-src for -Zbuild-std (custom toolchains lack this component)
-          echo "=== Installing rust-src for -Zbuild-std ==="
-          if rustup component add rust-src --toolchain "$QNX_RUST_TOOLCHAIN" 2>/dev/null; then
-            echo "rust-src installed via rustup"
-          else
-            echo "Downloading rust-src ${RUST_VER} ..."
-            curl -fsSL "https://static.rust-lang.org/dist/rust-src-${RUST_VER}.tar.xz" \
-              -o /tmp/rust-src.tar.xz
-            mkdir -p "$SYSROOT/lib/rustlib"
-            tar -xJf /tmp/rust-src.tar.xz -C /tmp
-            cp -r /tmp/rust-src-*/rust-src/lib/rustlib/src "$SYSROOT/lib/rustlib/"
-            rm -rf /tmp/rust-src.tar.xz /tmp/rust-src-*
-            test -f "$SYSROOT/lib/rustlib/src/rust/library/Cargo.lock"
-            echo "rust-src installed successfully"
-          fi
-
       - name: Build veloFlux debug binary for QNX
         env:
-          QNX_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
-          CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
-          RUSTC_BOOTSTRAP: "1"
+          QNX_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
+          CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
           source "$QNX_ENV_SCRIPT"
 
-          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN -Zbuild-std"
+          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
 
       - name: Inspect QNX binary
         env:
-          QNX_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
+          QNX_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
         run: |
           set -euo pipefail
 
@@ -243,6 +226,6 @@ jobs:
       - name: Upload QNX debug binary
         uses: actions/upload-artifact@v4
         with:
-          name: veloflux-qnx-${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}-debug
-          path: target/${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}/debug/veloflux
+          name: veloflux-qnx-${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}-debug
+          path: target/${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}/debug/veloflux
           if-no-files-found: error
