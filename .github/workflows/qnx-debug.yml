@@ -191,16 +191,26 @@ jobs:
           rustc +"$QNX_RUST_TOOLCHAIN" -Vv
           echo "QNX_RUST_TOOLCHAIN_ROOT=$QNX_RUST_TC_DIR" >> "$GITHUB_ENV"
 
+          # Inspect which QNX targets the toolchain supports
+          echo "=== Available QNX targets in toolchain ==="
+          SYSROOT="$(rustc +"$QNX_RUST_TOOLCHAIN" --print sysroot)"
+          echo "Sysroot: $SYSROOT"
+          echo "Installed targets:"
+          ls -1 "$SYSROOT/lib/rustlib/" 2>/dev/null || true
+          echo "Known QNX targets:"
+          rustc +"$QNX_RUST_TOOLCHAIN" --print target-list 2>/dev/null | grep -i qnx || true
+
       - name: Build veloFlux debug binary for QNX
         env:
           QNX_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
           CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
+          RUSTC_BOOTSTRAP: "1"
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
           source "$QNX_ENV_SCRIPT"
 
-          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
+          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN -Zbuild-std"
 
       - name: Inspect QNX binary
         env:

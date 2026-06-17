@@ -1,0 +1,59 @@
+name: QNX SDP Image (Try Build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: GHCR tag for the QNX SDP image
+        required: true
+        default: "8.0-try"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-sdp
+  QNX_SDP_IMAGE_TAG: ${{ inputs.image_tag || '8.0-try' }}
+  QNX_BASELINE: com.qnx.qnx800
+  QNX_MIRROR_BASELINE: qnx800
+
+jobs:
+  build-qnx-sdp-image:
+    name: Build QNX SDP image (try)
+    runs-on: infra-emqx-io-4c
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push QNX SDP image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/qnx-sdp-image/Dockerfile
+          push: true
+          network: host
+          tags: ${{ env.IMAGE_NAME }}:${{ env.QNX_SDP_IMAGE_TAG }}
+          build-args: |
+            QNX_BASELINE=${{ env.QNX_BASELINE }}
+            QNX_MIRROR_BASELINE=${{ env.QNX_MIRROR_BASELINE }}
+          secrets: |
+            qnx_installer_token=${{ secrets.QNX_INSTALLER_TOKEN }}
+            qnx_license_key=${{ secrets.QNX_LICENSE_KEY }}
+            qnx_myqnx_user=${{ secrets.QNX_MYQNX_USER }}
+            qnx_myqnx_password=${{ secrets.QNX_MYQNX_PASSWORD }}
