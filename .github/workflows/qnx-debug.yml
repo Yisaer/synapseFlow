@@ -43,7 +43,7 @@ env:
 jobs:
   qnx-debug-build:
     name: QNX debug build (${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }})
-    runs-on: ubuntu-latest
+    runs-on: infra-emqx-io-4c
     timeout-minutes: 120
     permissions:
       contents: read

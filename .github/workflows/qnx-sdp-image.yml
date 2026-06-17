@@ -37,7 +37,7 @@ env:
 jobs:
   build-qnx-sdp-image:
     name: Build QNX SDP image
-    runs-on: ubuntu-latest
+    runs-on: infra-emqx-io-4c
     timeout-minutes: 180
     permissions:
       contents: read
