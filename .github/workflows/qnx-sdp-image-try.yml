@@ -8,9 +8,11 @@ on:
         required: true
         default: "8.0-try"
         type: string
+  pull_request:
+    types: [opened, reopened, synchronize]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.image_tag }}
+  group: ${{ github.workflow }}-${{ inputs.image_tag || '8.0-try' }}
   cancel-in-progress: false
 
 env:
