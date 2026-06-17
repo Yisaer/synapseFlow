@@ -25,12 +25,12 @@ env:
   CARGO_INCREMENTAL: 0
   QNX_INSTALL_DIR: /opt/qnx800
   QNX_RUST_TOOLCHAIN: qnx
+  QNX_SDP_IMAGE: ghcr.io/emqx/veloflux-qnx-sdp:8.0-try
 
 jobs:
   qnx-debug-build:
     name: QNX debug build (${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }})
     runs-on: infra-emqx-io-4c
-    container: ghcr.io/emqx/veloflux-qnx-sdp:8.0-try
     timeout-minutes: 120
     permissions:
       contents: read
@@ -39,70 +39,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential \
-            m4 \
-            pkg-config \
-            protobuf-compiler
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Pull QNX SDP image
+        run: docker pull "$QNX_SDP_IMAGE"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            .cargo-cache/registry
+            .cargo-cache/git
           key: qnx-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             qnx-cargo-${{ runner.os }}-
-
-      - name: Install QNX Rust toolchain
-        env:
-          QNX_RUST_TC_URL: https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.2.0/qnx8_rust_toolchain.tar.gz
-          QNX_RUST_TC_DIR: /opt/qnx-rust-toolchain
-        run: |
-          set -euo pipefail
-
-          echo "Downloading QNX Rust toolchain from qorix-group/rust-lang-qnx8..."
-          curl -fsSL "$QNX_RUST_TC_URL" -o /tmp/qnx8_rust_toolchain.tar.gz
-          mkdir -p "$QNX_RUST_TC_DIR"
-          tar -xzf /tmp/qnx8_rust_toolchain.tar.gz -C "$QNX_RUST_TC_DIR" --strip-components=1
-          rm -f /tmp/qnx8_rust_toolchain.tar.gz
-
-          # The archive may contain a top-level directory; locate the real
-          # toolchain root (must contain bin/rustc and lib/rustlib).
-          if [ ! -x "$QNX_RUST_TC_DIR/bin/rustc" ]; then
-            inner="$(find "$QNX_RUST_TC_DIR" -maxdepth 3 -type f -name rustc -perm -111 | head -1)"
-            if [ -n "$inner" ]; then
-              QNX_RUST_TC_DIR="$(dirname "$(dirname "$inner")")"
-              echo "Adjusted toolchain root to: $QNX_RUST_TC_DIR"
-            else
-              echo "QNX Rust toolchain: rustc not found after extraction" >&2
-              find "$QNX_RUST_TC_DIR" -maxdepth 4 -type f | sort >&2
-              exit 1
-            fi
-          fi
-
-          rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$QNX_RUST_TC_DIR"
-          cargo +"$QNX_RUST_TOOLCHAIN" -V
-          rustc +"$QNX_RUST_TOOLCHAIN" -Vv
-          echo "QNX_RUST_TOOLCHAIN_ROOT=$QNX_RUST_TC_DIR" >> "$GITHUB_ENV"
-
-          # Inspect which QNX targets the toolchain supports
-          echo "=== QNX toolchain diagnostics ==="
-          SYSROOT="$(rustc +"$QNX_RUST_TOOLCHAIN" --print sysroot)"
-          RUST_VER="$(rustc +"$QNX_RUST_TOOLCHAIN" --version | awk '{print $2}')"
-          echo "Version: $RUST_VER"
-          echo "Sysroot: $SYSROOT"
-          echo "Installed targets (with pre-built std):"
-          ls -1 "$SYSROOT/lib/rustlib/" 2>/dev/null || true
-          echo "Known QNX targets:"
-          rustc +"$QNX_RUST_TOOLCHAIN" --print target-list 2>/dev/null | grep -i qnx || true
 
       - name: Build veloFlux debug binary for QNX
         env:
@@ -110,10 +65,72 @@ jobs:
           CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC1090
-          source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
 
-          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
+          mkdir -p "$PWD/.cargo-cache/registry" "$PWD/.cargo-cache/git"
+
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TERM_COLOR \
+            -e CARGO_BUILD_JOBS \
+            -e CARGO_INCREMENTAL \
+            -e CARGO_HOME=/workspace/.cargo-cache \
+            -e QNX_INSTALL_DIR \
+            -e QNX_RUST_TOOLCHAIN \
+            -e QNX_TARGET \
+            -e CARGO_BUILD_TARGET \
+            "$QNX_SDP_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential \
+                curl \
+                m4 \
+                pkg-config \
+                protobuf-compiler
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+              source "$CARGO_HOME/env"
+
+              QNX_RUST_TC_URL="https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.2.0/qnx8_rust_toolchain.tar.gz"
+              QNX_RUST_TC_DIR="/opt/qnx-rust-toolchain"
+
+              echo "Downloading QNX Rust toolchain from qorix-group/rust-lang-qnx8..."
+              curl -fsSL "$QNX_RUST_TC_URL" -o /tmp/qnx8_rust_toolchain.tar.gz
+              mkdir -p "$QNX_RUST_TC_DIR"
+              tar -xzf /tmp/qnx8_rust_toolchain.tar.gz -C "$QNX_RUST_TC_DIR" --strip-components=1
+              rm -f /tmp/qnx8_rust_toolchain.tar.gz
+
+              if [ ! -x "$QNX_RUST_TC_DIR/bin/rustc" ]; then
+                inner="$(find "$QNX_RUST_TC_DIR" -maxdepth 3 -type f -name rustc -perm -111 | head -1)"
+                if [ -n "$inner" ]; then
+                  QNX_RUST_TC_DIR="$(dirname "$(dirname "$inner")")"
+                  echo "Adjusted toolchain root to: $QNX_RUST_TC_DIR"
+                else
+                  echo "QNX Rust toolchain: rustc not found after extraction" >&2
+                  find "$QNX_RUST_TC_DIR" -maxdepth 4 -type f | sort >&2
+                  exit 1
+                fi
+              fi
+
+              rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$QNX_RUST_TC_DIR"
+              cargo +"$QNX_RUST_TOOLCHAIN" -V
+              rustc +"$QNX_RUST_TOOLCHAIN" -Vv
+
+              echo "=== QNX toolchain diagnostics ==="
+              SYSROOT="$(rustc +"$QNX_RUST_TOOLCHAIN" --print sysroot)"
+              echo "Sysroot: $SYSROOT"
+              echo "Installed targets (with pre-built std):"
+              ls -1 "$SYSROOT/lib/rustlib/" 2>/dev/null || true
+              echo "Known QNX targets:"
+              rustc +"$QNX_RUST_TOOLCHAIN" --print target-list 2>/dev/null | grep -i qnx || true
+
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
+            '
 
       - name: Inspect QNX binary
         env:
