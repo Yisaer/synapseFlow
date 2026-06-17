@@ -61,7 +61,7 @@ jobs:
 
       - name: Build veloFlux debug binary for QNX
         env:
-          QNX_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
+          RUST_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
           CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
         run: |
           set -euo pipefail
@@ -77,7 +77,7 @@ jobs:
             -e CARGO_HOME=/workspace/.cargo-cache \
             -e QNX_INSTALL_DIR \
             -e QNX_RUST_TOOLCHAIN \
-            -e QNX_TARGET \
+            -e RUST_TARGET \
             -e CARGO_BUILD_TARGET \
             "$QNX_SDP_IMAGE" \
             bash -lc '
@@ -129,6 +129,12 @@ jobs:
               rustc +"$QNX_RUST_TOOLCHAIN" --print target-list 2>/dev/null | grep -i qnx || true
 
               source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              echo "QNX TCP keepalive macros:"
+              grep -RnsE "#[[:space:]]*define[[:space:]]+TCP_KEEP(ALIVE|IDLE|INTVL|CNT)\\b" \
+                "$QNX_TARGET/usr/include" | head -20 || true
+              echo "Target cfg:"
+              rustc +"$QNX_RUST_TOOLCHAIN" --print cfg --target "$RUST_TARGET" | sort
+
               make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
             '
 
