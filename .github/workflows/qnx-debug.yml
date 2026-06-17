@@ -192,13 +192,31 @@ jobs:
           echo "QNX_RUST_TOOLCHAIN_ROOT=$QNX_RUST_TC_DIR" >> "$GITHUB_ENV"
 
           # Inspect which QNX targets the toolchain supports
-          echo "=== Available QNX targets in toolchain ==="
+          echo "=== QNX toolchain diagnostics ==="
           SYSROOT="$(rustc +"$QNX_RUST_TOOLCHAIN" --print sysroot)"
+          RUST_VER="$(rustc +"$QNX_RUST_TOOLCHAIN" --version | awk '{print $2}')"
+          echo "Version: $RUST_VER"
           echo "Sysroot: $SYSROOT"
           echo "Installed targets:"
           ls -1 "$SYSROOT/lib/rustlib/" 2>/dev/null || true
           echo "Known QNX targets:"
           rustc +"$QNX_RUST_TOOLCHAIN" --print target-list 2>/dev/null | grep -i qnx || true
+
+          # Install rust-src for -Zbuild-std (custom toolchains lack this component)
+          echo "=== Installing rust-src for -Zbuild-std ==="
+          if rustup component add rust-src --toolchain "$QNX_RUST_TOOLCHAIN" 2>/dev/null; then
+            echo "rust-src installed via rustup"
+          else
+            echo "Downloading rust-src ${RUST_VER} ..."
+            curl -fsSL "https://static.rust-lang.org/dist/rust-src-${RUST_VER}.tar.xz" \
+              -o /tmp/rust-src.tar.xz
+            mkdir -p "$SYSROOT/lib/rustlib"
+            tar -xJf /tmp/rust-src.tar.xz -C /tmp
+            cp -r /tmp/rust-src-*/rust-src/lib/rustlib/src "$SYSROOT/lib/rustlib/"
+            rm -rf /tmp/rust-src.tar.xz /tmp/rust-src-*
+            test -f "$SYSROOT/lib/rustlib/src/rust/library/Cargo.lock"
+            echo "rust-src installed successfully"
+          fi
 
       - name: Build veloFlux debug binary for QNX
         env:
