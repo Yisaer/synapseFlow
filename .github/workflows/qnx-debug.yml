@@ -194,12 +194,13 @@ jobs:
       - name: Build veloFlux debug binary for QNX
         env:
           QNX_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
+          CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'x86_64-pc-nto-qnx800' }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
           source "$QNX_ENV_SCRIPT"
 
-          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN --target $QNX_TARGET"
+          make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
 
       - name: Inspect QNX binary
         env:
