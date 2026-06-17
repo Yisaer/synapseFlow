@@ -13,16 +13,6 @@ on:
         options:
           - aarch64-unknown-nto-qnx800
           - x86_64-pc-nto-qnx800
-      qnx_baseline:
-        description: QNX SDP baseline package
-        required: true
-        default: com.qnx.qnx800
-        type: string
-      qnx_mirror_baseline:
-        description: QNX SDP mirror baseline id
-        required: true
-        default: qnx800
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.run_id }}
@@ -31,19 +21,16 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: 2
-  CARGO_HOME: /home/runner/.cargo
+  CARGO_HOME: /root/.cargo
   CARGO_INCREMENTAL: 0
-  QNX_INSTALL_DIR: /home/runner/qnx800
-  QNX_QSC_DIR: /home/runner/qnxsoftwarecenter
+  QNX_INSTALL_DIR: /opt/qnx800
   QNX_RUST_TOOLCHAIN: qnx
-  QNX_DEFAULT_BASELINE: com.qnx.qnx800
-  QNX_DEFAULT_MIRROR_BASELINE: qnx800
-  QNX_DEFAULT_TARGET: aarch64-unknown-nto-qnx800
 
 jobs:
   qnx-debug-build:
     name: QNX debug build (${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }})
     runs-on: infra-emqx-io-4c
+    container: ghcr.io/emqx/veloflux-qnx-sdp:8.0-try
     timeout-minutes: 120
     permissions:
       contents: read
@@ -51,17 +38,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
+      - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y --no-install-recommends \
             build-essential \
-            ca-certificates \
-            curl \
-            file \
             m4 \
-            protobuf-compiler \
-            unzip
+            pkg-config \
+            protobuf-compiler
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -76,93 +60,10 @@ jobs:
           restore-keys: |
             qnx-cargo-${{ runner.os }}-
 
-      - name: Install QNX Software Center
-        env:
-          GH_TOKEN: ${{ secrets.QNX_INSTALLER_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          installer="$RUNNER_TEMP/qnx-setup-linux.run"
-          gh release download qnx-sdp-8-installer \
-            --repo Yisaer/qnx-private-assets \
-            --pattern qnx-setup-2.0.4-202501021438-linux.run \
-            --dir "$RUNNER_TEMP"
-          mv "$RUNNER_TEMP/qnx-setup-2.0.4-202501021438-linux.run" "$installer"
-          echo "5695a0ec8a1fd91840753b2cba86a9325f6052d4f69c757166cc61b09bcbe507  $installer" | sha256sum --check
-          if file "$installer" | grep -qiE 'html|text'; then
-            echo "Downloaded QNX Software Center installer does not look executable." >&2
-            echo "Check the qnx-private-assets release asset." >&2
-            file "$installer" >&2
-            exit 1
-          fi
-          chmod +x "$installer"
-
-          "$installer" force-override disable-auto-start agree-to-license-terms "$QNX_QSC_DIR"
-
-          qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"
-          if [ ! -x "$qsc_bin" ]; then
-            qsc_bin="$(find "$QNX_QSC_DIR" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
-          fi
-          if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
-            echo "qnxsoftwarecenter_clt was not found under $QNX_QSC_DIR" >&2
-            find "$QNX_QSC_DIR" -maxdepth 4 -type f | sort >&2
-            exit 1
-          fi
-
-          qsc_dir="$(dirname "$qsc_bin")"
-          echo "$qsc_dir" >> "$GITHUB_PATH"
-          echo "QNX_QSC_BIN=$qsc_bin" >> "$GITHUB_ENV"
-
-      - name: Install QNX SDP
-        env:
-          QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
-          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
-          QNX_BASELINE: ${{ inputs.qnx_baseline || 'com.qnx.qnx800' }}
-          QNX_MIRROR_BASELINE: ${{ inputs.qnx_mirror_baseline || 'qnx800' }}
-          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
-          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          "$QNX_QSC_BIN" \
-            -addLicenseKey "$QNX_LICENSE_KEY" \
-            -listLicenseKeys
-
-          if [ -z "$QNX_MYQNX_USER" ] || [ -z "$QNX_MYQNX_PASSWORD" ]; then
-            echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD secrets are required to mirror QNX SDP packages." >&2
-            exit 1
-          fi
-
-          "$QNX_QSC_BIN" \
-            -mirrorBaseline "$QNX_MIRROR_BASELINE" \
-            -myqnx.user "$QNX_MYQNX_USER" \
-            -myqnx.password "$QNX_MYQNX_PASSWORD"
-
-          "$QNX_QSC_BIN" \
-            -cleanInstall \
-            -destination "$QNX_INSTALL_DIR" \
-            -installBaseline "$QNX_BASELINE" \
-            -listLicenseKeys \
-            -myqnx.user "$QNX_MYQNX_USER" \
-            -myqnx.password "$QNX_MYQNX_PASSWORD"
-
-      - name: Locate QNX environment
-        run: |
-          set -euo pipefail
-
-          env_script="$(find "$QNX_INSTALL_DIR" -type f -name qnxsdp-env.sh | head -n 1)"
-          if [ -z "$env_script" ]; then
-            echo "qnxsdp-env.sh was not found under $QNX_INSTALL_DIR" >&2
-            find "$QNX_INSTALL_DIR" -maxdepth 4 -type f | sort >&2
-            exit 1
-          fi
-
-          echo "QNX_ENV_SCRIPT=$env_script" >> "$GITHUB_ENV"
-
       - name: Install QNX Rust toolchain
         env:
           QNX_RUST_TC_URL: https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.2.0/qnx8_rust_toolchain.tar.gz
-          QNX_RUST_TC_DIR: /home/runner/qnx-rust-toolchain
+          QNX_RUST_TC_DIR: /opt/qnx-rust-toolchain
         run: |
           set -euo pipefail
 
@@ -209,7 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           # shellcheck disable=SC1090
-          source "$QNX_ENV_SCRIPT"
+          source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
 
           make debug CARGO="cargo +$QNX_RUST_TOOLCHAIN"
 
