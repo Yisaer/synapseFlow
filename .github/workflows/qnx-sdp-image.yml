@@ -3,15 +3,12 @@ name: QNX SDP Image
 on:
   pull_request:
     types: [opened, reopened, synchronize]
-    paths:
-      - .github/qnx-sdp-image/**
-      - .github/workflows/qnx-sdp-image.yml
   workflow_dispatch:
     inputs:
       image_tag:
         description: GHCR tag for the QNX SDP image
         required: true
-        default: "8.0"
+        default: "8.0-try"
         type: string
       qnx_baseline:
         description: QNX SDP baseline package
@@ -25,12 +22,12 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.image_tag }}
+  group: ${{ github.workflow }}-${{ inputs.image_tag || '8.0-try' }}
   cancel-in-progress: false
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-sdp
-  QNX_SDP_IMAGE_TAG: ${{ inputs.image_tag || '8.0' }}
+  QNX_SDP_IMAGE_TAG: ${{ inputs.image_tag || '8.0-try' }}
   QNX_BASELINE: ${{ inputs.qnx_baseline || 'com.qnx.qnx800' }}
   QNX_MIRROR_BASELINE: ${{ inputs.qnx_mirror_baseline || 'qnx800' }}
 
@@ -63,9 +60,7 @@ jobs:
           file: .github/qnx-sdp-image/Dockerfile
           push: true
           network: host
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.QNX_SDP_IMAGE_TAG }}
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ env.IMAGE_NAME }}:${{ env.QNX_SDP_IMAGE_TAG }}
           build-args: |
             QNX_BASELINE=${{ env.QNX_BASELINE }}
             QNX_MIRROR_BASELINE=${{ env.QNX_MIRROR_BASELINE }}
