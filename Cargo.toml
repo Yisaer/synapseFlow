@@ -16,9 +16,10 @@ members = [
 resolver = "2"
 
 [patch.crates-io]
-# Temporary QNX 8.0 workaround until rust-lang/libc publishes the nto80
-# io-sock TCP keepalive constants.
-libc = { git = "https://github.com/skarlsson/libc.git", rev = "e464a33781da9cb6ffa09b7ec1d6f4a872177e34" }
+# Temporary QNX 8.0 workaround using the QNX ports Tokio bundle.
+libc = { git = "https://github.com/qnx-ports/libc-rs.git", rev = "ffc9915668ea90c3bff2d5a47298898f7a1ec972" }
+socket2 = { git = "https://github.com/qnx-ports/socket2-rs.git", rev = "ca2d6b04c87ababeaee209fe7fa31796fd48808a" }
+tokio = { git = "https://github.com/qnx-ports/tokio.git", rev = "c5e4a5e2e770121a7ff2d52d40d4aa9dfb3b0722" }
 
 [package]
 name = "veloflux"

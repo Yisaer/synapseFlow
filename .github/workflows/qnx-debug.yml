@@ -30,67 +30,15 @@ env:
 
 jobs:
   qnx-debug-build:
-    name: QNX debug build (${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}, ${{ matrix.patch_label }})
+    name: QNX debug build (${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}, qnx-ports)
     runs-on: infra-emqx-io-4c
     timeout-minutes: 120
     permissions:
       contents: read
       packages: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - patch_scheme: skarlsson
-            patch_label: skarlsson-upstream-prs
-          - patch_scheme: qnx-ports
-            patch_label: qnx-ports-bundle
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Prepare QNX dependency patch
-        env:
-          QNX_PATCH_SCHEME: ${{ matrix.patch_scheme }}
-        run: |
-          set -euo pipefail
-
-          tmp="$(mktemp)"
-          awk '
-            /^\[patch\.crates-io\]$/ { skip = 1; next }
-            skip && /^\[/ { skip = 0 }
-            !skip { print }
-          ' Cargo.toml > "$tmp"
-          mv "$tmp" Cargo.toml
-
-          case "$QNX_PATCH_SCHEME" in
-            skarlsson)
-              {
-                echo
-                echo "[patch.crates-io]"
-                echo "# Temporary QNX 8.0 workaround until upstream libc/tokio publish"
-                echo "# nto80 io-sock fixes."
-                echo 'libc = { git = "https://github.com/skarlsson/libc.git", rev = "e464a33781da9cb6ffa09b7ec1d6f4a872177e34" }'
-                echo 'tokio = { git = "https://github.com/skarlsson/tokio.git", rev = "f6954942b83378942f521979bfb8e5199dd09118" }'
-              } >> Cargo.toml
-              ;;
-            qnx-ports)
-              {
-                echo
-                echo "[patch.crates-io]"
-                echo "# Temporary QNX 8.0 workaround using the QNX ports Tokio bundle."
-                echo 'libc = { git = "https://github.com/qnx-ports/libc-rs.git", rev = "9c10cca9e5fb3a4e3dc6c4e88029343fb7111f90" }'
-                echo 'socket2 = { git = "https://github.com/qnx-ports/socket2-rs.git", rev = "ca2d6b04c87ababeaee209fe7fa31796fd48808a" }'
-                echo 'tokio = { git = "https://github.com/qnx-ports/tokio.git", rev = "c5e4a5e2e770121a7ff2d52d40d4aa9dfb3b0722" }'
-              } >> Cargo.toml
-              ;;
-            *)
-              echo "Unknown QNX patch scheme: $QNX_PATCH_SCHEME" >&2
-              exit 1
-              ;;
-          esac
-
-          echo "Using QNX patch scheme: $QNX_PATCH_SCHEME"
-          sed -n '/^\[patch\.crates-io\]/,$p' Cargo.toml | head -20
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -108,15 +56,14 @@ jobs:
           path: |
             .cargo-cache/registry
             .cargo-cache/git
-          key: qnx-${{ matrix.patch_scheme }}-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: qnx-ports-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            qnx-${{ matrix.patch_scheme }}-cargo-${{ runner.os }}-
+            qnx-ports-cargo-${{ runner.os }}-
 
       - name: Build veloFlux debug binary for QNX
         env:
           RUST_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
           CARGO_BUILD_TARGET: ${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}
-          QNX_PATCH_SCHEME: ${{ matrix.patch_scheme }}
         run: |
           set -euo pipefail
 
@@ -134,7 +81,6 @@ jobs:
             -e QNX_RUST_TOOLCHAIN \
             -e RUST_TARGET \
             -e CARGO_BUILD_TARGET \
-            -e QNX_PATCH_SCHEME \
             "$QNX_SDP_IMAGE" \
             bash -lc '
               set -euo pipefail
@@ -177,24 +123,11 @@ jobs:
               cargo +"$QNX_RUST_TOOLCHAIN" -V
               rustc +"$QNX_RUST_TOOLCHAIN" -Vv
 
-              case "$QNX_PATCH_SCHEME" in
-                skarlsson)
-                  cargo +"$QNX_RUST_TOOLCHAIN" update -p tokio --precise 1.52.1
-                  ;;
-                qnx-ports)
-                  cargo +"$QNX_RUST_TOOLCHAIN" update -p tokio --precise 1.50.0
-                  cargo +"$QNX_RUST_TOOLCHAIN" update -p socket2@0.6.4 --precise 0.6.3
-                  ;;
-                *)
-                  echo "Unknown QNX patch scheme: $QNX_PATCH_SCHEME" >&2
-                  exit 1
-                  ;;
-              esac
-
               echo "Resolved QNX dependency patches:"
               cargo +"$QNX_RUST_TOOLCHAIN" tree -i tokio --target "$RUST_TARGET"
-              cargo +"$QNX_RUST_TOOLCHAIN" tree -i socket2 --target "$RUST_TARGET" || true
+              cargo +"$QNX_RUST_TOOLCHAIN" tree -i socket2@0.6.3 --target "$RUST_TARGET" || true
               cargo +"$QNX_RUST_TOOLCHAIN" tree -i libc --target "$RUST_TARGET" || true
+              cargo +"$QNX_RUST_TOOLCHAIN" tree -i rustix@1.0.8 --target "$RUST_TARGET" || true
 
               echo "=== QNX toolchain diagnostics ==="
               SYSROOT="$(rustc +"$QNX_RUST_TOOLCHAIN" --print sysroot)"
@@ -227,6 +160,6 @@ jobs:
       - name: Upload QNX debug binary
         uses: actions/upload-artifact@v4
         with:
-          name: veloflux-qnx-${{ matrix.patch_label }}-${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}-debug
+          name: veloflux-qnx-qnx-ports-${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}-debug
           path: target/${{ inputs.qnx_target || 'aarch64-unknown-nto-qnx800' }}/debug/veloflux
           if-no-files-found: error
