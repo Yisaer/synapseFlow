@@ -64,20 +64,48 @@ RUN --mount=type=secret,id=qnx_license_key \
       -mirrorBaseline "$QNX_MIRROR_BASELINE" \
       -myqnx.user "$qnx_myqnx_user" \
       -myqnx.password "$qnx_myqnx_password"; \
+    echo "=== Searching for available QNX Rust packages ==="; \
+    RUST_PKGS="$("$qsc_bin" \
+      -listAvailable \
+      -myqnx.user "$qnx_myqnx_user" \
+      -myqnx.password "$qnx_myqnx_password" \
+      2>/dev/null | grep -i 'rust' | awk '{print $1}' || true)"; \
+    echo "Rust packages discovered: ${RUST_PKGS:-none}"; \
+    INSTALL_ARGS=( \
+      -setDebugSymbolsEnabled=false \
+      -cleanInstall \
+      -destination "$QNX_INSTALL_DIR" \
+      -installBaseline "$QNX_BASELINE" \
+      -listLicenseKeys \
+      -myqnx.user "$qnx_myqnx_user" \
+      -myqnx.password "$qnx_myqnx_password" \
+    ); \
+    for pkg in $RUST_PKGS; do \
+      echo "Adding Rust add-on package: $pkg"; \
+      INSTALL_ARGS+=(-installAddOn "$pkg"); \
+    done; \
     for attempt in 1 2 3; do \
-      "$qsc_bin" \
-        -setDebugSymbolsEnabled=false \
-        -cleanInstall \
-        -destination "$QNX_INSTALL_DIR" \
-        -installBaseline "$QNX_BASELINE" \
-        -listLicenseKeys \
-        -myqnx.user "$qnx_myqnx_user" \
-        -myqnx.password "$qnx_myqnx_password" && break; \
+      "$qsc_bin" "${INSTALL_ARGS[@]}" && break; \
       if [ "$attempt" = 3 ]; then \
         exit 1; \
       fi; \
       sleep $((attempt * 30)); \
     done; \
+    if [ -z "${RUST_PKGS:-}" ]; then \
+      echo "No Rust packages discovered via -listAvailable; trying heuristics."; \
+      for candidate in \
+        com.qnx.qnx800.host.linux.x86_64.rust \
+        com.qnx.qnx800.target.rust.host \
+        com.qnx.qnx800.target.rust \
+      ; do \
+        echo "Trying add-on: $candidate"; \
+        "$qsc_bin" \
+          -installAddOn "$candidate" \
+          -destination "$QNX_INSTALL_DIR" \
+          -myqnx.user "$qnx_myqnx_user" \
+          -myqnx.password "$qnx_myqnx_password" || true; \
+      done; \
+    fi; \
     rm -rf /root/.qnx/license /root/.qnx/swupdate/session /root/.qnx/swupdate/server-cache
 
 FROM ubuntu:24.04

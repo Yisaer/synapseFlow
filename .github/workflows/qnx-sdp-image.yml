@@ -62,6 +62,7 @@ jobs:
           context: .
           file: .github/qnx-sdp-image/Dockerfile
           push: true
+          network: host
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.QNX_SDP_IMAGE_TAG }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
