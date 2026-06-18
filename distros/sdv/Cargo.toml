@@ -30,12 +30,13 @@ can-dbc = "7"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
 hex = "0.4"
-rumqttc = "0.24"
+rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 base64 = "0.22.1"
 bytes = "1"
 
 [dev-dependencies]
-reqwest = { version = "0.11", features = ["blocking", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 serial_test = "3"
 criterion = "0.5"
 
@@ -49,8 +50,4 @@ harness = false
 
 [[bench]]
 name = "decoder_projection"
-harness = false
-
-[[bench]]
-name = "gbf_fused"
 harness = false
