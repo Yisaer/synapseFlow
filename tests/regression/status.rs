@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
 use sdk::{PipelineCreateRequest, StreamCreateRequest};
 use serde_json::Value as JsonValue;
 
@@ -19,10 +19,7 @@ async fn status_endpoint_returns_expected_fields() {
             .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{addr}");
 
     // Wait for > 1 second so that uptime_seconds (whole-second resolution) is measurably > 0.
@@ -171,10 +168,7 @@ async fn status_endpoint_uptime_monotonic() {
             .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{addr}");
 
     // First request after sufficient delay for uptime_seconds to cross the 1s boundary.

@@ -7,6 +7,14 @@ mod stream_upsert;
 
 use tokio::net::TcpListener;
 
+pub fn http_client() -> reqwest::Client {
+    sdk::install_default_crypto_provider();
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client")
+}
+
 pub fn random_suffix() -> String {
     use rand::{distributions::Alphanumeric, Rng};
     rand::thread_rng()

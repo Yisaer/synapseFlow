@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
 use reqwest::StatusCode;
 use sdk::{PipelineCreateRequest, StreamCreateRequest};
 use serde_json::Value as JsonValue;
@@ -27,10 +27,7 @@ async fn pipeline_stats_returns_400_for_stopped_pipeline_via_rest() {
             .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{addr}");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -134,10 +131,7 @@ async fn pipeline_stats_excludes_internal_and_shared_ingest_processors_via_rest(
             .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{addr}");
     tokio::time::sleep(Duration::from_millis(300)).await;
 

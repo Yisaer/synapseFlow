@@ -1,6 +1,7 @@
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Once;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -14,6 +15,13 @@ pub const MQTT_PORT: u16 = 1883;
 
 /// Global singleton test environment instance
 static TEST_ENV: OnceLock<TestEnvironment> = OnceLock::new();
+static INSTALL_PROVIDER: Once = Once::new();
+
+fn install_default_crypto_provider() {
+    INSTALL_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 /// Check if MQTT broker is available, panic with clear message if not.
 fn check_mqtt_available() {
@@ -124,6 +132,7 @@ impl TestEnvironment {
         let base_url = format!("http://127.0.0.1:{}", TEST_PORT);
 
         // Wait for server to be ready
+        install_default_crypto_provider();
         let client = reqwest::blocking::Client::new();
         let health_url = format!("{}/ping", base_url);
         for _ in 0..300 {
@@ -177,6 +186,7 @@ pub struct ApiClient {
 #[allow(dead_code)]
 impl ApiClient {
     pub fn new(base_url: &str) -> Self {
+        install_default_crypto_provider();
         Self {
             client: reqwest::blocking::Client::new(),
             base_url: base_url.to_string(),

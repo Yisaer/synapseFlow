@@ -12,8 +12,12 @@ members = [
     "src/udf",
     "src/veloflux-udf-sdk",
     "distros/sdv",
+    "third_party/metrics-exporter-prometheus-shim",
 ]
 resolver = "2"
+
+[patch.crates-io]
+metrics-exporter-prometheus = { path = "third_party/metrics-exporter-prometheus-shim" }
 
 [package]
 name = "veloflux"
@@ -58,7 +62,6 @@ profiling = ["dep:pprof"]
 allocator-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 allocator-system = []
 deadlock_detection = ["flow/deadlock_detection", "manager/deadlock_detection", "parking_lot/deadlock_detection"]
-gmp_force_cross = ["flow/gmp_force_cross"]
 wasm_udf = ["manager/wasm_udf", "veloflux_sdv/wasm_udf"]
 video_gstreamer = ["flow/video_gstreamer"]
 nng_pubsub = ["flow/nng_pubsub", "veloflux_sdv/nng_pubsub"]
@@ -66,12 +69,13 @@ nng_pubsub = ["flow/nng_pubsub", "veloflux_sdv/nng_pubsub"]
 [dev-dependencies]
 bytes = "1"
 criterion = "0.5"
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 tempfile = "3"
 flate2 = "1"
 tar = "0.4"
 proptest = "1"
-rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rumqttd = "0.20.0"
 uuid = "1"
 

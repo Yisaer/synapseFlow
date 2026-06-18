@@ -1,8 +1,8 @@
 use super::{
-    bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
+    bind_manager_listener_or_skip, default_flow_instances, http_client, make_client, random_suffix,
     wait_for_server,
 };
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::StatusCode;
 use serde_json::{json, Value as JsonValue};
 use std::net::SocketAddr;
 
@@ -10,7 +10,7 @@ struct ImportExportHarness {
     _temp_dir: tempfile::TempDir,
     server: tokio::task::JoinHandle<()>,
     addr: SocketAddr,
-    http: HttpClient,
+    http: reqwest::Client,
 }
 
 impl ImportExportHarness {
@@ -36,10 +36,7 @@ impl ImportExportHarness {
             .expect("start manager server");
         });
 
-        let http = HttpClient::builder()
-            .no_proxy()
-            .build()
-            .expect("build reqwest client");
+        let http = http_client();
         let client = make_client(addr);
 
         wait_for_server(&client).await;
@@ -120,7 +117,7 @@ fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> Js
     })
 }
 
-async fn export_bundle(http: &HttpClient, base: &str) -> JsonValue {
+async fn export_bundle(http: &reqwest::Client, base: &str) -> JsonValue {
     let resp = http
         .get(format!("{base}/storage/export"))
         .send()
@@ -168,7 +165,11 @@ fn build_tar_gz_from_metadata(bundle: &JsonValue) -> Result<Vec<u8>, String> {
     Ok(tar_gz)
 }
 
-async fn import_bundle(http: &HttpClient, base: &str, bundle: &JsonValue) -> (StatusCode, String) {
+async fn import_bundle(
+    http: &reqwest::Client,
+    base: &str,
+    bundle: &JsonValue,
+) -> (StatusCode, String) {
     let tar_gz = build_tar_gz_from_metadata(bundle).expect("build tar.gz");
     let resp = http
         .post(format!("{base}/import"))

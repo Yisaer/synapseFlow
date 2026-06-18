@@ -10,6 +10,14 @@ use tokio::net::TcpListener;
 
 use sdk::{ClientConfig, ManagerClient};
 
+pub fn http_client() -> reqwest::Client {
+    sdk::install_default_crypto_provider();
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client")
+}
+
 pub fn make_client(addr: SocketAddr) -> ManagerClient {
     let base_url = format!("http://{}", addr).parse().expect("base_url");
     ManagerClient::new(ClientConfig::new(base_url)).expect("create client")

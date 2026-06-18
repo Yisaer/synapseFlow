@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
 use reqwest::StatusCode;
 use sdk::{PipelineCreateRequest, StreamCreateRequest};
 use serde_json::Value as JsonValue;
@@ -69,10 +69,7 @@ async fn shared_stream_stats_default_to_default_instance_in_single_instance_depl
             .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{addr}");
 
     let stream_name = format!("shared_stream_stats_default_{}", random_suffix());
@@ -187,10 +184,7 @@ async fn shared_stream_stats_require_explicit_flow_instance_id_in_multi_instance
         .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{manager_addr}");
     let stream_name = format!("extra_shared_stream_stats_{}", random_suffix());
     let create_stream_resp = http

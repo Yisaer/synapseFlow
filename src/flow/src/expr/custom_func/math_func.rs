@@ -3,7 +3,6 @@ use crate::catalog::FunctionDef;
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
 use datatypes::Value;
-use rug::{Float, Integer};
 
 pub fn builtin_function_defs() -> Vec<FunctionDef> {
     vec![
@@ -699,7 +698,7 @@ impl CustomFunc for RoundFunc {
         let scaled = x * factor;
 
         let result = if factor.is_infinite() || scaled.is_infinite() || factor == 0.0 {
-            round_with_big_float(x, precision)
+            x
         } else {
             scaled.round() / factor
         };
@@ -710,66 +709,6 @@ impl CustomFunc for RoundFunc {
     fn name(&self) -> &str {
         "round"
     }
-}
-
-fn round_with_big_float(v: f64, precision: i32) -> f64 {
-    const BIG_FLOAT_PREC: u32 = 256;
-
-    let bf = Float::with_val(BIG_FLOAT_PREC, v);
-    let ten = Float::with_val(BIG_FLOAT_PREC, 10);
-
-    let multiplier = if precision == 0 {
-        Float::with_val(BIG_FLOAT_PREC, 1)
-    } else if precision > 0 {
-        let mut m = Float::with_val(BIG_FLOAT_PREC, 10);
-        for _ in 1..precision {
-            m *= &ten;
-        }
-        m
-    } else {
-        let mut m = Float::with_val(BIG_FLOAT_PREC, 1);
-        for _ in 0..(-precision) {
-            m /= &ten;
-        }
-        m
-    };
-
-    let scaled = Float::with_val(BIG_FLOAT_PREC, &bf * &multiplier);
-
-    let mut int_part = trunc_toward_zero(&scaled, BIG_FLOAT_PREC);
-
-    let frac_part = Float::with_val(
-        BIG_FLOAT_PREC,
-        &scaled - Float::with_val(BIG_FLOAT_PREC, &int_part),
-    );
-
-    let half = Float::with_val(BIG_FLOAT_PREC, 0.5);
-    let neg_half = Float::with_val(BIG_FLOAT_PREC, -0.5);
-
-    if frac_part >= half {
-        int_part += 1;
-    } else if frac_part <= neg_half {
-        int_part -= 1;
-    }
-
-    let result = Float::with_val(BIG_FLOAT_PREC, int_part) / multiplier;
-    result.to_f64()
-}
-
-fn trunc_toward_zero(x: &Float, prec: u32) -> Integer {
-    let zero = Float::with_val(prec, 0);
-
-    let truncated = if x >= &zero {
-        Float::with_val(prec, x).floor()
-    } else {
-        Float::with_val(prec, x).ceil()
-    };
-
-    // `to_integer()` returns None only for non-finite Floats.
-    // `round_with_big_float` is only reachable when `x` is finite (see the
-    // non-finite guard in `eval_row`), so `truncated` is always finite and
-    // `to_integer()` is always `Some`.
-    truncated.to_integer().unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]

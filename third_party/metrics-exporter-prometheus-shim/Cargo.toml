@@ -1,0 +1,13 @@
+[package]
+name = "metrics-exporter-prometheus"
+version = "0.13.1"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+http-listener = []

@@ -1,9 +1,9 @@
 use super::{
-    bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
+    bind_manager_listener_or_skip, default_flow_instances, http_client, make_client, random_suffix,
     wait_for_server,
 };
 
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::StatusCode;
 use sdk::types::PipelineUpsertRequest;
 use sdk::{ManagerClient, PipelineCreateRequest, SdkError, StopOptions, StreamCreateRequest};
 use serde_json::{json, Value as JsonValue};
@@ -14,7 +14,7 @@ struct TestHarness {
     server: tokio::task::JoinHandle<()>,
     addr: SocketAddr,
     client: ManagerClient,
-    http: HttpClient,
+    http: reqwest::Client,
 }
 
 impl TestHarness {
@@ -41,10 +41,7 @@ impl TestHarness {
         });
 
         let client = make_client(addr);
-        let http = HttpClient::builder()
-            .no_proxy()
-            .build()
-            .expect("build reqwest client");
+        let http = http_client();
 
         wait_for_server(&client).await;
 
@@ -157,7 +154,7 @@ fn assert_http_status(err: SdkError, expected: u16) -> String {
     }
 }
 
-async fn assert_pipeline_absent(http: &HttpClient, base: &str, id: &str) {
+async fn assert_pipeline_absent(http: &reqwest::Client, base: &str, id: &str) {
     let resp = http
         .get(format!("{base}/pipelines/{id}"))
         .send()

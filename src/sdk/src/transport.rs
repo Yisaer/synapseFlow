@@ -12,6 +12,7 @@ pub struct Transport {
 
 impl Transport {
     pub fn new(cfg: ClientConfig) -> Result<Self, SdkError> {
+        crate::tls::install_default_crypto_provider();
         let http = reqwest::Client::builder()
             .timeout(cfg.timeout)
             .build()
