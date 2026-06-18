@@ -15,6 +15,14 @@ use tokio::task::JoinHandle;
 use sdk::{ClientConfig, ManagerClient};
 use serde_json::Value as JsonValue;
 
+pub fn http_client() -> reqwest::Client {
+    sdk::install_default_crypto_provider();
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client")
+}
+
 pub fn make_client(addr: SocketAddr) -> ManagerClient {
     let base_url = format!("http://{}", addr).parse().expect("base_url");
     ManagerClient::new(ClientConfig::new(base_url)).expect("create client")
@@ -94,10 +102,7 @@ impl ManagerHarness {
 
         let client = make_client(addr);
         wait_for_server(&client).await;
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build test http client");
+        let http = http_client();
 
         Some(Self {
             _temp_dir: temp_dir,

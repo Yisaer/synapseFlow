@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
 use reqwest::StatusCode;
 use sdk::{PipelineCreateRequest, StreamCreateRequest, StreamUpsertRequest};
 use std::time::Duration;
@@ -19,13 +19,6 @@ async fn start_manager(temp_dir: &tempfile::TempDir) -> (tokio::task::JoinHandle
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     (server, format!("http://{addr}"))
-}
-
-fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client")
 }
 
 fn pipeline_nop(id: &str, sql: String) -> PipelineCreateRequest {

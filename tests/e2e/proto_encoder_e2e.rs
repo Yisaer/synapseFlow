@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
 use reqwest::StatusCode;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
@@ -175,10 +175,7 @@ async fn protobuf_encoder_covers_all_value_types() {
             .expect("start manager server");
     });
 
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build test http client");
+    let http = http_client();
     let manager_base = format!("http://{addr}");
     tokio::time::sleep(Duration::from_millis(300)).await;
 

@@ -3,7 +3,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 
 use super::{
-    bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
+    bind_manager_listener_or_skip, default_flow_instances, http_client, make_client, random_suffix,
     wait_for_server,
 };
 
@@ -45,10 +45,7 @@ impl TestHarness {
         });
 
         let client = make_client(addr);
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build reqwest client");
+        let http = http_client();
 
         wait_for_server(&client).await;
 
