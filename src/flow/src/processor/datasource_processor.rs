@@ -6,8 +6,8 @@
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    ProcessorChannelCapacities,
+    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -16,7 +16,7 @@ use crate::runtime::TaskSpawner;
 use datatypes::Schema;
 use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -33,11 +33,11 @@ pub struct DataSourceProcessor {
     stream_name: String,
     schema: Arc<Schema>,
     /// Input channels for receiving control signals
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
     /// Broadcast channel for downstream consumers
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     /// External source connectors that feed this processor
     connectors: Vec<ConnectorBinding>,
@@ -56,8 +56,11 @@ impl ConnectorBinding {
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
         spawner: &TaskSpawner,
-    ) -> Result<broadcast::Receiver<StreamData>, ProcessorError> {
-        let (sender, receiver) = broadcast::channel(data_channel_capacity);
+    ) -> Result<LinkReceiver<StreamData>, ProcessorError> {
+        let output = LinkOutput::broadcast(data_channel_capacity);
+        let receiver = output.subscribe().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration("connector output unavailable".into())
+        })?;
         let processor_id = processor_id.to_string();
         let connector_id = self.connector.id().to_string();
         let mut stream = match self.connector.subscribe() {
@@ -80,7 +83,7 @@ impl ConnectorBinding {
             connector_id = %connector_id,
             "data source connector starting"
         );
-        let sender_clone = sender.clone();
+        let sender_clone = output.clone();
         self.handle = Some(spawner.spawn(async move {
             let sender = sender_clone;
             while let Some(event) = stream.next().await {
@@ -194,8 +197,11 @@ impl DataSourceProcessor {
         schema: Arc<Schema>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         let stream_name = source_name.into();
         Self {
             id: id.into(),
@@ -230,7 +236,7 @@ impl DataSourceProcessor {
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
         spawner: &TaskSpawner,
-    ) -> Result<Vec<broadcast::Receiver<StreamData>>, ProcessorError> {
+    ) -> Result<Vec<LinkReceiver<StreamData>>, ProcessorError> {
         connectors
             .iter_mut()
             .map(|binding| {
@@ -255,7 +261,7 @@ impl DataSourceProcessor {
 
     async fn forward_data(
         processor_id: &str,
-        output: &broadcast::Sender<StreamData>,
+        output: &LinkOutput<StreamData>,
         channel_capacity: usize,
         stats: &ProcessorStats,
         data: StreamData,
@@ -428,20 +434,26 @@ impl Processor for DataSourceProcessor {
         ProcessorStart::with_ready(handle, ready_rx)
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }
 

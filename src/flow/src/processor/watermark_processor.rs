@@ -6,7 +6,8 @@ use crate::planner::physical::{
 };
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
+    send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -18,6 +19,7 @@ use std::collections::BinaryHeap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
 use tokio::sync::broadcast;
 use tokio::time::{interval, sleep, Interval, MissedTickBehavior, Sleep};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -132,28 +134,34 @@ impl Processor for WatermarkProcessor {
         }
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
         match self {
             WatermarkProcessor::ProcessTime(p) => p.subscribe_output(),
             WatermarkProcessor::Eventtime(p) => p.subscribe_output(),
         }
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
         match self {
             WatermarkProcessor::ProcessTime(p) => p.subscribe_control_output(),
             WatermarkProcessor::Eventtime(p) => p.subscribe_control_output(),
         }
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
         match self {
             WatermarkProcessor::ProcessTime(p) => p.add_input(receiver),
             WatermarkProcessor::Eventtime(p) => p.add_input(receiver),
         }
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
         match self {
             WatermarkProcessor::ProcessTime(p) => p.add_control_input(receiver),
             WatermarkProcessor::Eventtime(p) => p.add_control_input(receiver),
@@ -176,28 +184,34 @@ impl Processor for ProcessTimeWatermarkProcessor {
         }
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
         match self {
             ProcessTimeWatermarkProcessor::Tumbling(p) => p.subscribe_output(),
             ProcessTimeWatermarkProcessor::Sliding(p) => p.subscribe_output(),
         }
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
         match self {
             ProcessTimeWatermarkProcessor::Tumbling(p) => p.subscribe_control_output(),
             ProcessTimeWatermarkProcessor::Sliding(p) => p.subscribe_control_output(),
         }
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
         match self {
             ProcessTimeWatermarkProcessor::Tumbling(p) => p.add_input(receiver),
             ProcessTimeWatermarkProcessor::Sliding(p) => p.add_input(receiver),
         }
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
         match self {
             ProcessTimeWatermarkProcessor::Tumbling(p) => p.add_control_input(receiver),
             ProcessTimeWatermarkProcessor::Sliding(p) => p.add_control_input(receiver),
@@ -209,10 +223,10 @@ impl Processor for ProcessTimeWatermarkProcessor {
 pub struct TumblingWatermarkProcessor {
     id: String,
     physical: Arc<PhysicalProcessTimeWatermark>,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
@@ -227,8 +241,11 @@ impl TumblingWatermarkProcessor {
         physical: Arc<PhysicalProcessTimeWatermark>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         Self {
             id: id.into(),
             physical,
@@ -371,20 +388,26 @@ impl Processor for TumblingWatermarkProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }
 
@@ -409,10 +432,10 @@ pub struct SlidingWatermarkProcessor {
     id: String,
     lookahead: Option<Duration>,
     ticker: Option<Interval>,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
@@ -430,8 +453,11 @@ impl SlidingWatermarkProcessor {
         physical: Arc<PhysicalProcessTimeWatermark>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Result<Self, ProcessorError> {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         let id = id.into();
         let (lookahead, strategy) = match &physical.config {
             WatermarkConfig::Sliding {
@@ -522,7 +548,7 @@ impl Processor for SlidingWatermarkProcessor {
             tracing::info!(processor_id = %id, "watermark processor starting");
 
             async fn emit_monotonic_watermark(
-                output: &broadcast::Sender<StreamData>,
+                output: &LinkOutput<StreamData>,
                 data_channel_capacity: usize,
                 last_emitted_nanos: &mut Option<u128>,
                 ts: SystemTime,
@@ -671,20 +697,26 @@ impl Processor for SlidingWatermarkProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }
 
@@ -725,10 +757,10 @@ impl Ord for HeapItem {
 ///   Late events (`ts <= current_watermark`) are dropped.
 pub struct EventtimeWatermarkProcessor {
     id: String,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     state: EventtimeWatermarkState,
     stats: Arc<ProcessorStats>,
@@ -744,8 +776,11 @@ impl EventtimeWatermarkProcessor {
         physical: Arc<PhysicalEventtimeWatermark>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
 
         let late_tolerance = match physical.config.strategy() {
             WatermarkStrategy::EventTime { late_tolerance } => *late_tolerance,
@@ -958,20 +993,26 @@ impl Processor for EventtimeWatermarkProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }
 

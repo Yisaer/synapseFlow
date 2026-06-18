@@ -114,12 +114,28 @@ async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
         "fresh running pipeline should not report processor errors"
     );
     assert!(
-        stats.iter().all(|entry| {
-            entry.stats.records_in == 0
-                && entry.stats.records_out == 0
-                && entry.stats.custom.is_empty()
-        }),
-        "idle pipeline should expose zeroed base stats without custom metrics"
+        stats
+            .iter()
+            .all(|entry| entry.stats.records_in == 0 && entry.stats.records_out == 0),
+        "idle pipeline should expose zeroed base counters"
+    );
+    let control_source = find_processor_stats(&stats, "control_source");
+    assert_eq!(
+        control_source.stats.custom.get("broadcast_links"),
+        Some(&1),
+        "control source stats should expose pipeline broadcast link count"
+    );
+    assert_eq!(
+        control_source.stats.custom.get("mpsc_links"),
+        Some(&5),
+        "control source stats should expose pipeline mpsc link count"
+    );
+    assert!(
+        stats
+            .iter()
+            .filter(|entry| entry.processor_id != "control_source")
+            .all(|entry| entry.stats.custom.is_empty()),
+        "non-control processors should not expose pipeline-level custom metrics"
     );
 
     instance
@@ -268,9 +284,19 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
                 && entry.stats.records_out == 0
                 && entry.stats.error_count == 0
                 && entry.stats.last_error.is_none()
-                && entry.stats.custom.is_empty()
         }),
         "runtime rebuild should reset in-memory stats counters: {stats_after:#?}"
+    );
+    let control_source = find_processor_stats(&stats_after, "control_source");
+    assert_eq!(
+        control_source.stats.custom.get("broadcast_links"),
+        Some(&1),
+        "rebuilt pipeline should keep build-time broadcast link count"
+    );
+    assert_eq!(
+        control_source.stats.custom.get("mpsc_links"),
+        Some(&5),
+        "rebuilt pipeline should keep build-time mpsc link count"
     );
 
     instance

@@ -6,7 +6,9 @@ use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{
     AggregateCall, PhysicalPlan, PhysicalStreamingAggregation, StreamingWindowSpec,
 };
-use crate::processor::base::{default_channel_capacities, ProcessorChannelCapacities};
+use crate::processor::base::{
+    default_channel_capacities, LinkReceiver, ProcessorChannelCapacities,
+};
 use crate::processor::{Processor, ProcessorError, ProcessorStart, ProcessorStats};
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
@@ -14,7 +16,6 @@ use sqlparser::ast::Expr;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 #[path = "streaming_count_aggregation_processor.rs"]
 mod streaming_count_aggregation_processor;
@@ -146,7 +147,7 @@ impl Processor for StreamingAggregationProcessor {
         }
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<crate::processor::StreamData>> {
+    fn subscribe_output(&self) -> Option<LinkReceiver<crate::processor::StreamData>> {
         match self {
             StreamingAggregationProcessor::Count(p) => p.subscribe_output(),
             StreamingAggregationProcessor::Tumbling(p) => p.subscribe_output(),
@@ -155,9 +156,7 @@ impl Processor for StreamingAggregationProcessor {
         }
     }
 
-    fn subscribe_control_output(
-        &self,
-    ) -> Option<broadcast::Receiver<crate::processor::ControlSignal>> {
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<crate::processor::ControlSignal>> {
         match self {
             StreamingAggregationProcessor::Count(p) => p.subscribe_control_output(),
             StreamingAggregationProcessor::Tumbling(p) => p.subscribe_control_output(),
@@ -166,7 +165,10 @@ impl Processor for StreamingAggregationProcessor {
         }
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<crate::processor::StreamData>) {
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<crate::processor::StreamData>>,
+    {
         match self {
             StreamingAggregationProcessor::Count(p) => p.add_input(receiver),
             StreamingAggregationProcessor::Tumbling(p) => p.add_input(receiver),
@@ -175,10 +177,10 @@ impl Processor for StreamingAggregationProcessor {
         }
     }
 
-    fn add_control_input(
-        &mut self,
-        receiver: broadcast::Receiver<crate::processor::ControlSignal>,
-    ) {
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<crate::processor::ControlSignal>>,
+    {
         match self {
             StreamingAggregationProcessor::Count(p) => p.add_control_input(receiver),
             StreamingAggregationProcessor::Tumbling(p) => p.add_control_input(receiver),

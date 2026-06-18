@@ -7,11 +7,16 @@
 
 use crate::processor::{ControlSignal, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
-use futures::stream::SelectAll;
-use tokio::sync::{broadcast, oneshot};
+use futures::stream::{BoxStream, SelectAll};
+use futures::{Stream, StreamExt};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use tokio_stream::wrappers::BroadcastStream;
+pub(crate) use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 /// Log received StreamData for debugging
 pub fn log_received_data(processor_id: &str, data: &StreamData) {
@@ -99,6 +104,8 @@ pub(crate) fn normalize_channel_capacity(capacity: usize) -> usize {
 pub(crate) struct ProcessorChannelCapacities {
     pub data: usize,
     pub control: usize,
+    pub data_link_kind: LinkKind,
+    pub control_link_kind: LinkKind,
 }
 
 impl ProcessorChannelCapacities {
@@ -106,7 +113,15 @@ impl ProcessorChannelCapacities {
         Self {
             data: normalize_channel_capacity(data),
             control: normalize_channel_capacity(control),
+            data_link_kind: LinkKind::Broadcast,
+            control_link_kind: LinkKind::Broadcast,
         }
+    }
+
+    pub(crate) fn with_link_kind(mut self, kind: LinkKind) -> Self {
+        self.data_link_kind = kind;
+        self.control_link_kind = kind;
+        self
     }
 }
 
@@ -115,6 +130,138 @@ pub(crate) fn default_channel_capacities() -> ProcessorChannelCapacities {
         DEFAULT_DATA_CHANNEL_CAPACITY,
         DEFAULT_CONTROL_CHANNEL_CAPACITY,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkKind {
+    Broadcast,
+    Mpsc,
+}
+
+pub(crate) enum LinkReceiver<T> {
+    Broadcast(broadcast::Receiver<T>),
+    Mpsc(mpsc::Receiver<T>),
+}
+
+impl<T> From<broadcast::Receiver<T>> for LinkReceiver<T> {
+    fn from(receiver: broadcast::Receiver<T>) -> Self {
+        LinkReceiver::Broadcast(receiver)
+    }
+}
+
+impl<T> From<mpsc::Receiver<T>> for LinkReceiver<T> {
+    fn from(receiver: mpsc::Receiver<T>) -> Self {
+        LinkReceiver::Mpsc(receiver)
+    }
+}
+
+impl<T> LinkReceiver<T>
+where
+    T: Clone,
+{
+    #[cfg(test)]
+    pub(crate) async fn recv(&mut self) -> Result<T, ProcessorError> {
+        match self {
+            LinkReceiver::Broadcast(receiver) => receiver
+                .recv()
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed),
+            LinkReceiver::Mpsc(receiver) => {
+                receiver.recv().await.ok_or(ProcessorError::ChannelClosed)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_recv(&mut self) -> Result<T, ProcessorError> {
+        match self {
+            LinkReceiver::Broadcast(receiver) => receiver
+                .try_recv()
+                .map_err(|_| ProcessorError::ChannelClosed),
+            LinkReceiver::Mpsc(receiver) => receiver
+                .try_recv()
+                .map_err(|_| ProcessorError::ChannelClosed),
+        }
+    }
+}
+
+pub(crate) enum LinkSender<T> {
+    Broadcast(broadcast::Sender<T>),
+    Mpsc(mpsc::Sender<T>),
+}
+
+impl<T> Clone for LinkSender<T> {
+    fn clone(&self) -> Self {
+        match self {
+            LinkSender::Broadcast(sender) => LinkSender::Broadcast(sender.clone()),
+            LinkSender::Mpsc(sender) => LinkSender::Mpsc(sender.clone()),
+        }
+    }
+}
+
+pub(crate) struct LinkOutput<T> {
+    sender: LinkSender<T>,
+    mpsc_receiver: Option<Arc<Mutex<Option<mpsc::Receiver<T>>>>>,
+}
+
+impl<T> Clone for LinkOutput<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            mpsc_receiver: self.mpsc_receiver.clone(),
+        }
+    }
+}
+
+impl<T> LinkOutput<T>
+where
+    T: Clone + Send + 'static,
+{
+    pub(crate) fn new(kind: LinkKind, capacity: usize) -> Self {
+        match kind {
+            LinkKind::Broadcast => {
+                let (sender, _) = broadcast::channel(normalize_channel_capacity(capacity));
+                Self {
+                    sender: LinkSender::Broadcast(sender),
+                    mpsc_receiver: None,
+                }
+            }
+            LinkKind::Mpsc => {
+                let (sender, receiver) = mpsc::channel(normalize_channel_capacity(capacity));
+                Self {
+                    sender: LinkSender::Mpsc(sender),
+                    mpsc_receiver: Some(Arc::new(Mutex::new(Some(receiver)))),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn broadcast(capacity: usize) -> Self {
+        Self::new(LinkKind::Broadcast, capacity)
+    }
+
+    pub(crate) fn subscribe(&self) -> Option<LinkReceiver<T>> {
+        match &self.sender {
+            LinkSender::Broadcast(sender) => Some(LinkReceiver::Broadcast(sender.subscribe())),
+            LinkSender::Mpsc(_) => {
+                let receiver = self.mpsc_receiver.as_ref()?;
+                receiver.lock().ok()?.take().map(LinkReceiver::Mpsc)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send(&self, item: T) -> Result<(), ProcessorError> {
+        match &self.sender {
+            LinkSender::Broadcast(sender) => sender
+                .send(item)
+                .map(|_| ())
+                .map_err(|_| ProcessorError::ChannelClosed),
+            LinkSender::Mpsc(sender) => sender
+                .try_send(item)
+                .map_err(|_| ProcessorError::ChannelClosed),
+        }
+    }
 }
 
 pub(crate) type ProcessorReadyReceiver = oneshot::Receiver<Result<(), ProcessorError>>;
@@ -182,16 +329,20 @@ pub(crate) trait Processor: Send + Sync {
     fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart;
 
     /// Get output channel senders (for connecting downstream processors)
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>>;
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>>;
 
     /// Subscribe to the processor's control signal output (high priority path)
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>>;
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>>;
 
     /// Add an input channel (connect upstream processor)
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>;
 
     /// Add a control-signal input channel (connect upstream control path)
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>;
 }
 
 /// Error type for processor operations
@@ -222,36 +373,95 @@ impl std::fmt::Display for ProcessorError {
 
 impl std::error::Error for ProcessorError {}
 
-/// Combined input stream built from multiple broadcast receivers
-pub(crate) type ProcessorInputStream = SelectAll<BroadcastStream<StreamData>>;
-pub(crate) type ControlInputStream = SelectAll<BroadcastStream<ControlSignal>>;
+/// Combined input stream built from one or more link receivers.
+pub(crate) type ProcessorInputStream = FanInStream<StreamData>;
+pub(crate) type ControlInputStream = FanInStream<ControlSignal>;
 
-/// Convert a list of broadcast receivers into a single SelectAll stream
-pub(crate) fn fan_in_streams(inputs: Vec<broadcast::Receiver<StreamData>>) -> ProcessorInputStream {
+pub(crate) enum FanInStream<T> {
+    Empty,
+    SingleMpsc(mpsc::Receiver<T>),
+    SingleBroadcast(BroadcastStream<T>),
+    Many(SelectAll<BoxStream<'static, Result<T, BroadcastStreamRecvError>>>),
+}
+
+impl<T> FanInStream<T> {
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            FanInStream::Empty => true,
+            FanInStream::SingleMpsc(_) | FanInStream::SingleBroadcast(_) => false,
+            FanInStream::Many(streams) => streams.is_empty(),
+        }
+    }
+}
+
+impl<T> Stream for FanInStream<T>
+where
+    T: Clone + Unpin + Send + 'static,
+{
+    type Item = Result<T, BroadcastStreamRecvError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this {
+            FanInStream::Empty => Poll::Ready(None),
+            FanInStream::SingleMpsc(receiver) => {
+                Pin::new(receiver).poll_recv(cx).map(|item| item.map(Ok))
+            }
+            FanInStream::SingleBroadcast(stream) => Pin::new(stream).poll_next(cx),
+            FanInStream::Many(streams) => Pin::new(streams).poll_next(cx),
+        }
+    }
+}
+
+fn fan_in_receivers<T>(mut inputs: Vec<LinkReceiver<T>>) -> FanInStream<T>
+where
+    T: Clone + Unpin + Send + 'static,
+{
+    if inputs.is_empty() {
+        return FanInStream::Empty;
+    }
+    if inputs.len() == 1 {
+        return match inputs.pop().expect("single input checked above") {
+            LinkReceiver::Broadcast(receiver) => {
+                FanInStream::SingleBroadcast(BroadcastStream::new(receiver))
+            }
+            LinkReceiver::Mpsc(receiver) => FanInStream::SingleMpsc(receiver),
+        };
+    }
+
     let mut streams = SelectAll::new();
     for receiver in inputs {
-        streams.push(BroadcastStream::new(receiver));
+        match receiver {
+            LinkReceiver::Broadcast(receiver) => {
+                streams.push(BroadcastStream::new(receiver).boxed())
+            }
+            LinkReceiver::Mpsc(receiver) => {
+                streams.push(ReceiverStream::new(receiver).map(Ok).boxed());
+            }
+        }
     }
-    streams
+    FanInStream::Many(streams)
+}
+
+/// Convert a list of link receivers into a single input stream.
+pub(crate) fn fan_in_streams(inputs: Vec<LinkReceiver<StreamData>>) -> ProcessorInputStream {
+    fan_in_receivers(inputs)
 }
 
 pub(crate) fn fan_in_control_streams(
-    inputs: Vec<broadcast::Receiver<ControlSignal>>,
+    inputs: Vec<LinkReceiver<ControlSignal>>,
 ) -> ControlInputStream {
-    let mut streams = SelectAll::new();
-    for receiver in inputs {
-        streams.push(BroadcastStream::new(receiver));
-    }
-    streams
+    fan_in_receivers(inputs)
 }
 
-/// Send data to a broadcast channel while applying cooperative backpressure.
+/// Send data over a link while applying cooperative backpressure.
 ///
-/// `tokio::broadcast` drops the oldest messages when the channel is full.
-/// To avoid that behaviour we proactively wait until space becomes
-/// available (or until there are no receivers left) before sending.
+/// For a `broadcast` link, `tokio::broadcast` drops the oldest messages when the
+/// channel is full; to avoid that we proactively wait until space becomes available
+/// (or until there are no receivers left) before sending. For an `mpsc` link,
+/// `.send().await` backpressures naturally, so we simply await it.
 pub(crate) async fn send_with_backpressure(
-    sender: &broadcast::Sender<StreamData>,
+    sender: &LinkOutput<StreamData>,
     capacity: usize,
     data: StreamData,
     stats: Option<&ProcessorStats>,
@@ -259,8 +469,32 @@ pub(crate) async fn send_with_backpressure(
     const BACKOFF: Duration = Duration::from_millis(1);
     let capacity = normalize_channel_capacity(capacity);
     let mut payload = Some(data);
-    loop {
-        if sender.receiver_count() == 0 || sender.len() < capacity {
+    match &sender.sender {
+        LinkSender::Broadcast(sender) => loop {
+            if sender.receiver_count() == 0 || sender.len() < capacity {
+                let value = payload.take().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "send_with_backpressure payload state corrupted".to_string(),
+                    )
+                })?;
+                sender
+                    .send(value)
+                    .map(|_| ())
+                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                return Ok(());
+            }
+            if let Some(stats) = stats {
+                // One tick per cooperative backpressure sleep.
+                stats.record_send_backpressure_wait_tick();
+            }
+            sleep(BACKOFF).await;
+        },
+        LinkSender::Mpsc(sender) => {
+            if sender.capacity() == 0 {
+                if let Some(stats) = stats {
+                    stats.record_send_backpressure_wait_tick();
+                }
+            }
             let value = payload.take().ok_or_else(|| {
                 ProcessorError::ProcessingError(
                     "send_with_backpressure payload state corrupted".to_string(),
@@ -268,28 +502,37 @@ pub(crate) async fn send_with_backpressure(
             })?;
             sender
                 .send(value)
-                .map(|_| ())
-                .map_err(|_| ProcessorError::ChannelClosed)?;
-            return Ok(());
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed)
         }
-        if let Some(stats) = stats {
-            // One tick per cooperative backpressure sleep.
-            stats.record_send_backpressure_wait_tick();
-        }
-        sleep(BACKOFF).await;
     }
 }
 
 pub(crate) async fn send_control_with_backpressure(
-    sender: &broadcast::Sender<ControlSignal>,
+    sender: &LinkOutput<ControlSignal>,
     capacity: usize,
     signal: ControlSignal,
 ) -> Result<(), ProcessorError> {
     const BACKOFF: Duration = Duration::from_millis(1);
     let capacity = normalize_channel_capacity(capacity);
     let mut payload = Some(signal);
-    loop {
-        if sender.receiver_count() == 0 || sender.len() < capacity {
+    match &sender.sender {
+        LinkSender::Broadcast(sender) => loop {
+            if sender.receiver_count() == 0 || sender.len() < capacity {
+                let value = payload.take().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "send_control_with_backpressure payload state corrupted".to_string(),
+                    )
+                })?;
+                sender
+                    .send(value)
+                    .map(|_| ())
+                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                return Ok(());
+            }
+            sleep(BACKOFF).await;
+        },
+        LinkSender::Mpsc(sender) => {
             let value = payload.take().ok_or_else(|| {
                 ProcessorError::ProcessingError(
                     "send_control_with_backpressure payload state corrupted".to_string(),
@@ -297,10 +540,8 @@ pub(crate) async fn send_control_with_backpressure(
             })?;
             sender
                 .send(value)
-                .map(|_| ())
-                .map_err(|_| ProcessorError::ChannelClosed)?;
-            return Ok(());
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed)
         }
-        sleep(BACKOFF).await;
     }
 }

@@ -9,8 +9,8 @@ use crate::model::{Collection, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalOrder, PhysicalOrderKey, PhysicalPlan};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    ProcessorChannelCapacities,
+    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -21,16 +21,15 @@ use futures::stream::StreamExt;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 pub struct OrderProcessor {
     id: String,
     physical_order: Arc<PhysicalOrder>,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
@@ -45,8 +44,11 @@ impl OrderProcessor {
         physical_order: Arc<PhysicalOrder>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         Self {
             id: id.into(),
             physical_order,
@@ -438,19 +440,25 @@ impl Processor for OrderProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }

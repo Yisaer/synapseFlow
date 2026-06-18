@@ -6,8 +6,8 @@
 use crate::codec::EncryptWriter;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    ProcessorChannelCapacities,
+    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::EncodedDeliveryFlags;
 use crate::processor::{
@@ -17,15 +17,16 @@ use crate::runtime::TaskSpawner;
 use bytes::Bytes;
 use futures::stream::StreamExt;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 pub struct SinkEncryptProcessor {
     id: String,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     // Taken into the task on first start.
     writer: Mutex<Option<Box<dyn EncryptWriter>>>,
@@ -49,8 +50,11 @@ impl SinkEncryptProcessor {
         writer: Box<dyn EncryptWriter>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         Self {
             id: id.into(),
             inputs: Vec::new(),
@@ -243,20 +247,26 @@ impl Processor for SinkEncryptProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }
 
@@ -265,7 +275,7 @@ async fn handle_delivery(
     delivery: &mut EncryptDelivery,
     flags: EncodedDeliveryFlags,
     bytes: Bytes,
-    output: &broadcast::Sender<StreamData>,
+    output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
 ) -> Result<(), ProcessorError> {
@@ -420,7 +430,7 @@ async fn handle_delivery(
 async fn abort_in_flight(
     writer: &mut dyn EncryptWriter,
     delivery: &mut EncryptDelivery,
-    output: &broadcast::Sender<StreamData>,
+    output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
     processor_id: &str,
@@ -454,7 +464,7 @@ async fn abort_in_flight(
 async fn fail_delivery(
     writer: &mut dyn EncryptWriter,
     delivery: &mut EncryptDelivery,
-    output: &broadcast::Sender<StreamData>,
+    output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
     reason: &str,
@@ -497,14 +507,14 @@ mod tests {
         AesGcmStreamWriter::from_config(&config).expect("writer")
     }
 
-    async fn recv_output(output: &mut broadcast::Receiver<StreamData>) -> StreamData {
+    async fn recv_output(output: &mut LinkReceiver<StreamData>) -> StreamData {
         timeout(Duration::from_secs(2), output.recv())
             .await
             .expect("output timeout")
             .expect("output")
     }
 
-    async fn assert_no_output(output: &mut broadcast::Receiver<StreamData>) {
+    async fn assert_no_output(output: &mut LinkReceiver<StreamData>) {
         assert!(
             timeout(Duration::from_millis(50), output.recv())
                 .await
@@ -516,7 +526,8 @@ mod tests {
     // coverage-covers: sink.encrypt.aes_gcm_delivery
     #[tokio::test]
     async fn single_chunk_delivery_forwards_start_end() {
-        let (output, mut output_rx) = broadcast::channel(16);
+        let output = LinkOutput::broadcast(16);
+        let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
         let mut writer = writer();
         let mut delivery = EncryptDelivery::default();
@@ -546,7 +557,8 @@ mod tests {
     // coverage-covers: sink.encrypt.aes_gcm_delivery
     #[tokio::test]
     async fn multi_chunk_empty_middle_and_empty_end_lifecycle() {
-        let (output, mut output_rx) = broadcast::channel(16);
+        let output = LinkOutput::broadcast(16);
+        let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
         let mut writer = writer();
         let mut delivery = EncryptDelivery::default();
@@ -608,7 +620,8 @@ mod tests {
     // coverage-covers: sink.encrypt.aes_gcm_delivery
     #[tokio::test]
     async fn abort_forwarding_depends_on_downstream_start() {
-        let (output, mut output_rx) = broadcast::channel(16);
+        let output = LinkOutput::broadcast(16);
+        let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
         let mut writer = writer();
         let mut delivery = EncryptDelivery::default();
@@ -661,7 +674,8 @@ mod tests {
     // coverage-covers: sink.encrypt.aes_gcm_delivery
     #[tokio::test]
     async fn protocol_errors_reset_and_forward_abort_when_needed() {
-        let (output, mut output_rx) = broadcast::channel(16);
+        let output = LinkOutput::broadcast(16);
+        let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
         let mut writer = writer();
         let mut delivery = EncryptDelivery::default();

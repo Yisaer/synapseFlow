@@ -3,7 +3,7 @@
 //! This processor receives data from upstream processors and forwards it to a single output.
 
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
+    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data, LinkReceiver,
 };
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -12,8 +12,8 @@ use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Debug, Default)]
@@ -102,9 +102,9 @@ pub struct ResultCollectProcessor {
     /// Processor identifier
     id: String,
     /// Input channels for receiving data (multi-input)
-    inputs: Vec<broadcast::Receiver<StreamData>>,
+    inputs: Vec<LinkReceiver<StreamData>>,
     /// Control input channels for high-priority signals
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
     /// Single output channel for forwarding received data (single-output)
     output: Option<mpsc::Sender<StreamData>>,
     /// Hooks that observe items after they have been written to the output bus.
@@ -247,19 +247,25 @@ impl Processor for ResultCollectProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
         None
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
         None
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }

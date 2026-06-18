@@ -11,8 +11,8 @@ use crate::codec::{
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::base::{
-    normalize_channel_capacity, ProcessorChannelCapacities, DEFAULT_CONTROL_CHANNEL_CAPACITY,
-    DEFAULT_DATA_CHANNEL_CAPACITY,
+    normalize_channel_capacity, LinkKind, LinkReceiver, ProcessorChannelCapacities,
+    DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY,
 };
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
@@ -28,14 +28,14 @@ use crate::processor::{
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
     TumblingWindowProcessor, WatermarkProcessor,
 };
-use crate::processor::{ProcessorStats, ProcessorStatsHandle};
+use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
 use crate::shared_stream::{AppliedDecodeState, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
@@ -194,7 +194,14 @@ struct ProcessorBuilderContext {
     merger_registry: Option<Arc<MergerRegistry>>,
     shared_stream: Option<SharedStreamPipelineOptions>,
     channel_capacities: ProcessorChannelCapacities,
+    output_link_kinds: HashMap<i64, LinkKind>,
     spawner: TaskSpawner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PipelineLinkKindCounts {
+    mpsc_links: u64,
+    broadcast_links: u64,
 }
 
 impl ProcessorBuilderContext {
@@ -285,6 +292,15 @@ impl ProcessorBuilderContext {
 
     fn shared_stream(&self) -> Option<&SharedStreamPipelineOptions> {
         self.shared_stream.as_ref()
+    }
+
+    fn channel_capacities_for(&self, plan: &PhysicalPlan) -> ProcessorChannelCapacities {
+        let kind = self
+            .output_link_kinds
+            .get(&plan.get_plan_index())
+            .copied()
+            .unwrap_or(LinkKind::Broadcast);
+        self.channel_capacities.with_link_kind(kind)
     }
 }
 
@@ -426,7 +442,7 @@ impl PlanProcessor {
     }
 
     /// Subscribe to the processor's output stream
-    pub fn subscribe_output(&self) -> Option<broadcast::Receiver<crate::processor::StreamData>> {
+    pub fn subscribe_output(&self) -> Option<LinkReceiver<crate::processor::StreamData>> {
         match self {
             PlanProcessor::Aggregation(p) => p.subscribe_output(),
             PlanProcessor::DataSource(p) => p.subscribe_output(),
@@ -459,7 +475,7 @@ impl PlanProcessor {
     }
 
     /// Subscribe to the processor's control output stream
-    pub fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
+    pub fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
         match self {
             PlanProcessor::Aggregation(p) => p.subscribe_control_output(),
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
@@ -492,7 +508,7 @@ impl PlanProcessor {
     }
 
     /// Add an input channel
-    pub fn add_input(&mut self, receiver: broadcast::Receiver<crate::processor::StreamData>) {
+    pub fn add_input(&mut self, receiver: LinkReceiver<crate::processor::StreamData>) {
         match self {
             PlanProcessor::Aggregation(p) => p.add_input(receiver),
             PlanProcessor::DataSource(p) => p.add_input(receiver),
@@ -525,7 +541,10 @@ impl PlanProcessor {
     }
 
     /// Add a control input channel
-    pub fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
+    pub fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
         match self {
             PlanProcessor::Aggregation(p) => p.add_control_input(receiver),
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
@@ -1010,7 +1029,7 @@ fn create_processor_from_plan_node(
     context: &ProcessorBuilderContext,
 ) -> Result<ProcessorBuildOutput, ProcessorError> {
     let plan_name = plan.get_plan_name();
-    let channel_capacities = context.channel_capacities;
+    let channel_capacities = context.channel_capacities_for(plan.as_ref());
     let processor_id = context
         .shared_stream()
         .map(|opts| format!("shared:{}/{}", opts.stream_name, plan_name))
@@ -1639,6 +1658,94 @@ fn collect_parent_child_relations(plan: Arc<PhysicalPlan>) -> Vec<(i64, i64)> {
     relations.into_iter().collect()
 }
 
+fn collect_plan_refs_by_index(
+    plan: &Arc<PhysicalPlan>,
+    refs: &mut HashMap<i64, Arc<PhysicalPlan>>,
+    visited: &mut HashSet<i64>,
+) {
+    let index = plan.get_plan_index();
+    if !visited.insert(index) {
+        return;
+    }
+    refs.insert(index, Arc::clone(plan));
+    for child in plan.children() {
+        collect_plan_refs_by_index(child, refs, visited);
+    }
+}
+
+fn classify_output_link_kinds(physical_plan: &Arc<PhysicalPlan>) -> HashMap<i64, LinkKind> {
+    let mut downstream_counts: HashMap<i64, usize> = HashMap::new();
+    for (_parent_index, child_index) in collect_parent_child_relations(Arc::clone(physical_plan)) {
+        *downstream_counts.entry(child_index).or_insert(0) += 1;
+    }
+
+    let mut refs = HashMap::new();
+    collect_plan_refs_by_index(physical_plan, &mut refs, &mut HashSet::new());
+
+    refs.into_iter()
+        .map(|(index, plan)| {
+            let kind = if downstream_counts.get(&index).copied() == Some(1)
+                && !matches!(plan.as_ref(), PhysicalPlan::SharedStream(_))
+            {
+                LinkKind::Mpsc
+            } else {
+                LinkKind::Broadcast
+            };
+            (index, kind)
+        })
+        .collect()
+}
+
+fn count_pipeline_link_kinds(
+    physical_plan: &Arc<PhysicalPlan>,
+    output_link_kinds: &HashMap<i64, LinkKind>,
+) -> PipelineLinkKindCounts {
+    let mut linked_outputs = HashSet::new();
+    for (_parent_index, child_index) in collect_parent_child_relations(Arc::clone(physical_plan)) {
+        linked_outputs.insert(child_index);
+    }
+
+    let mut counts = PipelineLinkKindCounts {
+        mpsc_links: 0,
+        broadcast_links: 0,
+    };
+
+    if !collect_leaf_indices(Arc::clone(physical_plan)).is_empty() {
+        counts.broadcast_links += 1;
+    }
+
+    for plan_index in linked_outputs {
+        match output_link_kinds
+            .get(&plan_index)
+            .copied()
+            .unwrap_or(LinkKind::Broadcast)
+        {
+            LinkKind::Mpsc => counts.mpsc_links += 1,
+            LinkKind::Broadcast => counts.broadcast_links += 1,
+        }
+    }
+
+    counts
+}
+
+fn record_pipeline_link_kind_counts(stats: &ProcessorStats, counts: PipelineLinkKindCounts) {
+    const MPSC_LINKS: MetricSpec = MetricSpec {
+        id: "pipeline_mpsc_links",
+        flat_name: "mpsc_links",
+        kind: MetricKind::Gauge,
+    };
+    const BROADCAST_LINKS: MetricSpec = MetricSpec {
+        id: "pipeline_broadcast_links",
+        flat_name: "broadcast_links",
+        kind: MetricKind::Gauge,
+    };
+
+    stats.register_gauge(MPSC_LINKS).set(counts.mpsc_links);
+    stats
+        .register_gauge(BROADCAST_LINKS)
+        .set(counts.broadcast_links);
+}
+
 /// Build a mapping from plan index to plan name for all nodes in the PhysicalPlan tree
 fn build_index_to_name_mapping(
     plan: &Arc<PhysicalPlan>,
@@ -1743,8 +1850,10 @@ fn connect_processors(
 /// carries the declarative sink configuration.
 fn create_processor_pipeline_with_context(
     physical_plan: Arc<PhysicalPlan>,
-    context: ProcessorBuilderContext,
+    mut context: ProcessorBuilderContext,
 ) -> Result<ProcessorPipeline, ProcessorError> {
+    context.output_link_kinds = classify_output_link_kinds(&physical_plan);
+    let link_kind_counts = count_pipeline_link_kinds(&physical_plan, &context.output_link_kinds);
     let channel_capacities = context.channel_capacities;
     let mut control_source =
         ControlSourceProcessor::new_with_channel_capacities("control_source", channel_capacities);
@@ -1799,6 +1908,7 @@ fn create_processor_pipeline_with_context(
         control_id.as_str(),
         "control_source",
     ));
+    record_pipeline_link_kind_counts(stats.as_ref(), link_kind_counts);
     control_source.set_stats(Arc::clone(&stats));
     processor_stats.push(ProcessorStatsHandle {
         processor_id: control_id,
@@ -1883,6 +1993,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             eventtime: None,
             merger_registry: Some(Arc::clone(&options.merger_registry)),
             shared_stream: Some(options),
+            output_link_kinds: HashMap::new(),
             channel_capacities: ProcessorChannelCapacities::new(
                 DEFAULT_DATA_CHANNEL_CAPACITY,
                 DEFAULT_CONTROL_CHANNEL_CAPACITY,
@@ -1911,6 +2022,7 @@ pub(crate) fn create_processor_pipeline(
             eventtime: dependencies.eventtime,
             merger_registry: Some(dependencies.merger_registry),
             shared_stream: None,
+            output_link_kinds: HashMap::new(),
             channel_capacities: options.channel_capacities(),
             spawner: dependencies.spawner,
         },
@@ -1924,6 +2036,7 @@ mod tests {
     use crate::expr::ScalarExpr;
     use crate::planner::physical::{
         PhysicalDataSource, PhysicalDecoder, PhysicalProject, PhysicalProjectField,
+        PhysicalSharedStream, PhysicalSharedStreamRequirement,
     };
     use datatypes::{ConcreteDatatype, Schema, Value};
     use sqlparser::ast::{Expr, Value as SqlValue};
@@ -1992,6 +2105,7 @@ mod tests {
             eventtime: None,
             merger_registry: None,
             shared_stream: None,
+            output_link_kinds: HashMap::new(),
             channel_capacities: ProcessorChannelCapacities::new(
                 DEFAULT_DATA_CHANNEL_CAPACITY,
                 DEFAULT_CONTROL_CHANNEL_CAPACITY,
@@ -2009,5 +2123,61 @@ mod tests {
             processor_id = %processor.id(),
             "PhysicalProject processor created successfully"
         );
+    }
+
+    #[test]
+    fn sealed_linear_links_use_mpsc() {
+        let schema = Arc::new(Schema::new(vec![]));
+        let data_source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
+            "test_source".to_string(),
+            None,
+            Arc::clone(&schema),
+            None,
+            0,
+        )));
+        let decoder = Arc::new(PhysicalPlan::Decoder(PhysicalDecoder::new(
+            "test_source".to_string(),
+            StreamDecoderConfig::json(),
+            Arc::clone(&schema),
+            None,
+            None,
+            vec![Arc::clone(&data_source)],
+            1,
+        )));
+        let project = Arc::new(PhysicalPlan::Project(PhysicalProject::with_single_child(
+            Vec::new(),
+            Arc::clone(&decoder),
+            2,
+        )));
+
+        let kinds = classify_output_link_kinds(&project);
+
+        assert_eq!(kinds.get(&0), Some(&LinkKind::Mpsc));
+        assert_eq!(kinds.get(&1), Some(&LinkKind::Mpsc));
+        assert_eq!(kinds.get(&2), Some(&LinkKind::Broadcast));
+    }
+
+    #[test]
+    fn shared_stream_output_stays_broadcast_even_with_one_downstream() {
+        let schema = Arc::new(Schema::new(vec![]));
+        let shared = Arc::new(PhysicalPlan::SharedStream(PhysicalSharedStream::new(
+            "shared_source".to_string(),
+            None,
+            Arc::clone(&schema),
+            PhysicalSharedStreamRequirement::new(Vec::new(), 0),
+            StreamDecoderConfig::json(),
+            None,
+            10,
+        )));
+        let project = Arc::new(PhysicalPlan::Project(PhysicalProject::with_single_child(
+            Vec::new(),
+            Arc::clone(&shared),
+            11,
+        )));
+
+        let kinds = classify_output_link_kinds(&project);
+
+        assert_eq!(kinds.get(&10), Some(&LinkKind::Broadcast));
+        assert_eq!(kinds.get(&11), Some(&LinkKind::Broadcast));
     }
 }

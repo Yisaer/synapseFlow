@@ -3,8 +3,8 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    ProcessorChannelCapacities,
+    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -14,6 +14,7 @@ use futures::stream::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -22,10 +23,10 @@ pub struct StreamingTumblingAggregationProcessor {
     id: String,
     physical: Arc<PhysicalStreamingAggregation>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     len_secs: u64,
@@ -55,8 +56,11 @@ impl StreamingTumblingAggregationProcessor {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
         let len_secs = Self::extract_window_length(physical.as_ref())?;
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         Ok(Self {
             id: id.into(),
             physical,
@@ -224,20 +228,26 @@ impl Processor for StreamingTumblingAggregationProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }
 
@@ -320,7 +330,7 @@ impl ProcessingWindowState {
     async fn flush_until(
         &mut self,
         watermark: SystemTime,
-        output: &broadcast::Sender<StreamData>,
+        output: &LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
@@ -350,7 +360,7 @@ impl ProcessingWindowState {
 
     async fn flush_all(
         &mut self,
-        output: &broadcast::Sender<StreamData>,
+        output: &LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {

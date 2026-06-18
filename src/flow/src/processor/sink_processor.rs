@@ -3,8 +3,8 @@ use crate::connector::SinkConnector;
 use crate::model::Collection;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure,
-    ProcessorChannelCapacities,
+    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::{
     ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError, ProcessorStart, ProcessorStats,
@@ -14,7 +14,7 @@ use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -28,7 +28,7 @@ enum ControlAction {
 
 struct SinkForwarding<'a> {
     forward_data: bool,
-    output: &'a broadcast::Sender<StreamData>,
+    output: &'a LinkOutput<StreamData>,
     data_channel_capacity: usize,
 }
 
@@ -142,10 +142,10 @@ impl ConnectorBinding {
 /// through it is encoded and delivered to each connector binding.
 pub struct SinkProcessor {
     id: String,
-    inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
-    output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<ControlSignal>,
+    inputs: Vec<LinkReceiver<StreamData>>,
+    control_inputs: Vec<LinkReceiver<ControlSignal>>,
+    output: LinkOutput<StreamData>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     connector: Option<ConnectorBinding>,
     forward_to_result: bool,
@@ -162,8 +162,11 @@ impl SinkProcessor {
         id: impl Into<String>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         Self {
             id: id.into(),
             inputs: Vec::new(),
@@ -227,7 +230,7 @@ impl SinkProcessor {
 
     async fn handle_control_item(
         processor_id: &str,
-        control_output: &broadcast::Sender<ControlSignal>,
+        control_output: &LinkOutput<ControlSignal>,
         control_channel_capacity: usize,
         connector: &mut ConnectorBinding,
         item: Option<Result<ControlSignal, BroadcastStreamRecvError>>,
@@ -443,19 +446,25 @@ impl Processor for SinkProcessor {
         ProcessorStart::with_ready(handle, ready_rx)
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
-        self.inputs.push(receiver);
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        self.inputs.push(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
-        self.control_inputs.push(receiver);
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        self.control_inputs.push(receiver.into());
     }
 }

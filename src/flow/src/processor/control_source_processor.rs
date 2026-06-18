@@ -4,8 +4,8 @@
 //! and it forwards them to downstream processors while preserving channel isolation.
 
 use crate::processor::base::{
-    default_channel_capacities, send_control_with_backpressure, send_with_backpressure,
-    ProcessorChannelCapacities,
+    default_channel_capacities, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::{
     BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats,
@@ -14,7 +14,6 @@ use crate::processor::{
 use crate::runtime::TaskSpawner;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,9 +56,9 @@ pub struct ControlSourceProcessor {
     /// Single input channel for receiving ingress items.
     ingress: Option<mpsc::Receiver<Ingress>>,
     /// Broadcast channel for all downstream processors
-    output: broadcast::Sender<StreamData>,
+    output: LinkOutput<StreamData>,
     /// Dedicated control channel for urgent control propagation
-    control_output: broadcast::Sender<ControlSignal>,
+    control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     /// Monotonically increasing control-signal id allocator (shared across control/data channels).
     next_control_signal_id: Arc<AtomicU64>,
@@ -76,8 +75,11 @@ impl ControlSourceProcessor {
         id: impl Into<String>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let (output, _) = broadcast::channel(channel_capacities.data);
-        let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
         Self {
             id: id.into(),
             ingress: None,
@@ -217,27 +219,33 @@ impl Processor for ControlSourceProcessor {
         }))
     }
 
-    fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.output.subscribe())
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.control_output.subscribe())
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
     }
 
-    fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
         tracing::warn!(
             processor_id = %self.id,
             "ControlSourceProcessor does not accept broadcast inputs; drop unused receiver"
         );
-        drop(receiver);
+        drop(receiver.into());
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
         tracing::warn!(
             processor_id = %self.id,
             "ControlSourceProcessor does not accept broadcast control inputs; drop unused receiver"
         );
-        drop(receiver);
+        drop(receiver.into());
     }
 }
