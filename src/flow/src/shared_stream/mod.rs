@@ -65,20 +65,32 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
     }
 }
 
-/// Append-only column→slot registry for a shared stream's output slot schema (VF-56).
+/// Column→slot registry for a shared stream's output slot schema (VF-56).
 ///
-/// Slots are assigned the first time a column is referenced by any consumer and
-/// are **never reassigned or compacted**. This is what lets a consumer's
+/// Slots are assigned the first time a column is referenced by any consumer and a
+/// retained slot is **never reassigned or shifted**. This is what lets a consumer's
 /// `ColumnRef::ByIndex`, resolved at plan time, stay valid as later consumers
-/// attach: existing slots never move, new columns append at the tail, and a detach
-/// never shrinks the slot schema.
+/// attach: existing slots never move, new columns append at the tail.
 ///
-/// Note the slot schema (output row layout) is independent from the parse
-/// *whitelist* (which signals the decoder actually parses, = the live union of
-/// consumers' required columns). The whitelist shrinks on detach — the decoder
-/// stops parsing columns no surviving consumer needs — while the slot schema stays
-/// at its high-water-mark width and a freed column is emitted as Null at its stable
-/// slot. See `set_applied_decoding_columns`.
+/// The registry can shrink, but **only from the tail and only slots nobody uses**.
+/// Each slot carries a reference count (how many consumers rely on it); on detach a
+/// consumer releases its columns and any trailing zero-refcount slots are popped.
+/// Removing from the tail keeps every retained slot's index, so surviving
+/// consumers' by-index slots are untouched. A zero-refcount slot that is *not* at
+/// the tail (a stranded "hole") is kept until it becomes the tail, so the schema is
+/// not guaranteed to shrink to the minimum — only opportunistically.
+///
+/// Refcounts are incremented when a column is assigned (plan time), so a slot is
+/// protected from the moment it is assigned — before the consumer registers its
+/// required columns — closing the plan-assign / start-register race against a
+/// concurrent detach. Decrements saturate at 0, so any accounting mismatch can only
+/// under-shrink (leak a slot), never pop a slot still in use.
+///
+/// The slot schema (output row layout) is independent from the parse *whitelist*
+/// (which signals the decoder actually parses, = the live union of consumers'
+/// required columns). The whitelist shrinks to the union on detach; the slot schema
+/// shrinks only its unused tail and a not-yet-reclaimed freed column is emitted as
+/// Null at its stable slot. See `set_applied_decoding_columns`.
 ///
 /// Lives behind a synchronous lock so the (sync) planner can resolve slots without
 /// awaiting the async stream map.
@@ -87,8 +99,11 @@ pub(crate) struct SliceRegistry {
     name_to_slot: HashMap<Arc<str>, u32>,
     /// slot index → column name (insertion order == slot order).
     keys: Vec<Arc<str>>,
-    /// Bumped on every new slot assignment so the decoder can rebuild its slice
-    /// layout lazily.
+    /// Per-slot reference count (parallel to `keys`): how many consumers currently
+    /// rely on the slot. A trailing slot with count 0 can be popped safely.
+    refcounts: Vec<u32>,
+    /// Bumped on every slot-layout change (new assignment or tail shrink) so the
+    /// decoder can rebuild its slice layout lazily.
     version: u64,
 }
 
@@ -99,17 +114,53 @@ pub(crate) struct SliceRegistrySnapshot {
 }
 
 impl SliceRegistry {
-    /// Return the column's slot, assigning the next free slot if unseen (append-only).
+    /// Return the column's slot, assigning the next free slot if unseen. Each call
+    /// adds one reference to the slot (a consumer's plan-time hold), so a freshly
+    /// assigned slot is protected against tail-shrink before the consumer registers.
     pub(crate) fn get_or_assign(&mut self, name: &str) -> u32 {
         if let Some(&slot) = self.name_to_slot.get(name) {
+            let rc = &mut self.refcounts[slot as usize];
+            *rc = rc.saturating_add(1);
             return slot;
         }
         let slot = self.keys.len() as u32;
         let arc: Arc<str> = Arc::from(name);
         self.name_to_slot.insert(Arc::clone(&arc), slot);
         self.keys.push(arc);
+        self.refcounts.push(1);
         self.version += 1;
         slot
+    }
+
+    /// Release one reference for each named column, then pop any trailing slots
+    /// that have no references left. Tail-only: retained slots keep their index, so
+    /// surviving consumers' by-index slots stay valid. A zero-refcount slot that is
+    /// not at the tail is left in place (a hole) until it becomes the tail. Columns
+    /// not present are ignored; refcounts saturate at 0, so an accounting mismatch
+    /// can only under-shrink, never pop a slot still referenced. Returns whether the
+    /// layout changed (and thus `version` was bumped).
+    pub(crate) fn release_and_shrink<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> bool {
+        for name in names {
+            if let Some(&slot) = self.name_to_slot.get(name) {
+                let rc = &mut self.refcounts[slot as usize];
+                *rc = rc.saturating_sub(1);
+            }
+        }
+        let mut shrunk = false;
+        while let Some(&0) = self.refcounts.last() {
+            self.refcounts.pop();
+            if let Some(key) = self.keys.pop() {
+                self.name_to_slot.remove(&key);
+            }
+            shrunk = true;
+        }
+        if shrunk {
+            self.version += 1;
+        }
+        shrunk
     }
 
     /// Assign the given columns in order, then return a slot-ordered snapshot.
@@ -323,7 +374,17 @@ impl SharedStreamRegistry {
         match entry.register_consumer(consumer_id.clone()).await {
             Ok(subscription) => Ok(subscription),
             Err(err) => {
-                entry.remove_consumer_requirement(&consumer_id).await;
+                // VF-56: register failed after the plan-time `assign_all` already added
+                // this consumer's slot holds, and the consumer never entered the
+                // subscriber set, so `unregister_consumer` will never release them.
+                // Release here to keep refcounts balanced; otherwise the trailing slots
+                // would leak and never reclaim for the stream's lifetime.
+                if let Some(columns) = entry.remove_consumer_requirement(&consumer_id).await {
+                    entry
+                        .slice_registry
+                        .write()
+                        .release_and_shrink(columns.iter().map(String::as_str));
+                }
                 Err(err)
             }
         }
@@ -778,14 +839,15 @@ impl SharedStreamInner {
     fn set_applied_decoding_columns(&self, applied: Vec<String>) {
         // VF-56: the parse whitelist and the output slot schema are two independent
         // things. `applied` is the *whitelist* — the live union of consumers'
-        // required columns — and it shrinks when a consumer detaches. The slot
-        // schema comes from the append-only slot registry and never shrinks, so a
-        // surviving consumer's plan-time `ColumnRef::ByIndex` stays valid. We decode
-        // only the union but still emit the full fixed-width slot row: a freed
-        // column (in the slot schema, no longer in the union) becomes a Null at its
-        // stable slot position. The union is always a subset of the slot keys
-        // (every slot key came from some consumer's used columns; see
-        // `build_shared_slice_schema`), so every decoded column lands in a slot.
+        // required columns — and it shrinks fully when a consumer detaches. The slot
+        // schema comes from the slot registry, which shrinks only its unused tail
+        // (see `SliceRegistry`), so a surviving consumer's plan-time
+        // `ColumnRef::ByIndex` stays valid. We decode only the union but still emit
+        // the full slot-width row: a freed column still in the slot schema (not yet
+        // reclaimed from the tail) becomes a Null at its stable slot position. The
+        // union is always a subset of the slot keys (every slot key came from some
+        // consumer's used columns; see `build_shared_slice_schema`), so every
+        // decoded column lands in a slot.
         let slot_snapshot = {
             let reg = self.slice_registry.read();
             reg.snapshot()
@@ -1097,9 +1159,12 @@ impl SharedStreamInner {
         Ok(union)
     }
 
-    async fn remove_consumer_requirement(&self, consumer_id: &str) {
+    /// Drop a consumer's recorded requirement and recompute the applied whitelist.
+    /// Returns the columns that were recorded (if any) so the caller can release the
+    /// matching slot-registry hold; this does NOT itself touch slot refcounts.
+    async fn remove_consumer_requirement(&self, consumer_id: &str) -> Option<Vec<String>> {
         let mut state = self.state.lock().await;
-        state.consumer_required_columns.remove(consumer_id);
+        let removed = state.consumer_required_columns.remove(consumer_id);
 
         let union_set: HashSet<String> = state
             .consumer_required_columns
@@ -1126,6 +1191,7 @@ impl SharedStreamInner {
             union
         };
         self.set_applied_decoding_columns(applied);
+        removed
     }
 
     async fn union_required_columns(&self) -> Vec<String> {
@@ -1136,7 +1202,18 @@ impl SharedStreamInner {
     async fn unregister_consumer(self: &Arc<Self>, consumer_id: &str) {
         let mut state = self.state.lock().await;
         state.subscribers.remove(consumer_id);
-        state.consumer_required_columns.remove(consumer_id);
+        let released_columns = state.consumer_required_columns.remove(consumer_id);
+
+        // VF-56: release this consumer's hold on its slots and reclaim any now-unused
+        // trailing slots. Tail-only, so surviving consumers' by-index slots keep
+        // their index; a stranded middle slot is left until it becomes the tail. The
+        // released set equals what was assigned at plan time (both are this
+        // consumer's used columns), so refcounts balance.
+        if let Some(columns) = released_columns.as_ref() {
+            self.slice_registry
+                .write()
+                .release_and_shrink(columns.iter().map(String::as_str));
+        }
 
         let union_set: HashSet<String> = state
             .consumer_required_columns
@@ -1242,6 +1319,52 @@ mod tests {
             "keys are slot-ordered (insertion order), not schema/alpha order"
         );
         assert_eq!(reg.name_to_slot.get("missing").copied(), None);
+    }
+
+    #[test]
+    fn release_and_shrink_pops_unused_tail_only() {
+        let mut reg = SliceRegistry::default();
+        reg.get_or_assign("a"); // slot 0
+        reg.get_or_assign("b"); // slot 1
+        reg.get_or_assign("c"); // slot 2
+        assert_eq!(reg.version, 3);
+
+        // Releasing a middle column leaves a stranded hole; the live tail blocks shrink.
+        assert!(!reg.release_and_shrink(["b"]));
+        assert_eq!(reg.keys.len(), 3, "stranded middle slot is not removed");
+        assert_eq!(reg.name_to_slot.get("a").copied(), Some(0));
+        assert_eq!(
+            reg.name_to_slot.get("c").copied(),
+            Some(2),
+            "tail slot index is unchanged"
+        );
+        assert_eq!(reg.version, 3, "no pop => no version bump");
+
+        // Releasing the tail pops it AND reclaims the now-trailing stranded hole,
+        // stopping at the still-referenced slot.
+        assert!(reg.release_and_shrink(["c"]));
+        assert_eq!(reg.keys.len(), 1, "c and the stranded b are both reclaimed");
+        assert_eq!(
+            reg.name_to_slot.get("a").copied(),
+            Some(0),
+            "live slot keeps its index"
+        );
+        assert_eq!(reg.name_to_slot.get("b").copied(), None);
+        assert_eq!(reg.name_to_slot.get("c").copied(), None);
+        assert_eq!(reg.version, 4, "a pop bumps version once");
+
+        // A second reference holds the slot against a single release.
+        reg.get_or_assign("a"); // a now referenced twice
+        assert!(!reg.release_and_shrink(["a"]));
+        assert_eq!(reg.keys.len(), 1, "still referenced once, not popped");
+        assert!(reg.release_and_shrink(["a"]));
+        assert_eq!(reg.keys.len(), 0, "last reference released, a popped");
+
+        // Over-release saturates at 0 (no underflow/panic) and then pops the slot.
+        reg.get_or_assign("x"); // slot 0
+        reg.get_or_assign("x"); // referenced twice
+        assert!(reg.release_and_shrink(["x", "x", "x"]));
+        assert_eq!(reg.keys.len(), 0, "x saturated to 0 and was popped");
     }
 
     use crate::codec::JsonDecoder;
@@ -1371,11 +1494,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detach_shrinks_whitelist_but_keeps_slot_schema() {
-        // VF-56: with slot-schema projection enabled, a detach must narrow the
-        // parse whitelist (decoding_columns) to the surviving union while leaving
-        // the append-only slot schema (slot_version / output slot layout) untouched,
-        // so the remaining consumer's by-index slots stay valid.
+    async fn detach_shrinks_whitelist_and_unused_tail_slots() {
+        // VF-56: with slot-schema projection enabled, a detach narrows the parse
+        // whitelist (decoding_columns) to the surviving union, and reclaims unused
+        // *trailing* slots while leaving live slots' indices untouched. Slots a@0,
+        // b@1, c@2: detaching the middle consumer (b) cannot shrink (c still tails);
+        // detaching the tail consumer (c) pops c and reclaims the stranded b.
         let registry = SharedStreamRegistry::new(test_spawner());
         let name = format!("shared_stream_detach_slot_test_{}", Uuid::new_v4().simple());
         let schema = Arc::new(Schema::new(vec![
@@ -1387,6 +1511,11 @@ mod tests {
             ColumnSchema::new(
                 name.clone(),
                 "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                name.clone(),
+                "c".to_string(),
                 ConcreteDatatype::Int64(Int64Type),
             ),
         ]));
@@ -1413,12 +1542,16 @@ mod tests {
             .subscribe(&name, "consumer_b")
             .await
             .expect("subscribe consumer_b");
+        let sub_c = registry
+            .subscribe(&name, "consumer_c")
+            .await
+            .expect("subscribe consumer_c");
 
-        // Plan-time slot assignment: both columns get stable append-only slots.
+        // Plan-time slot assignment: one reference per slot (a@0, b@1, c@2).
         registry
             .slice_registry(&name)
             .write()
-            .assign_all(["a", "b"]);
+            .assign_all(["a", "b", "c"]);
 
         registry
             .set_consumer_required_columns(&name, "consumer_a", vec!["a".to_string()])
@@ -1428,27 +1561,45 @@ mod tests {
             .set_consumer_required_columns(&name, "consumer_b", vec!["b".to_string()])
             .await
             .expect("set required columns for b");
+        registry
+            .set_consumer_required_columns(&name, "consumer_c", vec!["c".to_string()])
+            .await
+            .expect("set required columns for c");
 
-        // Both attached: whitelist == union {a,b}; slot schema has 2 slots.
+        // All attached: whitelist == union {a,b,c}; slot schema has 3 slots.
         let info = registry.get_stream(&name).await.expect("get stream");
         assert_eq!(
             info.decoding_columns,
-            vec!["a".to_string(), "b".to_string()],
-            "whitelist is the union of both consumers"
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
         );
-        assert_eq!(info.slot_version, 2, "two slots assigned");
+        assert_eq!(info.slot_version, 3, "three slots assigned");
 
-        // Detach b: whitelist shrinks to {a}, but the slot schema is unchanged.
+        // Detach the middle consumer b: whitelist drops b, but the slot schema is
+        // unchanged because the live tail (c) blocks the shrink.
         sub_b.release().await;
         let info = registry.get_stream(&name).await.expect("get stream");
         assert_eq!(
             info.decoding_columns,
-            vec!["a".to_string()],
-            "detach narrows the parse whitelist to the surviving union"
+            vec!["a".to_string(), "c".to_string()],
+            "whitelist narrows to the surviving union a,c"
         );
         assert_eq!(
-            info.slot_version, 2,
-            "detach must NOT shrink the append-only slot schema"
+            info.slot_version, 3,
+            "a stranded middle slot does not shrink the schema"
+        );
+
+        // Detach the tail consumer c: c is popped and the now-trailing stranded b is
+        // reclaimed, leaving only the live a@0. Slot version bumps.
+        sub_c.release().await;
+        let info = registry.get_stream(&name).await.expect("get stream");
+        assert_eq!(
+            info.decoding_columns,
+            vec!["a".to_string()],
+            "whitelist narrows to a"
+        );
+        assert_eq!(
+            info.slot_version, 4,
+            "tail shrink reclaims c and b; version bumps"
         );
 
         sub_a.release().await;

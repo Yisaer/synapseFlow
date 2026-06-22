@@ -621,7 +621,7 @@ async fn shared_stream_decode_projection_survives_consumer_lifecycle_changes() {
 
 // coverage-covers: source.shared.dynamic_decode
 #[tokio::test]
-async fn shared_stream_slot_schema_wildcard_expands_and_detach_keeps_slots() {
+async fn shared_stream_slot_schema_wildcard_expands_and_detach_reclaims_tail() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
@@ -689,11 +689,13 @@ async fn shared_stream_slot_schema_wildcard_expands_and_detach_keeps_slots() {
         .start_pipeline(pipeline_all_id)
         .await
         .expect("start wildcard pipeline");
+    // The parse whitelist (decoding_columns) is the union of consumers' columns, in
+    // schema order — independent of the slot schema, which is slot-ordered [c,a,b].
     wait_for_shared_stream_decoding_columns(
         &instance,
         stream_name,
         2,
-        &["c", "a", "b"],
+        &["a", "b", "c"],
         Duration::from_secs(5),
     )
     .await;
@@ -716,6 +718,9 @@ async fn shared_stream_slot_schema_wildcard_expands_and_detach_keeps_slots() {
         )
         .await
         .expect("stop wildcard pipeline");
+    // Detaching the wildcard consumer releases a and b. Both are unused now and sit
+    // at the tail (slots c@0, a@1, b@2), so they are reclaimed; the whitelist
+    // narrows back to {c}. The surviving narrow consumer's c@0 slot is untouched.
     wait_for_shared_stream_decoding_columns(
         &instance,
         stream_name,
