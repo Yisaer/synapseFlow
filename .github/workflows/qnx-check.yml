@@ -1,0 +1,166 @@
+name: QNX Build Check
+
+on:
+  pull_request:
+    branches: [main_qnx]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_HOME: /root/.cargo
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  QNX_INSTALL_DIR: /opt/qnx800
+  QNX_RUST_TOOLCHAIN: qnx
+  QNX_SDP_IMAGE: ghcr.io/emqx/veloflux-qnx-sdp:8.0-try
+
+jobs:
+  qnx-build:
+    name: QNX debug build (aarch64-unknown-nto-qnx800)
+    runs-on: infra-emqx-io-4c
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull QNX SDP image
+        run: docker pull "$QNX_SDP_IMAGE"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo-cache/registry
+            .cargo-cache/git
+          key: qnx-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            qnx-cargo-${{ runner.os }}-
+
+      - name: Build veloFlux debug binary for QNX
+        env:
+          RUST_TARGET: aarch64-unknown-nto-qnx800
+          CARGO_BUILD_TARGET: aarch64-unknown-nto-qnx800
+          QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
+          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
+          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$PWD/.cargo-cache/registry" "$PWD/.cargo-cache/git"
+
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TERM_COLOR \
+            -e CARGO_BUILD_JOBS \
+            -e CARGO_INCREMENTAL \
+            -e CARGO_NET_GIT_FETCH_WITH_CLI \
+            -e CARGO_HOME=/workspace/.cargo-cache \
+            -e QNX_INSTALL_DIR \
+            -e QNX_RUST_TOOLCHAIN \
+            -e RUST_TARGET \
+            -e CARGO_BUILD_TARGET \
+            -e QNX_SERIAL_NUMBER \
+            -e QNX_LICENSE_KEY \
+            -e QNX_MYQNX_USER \
+            -e QNX_MYQNX_PASSWORD \
+            "$QNX_SDP_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential \
+                curl \
+                git \
+                libprotobuf-dev \
+                m4 \
+                pkg-config \
+                protobuf-compiler
+              test -f /usr/include/google/protobuf/empty.proto
+              test -f /usr/include/google/protobuf/struct.proto
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+              source "$CARGO_HOME/env"
+
+              QNX_RUST_TC_URL="https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.2.0/qnx8_rust_toolchain.tar.gz"
+              QNX_RUST_TC_DIR="/opt/qnx-rust-toolchain"
+
+              echo "Downloading QNX Rust toolchain from qorix-group/rust-lang-qnx8..."
+              curl -fsSL "$QNX_RUST_TC_URL" -o /tmp/qnx8_rust_toolchain.tar.gz
+              mkdir -p "$QNX_RUST_TC_DIR"
+              tar -xzf /tmp/qnx8_rust_toolchain.tar.gz -C "$QNX_RUST_TC_DIR" --strip-components=1
+              rm -f /tmp/qnx8_rust_toolchain.tar.gz
+
+              if [ ! -x "$QNX_RUST_TC_DIR/bin/rustc" ]; then
+                inner="$(find "$QNX_RUST_TC_DIR" -maxdepth 3 -type f -name rustc -perm -111 | head -1)"
+                if [ -n "$inner" ]; then
+                  QNX_RUST_TC_DIR="$(dirname "$(dirname "$inner")")"
+                  echo "Adjusted toolchain root to: $QNX_RUST_TC_DIR"
+                else
+                  echo "QNX Rust toolchain: rustc not found after extraction" >&2
+                  find "$QNX_RUST_TC_DIR" -maxdepth 4 -type f | sort >&2
+                  exit 1
+                fi
+              fi
+
+              rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$QNX_RUST_TC_DIR"
+              cargo +"$QNX_RUST_TOOLCHAIN" -V
+              rustc +"$QNX_RUST_TOOLCHAIN" -Vv
+
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              if [ -z "${QNX_LICENSE_KEY:-}" ]; then
+                echo "QNX_LICENSE_KEY secret is required to activate the QNX runtime license." >&2
+                exit 1
+              fi
+
+              qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"
+              if [ ! -x "$qsc_bin" ]; then
+                qsc_bin="$(find "$QNX_QSC_DIR" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
+              fi
+              if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
+                echo "qnxsoftwarecenter_clt was not found under $QNX_QSC_DIR" >&2
+                find "$QNX_QSC_DIR" -maxdepth 4 -type f | sort >&2
+                exit 1
+              fi
+
+              "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
+              qcc -Vgcc_ntoaarch64le_cxx -E -xc /dev/null >/dev/null
+
+              echo "Target cfg:"
+              rustc +"$QNX_RUST_TOOLCHAIN" --print cfg --target "$RUST_TARGET" | sort
+
+              cargo +"$QNX_RUST_TOOLCHAIN" build \
+                --no-default-features \
+                --features allocator-system
+            '
+
+      - name: Inspect QNX binary
+        run: |
+          set -euo pipefail
+          bin="target/aarch64-unknown-nto-qnx800/debug/veloflux"
+          test -x "$bin"
+          file "$bin"
+
+      - name: Upload QNX debug binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-qnx-debug
+          path: target/aarch64-unknown-nto-qnx800/debug/veloflux
+          if-no-files-found: error

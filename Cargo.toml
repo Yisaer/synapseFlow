@@ -17,6 +17,11 @@ members = [
 resolver = "2"
 
 [patch.crates-io]
+# Temporary QNX 8.0 workaround until upstream libc/tokio publish nto80
+# io-sock fixes.
+libc = { git = "https://github.com/skarlsson/libc.git", rev = "e464a33781da9cb6ffa09b7ec1d6f4a872177e34" }
+tokio = { git = "https://github.com/skarlsson/tokio.git", rev = "f6954942b83378942f521979bfb8e5199dd09118" }
+ring = { git = "https://github.com/briansmith/ring.git", rev = "d018db62e1a4a92689611c86d33d6a85939197c4" }
 metrics-exporter-prometheus = { path = "third_party/metrics-exporter-prometheus-shim" }
 
 [package]
