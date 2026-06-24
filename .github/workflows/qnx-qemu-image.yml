@@ -1,6 +1,12 @@
 name: QNX QEMU Image
 
 on:
+  pull_request:
+    branches: [main_qnx]
+    paths:
+      - ".github/qnx-qemu-image/**"
+      - ".github/workflows/qnx-qemu-image.yml"
+      - "scripts/qnx/**"
   workflow_dispatch:
     inputs:
       image_tag:
