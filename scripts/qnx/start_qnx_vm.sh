@@ -14,6 +14,7 @@ qnx_ram="1024M"
 qnx_mirror_baseline="${QNX_MIRROR_BASELINE:-qnx800}"
 qemuvirt_package="com.qnx.qnx800.target.qemuvirt"
 run_pid=""
+key_dir=""
 
 usage() {
   cat <<'USAGE'
@@ -94,7 +95,8 @@ work_dir="$(cd "$work_dir" && pwd -P)"
 startup_log="$log_dir/start_qnx_vm.log"
 console_log="$log_dir/qnx_console.log"
 qemu_pidfile="$log_dir/qemu.pid"
-ssh_key="$work_dir/qnx_vm_ed25519"
+key_dir="$(mktemp -d)"
+ssh_key="$key_dir/qnx_vm_ed25519"
 
 exec > >(tee -a "$startup_log") 2>&1
 
@@ -105,6 +107,9 @@ cleanup() {
   if [ -n "$run_pid" ] && kill -0 "$run_pid" >/dev/null 2>&1; then
     kill "$run_pid" >/dev/null 2>&1
     wait "$run_pid" >/dev/null 2>&1
+  fi
+  if [ -n "$key_dir" ]; then
+    rm -rf "$key_dir"
   fi
 
   exit "$status"
@@ -189,7 +194,6 @@ mkqnximage --help | sed -n '1,80p'
 
 cd "$work_dir"
 
-rm -f "$ssh_key" "${ssh_key}.pub"
 ssh-keygen -q -t ed25519 -N '' -f "$ssh_key"
 
 echo "Building QNX QEMU image..."
@@ -199,6 +203,7 @@ mkqnximage \
   --hostname="$hostname" \
   --ssh-ident="${ssh_key}.pub" \
   --sshd-pregen=yes \
+  --force \
   --build
 
 ifs_image="$work_dir/output/ifs.bin"
