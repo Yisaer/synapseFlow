@@ -1,0 +1,168 @@
+name: QNX QEMU VM Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: GHCR tag for the prepared QNX QEMU VM image
+        required: true
+        default: "8.0-try"
+        type: string
+      base_image:
+        description: Base QNX SDP image
+        required: true
+        default: "ghcr.io/emqx/veloflux-qnx-sdp:8.0-try"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+env:
+  BUILDER_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-qemu-builder
+  VM_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-qemu-vm
+  QNX_QEMU_IMAGE_TAG: ${{ inputs.image_tag }}
+  QNX_SDP_IMAGE: ${{ inputs.base_image }}
+  QNX_MIRROR_BASELINE: qnx800
+  QNX_INSTALL_DIR: /opt/qnx800
+  QNX_QSC_DIR: /opt/qnxsoftwarecenter
+  QNX_VM_WORK_DIR: /opt/qnx-qemu/vm
+  QNX_VM_SSH_KEY: /opt/qnx-qemu/qnx_vm_ed25519
+
+jobs:
+  publish-qnx-qemu-vm-image:
+    name: Publish prepared QNX QEMU VM image
+    runs-on: infra-emqx-io-4c
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build QNX QEMU builder image
+        run: |
+          set -euo pipefail
+
+          docker build \
+            --build-arg "QNX_SDP_IMAGE=${QNX_SDP_IMAGE}" \
+            -f .github/qnx-qemu-image/Dockerfile \
+            -t "${BUILDER_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}" \
+            .
+
+      - name: Prepare QNX VM inside container
+        env:
+          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
+          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          rm -rf tmp/qnx-qemu
+          mkdir -p tmp/qnx-qemu
+
+          container_name="veloflux-qnx-qemu-vm-${GITHUB_RUN_ID}"
+          echo "container_name=${container_name}" >> "$GITHUB_ENV"
+
+          docker_args=(
+            --name "$container_name"
+            --privileged
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e QNX_INSTALL_DIR
+            -e QNX_QSC_DIR
+            -e QNX_MIRROR_BASELINE
+            -e QNX_LICENSE_KEY
+            -e QNX_MYQNX_USER
+            -e QNX_MYQNX_PASSWORD
+            -e QNX_VM_WORK_DIR
+            -e QNX_VM_SSH_KEY
+          )
+
+          if [ -e /dev/kvm ]; then
+            docker_args+=(--device /dev/kvm)
+          fi
+
+          docker run "${docker_args[@]}" "${BUILDER_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}" \
+            bash -lc '
+              status=0
+              /usr/local/bin/start_qnx_vm.sh \
+                --log-dir tmp/qnx-qemu \
+                --work-dir "$QNX_VM_WORK_DIR" \
+                --ssh-key "$QNX_VM_SSH_KEY" \
+                --timeout-secs 300 \
+                --hold-secs 10 || status=$?
+
+              # Remove local activation data and installer cache before committing
+              # the stopped container as a reusable CI image.
+              if [ -n "${QNX_LICENSE_KEY:-}" ] && [ -f tmp/qnx-qemu/start_qnx_vm.log ]; then
+                sanitized_log="$(mktemp)"
+                while IFS= read -r line; do
+                  printf "%s\n" "${line//${QNX_LICENSE_KEY}/[REDACTED]}"
+                done < tmp/qnx-qemu/start_qnx_vm.log > "$sanitized_log"
+                mv "$sanitized_log" tmp/qnx-qemu/start_qnx_vm.log
+              fi
+              rm -rf /root/.qnx/license /root/.qnx/swupdate/cache
+              rm -rf /tmp/* /var/tmp/*
+              exit "$status"
+            '
+
+      - name: Inspect prepared container
+        if: success()
+        run: |
+          set -euo pipefail
+
+          rm -rf tmp/qnx-qemu-inspect
+          mkdir -p tmp/qnx-qemu-inspect
+
+          docker cp "$container_name:${QNX_VM_WORK_DIR}/output/ifs.bin" tmp/qnx-qemu-inspect/ifs.bin
+          docker cp "$container_name:${QNX_VM_WORK_DIR}/output/disk-qemu" tmp/qnx-qemu-inspect/disk-qemu
+          docker cp "$container_name:${QNX_VM_SSH_KEY}" tmp/qnx-qemu-inspect/qnx_vm_ed25519
+          docker cp "$container_name:${QNX_VM_SSH_KEY}.pub" tmp/qnx-qemu-inspect/qnx_vm_ed25519.pub
+
+          if docker cp "$container_name:/root/.qnx/license" tmp/qnx-qemu-inspect/license >/dev/null 2>&1; then
+            echo "QNX license directory still exists in the prepared container." >&2
+            exit 1
+          fi
+
+      - name: Push prepared QNX QEMU VM image
+        if: success()
+        run: |
+          set -euo pipefail
+
+          docker commit \
+            --change 'WORKDIR /workspace' \
+            --change 'ENV QNX_VM_WORK_DIR=/opt/qnx-qemu/vm' \
+            --change 'ENV QNX_VM_SSH_KEY=/opt/qnx-qemu/qnx_vm_ed25519' \
+            "$container_name" \
+            "${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+
+          docker push "${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+
+      - name: Remove prepared container
+        if: always()
+        run: |
+          set -euo pipefail
+
+          if [ -n "${container_name:-}" ]; then
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+          fi
+
+      - name: Upload QNX VM logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qnx-qemu-vm-image-logs
+          path: tmp/qnx-qemu
+          if-no-files-found: warn

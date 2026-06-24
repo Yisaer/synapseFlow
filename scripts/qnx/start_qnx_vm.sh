@@ -16,6 +16,9 @@ qemuvirt_package="com.qnx.qnx800.target.qemuvirt"
 virtio_driver_package="com.qnx.qnx800.target.driver.virtio"
 run_pid=""
 key_dir=""
+ssh_key=""
+delete_key_dir=0
+skip_build=0
 
 usage() {
   cat <<'USAGE'
@@ -32,6 +35,8 @@ Options:
   --host-qconn-port PORT Host TCP port forwarded to QNX port 8000.
   --cpus COUNT          QEMU vCPU count.
   --ram SIZE            QEMU RAM size.
+  --ssh-key PATH        SSH private key used for QNX root login.
+  --skip-build          Start an existing VM image without QNX SDP setup.
   -h, --help            Show this help.
 USAGE
 }
@@ -78,6 +83,14 @@ while [ "$#" -gt 0 ]; do
       qnx_ram="$2"
       shift 2
       ;;
+    --ssh-key)
+      ssh_key="$2"
+      shift 2
+      ;;
+    --skip-build)
+      skip_build=1
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -96,8 +109,14 @@ work_dir="$(cd "$work_dir" && pwd -P)"
 startup_log="$log_dir/start_qnx_vm.log"
 console_log="$log_dir/qnx_console.log"
 qemu_pidfile="$log_dir/qemu.pid"
-key_dir="$(mktemp -d)"
-ssh_key="$key_dir/qnx_vm_ed25519"
+if [ -z "$ssh_key" ]; then
+  key_dir="$(mktemp -d)"
+  ssh_key="$key_dir/qnx_vm_ed25519"
+  delete_key_dir=1
+else
+  mkdir -p "$(dirname "$ssh_key")"
+  ssh_key="$(cd "$(dirname "$ssh_key")" && pwd -P)/$(basename "$ssh_key")"
+fi
 
 exec > >(tee -a "$startup_log") 2>&1
 
@@ -105,11 +124,19 @@ cleanup() {
   local status=$?
 
   set +e
+  if [ -n "${QNX_LICENSE_KEY:-}" ] && [ -f "$startup_log" ]; then
+    local sanitized_log
+    sanitized_log="$(mktemp)"
+    while IFS= read -r line; do
+      printf '%s\n' "${line//${QNX_LICENSE_KEY}/[REDACTED]}"
+    done <"$startup_log" >"$sanitized_log"
+    mv "$sanitized_log" "$startup_log"
+  fi
   if [ -n "$run_pid" ] && kill -0 "$run_pid" >/dev/null 2>&1; then
     kill "$run_pid" >/dev/null 2>&1
     wait "$run_pid" >/dev/null 2>&1
   fi
-  if [ -n "$key_dir" ]; then
+  if [ "$delete_key_dir" -eq 1 ] && [ -n "$key_dir" ]; then
     rm -rf "$key_dir"
   fi
 
@@ -129,102 +156,115 @@ echo "host_qconn_port=$host_qconn_port"
 echo "qnx_cpus=$qnx_cpus"
 echo "qnx_ram=$qnx_ram"
 echo "qnx_mirror_baseline=$qnx_mirror_baseline"
+echo "skip_build=$skip_build"
+echo "ssh_key=$ssh_key"
 
-if [ -f "${QNX_INSTALL_DIR:-/opt/qnx800}/qnxsdp-env.sh" ]; then
-  # shellcheck disable=SC1091
-  source "${QNX_INSTALL_DIR:-/opt/qnx800}/qnxsdp-env.sh"
+if [ "$skip_build" -eq 0 ]; then
+  if [ -f "${QNX_INSTALL_DIR:-/opt/qnx800}/qnxsdp-env.sh" ]; then
+    # shellcheck disable=SC1091
+    source "${QNX_INSTALL_DIR:-/opt/qnx800}/qnxsdp-env.sh"
+  else
+    echo "QNX SDP env file was not found under ${QNX_INSTALL_DIR:-/opt/qnx800}" >&2
+    exit 1
+  fi
+
+  if [ -z "${QNX_LICENSE_KEY:-}" ]; then
+    echo "QNX_LICENSE_KEY is required to activate the QNX runtime license." >&2
+    exit 1
+  fi
+
+  qsc_bin="${QNX_QSC_DIR:-/opt/qnxsoftwarecenter}/qnxsoftwarecenter/qnxsoftwarecenter_clt"
+  if [ ! -x "$qsc_bin" ]; then
+    qsc_bin="$(find "${QNX_QSC_DIR:-/opt/qnxsoftwarecenter}" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
+  fi
+  if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
+    echo "qnxsoftwarecenter_clt was not found under ${QNX_QSC_DIR:-/opt/qnxsoftwarecenter}" >&2
+    exit 1
+  fi
+
+  "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
+
+  if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt | grep -q .; then
+    echo "startup-qemu-virt was not found; installing ${qemuvirt_package}."
+
+    if [ -z "${QNX_MYQNX_USER:-}" ] || [ -z "${QNX_MYQNX_PASSWORD:-}" ]; then
+      echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${qemuvirt_package}." >&2
+      exit 1
+    fi
+
+    "$qsc_bin" \
+      -setDebugSymbolsEnabled=false \
+      -mirrorBaseline "$qnx_mirror_baseline" \
+      -myqnx.user "$QNX_MYQNX_USER" \
+      -myqnx.password "$QNX_MYQNX_PASSWORD"
+
+    "$qsc_bin" \
+      -setDebugSymbolsEnabled=false \
+      -destination "${QNX_INSTALL_DIR:-/opt/qnx800}" \
+      -installPackage "$qemuvirt_package" \
+      -listLicenseKeys \
+      -myqnx.user "$QNX_MYQNX_USER" \
+      -myqnx.password "$QNX_MYQNX_PASSWORD"
+  fi
+
+  find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt -print -quit
+
+  if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -path '*/sbin/devb-virtio' | grep -q .; then
+    echo "devb-virtio was not found; installing ${virtio_driver_package}."
+
+    if [ -z "${QNX_MYQNX_USER:-}" ] || [ -z "${QNX_MYQNX_PASSWORD:-}" ]; then
+      echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${virtio_driver_package}." >&2
+      exit 1
+    fi
+
+    "$qsc_bin" \
+      -setDebugSymbolsEnabled=false \
+      -destination "${QNX_INSTALL_DIR:-/opt/qnx800}" \
+      -installPackage "$virtio_driver_package" \
+      -listLicenseKeys \
+      -myqnx.user "$QNX_MYQNX_USER" \
+      -myqnx.password "$QNX_MYQNX_PASSWORD"
+  fi
+
+  find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -path '*/sbin/devb-virtio' -print -quit
+
+  if ! command -v mkqnximage >/dev/null 2>&1; then
+    mkqnximage_bin="$(find "${QNX_INSTALL_DIR:-/opt/qnx800}" -type f -name mkqnximage -perm -111 | head -n 1)"
+    if [ -n "$mkqnximage_bin" ]; then
+      export PATH="$(dirname "$mkqnximage_bin"):$PATH"
+    fi
+  fi
+  if ! command -v mkqnximage >/dev/null 2>&1; then
+    echo "mkqnximage was not found after sourcing the QNX SDP environment." >&2
+    exit 1
+  fi
+
+  qemu-system-aarch64 --version | head -n 1
+  mkqnximage --help | sed -n '1,80p'
+
+  cd "$work_dir"
+
+  if [ ! -f "$ssh_key" ]; then
+    ssh-keygen -q -t ed25519 -N '' -f "$ssh_key"
+  fi
+
+  echo "Building QNX QEMU image..."
+  mkqnximage \
+    --type=qemu \
+    --arch="$arch" \
+    --hostname="$hostname" \
+    --ssh-ident="${ssh_key}.pub" \
+    --sshd-pregen=yes \
+    --force \
+    --build
 else
-  echo "QNX SDP env file was not found under ${QNX_INSTALL_DIR:-/opt/qnx800}" >&2
-  exit 1
-fi
-
-if [ -z "${QNX_LICENSE_KEY:-}" ]; then
-  echo "QNX_LICENSE_KEY is required to activate the QNX runtime license." >&2
-  exit 1
-fi
-
-qsc_bin="${QNX_QSC_DIR:-/opt/qnxsoftwarecenter}/qnxsoftwarecenter/qnxsoftwarecenter_clt"
-if [ ! -x "$qsc_bin" ]; then
-  qsc_bin="$(find "${QNX_QSC_DIR:-/opt/qnxsoftwarecenter}" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
-fi
-if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
-  echo "qnxsoftwarecenter_clt was not found under ${QNX_QSC_DIR:-/opt/qnxsoftwarecenter}" >&2
-  exit 1
-fi
-
-"$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
-
-if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt | grep -q .; then
-  echo "startup-qemu-virt was not found; installing ${qemuvirt_package}."
-
-  if [ -z "${QNX_MYQNX_USER:-}" ] || [ -z "${QNX_MYQNX_PASSWORD:-}" ]; then
-    echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${qemuvirt_package}." >&2
+  if [ ! -f "$ssh_key" ]; then
+    echo "QNX SSH key was not found for the existing VM image: $ssh_key" >&2
     exit 1
   fi
-
-  "$qsc_bin" \
-    -setDebugSymbolsEnabled=false \
-    -mirrorBaseline "$qnx_mirror_baseline" \
-    -myqnx.user "$QNX_MYQNX_USER" \
-    -myqnx.password "$QNX_MYQNX_PASSWORD"
-
-  "$qsc_bin" \
-    -setDebugSymbolsEnabled=false \
-    -destination "${QNX_INSTALL_DIR:-/opt/qnx800}" \
-    -installPackage "$qemuvirt_package" \
-    -listLicenseKeys \
-    -myqnx.user "$QNX_MYQNX_USER" \
-    -myqnx.password "$QNX_MYQNX_PASSWORD"
+  qemu-system-aarch64 --version | head -n 1
+  cd "$work_dir"
 fi
-
-find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt -print -quit
-
-if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -path '*/sbin/devb-virtio' | grep -q .; then
-  echo "devb-virtio was not found; installing ${virtio_driver_package}."
-
-  if [ -z "${QNX_MYQNX_USER:-}" ] || [ -z "${QNX_MYQNX_PASSWORD:-}" ]; then
-    echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${virtio_driver_package}." >&2
-    exit 1
-  fi
-
-  "$qsc_bin" \
-    -setDebugSymbolsEnabled=false \
-    -destination "${QNX_INSTALL_DIR:-/opt/qnx800}" \
-    -installPackage "$virtio_driver_package" \
-    -listLicenseKeys \
-    -myqnx.user "$QNX_MYQNX_USER" \
-    -myqnx.password "$QNX_MYQNX_PASSWORD"
-fi
-
-find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -path '*/sbin/devb-virtio' -print -quit
-
-if ! command -v mkqnximage >/dev/null 2>&1; then
-  mkqnximage_bin="$(find "${QNX_INSTALL_DIR:-/opt/qnx800}" -type f -name mkqnximage -perm -111 | head -n 1)"
-  if [ -n "$mkqnximage_bin" ]; then
-    export PATH="$(dirname "$mkqnximage_bin"):$PATH"
-  fi
-fi
-if ! command -v mkqnximage >/dev/null 2>&1; then
-  echo "mkqnximage was not found after sourcing the QNX SDP environment." >&2
-  exit 1
-fi
-
-qemu-system-aarch64 --version | head -n 1
-mkqnximage --help | sed -n '1,80p'
-
-cd "$work_dir"
-
-ssh-keygen -q -t ed25519 -N '' -f "$ssh_key"
-
-echo "Building QNX QEMU image..."
-mkqnximage \
-  --type=qemu \
-  --arch="$arch" \
-  --hostname="$hostname" \
-  --ssh-ident="${ssh_key}.pub" \
-  --sshd-pregen=yes \
-  --force \
-  --build
 
 ifs_image="$work_dir/output/ifs.bin"
 disk_image="$work_dir/output/disk-qemu"
