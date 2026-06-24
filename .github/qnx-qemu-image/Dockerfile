@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       qemu-utils \
       rsync \
     && mkdir -p /etc/qemu \
-    && printf 'allow all\n' > /etc/qemu/bridge.conf \
+    && printf 'allow br0\n' > /etc/qemu/bridge.conf \
     && if [ -e /usr/lib/qemu/qemu-bridge-helper ]; then chmod u+s /usr/lib/qemu/qemu-bridge-helper; fi \
     && rm -rf /var/lib/apt/lists/*
 

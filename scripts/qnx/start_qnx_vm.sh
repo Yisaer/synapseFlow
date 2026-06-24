@@ -161,7 +161,7 @@ fi
 
 if [ -e /usr/lib/qemu/qemu-bridge-helper ]; then
   mkdir -p /etc/qemu
-  printf 'allow all\n' >/etc/qemu/bridge.conf
+  printf 'allow br0\n' >/etc/qemu/bridge.conf
   chmod u+s /usr/lib/qemu/qemu-bridge-helper
 fi
 
