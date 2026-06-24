@@ -1,0 +1,109 @@
+name: QNX QEMU Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: GHCR tag for the QNX QEMU image
+        required: true
+        default: "8.0-try"
+        type: string
+      base_image:
+        description: Base QNX SDP image
+        required: true
+        default: "ghcr.io/emqx/veloflux-qnx-sdp:8.0-try"
+        type: string
+      push_image:
+        description: Push the built QNX QEMU image to GHCR
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.image_tag || '8.0-try' }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-qemu
+  QNX_QEMU_IMAGE_TAG: ${{ inputs.image_tag || '8.0-try' }}
+  QNX_SDP_IMAGE: ${{ inputs.base_image || 'ghcr.io/emqx/veloflux-qnx-sdp:8.0-try' }}
+  QNX_INSTALL_DIR: /opt/qnx800
+  QNX_QSC_DIR: /opt/qnxsoftwarecenter
+
+jobs:
+  build-and-start-qnx-vm:
+    name: Build QNX QEMU image and start VM
+    runs-on: infra-emqx-io-4c
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build QNX QEMU image
+        run: |
+          set -euo pipefail
+
+          image="${IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+          docker build \
+            --build-arg "QNX_SDP_IMAGE=${QNX_SDP_IMAGE}" \
+            -f .github/qnx-qemu-image/Dockerfile \
+            -t "$image" \
+            .
+
+      - name: Push QNX QEMU image
+        if: ${{ inputs.push_image }}
+        run: |
+          set -euo pipefail
+
+          docker push "${IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+
+      - name: Start QNX VM
+        env:
+          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p tmp/qnx-qemu
+
+          image="${IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+          docker_args=(
+            --rm
+            --privileged
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e QNX_INSTALL_DIR
+            -e QNX_QSC_DIR
+            -e QNX_LICENSE_KEY
+          )
+
+          if [ -e /dev/kvm ]; then
+            docker_args+=(--device /dev/kvm)
+          fi
+
+          docker run "${docker_args[@]}" "$image" \
+            /usr/local/bin/start_qnx_vm.sh \
+              --log-dir tmp/qnx-qemu \
+              --work-dir tmp/qnx-qemu/work \
+              --timeout-secs 300 \
+              --hold-secs 10
+
+      - name: Upload QNX VM logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qnx-qemu-vm-logs
+          path: tmp/qnx-qemu
+          if-no-files-found: warn
