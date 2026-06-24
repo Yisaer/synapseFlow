@@ -247,6 +247,8 @@ qemu-system-aarch64 \
   -device "virtio-blk-device,drive=drv0" \
   -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${host_ssh_port}-:22,hostfwd=tcp:127.0.0.1:${host_qconn_port}-:8000" \
   -device "virtio-net-device,netdev=net0,mac=52:54:00:0f:f0:9d" \
+  -object rng-random,filename=/dev/urandom,id=rng0 \
+  -device "virtio-rng-device,rng=rng0" \
   -pidfile "$qemu_pidfile" \
   -kernel "$ifs_image" \
   -nographic \
