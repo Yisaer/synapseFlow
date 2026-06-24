@@ -7,6 +7,7 @@ timeout_secs=300
 hold_secs=10
 hostname="veloflux-qnx"
 arch="aarch64le"
+qnx_mirror_baseline="${QNX_MIRROR_BASELINE:-qnx800}"
 qemuvirt_package="com.qnx.qnx800.target.qemuvirt"
 vm_ip=""
 run_pid=""
@@ -96,6 +97,7 @@ echo "timeout_secs=$timeout_secs"
 echo "hold_secs=$hold_secs"
 echo "hostname=$hostname"
 echo "arch=$arch"
+echo "qnx_mirror_baseline=$qnx_mirror_baseline"
 
 if [ -f "${QNX_INSTALL_DIR:-/opt/qnx800}/qnxsdp-env.sh" ]; then
   # shellcheck disable=SC1091
@@ -128,6 +130,12 @@ if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -n
     echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${qemuvirt_package}." >&2
     exit 1
   fi
+
+  "$qsc_bin" \
+    -setDebugSymbolsEnabled=false \
+    -mirrorBaseline "$qnx_mirror_baseline" \
+    -myqnx.user "$QNX_MYQNX_USER" \
+    -myqnx.password "$QNX_MYQNX_PASSWORD"
 
   "$qsc_bin" \
     -setDebugSymbolsEnabled=false \

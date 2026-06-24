@@ -33,6 +33,7 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/veloflux-qnx-qemu
   QNX_QEMU_IMAGE_TAG: ${{ inputs.image_tag || '8.0-try' }}
   QNX_SDP_IMAGE: ${{ inputs.base_image || 'ghcr.io/emqx/veloflux-qnx-sdp:8.0-try' }}
+  QNX_MIRROR_BASELINE: qnx800
   QNX_INSTALL_DIR: /opt/qnx800
   QNX_QSC_DIR: /opt/qnxsoftwarecenter
 
@@ -94,6 +95,7 @@ jobs:
             -w /workspace
             -e QNX_INSTALL_DIR
             -e QNX_QSC_DIR
+            -e QNX_MIRROR_BASELINE
             -e QNX_LICENSE_KEY
             -e QNX_MYQNX_USER
             -e QNX_MYQNX_PASSWORD
