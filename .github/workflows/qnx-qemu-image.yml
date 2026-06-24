@@ -24,6 +24,11 @@ on:
         required: true
         default: false
         type: boolean
+      run_rust_hello:
+        description: Build and run a Rust hello world inside the prepared QNX VM
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.image_tag || '8.0-try' }}
@@ -37,6 +42,7 @@ env:
   QNX_MIRROR_BASELINE: qnx800
   QNX_INSTALL_DIR: /opt/qnx800
   QNX_QSC_DIR: /opt/qnxsoftwarecenter
+  QNX_RUST_TOOLCHAIN: qnx
   QNX_VM_WORK_DIR: /opt/qnx-qemu/vm
   QNX_VM_SSH_KEY: /opt/qnx-qemu/qnx_vm_ed25519
 
@@ -63,6 +69,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build QNX QEMU image
+        if: ${{ !inputs.run_rust_hello }}
         run: |
           set -euo pipefail
 
@@ -74,14 +81,14 @@ jobs:
             .
 
       - name: Push QNX QEMU image
-        if: ${{ inputs.push_image }}
+        if: ${{ inputs.push_image && !inputs.run_rust_hello }}
         run: |
           set -euo pipefail
 
           docker push "${IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
 
       - name: Start QNX VM
-        if: ${{ !inputs.push_image }}
+        if: ${{ !inputs.push_image && !inputs.run_rust_hello }}
         env:
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
           QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
@@ -117,7 +124,7 @@ jobs:
               --hold-secs 10
 
       - name: Prepare QNX VM image container
-        if: ${{ inputs.push_image }}
+        if: ${{ inputs.push_image && !inputs.run_rust_hello }}
         env:
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
           QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
@@ -176,7 +183,7 @@ jobs:
             '
 
       - name: Inspect prepared QNX VM container
-        if: ${{ success() && inputs.push_image }}
+        if: ${{ success() && inputs.push_image && !inputs.run_rust_hello }}
         run: |
           set -euo pipefail
 
@@ -194,7 +201,7 @@ jobs:
           fi
 
       - name: Push prepared QNX VM image
-        if: ${{ success() && inputs.push_image }}
+        if: ${{ success() && inputs.push_image && !inputs.run_rust_hello }}
         run: |
           set -euo pipefail
 
@@ -208,13 +215,202 @@ jobs:
           docker push "${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
 
       - name: Remove prepared QNX VM container
-        if: ${{ always() && inputs.push_image }}
+        if: ${{ always() && inputs.push_image && !inputs.run_rust_hello }}
         run: |
           set -euo pipefail
 
           if [ -n "${container_name:-}" ]; then
             docker rm -f "$container_name" >/dev/null 2>&1 || true
           fi
+
+      - name: Build Rust hello world for QNX
+        if: ${{ inputs.run_rust_hello }}
+        env:
+          RUST_TARGET: aarch64-unknown-nto-qnx800
+          CARGO_BUILD_TARGET: aarch64-unknown-nto-qnx800
+          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
+          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          rm -rf tmp/qnx-rust-hello
+          mkdir -p tmp/qnx-rust-hello/src .cargo-cache/registry .cargo-cache/git
+
+          printf '%s\n' \
+            '[package]' \
+            'name = "qnx-rust-hello"' \
+            'version = "0.1.0"' \
+            'edition = "2021"' \
+            '' \
+            '[workspace]' \
+            > tmp/qnx-rust-hello/Cargo.toml
+
+          printf '%s\n' \
+            'fn main() {' \
+            '    println!("hello from qnx rust");' \
+            '}' \
+            > tmp/qnx-rust-hello/src/main.rs
+
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TERM_COLOR \
+            -e CARGO_BUILD_JOBS \
+            -e CARGO_INCREMENTAL \
+            -e CARGO_NET_GIT_FETCH_WITH_CLI \
+            -e CARGO_HOME=/workspace/.cargo-cache \
+            -e QNX_INSTALL_DIR \
+            -e QNX_RUST_TOOLCHAIN \
+            -e RUST_TARGET \
+            -e CARGO_BUILD_TARGET \
+            -e QNX_LICENSE_KEY \
+            -e QNX_MYQNX_USER \
+            -e QNX_MYQNX_PASSWORD \
+            "$QNX_SDP_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              apt-get update
+              apt-get install -y --no-install-recommends build-essential curl git pkg-config
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+              source "$CARGO_HOME/env"
+
+              QNX_RUST_TC_URL="https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.2.0/qnx8_rust_toolchain.tar.gz"
+              QNX_RUST_TC_DIR="/opt/qnx-rust-toolchain"
+
+              curl -fsSL "$QNX_RUST_TC_URL" -o /tmp/qnx8_rust_toolchain.tar.gz
+              mkdir -p "$QNX_RUST_TC_DIR"
+              tar -xzf /tmp/qnx8_rust_toolchain.tar.gz -C "$QNX_RUST_TC_DIR" --strip-components=1
+              rm -f /tmp/qnx8_rust_toolchain.tar.gz
+
+              if [ ! -x "$QNX_RUST_TC_DIR/bin/rustc" ]; then
+                inner="$(find "$QNX_RUST_TC_DIR" -maxdepth 3 -type f -name rustc -perm -111 | head -1)"
+                if [ -n "$inner" ]; then
+                  QNX_RUST_TC_DIR="$(dirname "$(dirname "$inner")")"
+                else
+                  echo "QNX Rust toolchain: rustc not found after extraction" >&2
+                  exit 1
+                fi
+              fi
+
+              rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$QNX_RUST_TC_DIR"
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+
+              if [ -z "${QNX_LICENSE_KEY:-}" ]; then
+                echo "QNX_LICENSE_KEY secret is required to activate the QNX runtime license." >&2
+                exit 1
+              fi
+
+              qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"
+              if [ ! -x "$qsc_bin" ]; then
+                qsc_bin="$(find "$QNX_QSC_DIR" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
+              fi
+              if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
+                echo "qnxsoftwarecenter_clt was not found under $QNX_QSC_DIR" >&2
+                exit 1
+              fi
+
+              "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
+              qcc -Vgcc_ntoaarch64le_cxx -E -xc /dev/null >/dev/null
+
+              cargo +"$QNX_RUST_TOOLCHAIN" build \
+                --manifest-path tmp/qnx-rust-hello/Cargo.toml \
+                --release
+            '
+
+          hello_bin="tmp/qnx-rust-hello/target/aarch64-unknown-nto-qnx800/release/qnx-rust-hello"
+          test -x "$hello_bin"
+          file "$hello_bin"
+
+      - name: Run Rust hello world inside QNX VM
+        if: ${{ inputs.run_rust_hello }}
+        run: |
+          set -euo pipefail
+
+          rm -rf tmp/qnx-qemu
+          mkdir -p tmp/qnx-qemu
+
+          image="${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+          docker pull "$image"
+
+          docker_args=(
+            --rm
+            --privileged
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e QNX_VM_WORK_DIR
+            -e QNX_VM_SSH_KEY
+          )
+
+          if [ -e /dev/kvm ]; then
+            docker_args+=(--device /dev/kvm)
+          fi
+
+          docker run "${docker_args[@]}" "$image" \
+            bash -lc '
+              set -euo pipefail
+
+              /usr/local/bin/start_qnx_vm.sh \
+                --skip-build \
+                --log-dir tmp/qnx-qemu \
+                --work-dir "$QNX_VM_WORK_DIR" \
+                --ssh-key "$QNX_VM_SSH_KEY" \
+                --timeout-secs 300 \
+                --hold-secs 600 &
+              vm_pid=$!
+
+              cleanup() {
+                set +e
+                if kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  kill "$vm_pid" >/dev/null 2>&1
+                  wait "$vm_pid" >/dev/null 2>&1
+                fi
+              }
+              trap cleanup EXIT
+
+              for _ in $(seq 1 80); do
+                if [ -f tmp/qnx-qemu/qnx-vm.env ]; then
+                  break
+                fi
+                if ! kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  wait "$vm_pid"
+                fi
+                sleep 5
+              done
+
+              if [ ! -f tmp/qnx-qemu/qnx-vm.env ]; then
+                echo "QNX VM did not become ready." >&2
+                exit 1
+              fi
+
+              source tmp/qnx-qemu/qnx-vm.env
+
+              ssh_args=(
+                -i "$QNX_VM_SSH_KEY"
+                -p "$QNX_VM_SSH_PORT"
+                -o StrictHostKeyChecking=no
+                -o UserKnownHostsFile=/dev/null
+                -o ConnectTimeout=5
+                -o ConnectionAttempts=3
+              )
+              scp_args=(
+                -i "$QNX_VM_SSH_KEY"
+                -P "$QNX_VM_SSH_PORT"
+                -o StrictHostKeyChecking=no
+                -o UserKnownHostsFile=/dev/null
+                -o ConnectTimeout=5
+                -o ConnectionAttempts=3
+              )
+
+              hello_bin="tmp/qnx-rust-hello/target/aarch64-unknown-nto-qnx800/release/qnx-rust-hello"
+              scp "${scp_args[@]}" "$hello_bin" "root@${QNX_VM_HOST}:/tmp/qnx-rust-hello"
+              output="$(ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" /tmp/qnx-rust-hello)"
+              printf "%s\n" "$output"
+              grep -F "hello from qnx rust" <<< "$output"
+            '
 
       - name: Upload QNX VM logs
         if: always()

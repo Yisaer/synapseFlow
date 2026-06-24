@@ -124,6 +124,7 @@ cleanup() {
   local status=$?
 
   set +e
+  trap - EXIT INT TERM
   if [ -n "${QNX_LICENSE_KEY:-}" ] && [ -f "$startup_log" ]; then
     local sanitized_log
     sanitized_log="$(mktemp)"
@@ -143,7 +144,7 @@ cleanup() {
 
   exit "$status"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 echo "QNX QEMU startup"
 echo "log_dir=$log_dir"

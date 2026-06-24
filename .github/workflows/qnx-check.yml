@@ -1,8 +1,7 @@
 name: QNX Build Check
 
 on:
-  pull_request:
-    branches: [main_qnx]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.run_id }}
