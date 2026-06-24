@@ -131,6 +131,7 @@ cleanup() {
       printf '%s\n' "${line//${QNX_LICENSE_KEY}/[REDACTED]}"
     done <"$startup_log" >"$sanitized_log"
     mv "$sanitized_log" "$startup_log"
+    chmod 0644 "$startup_log"
   fi
   if [ -n "$run_pid" ] && kill -0 "$run_pid" >/dev/null 2>&1; then
     kill "$run_pid" >/dev/null 2>&1
