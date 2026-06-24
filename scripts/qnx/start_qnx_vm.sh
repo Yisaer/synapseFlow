@@ -159,6 +159,12 @@ if ! command -v mkqnximage >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ -e /usr/lib/qemu/qemu-bridge-helper ]; then
+  mkdir -p /etc/qemu
+  printf 'allow all\n' >/etc/qemu/bridge.conf
+  chmod u+s /usr/lib/qemu/qemu-bridge-helper
+fi
+
 qemu-system-aarch64 --version | head -n 1
 mkqnximage --help | sed -n '1,80p'
 

@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       qemu-system-arm \
       qemu-utils \
       rsync \
+    && mkdir -p /etc/qemu \
+    && printf 'allow all\n' > /etc/qemu/bridge.conf \
+    && if [ -e /usr/lib/qemu/qemu-bridge-helper ]; then chmod u+s /usr/lib/qemu/qemu-bridge-helper; fi \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/qnx/start_qnx_vm.sh /usr/local/bin/start_qnx_vm.sh
