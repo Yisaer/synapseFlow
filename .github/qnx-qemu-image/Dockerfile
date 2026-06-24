@@ -6,10 +6,12 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      binutils \
       bridge-utils \
       iproute2 \
       iputils-ping \
       netcat-openbsd \
+      net-tools \
       openssh-client \
       procps \
       qemu-system-arm \
