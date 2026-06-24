@@ -1028,6 +1028,28 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "topic_delimiter": cfg.topic_delimiter,
             }),
         ),
+        SinkConnectorConfig::Http(cfg) => (
+            "http".to_string(),
+            serde_json::json!({
+                "url": cfg.url,
+                "method": match cfg.method {
+                    crate::connector::sink::http::HttpMethod::Get => "GET",
+                    crate::connector::sink::http::HttpMethod::Post => "POST",
+                    crate::connector::sink::http::HttpMethod::Put => "PUT",
+                    crate::connector::sink::http::HttpMethod::Patch => "PATCH",
+                    crate::connector::sink::http::HttpMethod::Delete => "DELETE",
+                },
+                "timeout_ms": cfg.timeout.as_millis(),
+                "max_body_size": cfg.max_body_size,
+                "content_type": cfg.content_type,
+                "headers": cfg.headers,
+                "retry": {
+                    "max_attempts": cfg.retry.max_attempts,
+                    "initial_backoff_ms": cfg.retry.initial_backoff_ms,
+                    "max_backoff_ms": cfg.retry.max_backoff_ms,
+                },
+            }),
+        ),
         SinkConnectorConfig::Video(cfg) => {
             let crate::connector::sink::video::VideoSinkTargetConfig::File(file) = &cfg.target;
             (

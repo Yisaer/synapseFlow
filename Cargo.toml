@@ -70,6 +70,7 @@ nng_pubsub = ["flow/nng_pubsub", "veloflux_sdv/nng_pubsub"]
 bytes = "1"
 criterion = "0.5"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+axum = { version = "0.7", features = ["macros", "json"] }
 tempfile = "3"
 flate2 = "1"
 tar = "0.4"

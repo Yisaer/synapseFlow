@@ -170,13 +170,14 @@ Response:
 
 - Optional `id: string` (defaults to `{pipeline_id}_sink_{index}`)
 - `type: string` (required)
-  - Supported: `mqtt`, `nop`, `kuksa`
+  - Supported: `mqtt`, `nop`, `kuksa`, `kura`, `memory`, `file`, `video`, `nng_pubsub`, `http`
 - `props: object` (optional, defaults to `{}`)
 - `common_sink_props: object` (optional)
   - Optional `batch_count: number`
   - Optional `batch_duration: number` (milliseconds)
 - `encoder: { type: string, props: object }` (optional; default is `{ "type": "json", "props": {} }`)
-  - For `type == "kuksa"`, encoder is ignored and forced to `none`.
+  - For `type == "kuksa"` or `type == "kura"`, encoder is ignored and forced to `none`.
+  - For `type == "http"`, encoder is required (e.g. `json`, `protobuf`).
 
 ### Sink `props` by `type`
 
@@ -197,6 +198,57 @@ Response:
 
 - `addr: string` (required)
 - `vss_path: string` (required)
+
+`type == "http"`:
+
+Delivers encoded payloads to a remote HTTP endpoint. Each delivery unit is sent as a
+single HTTP request. The sink supports configurable retry with exponential backoff
+and random jitter for transient failures (network errors, 5xx, 429).
+
+- `url: string` (required) — target URL (e.g. `https://example.com/api/metrics`)
+- Optional `method: string` (default: `"POST"`) — HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`
+- Optional `timeout_secs: number` (default: `30`) — per-request timeout in seconds
+- Optional `headers: object` (default: `{}`) — extra headers (e.g. `{ "Authorization": "Bearer token" }`)
+- Optional `content_type: string` — explicit `Content-Type` header. When omitted, inferred from the
+  encoder kind (`application/json` for JSON, `application/octet-stream` for protobuf)
+- Optional `max_body_size: number` (default: `67108864`, i.e. 64 MiB) — maximum single-delivery body
+  size in bytes. Exceeding this limit aborts the delivery.
+- Optional `retry_max_attempts: number` (default: none, i.e. no retry) — maximum delivery attempts
+  including the first one. Example: `3` means up to 2 retries.
+- Optional `retry_backoff_ms: number` (default: `1000`) — initial backoff in milliseconds between
+  retries, doubles after each failed attempt.
+- Optional `retry_max_backoff_ms: number` (default: `30000`) — upper bound on backoff duration.
+
+**Example — basic JSON POST:**
+
+```json
+{
+  "type": "http",
+  "props": {
+    "url": "https://example.com/api/metrics",
+    "content_type": "application/json"
+  },
+  "encoder": { "type": "json", "props": {} }
+}
+```
+
+**Example — with retry and custom headers:**
+
+```json
+{
+  "type": "http",
+  "props": {
+    "url": "https://example.com/api/submit",
+    "method": "PUT",
+    "timeout_secs": 10,
+    "headers": { "Authorization": "Bearer xxx" },
+    "retry_max_attempts": 3,
+    "retry_backoff_ms": 500,
+    "retry_max_backoff_ms": 10000
+  },
+  "encoder": { "type": "json", "props": {} }
+}
+```
 
 ## Response Shapes
 

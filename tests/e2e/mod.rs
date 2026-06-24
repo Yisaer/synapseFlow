@@ -1,3 +1,4 @@
+mod http_sink_e2e;
 mod pipeline_stats;
 mod proto_decoder_e2e;
 mod proto_encoder_e2e;

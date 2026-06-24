@@ -1,10 +1,10 @@
 use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
-    FileRetentionConfig, FileSinkProps, KuksaSinkProps, KuraSinkProps, MemorySinkProps,
-    MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineDefinition, PipelineOptions,
-    PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition, VideoCodec,
-    VideoContainer, VideoRollingConfig, VideoSinkProps,
+    FileRetentionConfig, FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps,
+    MemorySinkProps, MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineDefinition,
+    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition,
+    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use super::types::{
     CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
-    FileSinkPropsRequest, KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest,
-    NngPubSubSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest, VideoSinkPropsRequest,
+    FileSinkPropsRequest, HttpSinkPropsRequest, KuraSinkPropsRequest, MemorySinkPropsRequest,
+    MqttSinkPropsRequest, NngPubSubSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest,
+    VideoSinkPropsRequest,
 };
 
 #[derive(Deserialize)]
@@ -424,6 +425,43 @@ pub(crate) fn build_pipeline_definition(
                     SinkType::NngPubSub,
                     SinkProps::NngPubSub(props),
                 )
+            }
+            "http" => {
+                let http_props: HttpSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid http sink props: {err}"))?;
+                let url = http_props
+                    .url
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "http sink requires url".to_string())?;
+                let mut props = HttpSinkProps::new(url);
+                if let Some(method) = http_props.method.filter(|v| !v.trim().is_empty()) {
+                    props = props.with_method(method);
+                }
+                if let Some(timeout_secs) = http_props.timeout_secs {
+                    props = props.with_timeout_secs(timeout_secs);
+                }
+                if let Some(ref headers) = http_props.headers {
+                    for (key, value) in headers {
+                        props = props.with_header(key, value);
+                    }
+                }
+                if let Some(ref ct) = http_props.content_type.filter(|v| !v.trim().is_empty()) {
+                    props = props.with_content_type(ct);
+                }
+                if let Some(max_size) = http_props.max_body_size {
+                    props = props.with_max_body_size(max_size);
+                }
+                if let Some(max_attempts) = http_props.retry_max_attempts {
+                    props = props.with_retry_max_attempts(max_attempts);
+                }
+                if let Some(backoff_ms) = http_props.retry_backoff_ms {
+                    props = props.with_retry_backoff_ms(backoff_ms);
+                }
+                if let Some(max_backoff_ms) = http_props.retry_max_backoff_ms {
+                    props = props.with_retry_max_backoff_ms(max_backoff_ms);
+                }
+                SinkDefinition::new(sink_id.clone(), SinkType::Http, SinkProps::Http(props))
             }
             other => return Err(format!("unsupported sink type: {other}")),
         };

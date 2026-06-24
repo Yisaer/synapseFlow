@@ -538,6 +538,20 @@ pub struct NngPubSubSinkPropsRequest {
 
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
+pub struct HttpSinkPropsRequest {
+    pub url: Option<String>,
+    pub method: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub content_type: Option<String>,
+    pub max_body_size: Option<usize>,
+    pub retry_max_attempts: Option<usize>,
+    pub retry_backoff_ms: Option<u64>,
+    pub retry_max_backoff_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
 pub struct CommonSinkPropsRequest {
     #[serde(rename = "batch_count")]
     pub batch_count: Option<usize>,

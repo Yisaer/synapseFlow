@@ -87,6 +87,7 @@ pub use mqtt_client::SharedMqttClientConfig;
 pub use nng_pubsub::{NngPubSubSinkConfig, NngPubSubSourceConfig};
 pub use registry::ConnectorRegistry;
 pub use sink::file::FileSinkConfig;
+pub use sink::http::HttpSinkConfig;
 pub use sink::kuksa::KuksaSinkConfig;
 pub use sink::kura::KuraSinkConfig;
 pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};

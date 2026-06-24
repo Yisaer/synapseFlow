@@ -3,6 +3,7 @@ use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::sink::file::{
     FileRetentionConfig as FileSinkRetentionConfig, FileSinkConfig,
 };
+use crate::connector::sink::http::{HttpMethod, HttpRetryConfig, HttpSinkConfig};
 use crate::connector::sink::video::{
     VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig,
     VideoRollingConfig as VideoSinkRollingConfig, VideoSinkTargetConfig,
@@ -973,6 +974,67 @@ fn build_sinks_from_definition(
                         sink.sink_id
                     ));
                 }
+            }
+            SinkType::Http => {
+                let props = match &sink.props {
+                    SinkProps::Http(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected http props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                if matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    return Err(format!(
+                        "sink {} expected an encoder for http but received encoder `none`",
+                        sink.sink_id
+                    ));
+                }
+                let mut http_cfg = HttpSinkConfig::new(&props.url);
+                if let Some(method) = &props.method {
+                    http_cfg = http_cfg.with_method(match method.to_uppercase().as_str() {
+                        "GET" => HttpMethod::Get,
+                        "PUT" => HttpMethod::Put,
+                        "PATCH" => HttpMethod::Patch,
+                        "DELETE" => HttpMethod::Delete,
+                        _ => HttpMethod::Post,
+                    });
+                }
+                if let Some(timeout_secs) = props.timeout_secs {
+                    http_cfg = http_cfg.with_timeout(Duration::from_secs(timeout_secs));
+                }
+                for (key, value) in &props.headers {
+                    http_cfg = http_cfg.with_header(key, value);
+                }
+                if let Some(ref ct) = props.content_type {
+                    http_cfg = http_cfg.with_content_type(ct);
+                }
+                if let Some(max_size) = props.max_body_size {
+                    http_cfg = http_cfg.with_max_body_size(max_size);
+                }
+                let mut retry_cfg = HttpRetryConfig::default();
+                if let Some(max_attempts) = props.retry_max_attempts {
+                    retry_cfg.max_attempts = Some(max_attempts);
+                }
+                if let Some(backoff_ms) = props.retry_backoff_ms {
+                    retry_cfg.initial_backoff_ms = backoff_ms;
+                }
+                if let Some(max_backoff_ms) = props.retry_max_backoff_ms {
+                    retry_cfg.max_backoff_ms = max_backoff_ms;
+                }
+                http_cfg = http_cfg.with_retry(retry_cfg);
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Http(http_cfg),
+                    sink.encoder.clone(),
+                )
+                .with_compression(sink.compression.clone())
+                .with_encryption(sink.encryption.clone());
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
+                sinks.push(pipeline_sink);
             }
         }
     }

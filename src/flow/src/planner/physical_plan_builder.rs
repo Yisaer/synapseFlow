@@ -1464,6 +1464,10 @@ fn add_regular_encoder_with_builder(
             _ => {}
         }
 
+        let connector_config = resolve_connector_content_type(
+            connector.connector.clone(),
+            connector.encoder.kind_str(),
+        );
         Ok((
             sink_input,
             PhysicalSinkConnector::new(
@@ -1532,15 +1536,35 @@ fn add_regular_encoder_with_builder(
             delivery_node = Arc::new(PhysicalPlan::SinkEncrypt(encrypt));
         }
 
+        let connector_config = resolve_connector_content_type(
+            connector.connector.clone(),
+            connector.encoder.kind_str(),
+        );
         Ok((
             delivery_node,
             PhysicalSinkConnector::new(
                 sink.sink_id.clone(),
                 sink.forward_to_result,
-                connector.connector.clone(),
+                connector_config,
                 Some(encoder_index),
             ),
         ))
+    }
+}
+
+/// Resolve the Content-Type header for HTTP sink configs by inferring it from
+/// the encoder kind when not explicitly configured.
+fn resolve_connector_content_type(
+    config: crate::planner::sink::SinkConnectorConfig,
+    encoder_kind: &str,
+) -> crate::planner::sink::SinkConnectorConfig {
+    match config {
+        crate::planner::sink::SinkConnectorConfig::Http(http_cfg) => {
+            crate::planner::sink::SinkConnectorConfig::Http(
+                http_cfg.with_inferred_content_type(Some(encoder_kind)),
+            )
+        }
+        other => other,
     }
 }
 

@@ -1,4 +1,5 @@
 use super::sink::file::FileSinkConnector;
+use super::sink::http::HttpSinkConnector;
 use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::kura::KuraSinkConnector;
 use super::sink::memory::MemorySinkConnector;
@@ -206,6 +207,20 @@ impl ConnectorRegistry {
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected NNG pubsub config but received {:?}",
+                    other.kind()
+                ))),
+            }),
+        );
+
+        self.register_sink_factory(
+            "http",
+            Arc::new(|sink_id, config, _, _, _| match config {
+                SinkConnectorConfig::Http(cfg) => Ok(Box::new(HttpSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                ))),
+                other => Err(ConnectorError::Other(format!(
+                    "connector `{sink_id}` expected HTTP config but received {:?}",
                     other.kind()
                 ))),
             }),

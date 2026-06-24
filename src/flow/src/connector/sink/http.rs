@@ -1,0 +1,546 @@
+//! HTTP sink connector for delivering encoded payloads to remote HTTP endpoints.
+
+use super::{DeliveryResult, SinkConnector, SinkConnectorError};
+use async_trait::async_trait;
+use rand::RngExt;
+use reqwest::{Client, Method, StatusCode};
+use std::collections::HashMap;
+use std::time::Duration;
+
+/// Configuration for the HTTP sink connector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpSinkConfig {
+    /// Target URL (required).
+    pub url: String,
+    /// HTTP method to use for each delivery.
+    pub method: HttpMethod,
+    /// Per-request timeout.
+    pub timeout: Duration,
+    /// Custom headers to include in every request.
+    pub headers: HashMap<String, String>,
+    /// Explicit Content-Type header value. When `None`, the value is inferred
+    /// from the pipeline encoder kind during plan building.
+    pub content_type: Option<String>,
+    /// Maximum allowed body size (bytes) for a single delivery. Exceeding this
+    /// limit aborts the delivery and returns an error.
+    pub max_body_size: usize,
+    /// Retry configuration for transient failures.
+    pub retry: HttpRetryConfig,
+}
+
+impl HttpSinkConfig {
+    /// Create a new HTTP sink config with the given URL and default values.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            method: HttpMethod::default(),
+            timeout: Duration::from_secs(30),
+            headers: HashMap::new(),
+            content_type: None,
+            max_body_size: 64 * 1024 * 1024,
+            retry: HttpRetryConfig::default(),
+        }
+    }
+
+    /// Set the HTTP method.
+    pub fn with_method(mut self, method: HttpMethod) -> Self {
+        self.method = method;
+        self
+    }
+
+    /// Set the request timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Add a custom header.
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set the Content-Type explicitly.
+    pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Set the maximum body size for a single delivery.
+    pub fn with_max_body_size(mut self, max_bytes: usize) -> Self {
+        self.max_body_size = max_bytes;
+        self
+    }
+
+    /// Set the retry configuration.
+    pub fn with_retry(mut self, retry: HttpRetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// Infer and set `content_type` from the pipeline encoder kind when it is
+    /// not already explicitly configured. Called during physical plan building.
+    pub fn with_inferred_content_type(mut self, encoder_kind: Option<&str>) -> Self {
+        if self.content_type.is_none() {
+            self.content_type = infer_content_type_for_encoder(encoder_kind);
+        }
+        self
+    }
+}
+
+/// Infer a Content-Type header value from the encoder kind string.
+fn infer_content_type_for_encoder(encoder_kind: Option<&str>) -> Option<String> {
+    match encoder_kind {
+        Some("json") => Some("application/json".to_string()),
+        Some("protobuf") => Some("application/octet-stream".to_string()),
+        _ => None,
+    }
+}
+
+/// Retry configuration for transient HTTP delivery failures.
+///
+/// Retryable errors include network failures (timeout, connection refused,
+/// DNS resolution) and server-side status codes (5xx, 429). Client errors
+/// (4xx except 429) are not retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRetryConfig {
+    /// Maximum number of delivery attempts including the first one.
+    /// `None` means no retry (single attempt).
+    pub max_attempts: Option<usize>,
+    /// Initial backoff duration in milliseconds. Doubles after each failed
+    /// attempt, capped at `max_backoff_ms`.
+    pub initial_backoff_ms: u64,
+    /// Upper bound on backoff duration in milliseconds.
+    pub max_backoff_ms: u64,
+}
+
+impl Default for HttpRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: None,
+            initial_backoff_ms: 1000,
+            max_backoff_ms: 30000,
+        }
+    }
+}
+
+impl HttpRetryConfig {
+    /// Convenience constructor: retry up to `max_attempts` times with default
+    /// backoff parameters.
+    pub fn with_max_attempts(max_attempts: usize) -> Self {
+        Self {
+            max_attempts: Some(max_attempts),
+            ..Default::default()
+        }
+    }
+}
+
+/// Returns `true` when the HTTP status code is transient and worth retrying.
+fn is_retryable_status(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Returns `true` when a reqwest error or wrapped error is retryable.
+fn is_retryable_error(err: &SinkConnectorError) -> bool {
+    matches!(&err, SinkConnectorError::Other(msg) if msg.starts_with("http retryable: "))
+}
+
+/// Supported HTTP methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HttpMethod {
+    /// HTTP GET.
+    Get,
+    /// HTTP POST.
+    #[default]
+    Post,
+    /// HTTP PUT.
+    Put,
+    /// HTTP PATCH.
+    Patch,
+    /// HTTP DELETE.
+    Delete,
+}
+
+impl HttpMethod {
+    fn to_reqwest(self) -> Method {
+        match self {
+            HttpMethod::Get => Method::GET,
+            HttpMethod::Post => Method::POST,
+            HttpMethod::Put => Method::PUT,
+            HttpMethod::Patch => Method::PATCH,
+            HttpMethod::Delete => Method::DELETE,
+        }
+    }
+}
+
+/// Sink connector that delivers encoded payloads to an HTTP endpoint.
+///
+/// Each delivery (start_delivery → write_chunk* → finish_delivery) is sent
+/// as a single HTTP request. The connector accumulates chunks into an
+/// in-memory buffer and sends the complete body on finish_delivery.
+///
+/// When retry is configured, transient failures (network errors, 5xx, 429)
+/// are retried with exponential backoff and random jitter.
+pub(crate) struct HttpSinkConnector {
+    id: String,
+    config: HttpSinkConfig,
+    client: Option<Client>,
+    buffer: Vec<u8>,
+    delivery_active: bool,
+}
+
+impl HttpSinkConnector {
+    /// Create a new HTTP sink connector with the given identifier and config.
+    pub fn new(id: impl Into<String>, config: HttpSinkConfig) -> Self {
+        Self {
+            id: id.into(),
+            config,
+            client: None,
+            buffer: Vec::new(),
+            delivery_active: false,
+        }
+    }
+
+    fn validate_url(url: &str) -> Result<(), SinkConnectorError> {
+        if url.trim().is_empty() {
+            return Err(SinkConnectorError::Other(
+                "http sink requires a non-empty url".to_string(),
+            ));
+        }
+        url::Url::parse(url).map_err(|err| {
+            SinkConnectorError::Other(format!("http sink has an invalid url: {err}"))
+        })?;
+        Ok(())
+    }
+
+    fn build_client(&self) -> Result<Client, SinkConnectorError> {
+        reqwest::Client::builder()
+            .timeout(self.config.timeout)
+            .build()
+            .map_err(|err| {
+                SinkConnectorError::Other(format!(
+                    "http sink `{}` failed to build http client: {err}",
+                    self.id
+                ))
+            })
+    }
+
+    /// Send a single HTTP request. Returns Ok(()) on 2xx.
+    /// Network errors and retryable status codes are tagged with a marker
+    /// prefix so the retry loop can distinguish them from non-retryable errors.
+    async fn send_single_request(
+        connector_id: &str,
+        client: &Client,
+        method: Method,
+        url: &str,
+        headers: &HashMap<String, String>,
+        content_type: Option<&str>,
+        body: bytes::Bytes,
+    ) -> Result<(), SinkConnectorError> {
+        let mut request = client.request(method, url).body(body);
+
+        for (key, value) in headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        if let Some(ct) = content_type {
+            request = request.header("Content-Type", ct);
+        }
+
+        let response = match request.send().await {
+            Ok(r) => r,
+            Err(err) => {
+                if !is_retryable_reqwest_error(&err) {
+                    return Err(SinkConnectorError::Other(format!(
+                        "http sink `{connector_id}` request failed: {err}"
+                    )));
+                }
+                return Err(SinkConnectorError::Other(format!(
+                    "http retryable: http sink `{connector_id}` network error: {err}"
+                )));
+            }
+        };
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let message = format!(
+            "http sink `{connector_id}` received non-success status: {} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("unknown")
+        );
+
+        if !is_retryable_status(status) {
+            return Err(SinkConnectorError::Other(message));
+        }
+
+        Err(SinkConnectorError::Other(format!(
+            "http retryable: {message}"
+        )))
+    }
+}
+
+/// Returns `true` when a reqwest-level error suggests a transient failure.
+fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+#[async_trait]
+impl SinkConnector for HttpSinkConnector {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn ready(&mut self) -> Result<(), SinkConnectorError> {
+        Self::validate_url(&self.config.url)?;
+        self.client = Some(self.build_client()?);
+        Ok(())
+    }
+
+    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        if self.delivery_active {
+            return Err(SinkConnectorError::Other(format!(
+                "http sink `{}` already has an active delivery",
+                self.id
+            )));
+        }
+        self.buffer.clear();
+        self.delivery_active = true;
+        Ok(())
+    }
+
+    async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
+        if !self.delivery_active {
+            return Err(SinkConnectorError::Other(format!(
+                "http sink `{}` received a chunk without an active delivery",
+                self.id
+            )));
+        }
+
+        let new_len = self.buffer.len() + bytes.len();
+        if new_len > self.config.max_body_size {
+            self.buffer.clear();
+            self.delivery_active = false;
+            return Err(SinkConnectorError::Other(format!(
+                "http sink `{}` body size {} exceeds max_body_size {}",
+                self.id, new_len, self.config.max_body_size
+            )));
+        }
+
+        self.buffer.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
+        if !self.delivery_active {
+            return Err(SinkConnectorError::Other(format!(
+                "http sink `{}` finished without an active delivery",
+                self.id
+            )));
+        }
+        self.delivery_active = false;
+
+        let client = self.client.as_ref().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "http sink `{}` client is not initialized; call ready() first",
+                self.id
+            ))
+        })?;
+
+        let method = self.config.method.to_reqwest();
+        let body_bytes: bytes::Bytes = std::mem::take(&mut self.buffer).into();
+        let bytes_written = body_bytes.len() as u64;
+
+        let retry = &self.config.retry;
+        let max_attempts = retry.max_attempts.unwrap_or(1).max(1);
+        let mut attempt = 0;
+        let mut backoff_ms = retry.initial_backoff_ms;
+
+        loop {
+            attempt += 1;
+            match Self::send_single_request(
+                &self.id,
+                client,
+                method.clone(),
+                &self.config.url,
+                &self.config.headers,
+                self.config.content_type.as_deref(),
+                body_bytes.clone(),
+            )
+            .await
+            {
+                Ok(()) => return Ok(DeliveryResult { bytes_written }),
+                Err(err) if !is_retryable_error(&err) => return Err(err),
+                Err(err) if attempt >= max_attempts => {
+                    return Err(SinkConnectorError::Other(format!(
+                        "http sink `{}` exhausted {} retry attempts: {err}",
+                        self.id, max_attempts
+                    )));
+                }
+                Err(err) => {
+                    // Add random jitter (±25% of backoff) to avoid thundering herd.
+                    let jitter = {
+                        let range = (backoff_ms / 4).max(1);
+                        rand::rng().random_range(0..=range)
+                    };
+                    let sleep_ms = backoff_ms + jitter;
+                    tracing::warn!(
+                        connector_id = %self.id,
+                        attempt,
+                        max_attempts,
+                        backoff_ms,
+                        sleep_ms,
+                        error = %err,
+                        "http sink request failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(retry.max_backoff_ms);
+                }
+            }
+        }
+    }
+
+    async fn abort_delivery(&mut self) {
+        self.buffer.clear();
+        self.delivery_active = false;
+    }
+
+    async fn close(&mut self) -> Result<(), SinkConnectorError> {
+        self.buffer.clear();
+        self.delivery_active = false;
+        self.client = None;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_new_sets_sensible_defaults() {
+        let cfg = HttpSinkConfig::new("https://example.com/api");
+        assert_eq!(cfg.url, "https://example.com/api");
+        assert_eq!(cfg.method, HttpMethod::Post);
+        assert_eq!(cfg.timeout, Duration::from_secs(30));
+        assert!(cfg.headers.is_empty());
+        assert_eq!(cfg.content_type, None);
+        assert_eq!(cfg.max_body_size, 64 * 1024 * 1024);
+        assert_eq!(cfg.retry, HttpRetryConfig::default());
+    }
+
+    #[test]
+    fn config_builder_methods() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_method(HttpMethod::Put)
+            .with_timeout(Duration::from_secs(10))
+            .with_header("Authorization", "Bearer token")
+            .with_content_type("application/json")
+            .with_max_body_size(1024)
+            .with_retry(HttpRetryConfig::with_max_attempts(3));
+
+        assert_eq!(cfg.method, HttpMethod::Put);
+        assert_eq!(cfg.timeout, Duration::from_secs(10));
+        assert_eq!(
+            cfg.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(cfg.content_type.as_deref(), Some("application/json"));
+        assert_eq!(cfg.max_body_size, 1024);
+        assert_eq!(cfg.retry.max_attempts, Some(3));
+    }
+
+    #[test]
+    fn retry_config_default_is_no_retry() {
+        let cfg = HttpRetryConfig::default();
+        assert_eq!(cfg.max_attempts, None);
+        assert_eq!(cfg.initial_backoff_ms, 1000);
+        assert_eq!(cfg.max_backoff_ms, 30000);
+    }
+
+    #[test]
+    fn retry_config_with_max_attempts() {
+        let cfg = HttpRetryConfig::with_max_attempts(5);
+        assert_eq!(cfg.max_attempts, Some(5));
+        assert_eq!(cfg.initial_backoff_ms, 1000);
+        assert_eq!(cfg.max_backoff_ms, 30000);
+    }
+
+    #[test]
+    fn retryable_statuses_are_server_errors_and_429() {
+        assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+    }
+
+    #[test]
+    fn non_retryable_statuses_are_client_errors_except_429() {
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn success_statuses_are_not_retryable() {
+        assert!(!is_retryable_status(StatusCode::OK));
+        assert!(!is_retryable_status(StatusCode::CREATED));
+        assert!(!is_retryable_status(StatusCode::NO_CONTENT));
+    }
+
+    #[test]
+    fn retryable_error_is_detected_by_prefix() {
+        assert!(is_retryable_error(&SinkConnectorError::Other(
+            "http retryable: something went wrong".to_string()
+        )));
+    }
+
+    #[test]
+    fn non_retryable_error_is_rejected() {
+        assert!(!is_retryable_error(&SinkConnectorError::Other(
+            "http sink `test` received non-success status: 404 Not Found".to_string()
+        )));
+    }
+
+    #[test]
+    fn infer_content_type_json() {
+        let cfg =
+            HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(Some("json"));
+        assert_eq!(cfg.content_type.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn infer_content_type_protobuf() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_inferred_content_type(Some("protobuf"));
+        assert_eq!(
+            cfg.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn infer_content_type_unknown_is_none() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_inferred_content_type(Some("custom_encoder"));
+        assert_eq!(cfg.content_type, None);
+    }
+
+    #[test]
+    fn infer_content_type_none_is_none() {
+        let cfg = HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(None);
+        assert_eq!(cfg.content_type, None);
+    }
+
+    #[test]
+    fn explicit_content_type_is_not_overwritten_by_inference() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_content_type("text/plain")
+            .with_inferred_content_type(Some("json"));
+        assert_eq!(cfg.content_type.as_deref(), Some("text/plain"));
+    }
+}

@@ -41,6 +41,8 @@ pub enum SinkType {
     Video,
     /// NNG pub/sub sink.
     NngPubSub,
+    /// HTTP sink that delivers encoded payloads to a remote endpoint.
+    Http,
 }
 
 /// Sink configuration payload.
@@ -62,6 +64,8 @@ pub enum SinkProps {
     Video(VideoSinkProps),
     /// NNG pub/sub sink config.
     NngPubSub(NngPubSubSinkProps),
+    /// HTTP sink config.
+    Http(HttpSinkProps),
 }
 
 /// Runtime state for pipeline execution.
@@ -168,6 +172,94 @@ pub struct NngPubSubSinkProps {
     pub url: String,
     pub topic: String,
     pub topic_delimiter: String,
+}
+
+/// Concrete HTTP sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpSinkProps {
+    /// Target URL (required).
+    pub url: String,
+    /// HTTP method ("POST", "PUT", etc.), defaults to "POST".
+    pub method: Option<String>,
+    /// Request timeout in seconds, defaults to 30.
+    pub timeout_secs: Option<u64>,
+    /// Additional headers to include in every request.
+    pub headers: HashMap<String, String>,
+    /// Explicit Content-Type. When `None`, inferred from the encoder kind.
+    pub content_type: Option<String>,
+    /// Maximum single-delivery body size in bytes, defaults to 64 MiB.
+    pub max_body_size: Option<usize>,
+    /// Maximum retry attempts, defaults to `None` (no retry).
+    pub retry_max_attempts: Option<usize>,
+    /// Initial backoff in milliseconds between retries, defaults to 1000.
+    pub retry_backoff_ms: Option<u64>,
+    /// Maximum backoff in milliseconds between retries, defaults to 30000.
+    pub retry_max_backoff_ms: Option<u64>,
+}
+
+impl HttpSinkProps {
+    /// Create a new HTTP sink configuration with the required URL.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            method: None,
+            timeout_secs: None,
+            headers: HashMap::new(),
+            content_type: None,
+            max_body_size: None,
+            retry_max_attempts: None,
+            retry_backoff_ms: None,
+            retry_max_backoff_ms: None,
+        }
+    }
+
+    /// Set the HTTP method.
+    pub fn with_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+
+    /// Set the request timeout in seconds.
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = Some(timeout_secs);
+        self
+    }
+
+    /// Add a custom header.
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set the Content-Type explicitly.
+    pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+
+    /// Set the maximum body size for a single delivery.
+    pub fn with_max_body_size(mut self, max_bytes: usize) -> Self {
+        self.max_body_size = Some(max_bytes);
+        self
+    }
+
+    /// Set the maximum number of retry attempts.
+    pub fn with_retry_max_attempts(mut self, max_attempts: usize) -> Self {
+        self.retry_max_attempts = Some(max_attempts);
+        self
+    }
+
+    /// Set the initial backoff duration in milliseconds.
+    pub fn with_retry_backoff_ms(mut self, backoff_ms: u64) -> Self {
+        self.retry_backoff_ms = Some(backoff_ms);
+        self
+    }
+
+    /// Set the maximum backoff duration in milliseconds.
+    pub fn with_retry_max_backoff_ms(mut self, max_backoff_ms: u64) -> Self {
+        self.retry_max_backoff_ms = Some(max_backoff_ms);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

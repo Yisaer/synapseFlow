@@ -79,6 +79,7 @@ pub enum SinkConnectorError {
 }
 
 pub mod file;
+pub mod http;
 pub mod kuksa;
 pub mod kura;
 pub mod memory;
