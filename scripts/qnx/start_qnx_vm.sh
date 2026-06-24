@@ -7,9 +7,12 @@ timeout_secs=300
 hold_secs=10
 hostname="veloflux-qnx"
 arch="aarch64le"
+host_ssh_port=2222
+host_qconn_port=8000
+qnx_cpus=2
+qnx_ram="1024M"
 qnx_mirror_baseline="${QNX_MIRROR_BASELINE:-qnx800}"
 qemuvirt_package="com.qnx.qnx800.target.qemuvirt"
-vm_ip=""
 run_pid=""
 
 usage() {
@@ -19,10 +22,14 @@ Usage: start_qnx_vm.sh [options]
 Options:
   --log-dir PATH        Directory for startup and console logs.
   --work-dir PATH       Working directory used by mkqnximage.
-  --timeout-secs SECS   Maximum time to wait for mkqnximage --getip.
-  --hold-secs SECS      Time to keep the VM running after the IP is found.
+  --timeout-secs SECS   Maximum time to wait for the forwarded SSH port.
+  --hold-secs SECS      Time to keep the VM running after SSH is reachable.
   --hostname NAME       QNX VM hostname.
   --arch ARCH           QNX target architecture.
+  --host-ssh-port PORT  Host TCP port forwarded to QNX port 22.
+  --host-qconn-port PORT Host TCP port forwarded to QNX port 8000.
+  --cpus COUNT          QEMU vCPU count.
+  --ram SIZE            QEMU RAM size.
   -h, --help            Show this help.
 USAGE
 }
@@ -53,6 +60,22 @@ while [ "$#" -gt 0 ]; do
       arch="$2"
       shift 2
       ;;
+    --host-ssh-port)
+      host_ssh_port="$2"
+      shift 2
+      ;;
+    --host-qconn-port)
+      host_qconn_port="$2"
+      shift 2
+      ;;
+    --cpus)
+      qnx_cpus="$2"
+      shift 2
+      ;;
+    --ram)
+      qnx_ram="$2"
+      shift 2
+      ;;
     -h | --help)
       usage
       exit 0
@@ -70,7 +93,8 @@ log_dir="$(cd "$log_dir" && pwd -P)"
 work_dir="$(cd "$work_dir" && pwd -P)"
 startup_log="$log_dir/start_qnx_vm.log"
 console_log="$log_dir/qnx_console.log"
-getip_log="$log_dir/mkqnximage_getip.log"
+qemu_pidfile="$log_dir/qemu.pid"
+ssh_key="$work_dir/qnx_vm_ed25519"
 
 exec > >(tee -a "$startup_log") 2>&1
 
@@ -78,9 +102,6 @@ cleanup() {
   local status=$?
 
   set +e
-  if command -v mkqnximage >/dev/null 2>&1; then
-    mkqnximage --stop >>"$startup_log" 2>&1
-  fi
   if [ -n "$run_pid" ] && kill -0 "$run_pid" >/dev/null 2>&1; then
     kill "$run_pid" >/dev/null 2>&1
     wait "$run_pid" >/dev/null 2>&1
@@ -97,6 +118,10 @@ echo "timeout_secs=$timeout_secs"
 echo "hold_secs=$hold_secs"
 echo "hostname=$hostname"
 echo "arch=$arch"
+echo "host_ssh_port=$host_ssh_port"
+echo "host_qconn_port=$host_qconn_port"
+echo "qnx_cpus=$qnx_cpus"
+echo "qnx_ram=$qnx_ram"
 echo "qnx_mirror_baseline=$qnx_mirror_baseline"
 
 if [ -f "${QNX_INSTALL_DIR:-/opt/qnx800}/qnxsdp-env.sh" ]; then
@@ -159,52 +184,86 @@ if ! command -v mkqnximage >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ -e /usr/lib/qemu/qemu-bridge-helper ]; then
-  mkdir -p /etc/qemu
-  printf 'allow br0\n' >/etc/qemu/bridge.conf
-  chmod u+s /usr/lib/qemu/qemu-bridge-helper
-fi
-
 qemu-system-aarch64 --version | head -n 1
 mkqnximage --help | sed -n '1,80p'
 
 cd "$work_dir"
+
+rm -f "$ssh_key" "${ssh_key}.pub"
+ssh-keygen -q -t ed25519 -N '' -f "$ssh_key"
 
 echo "Building QNX QEMU image..."
 mkqnximage \
   --type=qemu \
   --arch="$arch" \
   --hostname="$hostname" \
+  --ssh-ident="${ssh_key}.pub" \
+  --sshd-pregen=yes \
   --build
 
-echo "Starting QNX QEMU VM..."
-mkqnximage --run >"$console_log" 2>&1 &
+ifs_image="$work_dir/output/ifs.bin"
+disk_image="$work_dir/output/disk-qemu"
+if [ ! -f "$ifs_image" ]; then
+  echo "QNX IFS image was not generated: $ifs_image" >&2
+  exit 1
+fi
+if [ ! -f "$disk_image" ]; then
+  echo "QNX disk image was not generated: $disk_image" >&2
+  exit 1
+fi
+
+echo "Starting QNX QEMU VM with user networking..."
+qemu-system-aarch64 \
+  -machine virt \
+  -cpu cortex-a57 \
+  -smp "$qnx_cpus" \
+  -m "$qnx_ram" \
+  -drive "file=${disk_image},format=raw,if=none,id=drv0" \
+  -device "virtio-blk-device,drive=drv0" \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${host_ssh_port}-:22,hostfwd=tcp:127.0.0.1:${host_qconn_port}-:8000" \
+  -device "virtio-net-device,netdev=net0,mac=52:54:00:0f:f0:9d" \
+  -pidfile "$qemu_pidfile" \
+  -kernel "$ifs_image" \
+  -nographic \
+  >"$console_log" 2>&1 &
 run_pid=$!
-echo "mkqnximage --run pid=$run_pid"
+echo "qemu-system-aarch64 pid=$run_pid"
+
+ssh_args=(
+  -i "$ssh_key"
+  -p "$host_ssh_port"
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=5
+  -o ConnectionAttempts=1
+)
 
 deadline=$((SECONDS + timeout_secs))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  raw_getip="$(mkqnximage --getip 2>>"$getip_log" || true)"
-  if [ -n "$raw_getip" ]; then
-    echo "$raw_getip" >>"$getip_log"
-    vm_ip="$(
-      printf '%s\n' "$raw_getip" \
-        | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit } }'
-    )"
+  if ! kill -0 "$run_pid" >/dev/null 2>&1; then
+    echo "QEMU exited before SSH became reachable." >&2
+    echo "Last console log lines:" >&2
+    tail -n 200 "$console_log" >&2 || true
+    exit 1
   fi
 
-  if [ -n "$vm_ip" ]; then
-    echo "QNX VM IP: $vm_ip"
-    printf 'QNX_VM_IP=%s\n' "$vm_ip" >"$log_dir/qnx-vm.env"
+  if ssh "${ssh_args[@]}" root@127.0.0.1 uname -a >/dev/null 2>&1; then
+    echo "QNX VM SSH is reachable on 127.0.0.1:${host_ssh_port}"
+    {
+      printf 'QNX_VM_HOST=127.0.0.1\n'
+      printf 'QNX_VM_SSH_PORT=%s\n' "$host_ssh_port"
+      printf 'QNX_VM_QCONN_PORT=%s\n' "$host_qconn_port"
+      printf 'QNX_VM_SSH_KEY=%s\n' "$ssh_key"
+    } >"$log_dir/qnx-vm.env"
     break
   fi
 
-  echo "Waiting for QNX VM IP..."
-  sleep 10
+  echo "Waiting for QNX VM SSH..."
+  sleep 5
 done
 
-if [ -z "$vm_ip" ]; then
-  echo "QNX VM did not report an IP within ${timeout_secs}s." >&2
+if [ ! -f "$log_dir/qnx-vm.env" ]; then
+  echo "QNX VM SSH port was not reachable within ${timeout_secs}s." >&2
   echo "Last console log lines:" >&2
   tail -n 200 "$console_log" >&2 || true
   exit 1
