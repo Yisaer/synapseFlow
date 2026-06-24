@@ -2,11 +2,12 @@
 set -euo pipefail
 
 log_dir="tmp/qnx-qemu"
-work_dir="tmp/qnx-qemu/work"
+work_dir="tmp/qnx-qemu-work"
 timeout_secs=300
 hold_secs=10
 hostname="veloflux-qnx"
 arch="aarch64le"
+qemuvirt_package="com.qnx.qnx800.target.qemuvirt"
 vm_ip=""
 run_pid=""
 
@@ -119,6 +120,25 @@ if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
 fi
 
 "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
+
+if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt | grep -q .; then
+  echo "startup-qemu-virt was not found; installing ${qemuvirt_package}."
+
+  if [ -z "${QNX_MYQNX_USER:-}" ] || [ -z "${QNX_MYQNX_PASSWORD:-}" ]; then
+    echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${qemuvirt_package}." >&2
+    exit 1
+  fi
+
+  "$qsc_bin" \
+    -setDebugSymbolsEnabled=false \
+    -destination "${QNX_INSTALL_DIR:-/opt/qnx800}" \
+    -installPackage "$qemuvirt_package" \
+    -listLicenseKeys \
+    -myqnx.user "$QNX_MYQNX_USER" \
+    -myqnx.password "$QNX_MYQNX_PASSWORD"
+fi
+
+find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt -print -quit
 
 if ! command -v mkqnximage >/dev/null 2>&1; then
   mkqnximage_bin="$(find "${QNX_INSTALL_DIR:-/opt/qnx800}" -type f -name mkqnximage -perm -111 | head -n 1)"

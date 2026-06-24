@@ -79,6 +79,8 @@ jobs:
       - name: Start QNX VM
         env:
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
+          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -93,6 +95,8 @@ jobs:
             -e QNX_INSTALL_DIR
             -e QNX_QSC_DIR
             -e QNX_LICENSE_KEY
+            -e QNX_MYQNX_USER
+            -e QNX_MYQNX_PASSWORD
           )
 
           if [ -e /dev/kvm ]; then
@@ -102,7 +106,7 @@ jobs:
           docker run "${docker_args[@]}" "$image" \
             /usr/local/bin/start_qnx_vm.sh \
               --log-dir tmp/qnx-qemu \
-              --work-dir tmp/qnx-qemu/work \
+              --work-dir tmp/qnx-qemu-work \
               --timeout-secs 300 \
               --hold-secs 10
 
