@@ -412,6 +412,15 @@ jobs:
               grep -F "hello from qnx rust" <<< "$output"
             '
 
+      - name: Prepare QNX VM logs for upload
+        if: always()
+        run: |
+          set -euo pipefail
+
+          if [ -d tmp/qnx-qemu ]; then
+            chmod -R a+rX tmp/qnx-qemu
+          fi
+
       - name: Upload QNX VM logs
         if: always()
         uses: actions/upload-artifact@v4
