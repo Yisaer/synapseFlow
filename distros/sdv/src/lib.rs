@@ -53,17 +53,15 @@ pub fn register(instance: &flow::FlowInstance) {
                     flow::codec::CodecError::Other("missing schema property".to_string())
                 })?;
 
-            // When the merger config carries the CAN format schema, build a
-            // fused sampler that decodes accumulated frames directly to records,
-            // skipping the GBF re-encode + re-parse round-trip. Otherwise fall
-            // back to the plain byte-merging GbfMerger.
-            match props.get("format_schema_path").and_then(|v| v.as_str()) {
-                Some(format_schema_path) => {
-                    build_fused_gbf_merger(props, schema, schema_file, format_schema_path)
-                }
-                None => Ok(Box::new(codec::GbfMerger::from_schema_file(schema_file)?)
-                    as Box<dyn flow::Merger>),
-            }
+            let format_schema_path = props
+                .get("format_schema_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    flow::codec::CodecError::Other(
+                        "gbf packer merger requires `format_schema_path` prop".to_string(),
+                    )
+                })?;
+            build_fused_gbf_merger(props, schema, schema_file, format_schema_path)
         },
     );
 }
@@ -81,7 +79,7 @@ fn build_fused_gbf_merger(
     let format_type = props
         .get("format_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("can");
+        .ok_or_else(|| CodecError::Other("gbf packer merger requires `format_type` prop".into()))?;
     if format_type != "can" {
         return Err(CodecError::Other(format!(
             "unsupported merger format_type: {format_type}"
@@ -113,7 +111,7 @@ fn build_fused_gbf_merger(
         .map(|col| col.source_name.clone())
         .ok_or_else(|| CodecError::Other("output schema has no columns".to_string()))?;
 
-    let fused = decoder::GbfFusedSampler::new(
+    let fused = decoder::GbfFusedMerger::new(
         source_name,
         schema,
         gbf_schema,

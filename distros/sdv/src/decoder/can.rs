@@ -8,11 +8,11 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Identity hasher for the `u16` CAN-id message map. CAN ids are already small,
+/// Identity hasher for the `u32` CAN-id message map. CAN ids are already small,
 /// well-distributed integers, so the default SipHash is pure overhead: it shows
 /// as ~6% (`hash_one`) of the box.home `allcases` decode profile, one lookup per
-/// frame. This mirrors eKuiper's `mapaccess2_fast32`. Keyed exclusively by u16,
-/// so only `write_u16` is exercised; `write` is a defensive fallback.
+/// frame. This mirrors eKuiper's `mapaccess2_fast32`. Keyed exclusively by u32,
+/// so only `write_u32` is exercised; `write` is a defensive fallback.
 #[derive(Default)]
 struct CanIdHasher(u64);
 
@@ -25,6 +25,10 @@ impl Hasher for CanIdHasher {
     fn write_u16(&mut self, i: u16) {
         self.0 = i as u64;
     }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = i as u64;
+    }
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 = (self.0 << 8) | b as u64;
@@ -32,7 +36,7 @@ impl Hasher for CanIdHasher {
     }
 }
 
-type CanIdMap<V> = HashMap<u16, V, BuildHasherDefault<CanIdHasher>>;
+type CanIdMap<V> = HashMap<u32, V, BuildHasherDefault<CanIdHasher>>;
 
 use datatypes::{Schema, Value};
 use flow::{
@@ -48,8 +52,13 @@ use crate::schema::dbc::{DbcJson, format_signal_name};
 #[derive(Clone, Debug)]
 pub struct CanFrame<'a> {
     pub timestamp: u64,
-    pub can_id: u16,
+    pub can_id: u32,
     pub payload: &'a [u8],
+}
+
+#[inline]
+fn combined_can_id(bus_id: u32, msg_id: u32) -> u32 {
+    (bus_id << 12) | msg_id
 }
 
 /// Resolved per-signal numeric decode plan.
@@ -99,6 +108,7 @@ impl SignalNumeric {
 }
 
 /// Specification for decoding a single CAN signal.
+#[derive(Clone)]
 pub struct SignalSpec {
     pub col_index: usize,
     pub start: u32,
@@ -129,6 +139,135 @@ pub struct MessageSpec {
     /// Dense per-decoder index used as a key into per-decode scratch tables
     /// (e.g. the seen-message set in [`CanDecoder::decode_frames`]).
     pub msg_index: usize,
+}
+
+#[derive(Clone)]
+struct MuxSignalSpec {
+    signal: SignalSpec,
+}
+
+/// Resolves a multiplexed CAN frame's selector value for merger keys.
+///
+/// The resolver stores only CAN IDs that actually have a multiplexer selector,
+/// so non-multiplexed traffic can stay on the plain CAN-ID fast path.
+#[derive(Clone)]
+pub struct CanMuxKeyResolver {
+    mux_by_can_id: CanIdMap<MuxSignalSpec>,
+}
+
+impl CanMuxKeyResolver {
+    /// Build a resolver from a CAN schema. Returns `None` when the schema has
+    /// no multiplexed messages, allowing callers to keep the old fast path.
+    pub fn from_dbc(dbc: &DbcJson) -> Option<Self> {
+        let mut mux_by_can_id = CanIdMap::default();
+        for bus in &dbc.buses {
+            for msg in &bus.messages {
+                let Some(sig) = msg.signals.iter().find(|sig| sig.is_multiplexer) else {
+                    continue;
+                };
+                let can_id = combined_can_id(bus.id, msg.id);
+                let factor = sig.scale.unwrap_or(1.0);
+                let offset = sig.offset.unwrap_or(0.0);
+                mux_by_can_id.insert(
+                    can_id,
+                    MuxSignalSpec {
+                        signal: SignalSpec {
+                            col_index: 0,
+                            start: sig.start,
+                            length: sig.length,
+                            is_big_endian: sig.is_big_endian,
+                            numeric: classify_signal(sig.length, sig.is_signed, factor, offset),
+                            is_multiplexer: sig.is_multiplexer,
+                            is_multiplexed: sig.is_multiplexed,
+                            multiplexer_value: sig.multiplexer_value,
+                            clamp_min: None,
+                            clamp_max: None,
+                        },
+                    },
+                );
+            }
+        }
+
+        if mux_by_can_id.is_empty() {
+            None
+        } else {
+            Some(Self { mux_by_can_id })
+        }
+    }
+
+    /// Return true only for CAN IDs that have a known multiplexer selector.
+    #[inline]
+    pub fn is_multiplexed_can_id(&self, can_id: u32) -> bool {
+        self.mux_by_can_id.contains_key(&can_id)
+    }
+
+    /// Decode the mux selector for a known multiplexed CAN ID.
+    pub fn resolve_mux(&self, can_id: u32, payload: &[u8]) -> Result<i64, CodecError> {
+        let spec = self.mux_by_can_id.get(&can_id).ok_or_else(|| {
+            CodecError::Other(format!(
+                "mux resolver has no selector for CAN ID 0x{can_id:04X}"
+            ))
+        })?;
+        ensure_signal_fits_payload(payload, &spec.signal, can_id)?;
+        match decode_signal(payload, &spec.signal) {
+            Value::Int64(v) => Ok(v),
+            Value::Uint64(v) => i64::try_from(v).map_err(|_| {
+                CodecError::Other(format!(
+                    "mux selector value does not fit i64 for CAN ID 0x{can_id:04X}: {v}"
+                ))
+            }),
+            other => Err(CodecError::Other(format!(
+                "mux selector decoded to non-integer value for CAN ID 0x{can_id:04X}: {other:?}"
+            ))),
+        }
+    }
+}
+
+fn ensure_signal_fits_payload(
+    payload: &[u8],
+    signal: &SignalSpec,
+    can_id: u32,
+) -> Result<(), CodecError> {
+    if signal.length == 0 {
+        return Err(CodecError::Other(format!(
+            "mux selector has zero length for CAN ID 0x{can_id:04X}"
+        )));
+    }
+    let last_bit = signal_last_bit(signal).ok_or_else(|| {
+        CodecError::Other(format!(
+            "mux selector bit range overflow for CAN ID 0x{can_id:04X}"
+        ))
+    })?;
+    if last_bit >= payload.len().saturating_mul(8) {
+        return Err(CodecError::Other(format!(
+            "mux selector exceeds payload length for CAN ID 0x{can_id:04X}: start={}, len={}, payload_bytes={}",
+            signal.start,
+            signal.length,
+            payload.len()
+        )));
+    }
+    Ok(())
+}
+
+fn signal_last_bit(signal: &SignalSpec) -> Option<usize> {
+    let start = usize::try_from(signal.start).ok()?;
+    let len = usize::try_from(signal.length).ok()?;
+    if len == 0 {
+        return Some(start);
+    }
+    if signal.is_big_endian {
+        let start_byte = start / 8;
+        let start_bit = start % 8;
+        let bits_in_start_byte = start_bit + 1;
+        if len <= bits_in_start_byte {
+            Some(start)
+        } else {
+            let remaining = len - bits_in_start_byte;
+            Some((start_byte + remaining.div_ceil(8)) * 8 + 7)
+        }
+    } else {
+        start.checked_add(len - 1)
+    }
 }
 
 #[derive(Clone)]
@@ -224,7 +363,7 @@ impl CanDecoder {
             let bus_name = bus.name.unwrap_or_else(|| format!("Bus{}", bus.id));
             for msg in bus.messages {
                 // Custom CAN ID mapping: (bus_id << 12) | message_id
-                let can_id = ((bus.id as u16) << 12) | (msg.id as u16);
+                let can_id = combined_can_id(bus.id, msg.id);
                 let frame_id = msg.frame_id.clone();
                 let mut signals = Vec::new();
                 for sig in msg.signals {
@@ -363,6 +502,12 @@ impl CanDecoder {
             slot_layout: slot_layout.clone(),
         });
         (required, slot_layout)
+    }
+
+    /// Return true when this decoder has a DBC message for the CAN ID.
+    #[inline]
+    pub fn contains_can_id(&self, can_id: u32) -> bool {
+        self.messages.contains_key(&can_id)
     }
 
     /// Decode a list of CAN frames into a Tuple.
@@ -980,7 +1125,7 @@ mod tests {
         };
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
         let find = |dec: &CanDecoder, name: &str| -> (Option<f64>, Option<f64>) {
-            let specs = &dec.messages()[&1u16].signals; // can_id = (bus 0 << 12) | id 1
+            let specs = &dec.messages()[&1u32].signals; // can_id = (bus 0 << 12) | id 1
             let s = specs
                 .iter()
                 .find(|s| dec.keys()[s.col_index].as_ref() == name)

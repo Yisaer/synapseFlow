@@ -41,10 +41,6 @@ serial_test = "3"
 criterion = "0.5"
 
 [[bench]]
-name = "gbf_merger"
-harness = false
-
-[[bench]]
 name = "schema_load"
 harness = false
 

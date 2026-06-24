@@ -3,8 +3,8 @@ use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::startup::StartupPhase;
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    named_schema_store, schema_registry, validate_memory_stream_binding,
-    validate_memory_stream_topic, validate_stream_decoder_config,
+    named_schema_store, sampler_with_decoder_format_props, schema_registry,
+    validate_memory_stream_binding, validate_memory_stream_topic, validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -49,8 +49,8 @@ pub fn stream_definition_from_stored(
             cfg.eventtime_type.clone(),
         ));
     }
-    if let Some(sampler) = &req.sampler {
-        definition = definition.with_sampler(sampler.clone());
+    if let Some(sampler) = sampler_with_decoder_format_props(&req) {
+        definition = definition.with_sampler(sampler);
     }
     Ok(definition)
 }

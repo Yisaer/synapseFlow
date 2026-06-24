@@ -17,7 +17,7 @@ use flow::catalog::{
     VideoRtspTransport, VideoStreamProps,
 };
 use flow::processor::ProcessorStatsEntry;
-use flow::processor::SamplerConfig;
+use flow::processor::{SamplerConfig, SamplingStrategy};
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
@@ -597,8 +597,8 @@ pub async fn create_stream_handler(
         ));
     }
 
-    if let Some(sampler) = &req.sampler {
-        definition = definition.with_sampler(sampler.clone());
+    if let Some(sampler) = sampler_with_decoder_format_props(&req) {
+        definition = definition.with_sampler(sampler);
     }
 
     let mut created = Vec::new();
@@ -997,8 +997,8 @@ pub async fn upsert_stream_handler(
             cfg.eventtime_type.clone(),
         ));
     }
-    if let Some(sampler) = &new_req.sampler {
-        definition = definition.with_sampler(sampler.clone());
+    if let Some(sampler) = sampler_with_decoder_format_props(&new_req) {
+        definition = definition.with_sampler(sampler);
     }
 
     // Replace on every instance.
@@ -1575,6 +1575,39 @@ pub(crate) fn build_stream_decoder(
     Ok(config)
 }
 
+pub(crate) fn sampler_with_decoder_format_props(
+    req: &CreateStreamRequest,
+) -> Option<SamplerConfig> {
+    let mut sampler = req.sampler.clone()?;
+    propagate_gbf_decoder_format_props(&req.decoder, &mut sampler);
+    Some(sampler)
+}
+
+fn propagate_gbf_decoder_format_props(decoder: &DecoderConfigRequest, sampler: &mut SamplerConfig) {
+    if !decoder.decode_type.eq_ignore_ascii_case("gbf") {
+        return;
+    }
+    let SamplingStrategy::Packer { props } = &mut sampler.strategy else {
+        return;
+    };
+    if !props.merger.merger_type.eq_ignore_ascii_case("gbf") {
+        return;
+    }
+
+    for key in [
+        "format_type",
+        "format_schema_path",
+        "signal_name_pattern",
+        "clamp_to_range",
+    ] {
+        if !props.merger.props.contains_key(key)
+            && let Some(value) = decoder.props.get(key)
+        {
+            props.merger.props.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 pub(crate) fn validate_stream_decoder_config(
     req: &CreateStreamRequest,
     decoder: &StreamDecoderConfig,
@@ -1631,6 +1664,59 @@ pub(crate) fn validate_stream_decoder_config(
             "stream `{}` eventtime requires a decoder (decoder type `none` unsupported)",
             req.name
         ));
+    }
+    if uses_gbf_packer(req) && !decoder.kind().eq_ignore_ascii_case("gbf") {
+        return Err(format!(
+            "stream `{}` sampler merger type `gbf` requires decoder type `gbf`",
+            req.name
+        ));
+    }
+    validate_gbf_packer_format_props(req)?;
+    Ok(())
+}
+
+fn uses_gbf_packer(req: &CreateStreamRequest) -> bool {
+    let Some(sampler) = &req.sampler else {
+        return false;
+    };
+    let SamplingStrategy::Packer { props } = &sampler.strategy else {
+        return false;
+    };
+    props.merger.merger_type.eq_ignore_ascii_case("gbf")
+}
+
+fn validate_gbf_packer_format_props(req: &CreateStreamRequest) -> Result<(), String> {
+    if !req.decoder.decode_type.eq_ignore_ascii_case("gbf") {
+        return Ok(());
+    }
+    let Some(sampler) = &req.sampler else {
+        return Ok(());
+    };
+    let SamplingStrategy::Packer { props } = &sampler.strategy else {
+        return Ok(());
+    };
+    if !props.merger.merger_type.eq_ignore_ascii_case("gbf") {
+        return Ok(());
+    }
+
+    for key in [
+        "format_type",
+        "format_schema_path",
+        "signal_name_pattern",
+        "clamp_to_range",
+    ] {
+        let Some(decoder_value) = req.decoder.props.get(key) else {
+            continue;
+        };
+        let Some(merger_value) = props.merger.props.get(key) else {
+            continue;
+        };
+        if decoder_value != merger_value {
+            return Err(format!(
+                "stream `{}` sampler merger prop `{}` conflicts with decoder prop `{}`",
+                req.name, key, key
+            ));
+        }
     }
     Ok(())
 }
@@ -1979,6 +2065,68 @@ mod tests {
         definition
     }
 
+    #[test]
+    fn sampler_with_decoder_format_props_copies_gbf_decoder_props() {
+        let mut req = mqtt_stream_request("gbf_stream");
+        req.decoder = DecoderConfigRequest {
+            decode_type: "gbf".to_string(),
+            props: json!({
+                "format_type": "can",
+                "format_schema_path": "/tmp/can.json",
+                "signal_name_pattern": "{sig}",
+                "clamp_to_range": false
+            })
+            .as_object()
+            .expect("decoder props")
+            .clone(),
+        };
+        req.sampler = Some(
+            serde_json::from_value(json!({
+                "interval": "100ms",
+                "strategy": {
+                    "type": "packer",
+                    "props": {
+                        "merger": {
+                            "type": "gbf",
+                            "props": {
+                                "schema": "/tmp/spi_packet.json",
+                                "format_type": "custom"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("sampler config"),
+        );
+
+        let sampler = sampler_with_decoder_format_props(&req).expect("sampler");
+        let SamplingStrategy::Packer { props } = sampler.strategy else {
+            panic!("expected packer sampler")
+        };
+        let merger_props = props.merger.props;
+        assert_eq!(
+            merger_props.get("format_type").and_then(|v| v.as_str()),
+            Some("custom"),
+            "explicit merger prop must not be overwritten"
+        );
+        assert_eq!(
+            merger_props
+                .get("format_schema_path")
+                .and_then(|v| v.as_str()),
+            Some("/tmp/can.json")
+        );
+        assert_eq!(
+            merger_props
+                .get("signal_name_pattern")
+                .and_then(|v| v.as_str()),
+            Some("{sig}")
+        );
+        assert_eq!(
+            merger_props.get("clamp_to_range").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
     fn pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
         serde_json::from_value(json!({
             "id": id,
@@ -2261,6 +2409,77 @@ mod tests {
         assert_eq!(
             err,
             "stream `stream_test` eventtime requires a decoder (decoder type `none` unsupported)"
+        );
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_gbf_packer_without_gbf_decoder() {
+        let mut req = base_stream_request("mqtt");
+        req.decoder = DecoderConfigRequest::new("json", JsonMap::new());
+        req.sampler = Some(
+            serde_json::from_value(json!({
+                "interval": "100ms",
+                "strategy": {
+                    "type": "packer",
+                    "props": {
+                        "merger": {
+                            "type": "gbf",
+                            "props": {
+                                "schema": "/tmp/spi_packet.json"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("sampler"),
+        );
+        let decoder = StreamDecoderConfig::new("json", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "stream `stream_test` sampler merger type `gbf` requires decoder type `gbf`"
+        );
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_conflicting_gbf_merger_format_props() {
+        let mut req = base_stream_request("mqtt");
+        req.decoder = DecoderConfigRequest {
+            decode_type: "gbf".to_string(),
+            props: json!({
+                "format_type": "can",
+                "format_schema_path": "/tmp/can.json"
+            })
+            .as_object()
+            .expect("decoder props")
+            .clone(),
+        };
+        req.sampler = Some(
+            serde_json::from_value(json!({
+                "interval": "100ms",
+                "strategy": {
+                    "type": "packer",
+                    "props": {
+                        "merger": {
+                            "type": "gbf",
+                            "props": {
+                                "schema": "/tmp/spi_packet.json",
+                                "format_type": "custom",
+                                "format_schema_path": "/tmp/can.json"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("sampler"),
+        );
+        let decoder = StreamDecoderConfig::new("gbf", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "stream `stream_test` sampler merger prop `format_type` conflicts with decoder prop `format_type`"
         );
     }
 

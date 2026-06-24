@@ -193,6 +193,37 @@ impl Processor for DecoderProcessor {
                                             continue;
                                         }
                                     }
+                                } else if eventtime.is_some() {
+                                    data = match data {
+                                        StreamData::Collection(collection) => {
+                                            let batch = match crate::model::RecordBatch::new(
+                                                collection.rows().to_vec(),
+                                            ) {
+                                                Ok(batch) => batch,
+                                                Err(err) => {
+                                                    stats.record_error_logged(
+                                                        "decoder processor error",
+                                                        format!("eventtime batch build error: {err}"),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                            let result = apply_eventtime(batch, &eventtime);
+                                            if let Some(last) = result.errors.last() {
+                                                stats.record_error_count_logged(
+                                                    "decoder processor error",
+                                                    result.errors.len() as u64,
+                                                    last.clone(),
+                                                );
+                                            }
+                                            if let Some(batch) = result.batch {
+                                                StreamData::collection(Box::new(batch))
+                                            } else {
+                                                continue;
+                                            }
+                                        }
+                                        other => other,
+                                    };
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();
@@ -321,4 +352,43 @@ fn extract_timestamp(
             ))
         })?;
     cfg.parser.parse(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eventtime::EventtimeTypeRegistry;
+    use crate::model::{Message, RecordBatch, Tuple};
+    use datatypes::Value;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn apply_eventtime_updates_collection_rows() {
+        let registry = EventtimeTypeRegistry::with_builtin_types();
+        let parser = registry.resolve("unixtimestamp_ms").expect("parser");
+        let message = Message::new(
+            Arc::<str>::from("s"),
+            vec![Arc::<str>::from("value"), Arc::<str>::from("event_ts")],
+            vec![Arc::new(Value::Int64(7)), Arc::new(Value::Int64(1_500))],
+        );
+        let batch = RecordBatch::new(vec![Tuple::new(vec![Arc::new(message)])]).expect("batch");
+
+        let result = apply_eventtime(
+            batch,
+            &Some(EventtimeDecodeConfig {
+                source_name: "s".to_string(),
+                column_name: "event_ts".to_string(),
+                column_index: 1,
+                type_key: "unixtimestamp_ms".to_string(),
+                parser,
+            }),
+        );
+
+        assert!(result.errors.is_empty());
+        let batch = result.batch.expect("batch");
+        assert_eq!(
+            batch.rows()[0].timestamp,
+            UNIX_EPOCH + Duration::from_millis(1_500)
+        );
+    }
 }

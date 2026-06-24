@@ -7,6 +7,7 @@
 //! - Nested struct types
 //! - DBC payload format for CAN signal decoding
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datatypes::Schema;
@@ -18,7 +19,7 @@ use flow::{
 };
 use serde_json::Value as JsonValue;
 
-use super::can::{CanDecoder, CanFrame};
+use super::can::{CanDecoder, CanFrame, CanMuxKeyResolver};
 use crate::schema::dbc::load_can_schema;
 use crate::schema::gbf::GbfSchema;
 
@@ -143,7 +144,7 @@ impl RecordDecoder for GbfDecoder {
         // frame and then remapped to a second `Vec<CanFrame>` — pure overhead the
         // signal whitelist couldn't elide (issue emqx/VeloFlux#56). Reused across
         // packets within this payload.
-        let mut frame_slots: Vec<(u16, u32, u32)> = Vec::new();
+        let mut frame_slots: Vec<(u32, u32, u32)> = Vec::new();
 
         for packet in packets {
             frame_slots.clear();
@@ -153,11 +154,9 @@ impl RecordDecoder for GbfDecoder {
                 .parse_packet_with(packet, &mut |can_id, fpayload| {
                     // `parse_packet_with` always emits sub-slices of `packet`, so
                     // the pointer offset is a valid index back into it (zero-copy).
-                    if let Ok(cid) = u16::try_from(can_id) {
-                        let off = (fpayload.as_ptr() as usize - base) as u32;
-                        debug_assert!(off as usize + fpayload.len() <= packet.len());
-                        frame_slots.push((cid, off, fpayload.len() as u32));
-                    }
+                    let off = (fpayload.as_ptr() as usize - base) as u32;
+                    debug_assert!(off as usize + fpayload.len() <= packet.len());
+                    frame_slots.push((can_id, off, fpayload.len() as u32));
                 })?;
 
             // If packet has no frames (e.g., heartbeat or all invalid), decode a
@@ -165,7 +164,7 @@ impl RecordDecoder for GbfDecoder {
             let can_frames: Vec<CanFrame> = if frame_slots.is_empty() {
                 vec![CanFrame {
                     timestamp,
-                    can_id: 0xFFFF,
+                    can_id: u32::MAX,
                     payload: &[],
                 }]
             } else {
@@ -192,24 +191,6 @@ impl RecordDecoder for GbfDecoder {
     }
 }
 
-/// Fused GBF sampler: accumulates raw GBF packets and decodes them directly to a
-/// [`RecordBatch`] on trigger, without the intermediate GBF re-encode + re-parse
-/// round-trip used by the separate [`GbfMerger`] + [`GbfDecoder`] pipeline.
-///
-/// The legacy Packer path does:
-///   merge (parse_packet + HashMap dedup) → trigger (GbfEncoder::encode → bytes)
-///   → GbfDecoder::decode (parse_packet AGAIN → CanFrame → decode_frames)
-///
-/// This type collapses that to:
-///   merge (parse_packet, append) → trigger_decoded (CanFrame → decode_frames)
-///
-/// It also drops the merger's `HashMap<can_id, payload>` dedup, because
-/// [`CanDecoder::decode_frames`] already keeps the last frame per `can_id` (and
-/// per mux value), so the HashMap was redundant work — and dropping it fixes the
-/// multiplexed-frame loss tracked in #41 (the merger's CAN-ID-only key collapsed
-/// distinct mux pages; the decoder dedups per (message, mux) instead).
-///
-/// [`GbfMerger`]: crate::codec::GbfMerger
 /// A frame slot referencing a `[start, start+len)` range in `payload_buf`.
 struct FrameSlot {
     can_id: u32,
@@ -217,20 +198,36 @@ struct FrameSlot {
     len: u32,
 }
 
-pub struct GbfFusedSampler {
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct MuxFrameKey {
+    can_id: u32,
+    mux_value: i64,
+}
+
+/// Fused GBF merger: accumulates raw GBF packets and decodes them directly to a
+/// [`RecordBatch`] on trigger.
+///
+/// The GBF layer parses outer packets only. The inner format handler is currently
+/// CAN/DBC: unknown CAN IDs are discarded at merge time, non-multiplexed frames
+/// are keyed by CAN ID, and multiplexed frames are keyed by `(CAN ID, mux value)`.
+/// The sampler calls this type through the generic [`Merger`] trait.
+pub struct GbfFusedMerger {
     parser: crate::codec::gbf_parser::GbfParser,
     can_decoder: CanDecoder,
+    mux_resolver: Option<CanMuxKeyResolver>,
     /// All frame payloads for the current interval, concatenated into one
     /// reusable buffer to avoid a per-frame allocation.
     payload_buf: Vec<u8>,
-    /// Frame index into `payload_buf` (insertion order preserved).
-    frames: Vec<FrameSlot>,
+    /// Non-multiplexed frame accumulator: CAN ID -> newest payload slot.
+    frames: HashMap<u32, FrameSlot>,
+    /// Multiplexed frame accumulator: (CAN ID, mux value) -> newest payload slot.
+    mux_frames: HashMap<MuxFrameKey, FrameSlot>,
     /// Timestamp of the most recent packet merged this interval.
     last_ts: u64,
 }
 
-impl GbfFusedSampler {
-    /// Create a fused sampler from the same inputs as [`GbfDecoder::new`].
+impl GbfFusedMerger {
+    /// Create a fused merger from the same inputs as [`GbfDecoder::new`].
     pub fn new(
         source_name: impl Into<String>,
         schema: Arc<Schema>,
@@ -239,13 +236,16 @@ impl GbfFusedSampler {
         pattern: Option<String>,
         clamp_to_range: bool,
     ) -> Result<Self, CodecError> {
+        let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc);
         let can_decoder = CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range)?;
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
         Ok(Self {
             parser,
             can_decoder,
+            mux_resolver,
             payload_buf: Vec::with_capacity(64 * 8),
-            frames: Vec::with_capacity(64),
+            frames: HashMap::with_capacity(64),
+            mux_frames: HashMap::with_capacity(16),
             last_ts: 0,
         })
     }
@@ -257,23 +257,24 @@ impl GbfFusedSampler {
         &mut self,
         projection: Option<&DecodeProjection>,
     ) -> Result<Option<RecordBatch>, CodecError> {
-        if self.frames.is_empty() {
+        if self.frames.is_empty() && self.mux_frames.is_empty() {
             return Ok(None);
         }
 
         let ts = self.last_ts;
         let buf = self.payload_buf.as_slice();
-        let can_frames: Vec<CanFrame<'_>> = self
-            .frames
-            .iter()
-            .filter_map(|slot| {
-                u16::try_from(slot.can_id).ok().map(|can_id| CanFrame {
-                    timestamp: ts,
-                    can_id,
-                    payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
-                })
-            })
-            .collect();
+        let mut can_frames: Vec<CanFrame<'_>> =
+            Vec::with_capacity(self.frames.len().saturating_add(self.mux_frames.len()));
+        can_frames.extend(self.frames.values().map(|slot| CanFrame {
+            timestamp: ts,
+            can_id: slot.can_id,
+            payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
+        }));
+        can_frames.extend(self.mux_frames.values().map(|slot| CanFrame {
+            timestamp: ts,
+            can_id: slot.can_id,
+            payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
+        }));
 
         let batch = match self.can_decoder.decode_frames(can_frames, projection) {
             Some(tuple) => Some(RecordBatch::new(vec![tuple])?),
@@ -283,35 +284,87 @@ impl GbfFusedSampler {
         // Retain capacity across intervals to avoid re-allocating the buffers.
         self.payload_buf.clear();
         self.frames.clear();
+        self.mux_frames.clear();
         Ok(batch)
     }
 }
 
-impl Merger for GbfFusedSampler {
+impl Merger for GbfFusedMerger {
     fn merge(&mut self, data: &[u8]) -> Result<(), CodecError> {
+        if self.mux_resolver.is_none() {
+            let Self {
+                parser,
+                can_decoder,
+                payload_buf,
+                frames,
+                last_ts,
+                ..
+            } = self;
+            let timestamp = parser.parse_packet_with(data, &mut |can_id, payload| {
+                if !can_decoder.contains_can_id(can_id) {
+                    return;
+                }
+                let start = payload_buf.len() as u32;
+                payload_buf.extend_from_slice(payload);
+                frames.insert(
+                    can_id,
+                    FrameSlot {
+                        can_id,
+                        start,
+                        len: payload.len() as u32,
+                    },
+                );
+            })?;
+            *last_ts = timestamp;
+            return Ok(());
+        }
+
         // Split borrows so the parse callback can append into the arena while
         // `parser` is borrowed immutably.
         let Self {
             parser,
+            can_decoder,
+            mux_resolver,
             payload_buf,
             frames,
+            mux_frames,
             last_ts,
-            ..
         } = self;
         let timestamp = parser.parse_packet_with(data, &mut |can_id, payload| {
+            if !can_decoder.contains_can_id(can_id) {
+                return;
+            }
+            let mux_value = if let Some(resolver) = mux_resolver.as_ref() {
+                if resolver.is_multiplexed_can_id(can_id) {
+                    match resolver.resolve_mux(can_id, payload) {
+                        Ok(mux_value) => Some(mux_value),
+                        Err(_) => return,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let start = payload_buf.len() as u32;
             payload_buf.extend_from_slice(payload);
-            frames.push(FrameSlot {
+            let slot = FrameSlot {
                 can_id,
                 start,
                 len: payload.len() as u32,
-            });
+            };
+            if let Some(mux_value) = mux_value {
+                let key = MuxFrameKey { can_id, mux_value };
+                mux_frames.insert(key, slot);
+            } else {
+                frames.insert(can_id, slot);
+            }
         })?;
         *last_ts = timestamp;
         Ok(())
     }
 
-    /// Not used: the fused sampler always emits a decoded collection via
+    /// Not used: the fused merger always emits a decoded collection via
     /// [`Merger::trigger_decoded`]. Returning `None` keeps the trait contract
     /// satisfied without producing binary output.
     fn trigger(&mut self) -> Result<Option<Vec<u8>>, CodecError> {
@@ -374,6 +427,41 @@ mod tests {
         serde_json::from_str(json).expect("parse schema")
     }
 
+    fn get_u32_can_id_schema() -> GbfSchema {
+        let json = r#"
+        {
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "can_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": { "type": "dbc", "id_ref": "can_id" }
+                                }
+                            ]
+                        },
+                        "length_unit": "bytes"
+                    }
+                ]
+            }
+        }
+        "#;
+        serde_json::from_str(json).expect("parse u32 can id schema")
+    }
+
     fn get_test_decoder() -> GbfDecoder {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
@@ -409,19 +497,18 @@ mod tests {
         assert_eq!(*sig1, Value::Int64(84));
     }
 
-    fn get_test_fused() -> GbfFusedSampler {
+    fn get_test_fused() -> GbfFusedMerger {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
         let gbf_schema = get_test_schema();
-        GbfFusedSampler::new("can", schema, gbf_schema, dbc, None, true).expect("build fused")
+        GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("build fused")
     }
 
-    /// The fused merge+decode path must produce the same decoded values as the
-    /// round-trip (GbfMerger -> bytes -> GbfDecoder) path for the same input.
+    /// The fused merge+decode path must produce the same decoded values as
+    /// direct GBF decode for a non-multiplexed window.
     #[test]
-    fn test_fused_matches_roundtrip() {
-        use crate::codec::GbfMerger;
+    fn test_fused_matches_direct_decode_for_non_mux() {
         use flow::Merger;
 
         let hex_string = "00000190A5A0EC4A001855158688085465737400001155124A880854657374000011";
@@ -430,29 +517,203 @@ mod tests {
             .map(|i| u8::from_str_radix(&hex_string[i..i + 2], 16).unwrap())
             .collect();
 
-        // Round-trip path.
-        let mut merger = GbfMerger::new(get_test_schema()).expect("merger");
-        merger.merge(&packet).expect("merge");
-        let bytes = merger.trigger().expect("trigger").expect("bytes");
-        let rt = get_test_decoder().decode(&bytes).expect("roundtrip decode");
+        let direct = get_test_decoder().decode(&packet).expect("direct decode");
 
         // Fused path on the same raw packet.
         let mut fused = get_test_fused();
         fused.merge(&packet).expect("fused merge");
-        let fu = fused
+        let fused_batch = fused
             .decode_window(None)
             .expect("fused decode")
             .expect("fused batch");
 
-        assert_eq!(rt.rows().len(), fu.rows().len());
-        let (rt_t, fu_t) = (&rt.rows()[0], &fu.rows()[0]);
+        assert_eq!(direct.rows().len(), fused_batch.rows().len());
+        let (direct_t, fused_t) = (&direct.rows()[0], &fused_batch.rows()[0]);
         for name in ["ts", "Mess0_Sig1", "Mess1_Sig1", "Mess1_Sig2"] {
             assert_eq!(
-                rt_t.value_by_name("can", name),
-                fu_t.value_by_name("can", name),
-                "value mismatch for `{name}` between fused and round-trip paths"
+                direct_t.value_by_name("can", name),
+                fused_t.value_by_name("can", name),
+                "value mismatch for `{name}` between fused and direct decode paths"
             );
         }
+    }
+
+    #[test]
+    fn test_fused_preserves_mux_groups_by_composite_key() {
+        use flow::Merger;
+
+        fn push_frame(buf: &mut Vec<u8>, can_id: u16, payload: &[u8]) {
+            buf.push(0x55);
+            buf.extend_from_slice(&can_id.to_be_bytes());
+            buf.push(payload.len() as u8);
+            buf.extend_from_slice(payload);
+        }
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
+        let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
+        let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
+        let mut fused = GbfFusedMerger::new("mul", schema, get_test_schema(), dbc, None, true)
+            .expect("build fused");
+
+        let payload_g1 = [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11];
+        let payload_g0 = [0x00u8, 0x24, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11];
+        let mut frames = Vec::new();
+        push_frame(&mut frames, 0x00C8, &payload_g1);
+        push_frame(&mut frames, 0x00C8, &payload_g0);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&(frames.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&frames);
+
+        fused.merge(&packet).expect("merge");
+        let batch = fused
+            .decode_window(None)
+            .expect("decode")
+            .expect("fused batch");
+        let row = &batch.rows()[0];
+
+        assert_eq!(
+            row.value_by_name("mul", "SENSOR_SONARS_left"),
+            Some(&Value::Float64(86.9)),
+            "mux=0 group should survive fused accumulator"
+        );
+        assert_eq!(
+            row.value_by_name("mul", "SENSOR_SONARS_no_filt_left"),
+            Some(&Value::Float64(86.9)),
+            "mux=1 group should survive fused accumulator"
+        );
+    }
+
+    #[test]
+    fn test_fused_drops_unknown_can_id_before_decode() {
+        use flow::Merger;
+
+        fn push_frame(buf: &mut Vec<u8>, can_id: u16, payload: &[u8]) {
+            buf.push(0x55);
+            buf.extend_from_slice(&can_id.to_be_bytes());
+            buf.push(payload.len() as u8);
+            buf.extend_from_slice(payload);
+        }
+
+        let mut frames = Vec::new();
+        push_frame(&mut frames, 0x0FFF, &[0xAA, 0xBB, 0xCC]);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&(frames.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&frames);
+
+        let mut fused = get_test_fused();
+        fused.merge(&packet).expect("merge unknown");
+
+        assert!(
+            fused.decode_window(None).expect("decode").is_none(),
+            "unknown CAN IDs should be discarded during merge"
+        );
+    }
+
+    #[test]
+    fn test_fused_accepts_u32_can_id_from_gbf_schema() {
+        use flow::Merger;
+
+        let dbc: crate::schema::dbc::DbcJson = serde_json::from_str(
+            r#"
+            {
+                "buses": [
+                    {
+                        "name": "Bus0",
+                        "id": 0,
+                        "messages": [
+                            {
+                                "name": "WideMsg",
+                                "id": 703710,
+                                "frameId": "0xABCDE",
+                                "length": 8,
+                                "signals": [
+                                    {
+                                        "name": "WideSig",
+                                        "start": 0,
+                                        "length": 8,
+                                        "scale": 1,
+                                        "offset": 0,
+                                        "isBigEndian": false,
+                                        "isSigned": false
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            "#,
+        )
+        .expect("parse wide can dbc");
+        let schema = Arc::new(schema_from_dbc("wide", &dbc, None));
+        let mut fused =
+            GbfFusedMerger::new("wide", schema, get_u32_can_id_schema(), dbc, None, true)
+                .expect("build fused");
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&14u16.to_be_bytes());
+        packet.push(0x55);
+        packet.extend_from_slice(&703710u32.to_be_bytes());
+        packet.push(8);
+        packet.extend_from_slice(&[42, 0, 0, 0, 0, 0, 0, 0]);
+
+        fused.merge(&packet).expect("merge u32 can id");
+        let batch = fused
+            .decode_window(None)
+            .expect("decode u32 can id")
+            .expect("fused batch");
+        assert_eq!(
+            batch.rows()[0].value_by_name("wide", "WideSig"),
+            Some(&Value::Int64(42))
+        );
+    }
+
+    #[test]
+    fn test_fused_skips_bad_mux_frame_without_dropping_good_frame() {
+        use flow::Merger;
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
+        let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
+        let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
+        let mut fused = GbfFusedMerger::new("mul", schema, get_test_schema(), dbc, None, true)
+            .expect("build fused");
+
+        fn push_frame(buf: &mut Vec<u8>, can_id: u16, payload: &[u8]) {
+            buf.push(0x55);
+            buf.extend_from_slice(&can_id.to_be_bytes());
+            buf.push(payload.len() as u8);
+            buf.extend_from_slice(payload);
+        }
+
+        let mut frames = Vec::new();
+        push_frame(
+            &mut frames,
+            0x00C8,
+            &[0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11],
+        );
+        push_frame(&mut frames, 0x00C8, &[]);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&(frames.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&frames);
+
+        fused.merge(&packet).expect("merge mixed mux packet");
+        let batch = fused
+            .decode_window(None)
+            .expect("decode")
+            .expect("fused batch");
+        let row = &batch.rows()[0];
+        assert_eq!(
+            row.value_by_name("mul", "SENSOR_SONARS_no_filt_left"),
+            Some(&Value::Float64(86.9)),
+            "bad mux frame must not drop a good frame from the same packet"
+        );
     }
 
     /// The fused path must honor the decode projection: only requested columns

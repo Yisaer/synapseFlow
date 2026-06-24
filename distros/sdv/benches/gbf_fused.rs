@@ -1,11 +1,7 @@
-//! Compares the legacy Packer round-trip (GbfMerger -> bytes -> GbfDecoder)
-//! against the fused merge+decode path (GbfFusedSampler) for the "all signals"
-//! sampling workload.
+//! Benchmarks the GBF fused merger used by the Packer sampler.
 //!
-//! Both paths take the same raw GBF packets accumulated over a sampling window
-//! and produce a decoded RecordBatch. The round-trip path re-encodes to GBF
-//! bytes and re-parses them before CAN decoding; the fused path decodes the
-//! accumulated frames directly.
+//! The fused merger parses GBF outer packets, accumulates useful inner CAN
+//! frames by semantic key, and decodes the retained frames directly.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,8 +9,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use flow::Merger;
 use flow::codec::RecordDecoder;
-use veloflux_sdv::codec::GbfMerger;
-use veloflux_sdv::decoder::{GbfDecoder, GbfFusedSampler};
+use veloflux_sdv::decoder::{GbfDecoder, GbfFusedMerger};
 use veloflux_sdv::schema::dbc::{DbcJson, load_can_schema, load_dbc_json, schema_from_dbc};
 use veloflux_sdv::schema::gbf::GbfSchema;
 
@@ -54,23 +49,24 @@ fn gbf_schema_json() -> &'static str {
 }
 
 /// Build a single-frame GBF packet for the given can_id (8-byte payload).
-fn make_packet(can_id: u16, seed: u8) -> Vec<u8> {
+fn make_packet(can_id: u32, seed: u8) -> Vec<u8> {
+    let encoded_can_id = u16::try_from(can_id).expect("bench GBF schema encodes can_id as u16be");
     let payload_len: u8 = 8;
     let frame_size = 1 + 2 + 1 + payload_len as usize;
     let mut data = Vec::with_capacity(10 + frame_size);
     data.extend_from_slice(&0x3B9ACA00u64.to_be_bytes()); // ts
     data.extend_from_slice(&(frame_size as u16).to_be_bytes()); // total_len
     data.push(0x55); // magic
-    data.extend_from_slice(&can_id.to_be_bytes());
+    data.extend_from_slice(&encoded_can_id.to_be_bytes());
     data.push(payload_len);
     data.extend_from_slice(&[seed, 0x11, 0x22, 0x33, seed ^ 0xFF, 0x55, 0x66, 0x77]);
     data
 }
 
 /// One sampling window: `num_packets` single-frame packets, alternating between
-/// the two DBC message ids defined in sim.json (586 and 1414).
+/// the two bus-prefixed DBC CAN ids defined in sim.json.
 fn make_window(num_packets: usize) -> Vec<Vec<u8>> {
-    let ids = [586u16, 1414u16];
+    let ids = [0x124Au32, 0x1586u32];
     (0..num_packets)
         .map(|i| make_packet(ids[i % ids.len()], i as u8))
         .collect()
@@ -80,37 +76,17 @@ fn dbc_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json")
 }
 
-fn build_merger() -> GbfMerger {
-    let schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfMerger::new(schema).expect("merger")
-}
-
-fn build_decoder() -> GbfDecoder {
+fn build_fused() -> GbfFusedMerger {
     let dbc = load_dbc_json(dbc_path().to_str().unwrap()).expect("load sim.json");
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfDecoder::new("can", schema, gbf_schema, dbc, None, true).expect("decoder")
-}
-
-fn build_fused() -> GbfFusedSampler {
-    let dbc = load_dbc_json(dbc_path().to_str().unwrap()).expect("load sim.json");
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
-    let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfFusedSampler::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
+    GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
 }
 
 fn bench_paths(c: &mut Criterion) {
-    // Sanity: both paths must decode to a non-empty batch with the same width.
+    // Sanity: fused decode must emit one packed row for a non-empty window.
     {
         let window = make_window(4);
-        let mut merger = build_merger();
-        let decoder = build_decoder();
-        for p in &window {
-            merger.merge(p).unwrap();
-        }
-        let bytes = merger.trigger().unwrap().expect("roundtrip bytes");
-        let rt_batch = decoder.decode(&bytes).expect("roundtrip decode");
-
         let mut fused = build_fused();
         for p in &window {
             fused.merge(p).unwrap();
@@ -119,34 +95,12 @@ fn bench_paths(c: &mut Criterion) {
             .decode_window(None)
             .expect("fused decode")
             .expect("fused batch");
-        assert_eq!(
-            rt_batch.rows().len(),
-            fu_batch.rows().len(),
-            "row count must match between paths"
-        );
+        assert_eq!(fu_batch.rows().len(), 1, "one packed row per window");
     }
 
     let mut group = c.benchmark_group("gbf_sample_window");
     for &num_packets in &[10usize, 50, 200] {
         let window = make_window(num_packets);
-
-        group.bench_with_input(
-            BenchmarkId::new("roundtrip", num_packets),
-            &window,
-            |b, window| {
-                let mut merger = build_merger();
-                let decoder = build_decoder();
-                b.iter(|| {
-                    for p in window {
-                        merger.merge(black_box(p)).unwrap();
-                    }
-                    if let Some(bytes) = merger.trigger().unwrap() {
-                        let batch = decoder.decode(black_box(&bytes)).unwrap();
-                        black_box(batch);
-                    }
-                });
-            },
-        );
 
         group.bench_with_input(
             BenchmarkId::new("fused", num_packets),
@@ -183,15 +137,15 @@ fn build_decoder_with(dbc: DbcJson) -> GbfDecoder {
     GbfDecoder::new("can", schema, gbf_schema, dbc, None, true).expect("decoder")
 }
 
-fn build_fused_with(dbc: DbcJson) -> GbfFusedSampler {
+fn build_fused_with(dbc: DbcJson) -> GbfFusedMerger {
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfFusedSampler::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
+    GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
 }
 
 /// Window cycling all 5 TestBus message ids.
 fn make_window_testbus(num_packets: usize) -> Vec<Vec<u8>> {
-    let ids = [256u16, 512, 768, 1024, 1280];
+    let ids = [256u32, 512, 768, 1024, 1280];
     (0..num_packets)
         .map(|i| make_packet(ids[i % ids.len()], i as u8))
         .collect()
@@ -202,23 +156,6 @@ fn bench_multimsg(c: &mut Criterion) {
     // 10 packets / 5 ids = 2 repeats per ID; 25 = 5 repeats; 50 = 10 repeats.
     for &num_packets in &[10usize, 25, 50] {
         let window = make_window_testbus(num_packets);
-
-        group.bench_with_input(
-            BenchmarkId::new("roundtrip", num_packets),
-            &window,
-            |b, window| {
-                let mut merger = build_merger();
-                let decoder = build_decoder_with(testbus_dbc());
-                b.iter(|| {
-                    for p in window {
-                        merger.merge(black_box(p)).unwrap();
-                    }
-                    if let Some(bytes) = merger.trigger().unwrap() {
-                        black_box(decoder.decode(black_box(&bytes)).unwrap());
-                    }
-                });
-            },
-        );
 
         group.bench_with_input(
             BenchmarkId::new("fused", num_packets),
@@ -237,9 +174,90 @@ fn bench_multimsg(c: &mut Criterion) {
     group.finish();
 }
 
+fn mux_dbc() -> DbcJson {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
+    load_can_schema(path.to_str().unwrap()).expect("load mul.json")
+}
+
+fn make_mux_packet(mux_value: u8, seed: u8) -> Vec<u8> {
+    let payload_len: u8 = 8;
+    let frame_size = 1 + 2 + 1 + payload_len as usize;
+    let mut data = Vec::with_capacity(10 + frame_size);
+    data.extend_from_slice(&0x3B9ACA00u64.to_be_bytes());
+    data.extend_from_slice(&(frame_size as u16).to_be_bytes());
+    data.push(0x55);
+    data.extend_from_slice(&0x00C8u16.to_be_bytes());
+    data.push(payload_len);
+    data.extend_from_slice(&[mux_value, seed, 0x22, 0x33, seed ^ 0xFF, 0x55, 0x66, 0x77]);
+    data
+}
+
+fn make_mux_window(num_packets: usize) -> Vec<Vec<u8>> {
+    (0..num_packets)
+        .map(|i| make_mux_packet((i % 4) as u8, i as u8))
+        .collect()
+}
+
+fn make_unknown_window(num_packets: usize) -> Vec<Vec<u8>> {
+    (0..num_packets)
+        .map(|i| make_packet(0x0FFF, i as u8))
+        .collect()
+}
+
+fn bench_fused_accumulator(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gbf_fused_accumulator");
+    for &num_packets in &[10usize, 100, 1000] {
+        let non_mux = make_window(num_packets);
+        group.bench_with_input(
+            BenchmarkId::new("non_mux_known", num_packets),
+            &non_mux,
+            |b, window| {
+                let mut fused = build_fused();
+                b.iter(|| {
+                    for p in window {
+                        fused.merge(black_box(p)).unwrap();
+                    }
+                    black_box(fused.decode_window(None).unwrap());
+                });
+            },
+        );
+
+        let mux = make_mux_window(num_packets);
+        group.bench_with_input(
+            BenchmarkId::new("mux_known", num_packets),
+            &mux,
+            |b, window| {
+                let mut fused = build_fused_dbc(mux_dbc());
+                b.iter(|| {
+                    for p in window {
+                        fused.merge(black_box(p)).unwrap();
+                    }
+                    black_box(fused.decode_window(None).unwrap());
+                });
+            },
+        );
+
+        let unknown = make_unknown_window(num_packets);
+        group.bench_with_input(
+            BenchmarkId::new("unknown_can_id", num_packets),
+            &unknown,
+            |b, window| {
+                let mut fused = build_fused();
+                b.iter(|| {
+                    for p in window {
+                        fused.merge(black_box(p)).unwrap();
+                    }
+                    black_box(fused.decode_window(None).unwrap());
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // High-cardinality workload: a synthetic DBC with many distinct messages, so
-// the per-frame `CanDecoder.messages` lookup (HashMap<u16, _>) is exercised at
+// the per-frame `CanDecoder.messages` lookup (HashMap<u32, _>) is exercised at
 // production-like cardinality. Reproduces the ~12% `hash_one` seen in the
 // box.home pprof, to evaluate whether a faster CAN-id hasher is worth it.
 // ---------------------------------------------------------------------------
@@ -269,10 +287,10 @@ fn synth_dbc(num_msgs: u32, sigs_per_msg: u32) -> DbcJson {
     serde_json::from_str(&json).expect("parse synthetic dbc")
 }
 
-fn build_fused_dbc(dbc: DbcJson) -> GbfFusedSampler {
+fn build_fused_dbc(dbc: DbcJson) -> GbfFusedMerger {
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfFusedSampler::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
+    GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
 }
 
 fn bench_highcard(c: &mut Criterion) {
@@ -280,9 +298,7 @@ fn bench_highcard(c: &mut Criterion) {
     // ~300 distinct messages (≈ a real propulsion+body DBC slice). One frame per
     // id per window -> num_msgs per-frame `messages.get` lookups, low repetition.
     for &num_msgs in &[100u32, 300] {
-        let window: Vec<Vec<u8>> = (1..=num_msgs)
-            .map(|id| make_packet(id as u16, id as u8))
-            .collect();
+        let window: Vec<Vec<u8>> = (1..=num_msgs).map(|id| make_packet(id, id as u8)).collect();
         group.bench_with_input(BenchmarkId::new("fused", num_msgs), &window, |b, window| {
             let mut fused = build_fused_dbc(synth_dbc(num_msgs, 4));
             b.iter(|| {
@@ -307,7 +323,7 @@ fn bench_highcard(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 /// Build one multi-frame GBF packet carrying a single 8-byte frame per id.
-fn make_multiframe_packet(ids: &[u16]) -> Vec<u8> {
+fn make_multiframe_packet(ids: &[u32]) -> Vec<u8> {
     let payload_len: u8 = 8;
     let frame_size = 1 + 2 + 1 + payload_len as usize;
     let total_len = frame_size * ids.len();
@@ -317,7 +333,9 @@ fn make_multiframe_packet(ids: &[u16]) -> Vec<u8> {
     for (i, &can_id) in ids.iter().enumerate() {
         let seed = i as u8;
         data.push(0x55); // magic
-        data.extend_from_slice(&can_id.to_be_bytes());
+        let encoded_can_id =
+            u16::try_from(can_id).expect("bench GBF schema encodes can_id as u16be");
+        data.extend_from_slice(&encoded_can_id.to_be_bytes());
         data.push(payload_len);
         data.extend_from_slice(&[seed, 0x11, 0x22, 0x33, seed ^ 0xFF, 0x55, 0x66, 0x77]);
     }
@@ -329,7 +347,7 @@ fn bench_case_raw_decode(c: &mut Criterion) {
 
     let num_msgs = 250u32;
     // One SPI packet carrying one frame per message id (250 frames/packet).
-    let ids: Vec<u16> = (1..=num_msgs).map(|i| i as u16).collect();
+    let ids: Vec<u32> = (1..=num_msgs).collect();
     let packet = make_multiframe_packet(&ids);
     let decoder = build_decoder_with(synth_dbc(num_msgs, 4));
 
@@ -364,6 +382,7 @@ criterion_group!(
     benches,
     bench_paths,
     bench_multimsg,
+    bench_fused_accumulator,
     bench_highcard,
     bench_case_raw_decode
 );

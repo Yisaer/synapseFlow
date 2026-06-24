@@ -116,3 +116,35 @@ fn registry_builds_fused_gbf_merger_and_decodes() {
             .is_none()
     );
 }
+
+#[test]
+fn registry_rejects_gbf_merger_without_format_schema_path() {
+    let instance = FlowInstance::new(FlowInstanceOptions::dedicated_runtime(
+        "default",
+        None,
+        FlowInstanceDedicatedRuntimeOptions::default(),
+    ))
+    .expect("create flow instance");
+    veloflux_sdv::register(&instance);
+
+    let dbc = load_dbc_json(&fixture("src/tests/sim.json")).expect("load dbc json");
+    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+
+    let mut props = Map::new();
+    props.insert(
+        "schema".to_string(),
+        Value::String(fixture("src/tests/spi_packet.json")),
+    );
+
+    let err = match instance
+        .merger_registry()
+        .instantiate("gbf", &props, schema)
+    {
+        Ok(_) => panic!("gbf merger must require format schema"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("format_schema_path"),
+        "unexpected error: {err}"
+    );
+}

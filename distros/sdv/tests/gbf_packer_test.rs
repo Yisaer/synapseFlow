@@ -1,4 +1,4 @@
-//! Integration test for GBF Merger using Packer strategy.
+//! Integration test for GBF Packer strategy.
 //!
 //! Same as gbf_test but with sampler/merger enabled.
 //! Verifies:
@@ -57,14 +57,14 @@ fn build_gbf_packet(timestamp: u64, frames: &[(u16, &[u8])]) -> Vec<u8> {
 }
 
 #[test]
-fn test_gbf_merger_integration() {
+fn test_gbf_packer_integration() {
     let server = get_server();
     let client = ApiClient::new(&server.base_url);
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let test_name = format!("gbf_merger_int_{}", timestamp);
+    let test_name = format!("gbf_packer_int_{}", timestamp);
 
     // Use unique names to avoid conflicts with other tests
     let stream_name = format!("{}_stream", test_name);

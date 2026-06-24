@@ -70,7 +70,7 @@ The `latest` strategy is a lossy downsampling method ideal for telemetry where i
 
 ### Packer Strategy
 
-The `packer` strategy accumulates multiple raw payloads and merges them using a registered **Merger** (e.g., `CanMerger` for CAN data). On each interval tick, the merged result is emitted as a single payload.
+The `packer` strategy accumulates multiple raw payloads and merges them using a registered **Merger**. On each interval tick, the merger emits either merged bytes through `trigger()` or a decoded collection through `trigger_decoded()`. The exact merge key, overwrite behavior, and output mode are owned by the selected merger implementation.
 
 **Use Case**: High-density CAN bus data where multiple signals (distinct CAN IDs) arrive rapidly. The Packer merges them into one consolidated frame, reducing downstream processing while preserving all distinct signals.
 
@@ -81,9 +81,11 @@ The `packer` strategy accumulates multiple raw payloads and merges them using a 
     "interval": "1s",
     "strategy": {
       "type": "packer",
-      "merger": {
-        "type": "can_merger",
-        "props": { "schema": "/path/to/schema.dbc" }
+      "props": {
+        "merger": {
+          "type": "can_merger",
+          "props": { "schema": "/path/to/schema.dbc" }
+        }
       }
     }
   }
@@ -93,13 +95,32 @@ The `packer` strategy accumulates multiple raw payloads and merges them using a 
 **Algorithm:**
 1.  Accept incoming `StreamData::Bytes`.
 2.  Pass bytes to the registered `Merger::merge()` method.
-3.  At the end of the interval, call `Merger::trigger()` to emit the merged payload.
-4.  The merged bytes are passed to the downstream Decoder.
+3.  At the end of the interval, call `Merger::trigger_decoded()` when the merger supports fused decode; otherwise call `Merger::trigger()`.
+4.  Fused mergers emit a decoded collection. Bytes-output mergers emit bytes for the downstream decoder.
 
 **Requirements:**
 - The `merger.type` must be registered in the `MergerRegistry` provided by the binary.
 - *Note*: `can_merger` in the example above is hypothetical. Users must ensure the specified merger type is available in their VeloFlux distribution.
 - The stream decoder must be compatible with the merged output format.
+
+### SDV `gbf` Packer Semantics
+
+The SDV `gbf` merger is a fused decode-capable merger. It parses the GBF outer packet, accumulates supported inner frames, and emits a decoded collection directly. It does not have a bytes-output fallback.
+
+- `merger.type = "gbf"` requires `decoder.type = "gbf"` in stream configuration.
+- The manager copies GBF decoder format props such as `format_type`, `format_schema_path`, `signal_name_pattern`, and `clamp_to_range` into the merger props so users do not need to configure them twice.
+- The registry rejects `gbf` merger construction when `format_schema_path` is missing.
+- The only implemented inner `format_type` is `can`.
+
+For `format_type = "can"`, the fused merger keeps newest-wins semantics within each sampler interval:
+
+- CAN IDs are represented as `u32` inside the decoder and merger. The GBF schema can still choose a narrower field type, such as `u16be`, when the source format uses one.
+- Frames with CAN IDs that are absent from the DBC are discarded during merge.
+- Non-multiplexed CAN IDs are keyed by CAN ID.
+- Multiplexed CAN IDs are keyed by `(can_id, mux_value)`.
+- Repeated frames with the same key keep only the newest payload.
+
+The mux value is decoded from the payload using the DBC multiplexer signal definition. Future GBF inner formats must add explicit inner handlers with their own key semantics; they must not fall back to generic GBF byte merging.
 
 ## Implementation checklist
 
@@ -110,4 +131,3 @@ The `packer` strategy accumulates multiple raw payloads and merges them using a 
 - [x] Implement `SamplerProcessor` with `packer` strategy logic.
 - [x] Verify shutdown handling (emit buffered value).
 - [x] Verify with integration tests (stats: 5-in/1-out for latest, merger tests for packer).
-
