@@ -13,6 +13,7 @@ qnx_cpus=2
 qnx_ram="1024M"
 qnx_mirror_baseline="${QNX_MIRROR_BASELINE:-qnx800}"
 qemuvirt_package="com.qnx.qnx800.target.qemuvirt"
+virtio_driver_package="com.qnx.qnx800.target.driver.virtio"
 run_pid=""
 key_dir=""
 
@@ -177,6 +178,25 @@ if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -n
 fi
 
 find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -name startup-qemu-virt -print -quit
+
+if ! find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -path '*/sbin/devb-virtio' | grep -q .; then
+  echo "devb-virtio was not found; installing ${virtio_driver_package}."
+
+  if [ -z "${QNX_MYQNX_USER:-}" ] || [ -z "${QNX_MYQNX_PASSWORD:-}" ]; then
+    echo "QNX_MYQNX_USER and QNX_MYQNX_PASSWORD are required to install ${virtio_driver_package}." >&2
+    exit 1
+  fi
+
+  "$qsc_bin" \
+    -setDebugSymbolsEnabled=false \
+    -destination "${QNX_INSTALL_DIR:-/opt/qnx800}" \
+    -installPackage "$virtio_driver_package" \
+    -listLicenseKeys \
+    -myqnx.user "$QNX_MYQNX_USER" \
+    -myqnx.password "$QNX_MYQNX_PASSWORD"
+fi
+
+find "${QNX_TARGET:-${QNX_INSTALL_DIR:-/opt/qnx800}/target/qnx}" -type f -path '*/sbin/devb-virtio' -print -quit
 
 if ! command -v mkqnximage >/dev/null 2>&1; then
   mkqnximage_bin="$(find "${QNX_INSTALL_DIR:-/opt/qnx800}" -type f -name mkqnximage -perm -111 | head -n 1)"
