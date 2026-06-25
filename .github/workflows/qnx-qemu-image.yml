@@ -390,12 +390,16 @@ jobs:
                 --hold-secs 600 &
               vm_pid=$!
 
-              cleanup() {
+              stop_vm() {
                 set +e
                 if kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  echo "Stopping QNX VM..."
                   kill "$vm_pid" >/dev/null 2>&1
                   wait "$vm_pid" >/dev/null 2>&1
                 fi
+              }
+              cleanup() {
+                stop_vm
               }
               trap cleanup EXIT
 
@@ -438,6 +442,7 @@ jobs:
               output="$(ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" /tmp/qnx-rust-hello)"
               printf "%s\n" "$output"
               grep -F "hello from qnx rust" <<< "$output"
+              stop_vm
             '
 
       - name: Download fixed QNX veloFlux release artifact
@@ -503,12 +508,16 @@ jobs:
                 --hold-secs 600 &
               vm_pid=$!
 
-              cleanup() {
+              stop_vm() {
                 set +e
                 if kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  echo "Stopping QNX VM..."
                   kill "$vm_pid" >/dev/null 2>&1
                   wait "$vm_pid" >/dev/null 2>&1
                 fi
+              }
+              cleanup() {
+                stop_vm
               }
               trap cleanup EXIT
 
@@ -620,6 +629,7 @@ jobs:
                 grep -F \"startup configuration\" veloflux.log
                 grep -F \"manager listening\" veloflux.log
               "
+              stop_vm
             '
 
       - name: Prepare QNX VM logs for upload
