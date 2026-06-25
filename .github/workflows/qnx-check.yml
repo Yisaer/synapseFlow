@@ -213,14 +213,32 @@ jobs:
 
           stop_vm() {
             set +e
+            if [ -f tmp/qnx-qemu/qemu.pid ]; then
+              qemu_pid="$(cat tmp/qnx-qemu/qemu.pid)"
+              if [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" >/dev/null 2>&1; then
+                echo "Stopping QNX QEMU process..."
+                kill "$qemu_pid" >/dev/null 2>&1
+              fi
+            fi
             if kill -0 "$vm_pid" >/dev/null 2>&1; then
-              echo "Stopping QNX VM..."
+              echo "Stopping QNX VM launcher..."
               kill "$vm_pid" >/dev/null 2>&1
-              wait "$vm_pid" >/dev/null 2>&1
+              for _ in $(seq 1 20); do
+                if ! kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 1
+              done
+              if kill -0 "$vm_pid" >/dev/null 2>&1; then
+                kill -9 "$vm_pid" >/dev/null 2>&1
+              fi
+              wait "$vm_pid" >/dev/null 2>&1 || true
             fi
           }
           cleanup() {
+            status=$?
             stop_vm
+            exit "$status"
           }
           trap cleanup EXIT
 
@@ -265,11 +283,13 @@ jobs:
 
           remote_dir="/tmp/veloflux-qnx-check"
           echo "Preparing remote directory ${remote_dir}..."
-          ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "rm -rf $remote_dir && mkdir -p $remote_dir"
+          ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "rm -rf $remote_dir && mkdir -p $remote_dir && ls -ld $remote_dir"
+          echo "Remote directory is ready."
 
           echo "Copying current QNX debug binary and config into the QNX VM..."
           scp "${scp_args[@]}" "target/aarch64-unknown-nto-qnx800/debug/veloflux" "root@${QNX_VM_HOST}:${remote_dir}/veloflux"
           scp "${scp_args[@]}" "etc/config.example.yaml" "root@${QNX_VM_HOST}:${remote_dir}/config.yaml"
+          echo "Copied veloFlux binary and config into the QNX VM."
 
           echo "Inspecting copied veloFlux binary inside QNX VM..."
           ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "chmod +x ${remote_dir}/veloflux && file ${remote_dir}/veloflux || true"
