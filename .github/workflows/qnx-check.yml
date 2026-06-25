@@ -185,6 +185,7 @@ jobs:
 
           docker_args=(
             --rm
+            -i
             --privileged
             -v "$PWD:/workspace"
             -w /workspace
