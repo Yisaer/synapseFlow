@@ -582,11 +582,22 @@ jobs:
           set -euo pipefail
 
           if [ -d tmp/qnx-qemu ]; then
-            chmod -R a+rX tmp/qnx-qemu
+            if ! chmod -R a+rX tmp/qnx-qemu 2>/dev/null; then
+              helper_image="${IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+              if [ "${{ inputs.run_rust_hello }}" = "true" ] || [ "${{ inputs.run_veloflux_release }}" = "true" ]; then
+                helper_image="${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+              fi
+              docker run --rm \
+                -v "$PWD/tmp/qnx-qemu:/qnx-qemu-logs" \
+                "$helper_image" \
+                bash -lc 'chmod -R a+rX /qnx-qemu-logs' || true
+              chmod -R a+rX tmp/qnx-qemu 2>/dev/null || true
+            fi
           fi
 
       - name: Upload QNX VM logs
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: qnx-qemu-vm-logs
