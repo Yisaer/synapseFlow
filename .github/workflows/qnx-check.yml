@@ -153,6 +153,11 @@ jobs:
                 --features allocator-system
             '
 
+          docker run --rm \
+            -v "$PWD/.cargo-cache:/cargo-cache" \
+            "$QNX_SDP_IMAGE" \
+            bash -lc 'chmod -R a+rX /cargo-cache' || true
+
       - name: Inspect QNX binary
         run: |
           set -euo pipefail
@@ -265,6 +270,7 @@ jobs:
           echo "QNX VM forwarded manager endpoint: 127.0.0.1:${QNX_VM_MANAGER_PORT}"
 
           ssh_args=(
+            -n
             -i "$QNX_VM_SSH_KEY"
             -p "$QNX_VM_SSH_PORT"
             -o StrictHostKeyChecking=no
