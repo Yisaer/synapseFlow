@@ -29,6 +29,11 @@ on:
         required: true
         default: false
         type: boolean
+      run_veloflux_release:
+        description: Run the fixed QNX release artifact inside the prepared QNX VM
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.image_tag || '8.0-try' }}
@@ -45,6 +50,8 @@ env:
   QNX_RUST_TOOLCHAIN: qnx
   QNX_VM_WORK_DIR: /opt/qnx-qemu/vm
   QNX_VM_SSH_KEY: /opt/qnx-qemu/qnx_vm_ed25519
+  VELOFLUX_QNX_RELEASE_RUN_ID: "28142746816"
+  VELOFLUX_QNX_ARTIFACT_NAME: veloflux-qnx-aarch64
 
 jobs:
   build-and-start-qnx-vm:
@@ -52,6 +59,7 @@ jobs:
     runs-on: infra-emqx-io-4c
     timeout-minutes: 120
     permissions:
+      actions: read
       contents: read
       packages: write
     steps:
@@ -68,8 +76,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate QNX QEMU mode
+        run: |
+          set -euo pipefail
+
+          enabled_modes=0
+          if [ "${{ inputs.push_image }}" = "true" ]; then
+            enabled_modes=$((enabled_modes + 1))
+          fi
+          if [ "${{ inputs.run_rust_hello }}" = "true" ]; then
+            enabled_modes=$((enabled_modes + 1))
+          fi
+          if [ "${{ inputs.run_veloflux_release }}" = "true" ]; then
+            enabled_modes=$((enabled_modes + 1))
+          fi
+
+          if [ "$enabled_modes" -gt 1 ]; then
+            echo "Only one QNX QEMU mode can be enabled per run." >&2
+            exit 1
+          fi
+
       - name: Build QNX QEMU image
-        if: ${{ !inputs.run_rust_hello }}
+        if: ${{ !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         run: |
           set -euo pipefail
 
@@ -81,14 +109,14 @@ jobs:
             .
 
       - name: Push QNX QEMU image
-        if: ${{ inputs.push_image && !inputs.run_rust_hello }}
+        if: ${{ inputs.push_image && !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         run: |
           set -euo pipefail
 
           docker push "${IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
 
       - name: Start QNX VM
-        if: ${{ !inputs.push_image && !inputs.run_rust_hello }}
+        if: ${{ !inputs.push_image && !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         env:
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
           QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
@@ -124,7 +152,7 @@ jobs:
               --hold-secs 10
 
       - name: Prepare QNX VM image container
-        if: ${{ inputs.push_image && !inputs.run_rust_hello }}
+        if: ${{ inputs.push_image && !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         env:
           QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
           QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
@@ -183,7 +211,7 @@ jobs:
             '
 
       - name: Inspect prepared QNX VM container
-        if: ${{ success() && inputs.push_image && !inputs.run_rust_hello }}
+        if: ${{ success() && inputs.push_image && !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         run: |
           set -euo pipefail
 
@@ -201,7 +229,7 @@ jobs:
           fi
 
       - name: Push prepared QNX VM image
-        if: ${{ success() && inputs.push_image && !inputs.run_rust_hello }}
+        if: ${{ success() && inputs.push_image && !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         run: |
           set -euo pipefail
 
@@ -215,7 +243,7 @@ jobs:
           docker push "${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
 
       - name: Remove prepared QNX VM container
-        if: ${{ always() && inputs.push_image && !inputs.run_rust_hello }}
+        if: ${{ always() && inputs.push_image && !inputs.run_rust_hello && !inputs.run_veloflux_release }}
         run: |
           set -euo pipefail
 
@@ -410,6 +438,142 @@ jobs:
               output="$(ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" /tmp/qnx-rust-hello)"
               printf "%s\n" "$output"
               grep -F "hello from qnx rust" <<< "$output"
+            '
+
+      - name: Download fixed QNX veloFlux release artifact
+        if: ${{ inputs.run_veloflux_release }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.VELOFLUX_QNX_ARTIFACT_NAME }}
+          run-id: ${{ env.VELOFLUX_QNX_RELEASE_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: tmp/qnx-veloflux-release
+
+      - name: Inspect fixed QNX veloFlux release artifact
+        if: ${{ inputs.run_veloflux_release }}
+        run: |
+          set -euo pipefail
+
+          asset="tmp/qnx-veloflux-release/${VELOFLUX_QNX_ARTIFACT_NAME}.tar.gz"
+          test -f "$asset"
+          tar -xzf "$asset" -C tmp/qnx-veloflux-release
+
+          bin="tmp/qnx-veloflux-release/${VELOFLUX_QNX_ARTIFACT_NAME}"
+          config="tmp/qnx-veloflux-release/${VELOFLUX_QNX_ARTIFACT_NAME}.config.example.yaml"
+          test -x "$bin"
+          test -f "$config"
+          file "$bin"
+
+      - name: Run fixed QNX veloFlux release inside QNX VM
+        if: ${{ inputs.run_veloflux_release }}
+        run: |
+          set -euo pipefail
+
+          rm -rf tmp/qnx-qemu
+          mkdir -p tmp/qnx-qemu
+
+          image="${VM_IMAGE_NAME}:${QNX_QEMU_IMAGE_TAG}"
+          docker pull "$image"
+
+          docker_args=(
+            --rm
+            --privileged
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e QNX_VM_WORK_DIR
+            -e QNX_VM_SSH_KEY
+            -e VELOFLUX_QNX_ARTIFACT_NAME
+          )
+
+          if [ -e /dev/kvm ]; then
+            docker_args+=(--device /dev/kvm)
+          fi
+
+          docker run "${docker_args[@]}" "$image" \
+            bash -lc '
+              set -euo pipefail
+
+              /usr/local/bin/start_qnx_vm.sh \
+                --skip-build \
+                --log-dir tmp/qnx-qemu \
+                --work-dir "$QNX_VM_WORK_DIR" \
+                --ssh-key "$QNX_VM_SSH_KEY" \
+                --timeout-secs 300 \
+                --hold-secs 600 &
+              vm_pid=$!
+
+              cleanup() {
+                set +e
+                if kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  kill "$vm_pid" >/dev/null 2>&1
+                  wait "$vm_pid" >/dev/null 2>&1
+                fi
+              }
+              trap cleanup EXIT
+
+              for _ in $(seq 1 80); do
+                if [ -f tmp/qnx-qemu/qnx-vm.env ]; then
+                  break
+                fi
+                if ! kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  wait "$vm_pid"
+                fi
+                sleep 5
+              done
+
+              if [ ! -f tmp/qnx-qemu/qnx-vm.env ]; then
+                echo "QNX VM did not become ready." >&2
+                exit 1
+              fi
+
+              source tmp/qnx-qemu/qnx-vm.env
+
+              ssh_args=(
+                -i "$QNX_VM_SSH_KEY"
+                -p "$QNX_VM_SSH_PORT"
+                -o StrictHostKeyChecking=no
+                -o UserKnownHostsFile=/dev/null
+                -o ConnectTimeout=5
+                -o ConnectionAttempts=3
+              )
+              scp_args=(
+                -i "$QNX_VM_SSH_KEY"
+                -P "$QNX_VM_SSH_PORT"
+                -o StrictHostKeyChecking=no
+                -o UserKnownHostsFile=/dev/null
+                -o ConnectTimeout=5
+                -o ConnectionAttempts=3
+              )
+
+              remote_dir="/tmp/veloflux-qnx-release"
+              ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "rm -rf $remote_dir && mkdir -p $remote_dir"
+
+              bin="tmp/qnx-veloflux-release/${VELOFLUX_QNX_ARTIFACT_NAME}"
+              config="tmp/qnx-veloflux-release/${VELOFLUX_QNX_ARTIFACT_NAME}.config.example.yaml"
+              scp "${scp_args[@]}" "$bin" "root@${QNX_VM_HOST}:${remote_dir}/veloflux"
+              scp "${scp_args[@]}" "$config" "root@${QNX_VM_HOST}:${remote_dir}/config.yaml"
+
+              ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "chmod +x ${remote_dir}/veloflux"
+              ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "file ${remote_dir}/veloflux || true"
+
+              ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
+                set -eu
+                cd ${remote_dir}
+                rm -rf data logs veloflux.log
+                mkdir -p data logs
+                ./veloflux --config config.yaml --data-dir data > veloflux.log 2>&1 &
+                pid=\$!
+                sleep 8
+                if ! kill -0 \$pid >/dev/null 2>&1; then
+                  echo \"veloflux exited during startup\" >&2
+                  cat veloflux.log >&2 || true
+                  exit 1
+                fi
+                kill \$pid >/dev/null 2>&1 || true
+                wait \$pid >/dev/null 2>&1 || true
+                cat veloflux.log
+                grep -F \"startup configuration\" veloflux.log
+              "
             '
 
       - name: Prepare QNX VM logs for upload
