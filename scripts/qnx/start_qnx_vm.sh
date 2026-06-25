@@ -9,6 +9,7 @@ hostname="veloflux-qnx"
 arch="aarch64le"
 host_ssh_port=2222
 host_qconn_port=8000
+host_manager_port=18080
 qnx_cpus=2
 qnx_ram="1024M"
 qnx_mirror_baseline="${QNX_MIRROR_BASELINE:-qnx800}"
@@ -33,6 +34,7 @@ Options:
   --arch ARCH           QNX target architecture.
   --host-ssh-port PORT  Host TCP port forwarded to QNX port 22.
   --host-qconn-port PORT Host TCP port forwarded to QNX port 8000.
+  --host-manager-port PORT Host TCP port forwarded to QNX port 8080.
   --cpus COUNT          QEMU vCPU count.
   --ram SIZE            QEMU RAM size.
   --ssh-key PATH        SSH private key used for QNX root login.
@@ -73,6 +75,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --host-qconn-port)
       host_qconn_port="$2"
+      shift 2
+      ;;
+    --host-manager-port)
+      host_manager_port="$2"
       shift 2
       ;;
     --cpus)
@@ -155,6 +161,7 @@ echo "hostname=$hostname"
 echo "arch=$arch"
 echo "host_ssh_port=$host_ssh_port"
 echo "host_qconn_port=$host_qconn_port"
+echo "host_manager_port=$host_manager_port"
 echo "qnx_cpus=$qnx_cpus"
 echo "qnx_ram=$qnx_ram"
 echo "qnx_mirror_baseline=$qnx_mirror_baseline"
@@ -287,7 +294,7 @@ qemu-system-aarch64 \
   -m "$qnx_ram" \
   -drive "file=${disk_image},format=raw,if=none,id=drv0" \
   -device "virtio-blk-device,drive=drv0" \
-  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${host_ssh_port}-:22,hostfwd=tcp:127.0.0.1:${host_qconn_port}-:8000" \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${host_ssh_port}-:22,hostfwd=tcp:127.0.0.1:${host_qconn_port}-:8000,hostfwd=tcp:127.0.0.1:${host_manager_port}-:8080" \
   -device "virtio-net-device,netdev=net0,mac=52:54:00:0f:f0:9d" \
   -object rng-random,filename=/dev/urandom,id=rng0 \
   -device "virtio-rng-device,rng=rng0" \
@@ -322,6 +329,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
       printf 'QNX_VM_HOST=127.0.0.1\n'
       printf 'QNX_VM_SSH_PORT=%s\n' "$host_ssh_port"
       printf 'QNX_VM_QCONN_PORT=%s\n' "$host_qconn_port"
+      printf 'QNX_VM_MANAGER_PORT=%s\n' "$host_manager_port"
       printf 'QNX_VM_SSH_KEY=%s\n' "$ssh_key"
     } >"$log_dir/qnx-vm.env"
     break

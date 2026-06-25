@@ -189,7 +189,7 @@ jobs:
           docker run "${docker_args[@]}" "$image" \
             bash -lc '
               status=0
-              /usr/local/bin/start_qnx_vm.sh \
+              bash scripts/qnx/start_qnx_vm.sh \
                 --log-dir tmp/qnx-qemu \
                 --work-dir "$QNX_VM_WORK_DIR" \
                 --ssh-key "$QNX_VM_SSH_KEY" \
@@ -493,11 +493,12 @@ jobs:
             bash -lc '
               set -euo pipefail
 
-              /usr/local/bin/start_qnx_vm.sh \
+              bash scripts/qnx/start_qnx_vm.sh \
                 --skip-build \
                 --log-dir tmp/qnx-qemu \
                 --work-dir "$QNX_VM_WORK_DIR" \
                 --ssh-key "$QNX_VM_SSH_KEY" \
+                --host-manager-port 18080 \
                 --timeout-secs 300 \
                 --hold-secs 600 &
               vm_pid=$!
@@ -554,16 +555,59 @@ jobs:
               scp "${scp_args[@]}" "$config" "root@${QNX_VM_HOST}:${remote_dir}/config.yaml"
 
               ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "chmod +x ${remote_dir}/veloflux"
+              echo "Inspecting veloFlux binary inside QNX VM..."
               ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "file ${remote_dir}/veloflux || true"
 
+              echo "Starting veloFlux inside QNX VM..."
               ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
                 set -eu
                 cd ${remote_dir}
-                rm -rf data logs veloflux.log
+                rm -rf data logs veloflux.log veloflux.pid
                 mkdir -p data logs
                 ./veloflux --config config.yaml --data-dir data > veloflux.log 2>&1 &
-                pid=\$!
-                sleep 8
+                echo \$! > veloflux.pid
+              "
+
+              echo "Waiting for veloFlux /status through QEMU port forwarding..."
+              status_response=""
+              for attempt in $(seq 1 30); do
+                if ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
+                    set -eu
+                    cd ${remote_dir}
+                    pid=\$(cat veloflux.pid)
+                    kill -0 \$pid >/dev/null 2>&1
+                  "; then
+                  if exec 3<>/dev/tcp/127.0.0.1/"$QNX_VM_MANAGER_PORT"; then
+                    printf "GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3
+                    status_response="$(cat <&3)"
+                    exec 3>&-
+                    exec 3<&-
+                    if grep -F "200 OK" <<< "$status_response" >/dev/null; then
+                      break
+                    fi
+                    printf "Attempt %s received a non-200 /status response:\n%s\n" "$attempt" "$status_response"
+                  else
+                    echo "Attempt $attempt could not connect to forwarded manager port ${QNX_VM_MANAGER_PORT}."
+                  fi
+                else
+                  echo "veloFlux exited before /status became reachable." >&2
+                  ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "cat ${remote_dir}/veloflux.log >&2 || true"
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              echo "veloFlux /status HTTP response:"
+              printf "%s\n" "$status_response"
+              grep -F "200 OK" <<< "$status_response"
+              grep -F "active_pipeline_count" <<< "$status_response"
+              grep -F "uptime_seconds" <<< "$status_response"
+
+              echo "Stopping veloFlux after HTTP smoke check..."
+              ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
+                set -eu
+                cd ${remote_dir}
+                pid=\$(cat veloflux.pid)
                 if ! kill -0 \$pid >/dev/null 2>&1; then
                   echo \"veloflux exited during startup\" >&2
                   cat veloflux.log >&2 || true
@@ -571,8 +615,10 @@ jobs:
                 fi
                 kill \$pid >/dev/null 2>&1 || true
                 wait \$pid >/dev/null 2>&1 || true
+                echo \"veloFlux log from QNX VM:\"
                 cat veloflux.log
                 grep -F \"startup configuration\" veloflux.log
+                grep -F \"manager listening\" veloflux.log
               "
             '
 
