@@ -27,6 +27,11 @@ jobs:
     name: QNX debug build and runtime smoke check
     runs-on: infra-emqx-io-4c
     timeout-minutes: 120
+    services:
+      mosquitto:
+        image: eclipse-mosquitto:2
+        ports:
+          - 1883:1883
     permissions:
       contents: read
       packages: read
@@ -212,6 +217,7 @@ jobs:
             --rm
             -i
             --privileged
+            --network host
             -v "$PWD:/workspace"
             -w /workspace
             -e QNX_VM_WORK_DIR
@@ -387,6 +393,140 @@ jobs:
           fi
           grep -F "active_pipeline_count" <<< "$status_response"
           grep -F "uptime_seconds" <<< "$status_response"
+
+          echo "=== QNX Pipeline E2E Verification ==="
+
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends mosquitto-clients
+
+          manager_api() {
+            local method="$1" path="$2" body="${3:-}"
+            local response_file="tmp/qnx-qemu/manager-api.http"
+            : >"$response_file"
+
+            if [ -n "$body" ]; then
+              timeout 10 bash -c '
+                set -eu
+                method="$1" path="$2" body="$3" port="$4" response_file="$5"
+                body_len="${#body}"
+                exec 3<>/dev/tcp/127.0.0.1/"${port}"
+                printf "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s" \
+                  "$method" "$path" "$body_len" "$body" >&3
+                cat <&3 >"${response_file}"
+                exec 3>&-
+                exec 3<&-
+              ' _ "$method" "$path" "$body" "$QNX_VM_MANAGER_PORT" "$response_file"
+            else
+              timeout 10 bash -c '
+                set -eu
+                method="$1" path="$2" port="$3" response_file="$4"
+                exec 3<>/dev/tcp/127.0.0.1/"${port}"
+                printf "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" \
+                  "$method" "$path" >&3
+                cat <&3 >"${response_file}"
+                exec 3>&-
+                exec 3<&-
+              ' _ "$method" "$path" "$QNX_VM_MANAGER_PORT" "$response_file"
+            fi
+            cat "$response_file"
+          }
+
+          # 1. Create MQTT source stream
+          echo "Creating MQTT stream qnx_e2e_src..."
+          stream_resp=$(manager_api "POST" "/streams" \
+            '{"name":"qnx_e2e_src","type":"mqtt","schema":{"type":"json","props":{"columns":[{"name":"user_id","data_type":"int64"},{"name":"score","data_type":"float64"}]}},"props":{"broker_url":"tcp://10.0.2.2:1883","topic":"/qnx/e2e/source","qos":0}}')
+          echo "Stream response: $stream_resp"
+          if ! grep -F "201" <<< "$stream_resp" >/dev/null && ! grep -F "409" <<< "$stream_resp" >/dev/null; then
+            echo "Failed to create stream" >&2
+            exit 1
+          fi
+
+          # 2. Create pipeline
+          echo "Creating pipeline qnx_e2e_pipe..."
+          pipe_resp=$(manager_api "POST" "/pipelines" \
+            '{"id":"qnx_e2e_pipe","sql":"SELECT * FROM qnx_e2e_src WHERE score > 0","sinks":[{"type":"mqtt","props":{"broker_url":"tcp://10.0.2.2:1883","topic":"/qnx/e2e/sink"},"encoder":{"type":"json","props":{}}}]}')
+          echo "Pipeline create response: $pipe_resp"
+          if ! grep -F "201" <<< "$pipe_resp" >/dev/null; then
+            echo "Failed to create pipeline" >&2
+            exit 1
+          fi
+
+          # 3. EXPLAIN pipeline (validates parser + planner on QNX)
+          echo "Explaining pipeline qnx_e2e_pipe..."
+          explain_resp=$(manager_api "GET" "/pipelines/qnx_e2e_pipe/explain")
+          echo "EXPLAIN output:"
+          printf "%s\n" "$explain_resp"
+          if ! grep -F "200 OK" <<< "$explain_resp" >/dev/null; then
+            echo "Failed to explain pipeline" >&2
+            exit 1
+          fi
+
+          # 4. Start pipeline
+          echo "Starting pipeline qnx_e2e_pipe..."
+          start_resp=$(manager_api "POST" "/pipelines/qnx_e2e_pipe/start")
+          echo "Start response: $start_resp"
+          if ! grep -F "200 OK" <<< "$start_resp" >/dev/null; then
+            echo "Failed to start pipeline" >&2
+            exit 1
+          fi
+
+          # 5. Verify /status reflects running pipeline
+          echo "Verifying /status with active pipeline..."
+          status_resp2=$(manager_api "GET" "/status")
+          echo "Status after pipeline start: $status_resp2"
+          if ! grep -F "200 OK" <<< "$status_resp2" >/dev/null; then
+            echo "/status did not return 200 after pipeline start" >&2
+            exit 1
+          fi
+          if ! grep -qE '"active_pipeline_count":\s*[1-9]' <<< "$status_resp2"; then
+            echo "active_pipeline_count is not >= 1" >&2
+            echo "$status_resp2"
+            exit 1
+          fi
+
+          # 6. Wait for MQTT source to subscribe, then publish test message
+          echo "Waiting 3s for MQTT source to subscribe..."
+          sleep 3
+
+          echo "Publishing test message to /qnx/e2e/source..."
+          mosquitto_pub -h 127.0.0.1 -t "/qnx/e2e/source" \
+            -m '{"user_id":42,"score":99.5}' -q 0
+
+          # 7. Subscribe and verify message arrives at sink topic
+          echo "Subscribing to /qnx/e2e/sink and waiting for message..."
+          received=$(timeout 15 mosquitto_sub -h 127.0.0.1 -t "/qnx/e2e/sink" -C 1 -q 0)
+          echo "Received from sink: $received"
+          if ! grep -q "user_id" <<< "$received"; then
+            echo "Sink message did not contain expected field user_id" >&2
+            exit 1
+          fi
+          echo "E2E message routing: SUCCESS"
+
+          # 8. Collect pipeline stats
+          echo "Collecting pipeline stats..."
+          stats_resp=$(manager_api "GET" "/pipelines/qnx_e2e_pipe/stats?timeout_ms=3000")
+          echo "Pipeline stats: $stats_resp"
+          if ! grep -F "200 OK" <<< "$stats_resp" >/dev/null; then
+            echo "Failed to collect pipeline stats" >&2
+            exit 1
+          fi
+
+          # 9. Stop pipeline
+          echo "Stopping pipeline qnx_e2e_pipe..."
+          stop_resp=$(manager_api "POST" "/pipelines/qnx_e2e_pipe/stop?mode=graceful&timeout_ms=5000")
+          echo "Stop response: $stop_resp"
+          if ! grep -F "200 OK" <<< "$stop_resp" >/dev/null; then
+            echo "Failed to stop pipeline (non-fatal)" >&2
+          fi
+
+          # 10. Delete pipeline
+          echo "Deleting pipeline qnx_e2e_pipe..."
+          delete_resp=$(manager_api "DELETE" "/pipelines/qnx_e2e_pipe")
+          echo "Delete response: $delete_resp"
+          if ! grep -F "200 OK" <<< "$delete_resp" >/dev/null; then
+            echo "Failed to delete pipeline (non-fatal)" >&2
+          fi
+
+          echo "=== QNX Pipeline E2E Verification PASSED ==="
 
           echo "Stopping veloFlux after HTTP smoke check..."
           ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
