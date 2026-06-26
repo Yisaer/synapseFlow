@@ -2,14 +2,22 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 
 use flow::planner::decode_projection::{DecodeProjection, FieldPath};
-use veloflux_sdv::decoder::can::CanDecoder;
+use veloflux_sdv::decoder::can::{CanDecoder, CanIdMapping};
 use veloflux_sdv::schema::dbc::{load_dbc_json, schema_from_dbc};
 
 fn get_multiplex_decoder() -> CanDecoder {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
     let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
     let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
-    CanDecoder::new("mul", schema.clone(), dbc.clone(), None, true).expect("build decoder")
+    CanDecoder::new(
+        "mul",
+        schema.clone(),
+        dbc.clone(),
+        None,
+        true,
+        CanIdMapping::Raw,
+    )
+    .expect("build decoder")
 }
 
 fn bench_decoder_projection(c: &mut Criterion) {

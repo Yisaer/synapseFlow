@@ -56,9 +56,108 @@ pub struct CanFrame<'a> {
     pub payload: &'a [u8],
 }
 
-#[inline]
-fn combined_can_id(bus_id: u32, msg_id: u32) -> u32 {
-    (bus_id << 12) | msg_id
+/// Policy for deriving the CAN-ID lookup key from a DBC `(bus.id, msg.id)` pair.
+///
+/// The wire CAN ID (`CanFrame::can_id`) is matched against keys built with this
+/// policy. See `docs/schema/dbc.md` and issue emqx/VeloFlux#217.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanIdMapping {
+    /// Generic CAN/DBC: the key is the raw DBC `msg.id`. The wire CAN ID equals
+    /// the DBC message ID. This is the default.
+    #[default]
+    Raw,
+    /// Historical synthetic packing: `(bus.id << bits) | msg.id`. `bits == 12`
+    /// reproduces the original `(bus_id << 12) | msg_id` rule. Larger widths
+    /// accommodate extended / CAN-FD message IDs.
+    BusShift { bits: u32 },
+}
+
+impl CanIdMapping {
+    /// Derive the lookup key for a DBC `(bus.id, msg.id)` pair.
+    #[inline]
+    pub fn frame_key(&self, bus_id: u32, msg_id: u32) -> u32 {
+        match self {
+            CanIdMapping::Raw => msg_id,
+            CanIdMapping::BusShift { bits } => (bus_id << bits) | msg_id,
+        }
+    }
+
+    /// True when `bus_id`'s shifted bits would overlap `msg_id` (or overflow the
+    /// `u32` key) under `BusShift`. Such a DBC entry mis-keys and is warned about
+    /// at decoder construction. Always false for [`CanIdMapping::Raw`].
+    #[inline]
+    fn overlaps(&self, bus_id: u32, msg_id: u32) -> bool {
+        match self {
+            CanIdMapping::Raw => false,
+            CanIdMapping::BusShift { bits } => {
+                // msg must fit below the bus field, and the bus must not shift
+                // out of the 32-bit key.
+                msg_id >= (1u32 << bits) || (bus_id != 0 && bus_id > (u32::MAX >> bits))
+            }
+        }
+    }
+
+    /// Parse the `can_id_mapping` decoder property.
+    ///
+    /// Accepts either the string `"raw"` or the object
+    /// `{ "mode": "bus_shift", "bits": N }` with `1 <= N <= 31`. Absent → [`Raw`].
+    /// Any other shape is a hard error (fail fast; see issue #217).
+    ///
+    /// [`Raw`]: CanIdMapping::Raw
+    pub fn from_prop(value: Option<&serde_json::Value>) -> Result<Self, CodecError> {
+        let Some(value) = value else {
+            return Ok(CanIdMapping::Raw);
+        };
+        match value {
+            serde_json::Value::String(s) if s == "raw" => Ok(CanIdMapping::Raw),
+            serde_json::Value::String(s) => Err(CodecError::Other(format!(
+                "invalid `can_id_mapping` value {s:?}; expected \"raw\" or \
+                 {{ \"mode\": \"bus_shift\", \"bits\": N }}"
+            ))),
+            serde_json::Value::Object(map) => {
+                let mode = map.get("mode").and_then(|v| v.as_str()).ok_or_else(|| {
+                    CodecError::Other(
+                        "`can_id_mapping` object requires a string `mode` field".into(),
+                    )
+                })?;
+                if mode != "bus_shift" {
+                    return Err(CodecError::Other(format!(
+                        "unknown `can_id_mapping` mode {mode:?}; expected \"bus_shift\""
+                    )));
+                }
+                let bits_field = map.get("bits").ok_or_else(|| {
+                    CodecError::Other(
+                        "`can_id_mapping` `bus_shift` requires an integer `bits` field".into(),
+                    )
+                })?;
+                // Accept both JSON integers and integer-valued floats (e.g. `12.0`,
+                // which templating/Helm layers often render for numeric values).
+                let bits = bits_field
+                    .as_u64()
+                    .or_else(|| {
+                        bits_field
+                            .as_f64()
+                            .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                            .map(|f| f as u64)
+                    })
+                    .ok_or_else(|| {
+                        CodecError::Other(format!(
+                            "`can_id_mapping` `bits` must be an integer, got {bits_field}"
+                        ))
+                    })?;
+                if !(1..=31).contains(&bits) {
+                    return Err(CodecError::Other(format!(
+                        "`can_id_mapping` `bits` must be in 1..=31, got {bits}"
+                    )));
+                }
+                Ok(CanIdMapping::BusShift { bits: bits as u32 })
+            }
+            other => Err(CodecError::Other(format!(
+                "invalid `can_id_mapping` value {other}; expected \"raw\" or \
+                 {{ \"mode\": \"bus_shift\", \"bits\": N }}"
+            ))),
+        }
+    }
 }
 
 /// Resolved per-signal numeric decode plan.
@@ -158,14 +257,17 @@ pub struct CanMuxKeyResolver {
 impl CanMuxKeyResolver {
     /// Build a resolver from a CAN schema. Returns `None` when the schema has
     /// no multiplexed messages, allowing callers to keep the old fast path.
-    pub fn from_dbc(dbc: &DbcJson) -> Option<Self> {
+    ///
+    /// `mapping` must match the one passed to [`CanDecoder::new`] so the selector
+    /// map and the message map are keyed identically (issue #217).
+    pub fn from_dbc(dbc: &DbcJson, mapping: CanIdMapping) -> Option<Self> {
         let mut mux_by_can_id = CanIdMap::default();
         for bus in &dbc.buses {
             for msg in &bus.messages {
                 let Some(sig) = msg.signals.iter().find(|sig| sig.is_multiplexer) else {
                     continue;
                 };
-                let can_id = combined_can_id(bus.id, msg.id);
+                let can_id = mapping.frame_key(bus.id, msg.id);
                 let factor = sig.scale.unwrap_or(1.0);
                 let offset = sig.offset.unwrap_or(0.0);
                 mux_by_can_id.insert(
@@ -342,6 +444,7 @@ impl CanDecoder {
         dbc: DbcJson,
         pattern: Option<String>,
         clamp_to_range: bool,
+        mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
         let source_name: String = source_name.into();
         // Default to simple signal name if no pattern provided
@@ -362,8 +465,18 @@ impl CanDecoder {
         for bus in dbc.buses {
             let bus_name = bus.name.unwrap_or_else(|| format!("Bus{}", bus.id));
             for msg in bus.messages {
-                // Custom CAN ID mapping: (bus_id << 12) | message_id
-                let can_id = combined_can_id(bus.id, msg.id);
+                // CAN ID lookup key per the configured mapping policy (issue #217).
+                let can_id = mapping.frame_key(bus.id, msg.id);
+                if mapping.overlaps(bus.id, msg.id) {
+                    tracing::warn!(
+                        bus_id = bus.id,
+                        msg_id = msg.id,
+                        ?mapping,
+                        "CAN ID mapping overlap: msg.id does not fit below the bus \
+                         shift; bus and message fields collide. Increase `bits` or \
+                         use `raw` mapping."
+                    );
+                }
                 let frame_id = msg.frame_id.clone();
                 let mut signals = Vec::new();
                 for sig in msg.signals {
@@ -405,13 +518,18 @@ impl CanDecoder {
                         clamp_max,
                     });
                 }
-                // Warn if duplicate CAN ID found (same bus + frame ID)
+                // Warn if duplicate CAN ID found. Under `raw` mapping this happens
+                // when two buses carry the same `msg.id`; `bus_shift` disambiguates
+                // them. The later definition overwrites the earlier one (#217).
                 if messages.contains_key(&can_id) {
                     tracing::warn!(
                         can_id = format!("0x{:04X}", can_id),
                         bus = %bus_name,
                         frame_id = %frame_id,
-                        "Duplicate CAN ID detected, previous signals will be overwritten"
+                        ?mapping,
+                        "Duplicate CAN ID detected, previous signals will be \
+                         overwritten. With `raw` mapping, consider `bus_shift` to \
+                         disambiguate buses sharing a msg.id."
                     );
                 }
                 // Pre-compute if this message has a multiplexer signal
@@ -1030,6 +1148,149 @@ mod tests {
     use super::*;
     use crate::schema::dbc::{load_dbc_json, schema_from_dbc};
 
+    // ========================================================================
+    // CAN ID mapping (issue #217)
+    // ========================================================================
+
+    #[test]
+    fn can_id_mapping_frame_key() {
+        // raw -> msg.id, bus ignored.
+        assert_eq!(CanIdMapping::Raw.frame_key(1, 0x586), 0x586);
+        assert_eq!(CanIdMapping::Raw.frame_key(7, 0x586), 0x586);
+        // raw passes a full 29-bit extended id through unchanged (issue #202).
+        assert_eq!(CanIdMapping::Raw.frame_key(3, 0x1FFF_FFFF), 0x1FFF_FFFF);
+        // bus_shift bits=12 reproduces the historical (bus<<12)|msg packing.
+        let s12 = CanIdMapping::BusShift { bits: 12 };
+        assert_eq!(s12.frame_key(1, 0x586), 0x1586);
+        // bus_shift bits=29 supports extended/CAN-FD msg widths.
+        let s29 = CanIdMapping::BusShift { bits: 29 };
+        assert_eq!(s29.frame_key(2, 0x1234), (2u32 << 29) | 0x1234);
+        // bus 0 -> raw and any bus_shift width coincide.
+        for bits in 1..=31 {
+            let s = CanIdMapping::BusShift { bits };
+            assert_eq!(s.frame_key(0, 0x586), CanIdMapping::Raw.frame_key(0, 0x586));
+        }
+        // Default is raw.
+        assert_eq!(CanIdMapping::default(), CanIdMapping::Raw);
+    }
+
+    #[test]
+    fn can_id_mapping_from_prop() {
+        use serde_json::json;
+        // absent / "raw" -> Raw
+        assert_eq!(CanIdMapping::from_prop(None).unwrap(), CanIdMapping::Raw);
+        assert_eq!(
+            CanIdMapping::from_prop(Some(&json!("raw"))).unwrap(),
+            CanIdMapping::Raw
+        );
+        // object form
+        assert_eq!(
+            CanIdMapping::from_prop(Some(&json!({ "mode": "bus_shift", "bits": 12 }))).unwrap(),
+            CanIdMapping::BusShift { bits: 12 }
+        );
+        // integer-valued float (e.g. rendered by a templating layer) is accepted
+        assert_eq!(
+            CanIdMapping::from_prop(Some(&json!({ "mode": "bus_shift", "bits": 12.0 }))).unwrap(),
+            CanIdMapping::BusShift { bits: 12 }
+        );
+        // a non-integer float is still rejected
+        assert!(
+            CanIdMapping::from_prop(Some(&json!({ "mode": "bus_shift", "bits": 12.5 }))).is_err()
+        );
+        // invalid: unknown string, unknown mode, missing/out-of-range bits, bad type
+        assert!(CanIdMapping::from_prop(Some(&json!("bus_shift_12"))).is_err());
+        assert!(CanIdMapping::from_prop(Some(&json!({ "mode": "wat", "bits": 12 }))).is_err());
+        assert!(CanIdMapping::from_prop(Some(&json!({ "mode": "bus_shift" }))).is_err());
+        assert!(CanIdMapping::from_prop(Some(&json!({ "mode": "bus_shift", "bits": 0 }))).is_err());
+        assert!(
+            CanIdMapping::from_prop(Some(&json!({ "mode": "bus_shift", "bits": 32 }))).is_err()
+        );
+        assert!(CanIdMapping::from_prop(Some(&json!(42))).is_err());
+    }
+
+    #[test]
+    fn can_id_mapping_overlaps() {
+        // raw never overlaps.
+        assert!(!CanIdMapping::Raw.overlaps(7, 0xFFFF_FFFF));
+        let s12 = CanIdMapping::BusShift { bits: 12 };
+        // 11-bit standard id fits below the bus field.
+        assert!(!s12.overlaps(1, 0x7FF));
+        // a 29-bit/extended id under bits=12 overflows msg into the bus field.
+        assert!(s12.overlaps(1, 0x1000));
+        // bus too large to shift into a u32 key.
+        assert!(CanIdMapping::BusShift { bits: 28 }.overlaps(0x20, 0));
+    }
+
+    /// Differential: on sim.json (bus.id = 1) the two modes key messages
+    /// differently, so the same wire ID resolves under only one of them.
+    #[test]
+    fn can_id_mapping_differential_on_sim_json() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
+        let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+
+        let shift = CanDecoder::new(
+            "can",
+            schema.clone(),
+            dbc.clone(),
+            None,
+            true,
+            CanIdMapping::BusShift { bits: 12 },
+        )
+        .expect("build shift decoder");
+        let raw =
+            CanDecoder::new("can", schema, dbc, None, true, CanIdMapping::Raw).expect("build raw");
+
+        // bus_shift keys: (1<<12)|586 = 0x124A, (1<<12)|1414 = 0x1586.
+        assert!(shift.contains_can_id(0x1586));
+        assert!(!shift.contains_can_id(1414));
+        // raw keys: the bare msg ids.
+        assert!(raw.contains_can_id(1414));
+        assert!(!raw.contains_can_id(0x1586));
+    }
+
+    /// Two buses sharing a raw msg.id collide in `raw` mode: the decoder still
+    /// builds (last definition wins) rather than failing (D3, issue #217).
+    #[test]
+    fn raw_mode_duplicate_msg_id_overwrites() {
+        use crate::schema::dbc::{BusJson, DbcJson, MessageJson, SignalJson};
+        fn bus(id: u32, sig: &str) -> BusJson {
+            BusJson {
+                name: Some(format!("Bus{id}")),
+                id,
+                messages: vec![MessageJson {
+                    _name: "M".into(),
+                    id: 100,
+                    frame_id: "0x64".into(),
+                    _length: 8,
+                    signals: vec![SignalJson {
+                        name: sig.into(),
+                        start: 0,
+                        length: 8,
+                        scale: Some(1.0),
+                        offset: Some(0.0),
+                        is_big_endian: false,
+                        is_signed: false,
+                        is_multiplexer: false,
+                        is_multiplexed: false,
+                        multiplexer_value: None,
+                        min: None,
+                        max: None,
+                    }],
+                }],
+            }
+        }
+        let dbc = DbcJson {
+            buses: vec![bus(1, "SigA"), bus(2, "SigB")],
+        };
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let dec = CanDecoder::new("can", schema, dbc, None, true, CanIdMapping::Raw)
+            .expect("raw decoder builds despite duplicate msg.id");
+        // Single key 100; the later bus (SigB) overwrote the earlier one.
+        assert!(dec.contains_can_id(100));
+        assert_eq!(dec.messages().len(), 1);
+    }
+
     #[test]
     fn clamp_preserves_type_and_bounds() {
         // no bounds -> untouched
@@ -1125,7 +1386,7 @@ mod tests {
         };
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
         let find = |dec: &CanDecoder, name: &str| -> (Option<f64>, Option<f64>) {
-            let specs = &dec.messages()[&1u32].signals; // can_id = (bus 0 << 12) | id 1
+            let specs = &dec.messages()[&1u32].signals; // raw msg.id = 1 (bus 0)
             let s = specs
                 .iter()
                 .find(|s| dec.keys()[s.col_index].as_ref() == name)
@@ -1134,13 +1395,21 @@ mod tests {
         };
 
         // clamp enabled (default)
-        let dec = CanDecoder::new("can", schema.clone(), dbc.clone(), None, true).unwrap();
+        let dec = CanDecoder::new(
+            "can",
+            schema.clone(),
+            dbc.clone(),
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .unwrap();
         assert_eq!(find(&dec, "Normal"), (Some(-40.0), Some(210.0))); // valid range -> set
         assert_eq!(find(&dec, "Mux"), (None, None)); // multiplexer selector -> never clamped
         assert_eq!(find(&dec, "NoRange"), (None, None)); // min == max -> no range
 
         // clamp disabled -> nothing clamps
-        let dec = CanDecoder::new("can", schema, dbc, None, false).unwrap();
+        let dec = CanDecoder::new("can", schema, dbc, None, false, CanIdMapping::Raw).unwrap();
         assert_eq!(find(&dec, "Normal"), (None, None));
     }
 
@@ -1148,7 +1417,17 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
-        CanDecoder::new("can", schema.clone(), dbc.clone(), None, true).expect("build decoder")
+        // sim.json buses are bus-prefixed (bus.id = 1); the historical fixtures
+        // rely on the `(bus_id << 12) | msg_id` packing.
+        CanDecoder::new(
+            "can",
+            schema.clone(),
+            dbc.clone(),
+            None,
+            true,
+            CanIdMapping::BusShift { bits: 12 },
+        )
+        .expect("build decoder")
     }
 
     #[test]
@@ -1543,7 +1822,16 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
         let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
-        CanDecoder::new("mul", schema.clone(), dbc.clone(), None, true).expect("build decoder")
+        // mul.json is bus 0, so raw and bus_shift produce identical keys.
+        CanDecoder::new(
+            "mul",
+            schema.clone(),
+            dbc.clone(),
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build decoder")
     }
 
     /// Test multiplex group1 (mux=1): Should decode no_filt_* signals, NOT group0 signals

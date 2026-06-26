@@ -84,7 +84,8 @@ fn run_gbf_test(test_name: &str, format_schema_path: &str) {
             "props": {
                 "schema_path": gbf_schema_path(),
                 "format_type": "can",
-                "format_schema_path": format_schema_path
+                "format_schema_path": format_schema_path,
+                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
             }
         }
     });

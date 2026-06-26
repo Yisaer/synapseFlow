@@ -213,7 +213,25 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
         .iter()
         .map(|msg| {
             let msg_id = match *msg.id() {
-                can_dbc::MessageId::Standard(id) => id as u32,
+                can_dbc::MessageId::Standard(id) => {
+                    let id = id as u32;
+                    // A standard frame is 11-bit by definition. A larger value
+                    // means the `BO_` id was not flagged as extended (bit 31), so
+                    // `can-dbc` took the standard branch and may have truncated a
+                    // wide id to 16 bits — it will then never match a wire frame
+                    // carrying the real id. Warn instead of failing silently
+                    // (issue #202). See docs/schema/dbc.md "Extended / 29-bit".
+                    if id > 0x7FF {
+                        tracing::warn!(
+                            message = %msg.name(),
+                            msg_id = format!("0x{id:X}"),
+                            "DBC message id exceeds the 11-bit standard range but is \
+                             not marked as an extended frame; an extended id may be \
+                             missing its bit-31 flag and could be truncated"
+                        );
+                    }
+                    id
+                }
                 can_dbc::MessageId::Extended(id) => id,
             };
 
@@ -501,6 +519,49 @@ mod tests {
         let schema = schema_from_dbc("test", &dbc, None);
         // Only ts column
         assert_eq!(schema.column_schemas().len(), 1);
+    }
+
+    #[test]
+    fn load_can_schema_extended_message_id() {
+        // Extended (29-bit) frames set bit 31 in the DBC `BO_` id; the parser
+        // must yield the bare 29-bit id, not the raw value with the flag bit
+        // (issue #202).
+        const EXT_ID: u32 = 0x18FE_F100; // J1939-style 29-bit id
+        let raw = 0x8000_0000u32 | EXT_ID; // DBC extended-frame encoding
+        let dbc_content = format!(
+            "VERSION \"\"\nNS_ :\nBS_:\nBU_:\nBO_ {raw} ExtMsg: 8 Vector__XXX\n \
+             SG_ ExtSig : 0|8@1+ (1,0) [0|0] \"\" Vector__XXX\n"
+        );
+        let temp = std::env::temp_dir().join("vf202_extended.dbc");
+        std::fs::write(&temp, dbc_content).unwrap();
+
+        let dbc = load_can_schema(temp.to_str().unwrap()).expect("load extended dbc");
+        std::fs::remove_file(&temp).ok();
+
+        let msg = &dbc.buses[0].messages[0];
+        assert_eq!(
+            msg.id, EXT_ID,
+            "extended BO_ id must parse to the bare 29-bit message id"
+        );
+        assert!(msg.id > 0x7FF, "id must exceed the 11-bit standard range");
+    }
+
+    #[test]
+    fn load_can_schema_unflagged_wide_id_loads_and_is_preserved() {
+        // An id above the 11-bit standard range but WITHOUT the extended flag
+        // (bit 31) is loaded as-is when it fits 16 bits (no truncation here) and
+        // only warns; it must not fail the load (issue #202).
+        let dbc_content = "VERSION \"\"\nNS_ :\nBS_:\nBU_:\nBO_ 2048 StdOver: 8 Vector__XXX\n \
+             SG_ S : 0|8@1+ (1,0) [0|0] \"\" Vector__XXX\n";
+        let temp = std::env::temp_dir().join("vf202_unflagged_wide.dbc");
+        std::fs::write(&temp, dbc_content).unwrap();
+
+        let dbc = load_can_schema(temp.to_str().unwrap()).expect("load unflagged wide dbc");
+        std::fs::remove_file(&temp).ok();
+
+        // 2048 (0x800) fits 16 bits, so it is preserved; the warning fires because
+        // it exceeds the 11-bit standard range.
+        assert_eq!(dbc.buses[0].messages[0].id, 2048);
     }
 
     #[test]

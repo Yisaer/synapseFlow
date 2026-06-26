@@ -102,6 +102,9 @@ fn build_fused_gbf_merger(
         .get("clamp_to_range")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    // CAN ID lookup policy (issue #217). Default `raw`; `bus_shift` reproduces
+    // the historical synthetic packing.
+    let mapping = decoder::CanIdMapping::from_prop(props.get("can_id_mapping"))?;
 
     // The decoded tuple is namespaced by the stream's source name; derive it
     // from the schema so downstream column resolution matches the `gbf` decoder.
@@ -118,6 +121,7 @@ fn build_fused_gbf_merger(
         dbc,
         pattern,
         clamp_to_range,
+        mapping,
     )?;
     Ok(Box::new(fused) as Box<dyn flow::Merger>)
 }

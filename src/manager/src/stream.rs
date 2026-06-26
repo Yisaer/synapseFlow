@@ -1583,6 +1583,18 @@ pub(crate) fn sampler_with_decoder_format_props(
     Some(sampler)
 }
 
+/// GBF format props that flow from the `gbf` decoder to a paired `gbf` packer
+/// merger. They must be both forwarded (so the fused merger keys frames like the
+/// decoder) and conflict-checked, so the two passes share one list to avoid
+/// drift (see issue #217).
+const GBF_FORWARDED_FORMAT_PROPS: [&str; 5] = [
+    "format_type",
+    "format_schema_path",
+    "signal_name_pattern",
+    "clamp_to_range",
+    "can_id_mapping",
+];
+
 fn propagate_gbf_decoder_format_props(decoder: &DecoderConfigRequest, sampler: &mut SamplerConfig) {
     if !decoder.decode_type.eq_ignore_ascii_case("gbf") {
         return;
@@ -1594,12 +1606,7 @@ fn propagate_gbf_decoder_format_props(decoder: &DecoderConfigRequest, sampler: &
         return;
     }
 
-    for key in [
-        "format_type",
-        "format_schema_path",
-        "signal_name_pattern",
-        "clamp_to_range",
-    ] {
+    for key in GBF_FORWARDED_FORMAT_PROPS {
         if !props.merger.props.contains_key(key)
             && let Some(value) = decoder.props.get(key)
         {
@@ -1699,19 +1706,14 @@ fn validate_gbf_packer_format_props(req: &CreateStreamRequest) -> Result<(), Str
         return Ok(());
     }
 
-    for key in [
-        "format_type",
-        "format_schema_path",
-        "signal_name_pattern",
-        "clamp_to_range",
-    ] {
+    for key in GBF_FORWARDED_FORMAT_PROPS {
         let Some(decoder_value) = req.decoder.props.get(key) else {
             continue;
         };
         let Some(merger_value) = props.merger.props.get(key) else {
             continue;
         };
-        if decoder_value != merger_value {
+        if !json_semantically_eq(decoder_value, merger_value) {
             return Err(format!(
                 "stream `{}` sampler merger prop `{}` conflicts with decoder prop `{}`",
                 req.name, key, key
@@ -1719,6 +1721,30 @@ fn validate_gbf_packer_format_props(req: &CreateStreamRequest) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// Compare two JSON values for *semantic* equality, treating numbers by their
+/// `f64` value so `12` and `12.0` are equal. Config layers (templating/Helm)
+/// often render integers as floats, and `can_id_mapping`'s `bits` accepts both,
+/// so a raw `Value` comparison would flag `bits: 12` vs `bits: 12.0` as a
+/// spurious decoder/merger conflict.
+fn json_semantically_eq(a: &JsonValue, b: &JsonValue) -> bool {
+    match (a, b) {
+        (JsonValue::Number(x), JsonValue::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(xf), Some(yf)) => xf == yf,
+            _ => x == y,
+        },
+        (JsonValue::Array(xs), JsonValue::Array(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| json_semantically_eq(x, y))
+        }
+        (JsonValue::Object(xs), JsonValue::Object(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .all(|(k, x)| ys.get(k).is_some_and(|y| json_semantically_eq(x, y)))
+        }
+        _ => a == b,
+    }
 }
 
 pub(crate) fn validate_memory_stream_topic(
@@ -2074,7 +2100,8 @@ mod tests {
                 "format_type": "can",
                 "format_schema_path": "/tmp/can.json",
                 "signal_name_pattern": "{sig}",
-                "clamp_to_range": false
+                "clamp_to_range": false,
+                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
             })
             .as_object()
             .expect("decoder props")
@@ -2124,6 +2151,12 @@ mod tests {
         assert_eq!(
             merger_props.get("clamp_to_range").and_then(|v| v.as_bool()),
             Some(false)
+        );
+        // The CAN ID mapping must reach the fused merger so it keys frames the
+        // same way as the decoder (issue #217).
+        assert_eq!(
+            merger_props.get("can_id_mapping"),
+            Some(&json!({ "mode": "bus_shift", "bits": 12 }))
         );
     }
 
@@ -2481,6 +2514,55 @@ mod tests {
             err,
             "stream `stream_test` sampler merger prop `format_type` conflicts with decoder prop `format_type`"
         );
+    }
+
+    #[test]
+    fn validate_gbf_merger_can_id_mapping_int_and_float_bits_are_not_a_conflict() {
+        // decoder uses integer `bits`, merger uses float `bits` — both resolve to
+        // the same mapping, so this must NOT be flagged as a conflict (#217/#202).
+        let mut req = base_stream_request("mqtt");
+        req.decoder = DecoderConfigRequest {
+            decode_type: "gbf".to_string(),
+            props: json!({
+                "format_type": "can",
+                "format_schema_path": "/tmp/can.json",
+                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
+            })
+            .as_object()
+            .expect("decoder props")
+            .clone(),
+        };
+        req.sampler = Some(
+            serde_json::from_value(json!({
+                "interval": "100ms",
+                "strategy": {
+                    "type": "packer",
+                    "props": {
+                        "merger": {
+                            "type": "gbf",
+                            "props": {
+                                "schema": "/tmp/spi_packet.json",
+                                "can_id_mapping": { "mode": "bus_shift", "bits": 12.0 }
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("sampler"),
+        );
+        let decoder = StreamDecoderConfig::new("gbf", JsonMap::new());
+        assert!(validate_stream_decoder_config(&req, &decoder).is_ok());
+
+        // A genuine mismatch (different bits) is still rejected.
+        if let Some(sampler) = &mut req.sampler
+            && let SamplingStrategy::Packer { props } = &mut sampler.strategy
+        {
+            props.merger.props.insert(
+                "can_id_mapping".to_string(),
+                json!({ "mode": "bus_shift", "bits": 8 }),
+            );
+        }
+        assert!(validate_stream_decoder_config(&req, &decoder).is_err());
     }
 
     #[tokio::test]

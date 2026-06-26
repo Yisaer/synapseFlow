@@ -27,6 +27,7 @@ target
 .idea
 .cursorrules
 .antigravity
+.antigravitycli
 PROJECT_RULES.md
 AGENTS.md
 tmp
@@ -34,3 +35,7 @@ __PYCACHE__
 config.toml
 sqls.txt
 .codex
+
+# IDE workspace state (machine-specific, not project source)
+/workspace.xml
+/vcs.xml

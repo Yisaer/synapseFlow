@@ -53,6 +53,11 @@ fn registry_builds_fused_gbf_merger_and_decodes() {
         Value::String(fixture("src/tests/sim.json")),
     );
     props.insert("format_type".to_string(), Value::String("can".to_string()));
+    // sim.json frames are bus-prefixed (bus.id = 1) -> historical bus_shift packing.
+    props.insert(
+        "can_id_mapping".to_string(),
+        serde_json::json!({ "mode": "bus_shift", "bits": 12 }),
+    );
 
     let mut merger = instance
         .merger_registry()

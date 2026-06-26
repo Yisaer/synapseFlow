@@ -9,7 +9,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use flow::Merger;
 use flow::codec::RecordDecoder;
-use veloflux_sdv::decoder::{GbfDecoder, GbfFusedMerger};
+use veloflux_sdv::decoder::{CanIdMapping, GbfDecoder, GbfFusedMerger};
 use veloflux_sdv::schema::dbc::{DbcJson, load_can_schema, load_dbc_json, schema_from_dbc};
 use veloflux_sdv::schema::gbf::GbfSchema;
 
@@ -80,7 +80,17 @@ fn build_fused() -> GbfFusedMerger {
     let dbc = load_dbc_json(dbc_path().to_str().unwrap()).expect("load sim.json");
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
+    // sim.json is bus-prefixed (bus.id = 1).
+    GbfFusedMerger::new(
+        "can",
+        schema,
+        gbf_schema,
+        dbc,
+        None,
+        true,
+        CanIdMapping::BusShift { bits: 12 },
+    )
+    .expect("fused")
 }
 
 fn bench_paths(c: &mut Criterion) {
@@ -134,13 +144,31 @@ fn testbus_dbc() -> DbcJson {
 fn build_decoder_with(dbc: DbcJson) -> GbfDecoder {
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfDecoder::new("can", schema, gbf_schema, dbc, None, true).expect("decoder")
+    GbfDecoder::new(
+        "can",
+        schema,
+        gbf_schema,
+        dbc,
+        None,
+        true,
+        CanIdMapping::Raw,
+    )
+    .expect("decoder")
 }
 
 fn build_fused_with(dbc: DbcJson) -> GbfFusedMerger {
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
+    GbfFusedMerger::new(
+        "can",
+        schema,
+        gbf_schema,
+        dbc,
+        None,
+        true,
+        CanIdMapping::Raw,
+    )
+    .expect("fused")
 }
 
 /// Window cycling all 5 TestBus message ids.
@@ -290,7 +318,16 @@ fn synth_dbc(num_msgs: u32, sigs_per_msg: u32) -> DbcJson {
 fn build_fused_dbc(dbc: DbcJson) -> GbfFusedMerger {
     let schema = Arc::new(schema_from_dbc("can", &dbc, None));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
-    GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("fused")
+    GbfFusedMerger::new(
+        "can",
+        schema,
+        gbf_schema,
+        dbc,
+        None,
+        true,
+        CanIdMapping::Raw,
+    )
+    .expect("fused")
 }
 
 fn bench_highcard(c: &mut Criterion) {

@@ -100,7 +100,8 @@ fn test_gbf_packer_integration() {
             "props": {
                 "schema_path": gbf_schema_path(),
                 "format_type": "can",
-                "format_schema_path": json_schema_path()
+                "format_schema_path": json_schema_path(),
+                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
             }
         },
         "sampler": {

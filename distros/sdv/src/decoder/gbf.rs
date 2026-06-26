@@ -19,7 +19,7 @@ use flow::{
 };
 use serde_json::Value as JsonValue;
 
-use super::can::{CanDecoder, CanFrame, CanMuxKeyResolver};
+use super::can::{CanDecoder, CanFrame, CanIdMapping, CanMuxKeyResolver};
 use crate::schema::dbc::load_can_schema;
 use crate::schema::gbf::GbfSchema;
 
@@ -86,6 +86,10 @@ pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
                 .and_then(JsonValue::as_bool)
                 .unwrap_or(true);
 
+            // CAN ID lookup policy (issue #217). Default `raw`; `bus_shift`
+            // reproduces the historical synthetic packing.
+            let mapping = CanIdMapping::from_prop(config.props().get("can_id_mapping"))?;
+
             GbfDecoder::new(
                 stream_name,
                 schema.clone(),
@@ -93,6 +97,7 @@ pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
                 dbc,
                 pattern,
                 clamp_to_range,
+                mapping,
             )
             .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
         }),
@@ -114,8 +119,10 @@ impl GbfDecoder {
         dbc: crate::schema::dbc::DbcJson,
         pattern: Option<String>,
         clamp_to_range: bool,
+        mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
-        let can_decoder = CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range)?;
+        let can_decoder =
+            CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range, mapping)?;
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
 
         Ok(Self {
@@ -235,9 +242,11 @@ impl GbfFusedMerger {
         dbc: crate::schema::dbc::DbcJson,
         pattern: Option<String>,
         clamp_to_range: bool,
+        mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
-        let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc);
-        let can_decoder = CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range)?;
+        let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc, mapping);
+        let can_decoder =
+            CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range, mapping)?;
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
         Ok(Self {
             parser,
@@ -467,8 +476,17 @@ mod tests {
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
         let gbf_schema = get_test_schema();
-        GbfDecoder::new("can", schema.clone(), gbf_schema, dbc.clone(), None, true)
-            .expect("build decoder")
+        // sim.json is bus-prefixed (bus.id = 1) -> historical bus_shift packing.
+        GbfDecoder::new(
+            "can",
+            schema.clone(),
+            gbf_schema,
+            dbc.clone(),
+            None,
+            true,
+            CanIdMapping::BusShift { bits: 12 },
+        )
+        .expect("build decoder")
     }
 
     #[test]
@@ -497,12 +515,62 @@ mod tests {
         assert_eq!(*sig1, Value::Int64(84));
     }
 
+    /// Under `raw` mapping, the wire CAN ID is the bare DBC `msg.id` (no bus
+    /// prefix). Mess1 (id 1414 = 0x0586) decodes the same signals as the
+    /// bus-prefixed `bus_shift` case (issue #217).
+    #[test]
+    fn test_gbf_decoder_raw_mapping_uses_bare_msg_id() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
+        let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let decoder = GbfDecoder::new(
+            "can",
+            schema,
+            get_test_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build raw decoder");
+
+        // Same frame/payload as `test_gbf_decoder_with_dbc` but the wire CAN ID
+        // is the bare msg.id 0x0586 instead of the bus-prefixed 0x1586.
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1720765705290u64.to_be_bytes()); // ts
+        packet.extend_from_slice(&12u16.to_be_bytes()); // total_len (one 12-byte frame)
+        packet.push(0x55); // magic
+        packet.extend_from_slice(&0x0586u16.to_be_bytes()); // can_id = bare msg.id
+        packet.push(0x08); // data_len
+        packet.extend_from_slice(&[0x08, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11]); // payload
+
+        let batch = decoder.decode(&packet).expect("decode");
+        let tuple = &batch.rows()[0];
+        assert_eq!(
+            tuple.value_by_name("can", "ts"),
+            Some(&Value::Int64(1720765705290))
+        );
+        assert_eq!(
+            tuple.value_by_name("can", "Mess1_Sig1"),
+            Some(&Value::Int64(84))
+        );
+    }
+
     fn get_test_fused() -> GbfFusedMerger {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
         let schema = Arc::new(schema_from_dbc("can", &dbc, None));
         let gbf_schema = get_test_schema();
-        GbfFusedMerger::new("can", schema, gbf_schema, dbc, None, true).expect("build fused")
+        GbfFusedMerger::new(
+            "can",
+            schema,
+            gbf_schema,
+            dbc,
+            None,
+            true,
+            CanIdMapping::BusShift { bits: 12 },
+        )
+        .expect("build fused")
     }
 
     /// The fused merge+decode path must produce the same decoded values as
@@ -552,8 +620,17 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
         let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
-        let mut fused = GbfFusedMerger::new("mul", schema, get_test_schema(), dbc, None, true)
-            .expect("build fused");
+        // mul.json is bus 0 -> raw and bus_shift keys coincide.
+        let mut fused = GbfFusedMerger::new(
+            "mul",
+            schema,
+            get_test_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build fused");
 
         let payload_g1 = [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11];
         let payload_g0 = [0x00u8, 0x24, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11];
@@ -650,9 +727,16 @@ mod tests {
         )
         .expect("parse wide can dbc");
         let schema = Arc::new(schema_from_dbc("wide", &dbc, None));
-        let mut fused =
-            GbfFusedMerger::new("wide", schema, get_u32_can_id_schema(), dbc, None, true)
-                .expect("build fused");
+        let mut fused = GbfFusedMerger::new(
+            "wide",
+            schema,
+            get_u32_can_id_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build fused");
 
         let mut packet = Vec::new();
         packet.extend_from_slice(&1_000u64.to_be_bytes());
@@ -673,6 +757,92 @@ mod tests {
         );
     }
 
+    /// Extended CAN: a full 29-bit message id (0x1FFF_FFFF) decodes end-to-end
+    /// through both the direct and fused paths, with no code change beyond DBC +
+    /// GBF schema config (issue #202). Guards against any latent u16 narrowing.
+    #[test]
+    fn test_extended_29bit_can_id_decodes_both_paths() {
+        use flow::Merger;
+
+        // bus 0 + raw mapping -> the lookup key is the bare 29-bit msg.id.
+        const EXT_ID: u32 = 0x1FFF_FFFF;
+        let dbc: crate::schema::dbc::DbcJson = serde_json::from_str(&format!(
+            r#"
+            {{
+                "buses": [{{
+                    "name": "Bus0",
+                    "id": 0,
+                    "messages": [{{
+                        "name": "ExtMsg",
+                        "id": {EXT_ID},
+                        "frameId": "0x1FFFFFFF",
+                        "length": 8,
+                        "signals": [{{
+                            "name": "ExtSig",
+                            "start": 0,
+                            "length": 8,
+                            "scale": 1,
+                            "offset": 0,
+                            "isBigEndian": false,
+                            "isSigned": false
+                        }}]
+                    }}]
+                }}]
+            }}"#
+        ))
+        .expect("parse extended can dbc");
+        let schema = Arc::new(schema_from_dbc("ext", &dbc, None));
+
+        // Packet: ts(8) + total_len(2) + one frame [magic, u32be id, len, payload].
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&14u16.to_be_bytes());
+        packet.push(0x55);
+        packet.extend_from_slice(&EXT_ID.to_be_bytes());
+        packet.push(8);
+        packet.extend_from_slice(&[77, 0, 0, 0, 0, 0, 0, 0]);
+
+        // Direct (non-fused) decode.
+        let decoder = GbfDecoder::new(
+            "ext",
+            schema.clone(),
+            get_u32_can_id_schema(),
+            dbc.clone(),
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build decoder");
+        let batch = decoder.decode(&packet).expect("direct decode");
+        assert_eq!(
+            batch.rows()[0].value_by_name("ext", "ExtSig"),
+            Some(&Value::Int64(77)),
+            "extended id must decode via the direct path"
+        );
+
+        // Fused decode.
+        let mut fused = GbfFusedMerger::new(
+            "ext",
+            schema,
+            get_u32_can_id_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build fused");
+        fused.merge(&packet).expect("merge extended id");
+        let fused_batch = fused
+            .decode_window(None)
+            .expect("fused decode")
+            .expect("fused batch");
+        assert_eq!(
+            fused_batch.rows()[0].value_by_name("ext", "ExtSig"),
+            Some(&Value::Int64(77)),
+            "extended id must decode via the fused path"
+        );
+    }
+
     #[test]
     fn test_fused_skips_bad_mux_frame_without_dropping_good_frame() {
         use flow::Merger;
@@ -680,8 +850,17 @@ mod tests {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
         let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
-        let mut fused = GbfFusedMerger::new("mul", schema, get_test_schema(), dbc, None, true)
-            .expect("build fused");
+        // mul.json is bus 0 -> raw and bus_shift keys coincide.
+        let mut fused = GbfFusedMerger::new(
+            "mul",
+            schema,
+            get_test_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build fused");
 
         fn push_frame(buf: &mut Vec<u8>, can_id: u16, payload: &[u8]) {
             buf.push(0x55);
