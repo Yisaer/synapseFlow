@@ -392,6 +392,9 @@ mod tests {
             client_id: "client_a".to_string(),
             qos: 1,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         };
         let memory_topic = StoredMemoryTopic {
             topic: "topic_1".to_string(),
@@ -530,6 +533,9 @@ mod tests {
                 client_id: "client_b".to_string(),
                 qos: 1,
                 max_packet_size: None,
+                username: None,
+                password: None,
+                resolved_password: None,
             },
             SharedMqttClientConfig {
                 key: "shared_a".to_string(),
@@ -538,6 +544,9 @@ mod tests {
                 client_id: "client_a".to_string(),
                 qos: 0,
                 max_packet_size: Some(1024),
+                username: None,
+                password: None,
+                resolved_password: None,
             },
         ] {
             storage

@@ -274,6 +274,7 @@ pub(crate) fn build_pipeline_definition(
 ) -> Result<PipelineDefinition, String> {
     let select_stmt = parse_pipeline_select_stmt(req, instance)?;
     let sources = build_source_definitions(req, instance, &select_stmt)?;
+    let secret_ctx = instance.secret_context();
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
         let sink_id = sink_req
@@ -430,6 +431,8 @@ pub(crate) fn build_pipeline_definition(
                 let http_props: HttpSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid http sink props: {err}"))?;
+                http_props.reject_sensitive_plain_headers()?;
+                let resolved_secret_headers = http_props.resolve_secret_headers(&secret_ctx)?;
                 let url = http_props
                     .url
                     .filter(|value| !value.trim().is_empty())
@@ -445,6 +448,11 @@ pub(crate) fn build_pipeline_definition(
                     for (key, value) in headers {
                         props = props.with_header(key, value);
                     }
+                }
+                // Structured auth + secret headers resolved from the store (runtime
+                // only; the request JSON keeps the `SecretRef` pointers).
+                for (key, value) in resolved_secret_headers {
+                    props = props.with_header(key, value);
                 }
                 if let Some(ref ct) = http_props.content_type.filter(|v| !v.trim().is_empty()) {
                     props = props.with_content_type(ct);
@@ -531,7 +539,7 @@ pub(crate) fn build_pipeline_definition(
             }
             if let Some(encryption) = delivery.encryption.as_ref() {
                 sink_definition =
-                    sink_definition.with_encryption(encryption.to_encryption_config()?);
+                    sink_definition.with_encryption(encryption.to_encryption_config(&secret_ctx)?);
             }
         }
         sinks.push(sink_definition);
@@ -1158,11 +1166,7 @@ mod tests {
                         },
                         "encryption": {
                             "algorithm": "aes-gcm",
-                            "key_id": "sink-aes-v1",
-                            "key": {
-                                "value": key,
-                                "encoding": "base64"
-                            }
+                            "key": key
                         }
                     },
                     "encoder": {
@@ -1190,7 +1194,8 @@ mod tests {
         ));
         let encryption = sink.encryption.as_ref().expect("encryption");
         assert_eq!(encryption.algorithm.as_str(), "aes-gcm");
-        assert_eq!(encryption.key_id, "sink-aes-v1");
+        // Inline key (no store name) derives a constant key_id.
+        assert_eq!(encryption.key_id, "inline");
         assert_eq!(encryption.validate_and_resolve_key_bits().unwrap(), 256);
     }
 
@@ -1211,11 +1216,7 @@ mod tests {
                     "delivery": {
                         "encryption": {
                             "algorithm": "aes-gcm",
-                            "key_id": "sink-aes-v1",
-                            "key": {
-                                "value": raw_key,
-                                "encoding": "base64"
-                            }
+                            "key": raw_key
                         }
                     },
                     "encoder": {

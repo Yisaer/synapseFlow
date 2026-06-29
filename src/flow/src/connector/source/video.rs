@@ -113,7 +113,7 @@ impl SourceConnector for VideoSourceConnector {
 
         #[cfg(not(feature = "video_gstreamer"))]
         {
-            let target = self.config.url.clone();
+            let target = crate::connector::mask_url_userinfo(&self.config.url);
             let stream = futures::stream::once(async move {
                 Err(ConnectorError::Connection(format!(
                     "GStreamer video source backend is not available for `{target}` in this build"
@@ -352,7 +352,7 @@ fn source_launch(config: &VideoSourceConfig) -> Result<String, String> {
     }
     Err(format!(
         "unsupported video URL `{}` (expected rtsp://, rtsps://, or http(s)://...m3u8)",
-        config.url
+        crate::connector::mask_url_userinfo(&config.url)
     ))
 }
 

@@ -1055,6 +1055,9 @@ mod tests {
             client_id: format!("client_{key}"),
             qos: 0,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         }
     }
 

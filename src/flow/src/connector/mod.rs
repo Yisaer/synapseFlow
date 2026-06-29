@@ -11,9 +11,12 @@ use crate::model::Collection;
 pub mod memory_pubsub;
 pub mod mqtt_client;
 pub mod nng_pubsub;
+pub mod redact;
 pub mod registry;
 pub mod sink;
 pub mod source;
+
+pub use redact::{mask_url_userinfo, url_has_userinfo};
 
 /// Convenience alias for boxed connector streams.
 pub type ConnectorStream =

@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use url::Url;
 
+use crate::connector::mask_url_userinfo;
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttClient};
 use crate::runtime::TaskSpawner;
 
@@ -360,14 +361,17 @@ impl SinkConnector for MqttSinkConnector {
 fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnectorError> {
     let normalized = normalize_broker_url(&config.broker_url);
     let endpoint = Url::parse(&normalized).map_err(|err| {
-        SinkConnectorError::Other(format!("invalid broker URL `{}`: {err}", config.broker_url))
+        SinkConnectorError::Other(format!(
+            "invalid broker URL `{}`: {err}",
+            mask_url_userinfo(&config.broker_url)
+        ))
     })?;
     let scheme = endpoint.scheme();
 
     let host = endpoint.host_str().ok_or_else(|| {
         SinkConnectorError::Other(format!(
             "broker URL `{}` is missing a host",
-            config.broker_url
+            mask_url_userinfo(&config.broker_url)
         ))
     })?;
 
@@ -377,7 +381,7 @@ fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnec
         .ok_or_else(|| {
             SinkConnectorError::Other(format!(
                 "broker URL `{}` is missing a port",
-                config.broker_url
+                mask_url_userinfo(&config.broker_url)
             ))
         })?;
 

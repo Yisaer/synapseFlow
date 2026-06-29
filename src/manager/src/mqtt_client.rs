@@ -20,6 +20,14 @@ fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), Strin
             cfg.key
         ));
     }
+    // Reject credentials embedded in the URL (VF-51 §7.3): they would otherwise
+    // land in init.json/redb, a scannable surface. Use `username`/`password`.
+    if flow::connector::url_has_userinfo(cfg.broker_url.trim()) {
+        return Err(format!(
+            "shared mqtt client {} broker_url must not embed credentials; use `username`/`password`",
+            cfg.key
+        ));
+    }
     if cfg.topic.trim().is_empty() {
         return Err(format!(
             "shared mqtt client {} topic must not be empty",
@@ -45,6 +53,8 @@ pub(crate) fn shared_mqtt_config_eq(
         && left.client_id == right.client_id
         && left.qos == right.qos
         && left.max_packet_size == right.max_packet_size
+        && left.username == right.username
+        && left.password == right.password
 }
 
 fn storage_conflict_message(key: &str, existing: &SharedMqttClientConfig) -> String {
@@ -313,6 +323,9 @@ mod tests {
             client_id: format!("client_{key}"),
             qos: 0,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         }
     }
 

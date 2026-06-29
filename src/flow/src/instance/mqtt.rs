@@ -8,8 +8,17 @@ impl FlowInstance {
         &self,
         config: SharedMqttClientConfig,
     ) -> Result<(), FlowInstanceError> {
+        // Resolve the password against the secret store for the runtime copy; the
+        // registry/persisted copy keeps the `SecretRef` pointer (never the value).
+        let mut runtime_config = config.clone();
+        if let Some(warning) = runtime_config
+            .resolve_secrets(&self.secret_context())
+            .map_err(|err| FlowInstanceError::Invalid(err.to_string()))?
+        {
+            tracing::warn!(target: "veloflux::secret", "{warning}");
+        }
         self.mqtt_client_manager
-            .create_client(config.clone())
+            .create_client(runtime_config)
             .await?;
         self.shared_mqtt_client_configs
             .lock()

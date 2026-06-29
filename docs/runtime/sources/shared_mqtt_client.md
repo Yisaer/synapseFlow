@@ -44,6 +44,8 @@ A shared MQTT client is identified by `key` and currently stores:
 - `client_id`
 - `qos`
 - `max_packet_size`
+- `username` (optional, plaintext identifier)
+- `password` (optional, a secret-store reference — see *Credentials* below)
 
 At runtime, each flow instance owns its own per-key client registry. A shared client entry contains:
 
@@ -54,6 +56,54 @@ At runtime, each flow instance owns its own per-key client registry. A shared cl
 
 The resource is therefore shared within one flow instance, not across instances. `key` names the
 logical resource; each instance still creates its own network client.
+
+## Credentials (VF-51)
+
+MQTT authentication is configured with two fields, kept separate from `broker_url`:
+
+- `username`: a plaintext identifier (not treated as a secret).
+- `password`: a **secret reference**. Two forms are accepted:
+  - `"store:NAME"` (recommended) — resolves `NAME` from the encrypted secret store; only the pointer
+    is persisted, never the value.
+  - an inline literal (any value not starting with `store:`) — allowed under the default `warn`
+    policy (logs a warning), **rejected** under `strict` (`VELOFLUX_SECRETS_POLICY=strict`). An inline
+    password lands in scannable config, so prefer `store:NAME`.
+
+Embedding credentials in the URL (`mqtt://user:pass@host`) is **rejected** as invalid config: the
+userinfo would otherwise land in `init.json` / redb, which static scanners read.
+
+### Configuring the store and referring to it
+
+1. Create the secret in the local store (the value is read from a prompt, stdin, or `--from-file` —
+   never from the command line):
+
+   ```bash
+   veloflux secrets set my-broker-pass --from-file ./broker-pass.txt
+   # or:  printf '%s' "$PASS" | veloflux secrets set my-broker-pass
+   ```
+
+2. Reference it by that exact name in the shared MQTT client config:
+
+   ```json
+   {
+     "key": "fleet-broker",
+     "broker_url": "tcp://broker.example.com:1883",
+     "topic": "fleet/+/telemetry",
+     "client_id": "veloflux-fleet",
+     "qos": 0,
+     "username": "device",
+     "password": "store:my-broker-pass"
+   }
+   ```
+
+The store key (`my-broker-pass`) is whatever you pass to `secrets set`; `"store:my-broker-pass"` is
+how config points at it. At registration the manager resolves the reference against the store and
+injects the real password into the runtime connection only; `GET`/`LIST`/export and the persisted
+record keep the `store:NAME` pointer, never the value.
+
+The store (`<data-dir>/secrets.enc`) is encrypted with a root key from the `VELOFLUX_SECRETS_KEY`
+environment variable (base64 32-byte key). Without it, a built-in key is used, which keeps secrets
+out of static scanners but is not confidential against someone holding the binary.
 
 ## Delivery And Lifecycle Semantics
 

@@ -1,3 +1,4 @@
+use base64::Engine;
 use flow::codec::{
     CompressionCodec, EncryptionAlgorithm, InlineEncryptionKey, SecretEncoding,
     SinkEncryptionConfig,
@@ -7,6 +8,7 @@ use flow::pipeline::{SourceDefinition, SourceInputConfig, SourceInputMode, Sourc
 use flow::planner::sink::{
     CommonSinkProps, SinkDeltaOutputConfig, SinkOutputConfig, SinkOutputMode,
 };
+use flow::secret::{SecretContext, SecretRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeMap;
@@ -431,39 +433,50 @@ impl SinkCompressionConfigRequest {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SinkEncryptionConfigRequest {
-    pub algorithm: String,
-    pub key_id: String,
-    pub key: InlineEncryptionKeyRequest,
+/// Sink delivery encryption config, modeled as a discriminated union keyed on
+/// `algorithm` (VF-51). `algorithm` is required. One config selects exactly one
+/// algorithm, and each variant carries only its own parameters — adding a future
+/// suite (e.g. `chacha20-poly1305`, `aes-cbc-hmac` with its own `mac_key`) does
+/// not touch the existing variants. The IV/nonce is never a config field; it is
+/// generated per delivery and embedded in the ciphertext header.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(tag = "algorithm", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SinkEncryptionConfigRequest {
+    /// AES-GCM (AEAD). `key` is base64-encoded key bytes; the decoded length
+    /// selects AES-128/192/256.
+    AesGcm {
+        /// Key material: `store:NAME` (recommended) or an inline base64 literal.
+        key: SecretRef,
+    },
 }
 
 impl SinkEncryptionConfigRequest {
-    pub(super) fn to_encryption_config(&self) -> Result<SinkEncryptionConfig, String> {
-        let algorithm = EncryptionAlgorithm::try_from(self.algorithm.as_str())
-            .map_err(|err| err.to_string())?;
-        let key_id = self.key_id.trim();
-        if key_id.is_empty() {
-            return Err("delivery.encryption.key_id must be non-empty".to_string());
+    pub(super) fn to_encryption_config(
+        &self,
+        secrets: &SecretContext,
+    ) -> Result<SinkEncryptionConfig, String> {
+        match self {
+            SinkEncryptionConfigRequest::AesGcm { key } => {
+                // The store name is a stable, non-secret key identifier; inline
+                // keys have no name, so they fall back to a constant id.
+                let key_id = key.store_name().unwrap_or("inline").to_string();
+                // Resolve the key material (store ref or inline literal, subject
+                // to the policy). The resolved value is base64-encoded key bytes.
+                let (resolved, warning) = secrets
+                    .resolve(key, "delivery.encryption.key")
+                    .map_err(|err| err.to_string())?;
+                if let Some(message) = warning {
+                    tracing::warn!(target: "veloflux::secret", "{message}");
+                }
+                SinkEncryptionConfig::from_inline_key(
+                    EncryptionAlgorithm::AesGcm,
+                    key_id,
+                    InlineEncryptionKey::new(resolved.expose().to_string(), SecretEncoding::Base64),
+                )
+                .map_err(|err| err.to_string())
+            }
         }
-        let encoding =
-            SecretEncoding::try_from(self.key.encoding.as_str()).map_err(|err| err.to_string())?;
-        let config = SinkEncryptionConfig::from_inline_key(
-            algorithm,
-            key_id.to_string(),
-            InlineEncryptionKey::new(self.key.value.clone(), encoding),
-        )
-        .map_err(|err| err.to_string())?;
-        Ok(config)
     }
-}
-
-#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct InlineEncryptionKeyRequest {
-    pub value: String,
-    pub encoding: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -543,11 +556,102 @@ pub struct HttpSinkPropsRequest {
     pub method: Option<String>,
     pub timeout_secs: Option<u64>,
     pub headers: Option<BTreeMap<String, String>>,
+    /// Structured authentication (bearer/basic). Secret material is a `SecretRef`.
+    pub auth: Option<HttpAuthRequest>,
+    /// Catch-all for custom auth headers: header name -> secret reference.
+    pub secret_headers: Option<BTreeMap<String, SecretRef>>,
     pub content_type: Option<String>,
     pub max_body_size: Option<usize>,
     pub retry_max_attempts: Option<usize>,
     pub retry_backoff_ms: Option<u64>,
     pub retry_max_backoff_ms: Option<u64>,
+}
+
+/// Header names that must not appear in the plain `headers` map (VF-51 §7.4):
+/// they carry secrets and belong in `auth` / `secret_headers`.
+const SENSITIVE_HEADER_NAMES: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+
+/// Structured HTTP authentication. The secret is always a `SecretRef`.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum HttpAuthRequest {
+    Bearer {
+        token: SecretRef,
+    },
+    Basic {
+        username: String,
+        password: SecretRef,
+    },
+}
+
+impl HttpAuthRequest {
+    /// Resolve into the `Authorization` header `(name, value)`.
+    fn to_header(&self, secrets: &SecretContext) -> Result<(String, String), String> {
+        let value = match self {
+            HttpAuthRequest::Bearer { token } => {
+                let (v, warning) = secrets
+                    .resolve(token, "http.auth.token")
+                    .map_err(|e| e.to_string())?;
+                log_secret_warning(warning);
+                format!("Bearer {}", v.expose())
+            }
+            HttpAuthRequest::Basic { username, password } => {
+                let (v, warning) = secrets
+                    .resolve(password, "http.auth.password")
+                    .map_err(|e| e.to_string())?;
+                log_secret_warning(warning);
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{}", v.expose()));
+                format!("Basic {encoded}")
+            }
+        };
+        Ok(("Authorization".to_string(), value))
+    }
+}
+
+fn log_secret_warning(warning: Option<String>) {
+    if let Some(message) = warning {
+        tracing::warn!(target: "veloflux::secret", "{message}");
+    }
+}
+
+impl HttpSinkPropsRequest {
+    /// Reject sensitive auth headers placed in the plain `headers` map; they must
+    /// use `auth`/`secret_headers` so the value never lands in scannable config.
+    pub(super) fn reject_sensitive_plain_headers(&self) -> Result<(), String> {
+        if let Some(headers) = &self.headers {
+            for name in headers.keys() {
+                if SENSITIVE_HEADER_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+                    return Err(format!(
+                        "http sink header `{name}` carries a secret; use `auth` or `secret_headers`"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve `auth` and `secret_headers` into concrete header `(name, value)`
+    /// pairs (runtime only; never persisted).
+    pub(super) fn resolve_secret_headers(
+        &self,
+        secrets: &SecretContext,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut out = Vec::new();
+        if let Some(auth) = &self.auth {
+            out.push(auth.to_header(secrets)?);
+        }
+        if let Some(secret_headers) = &self.secret_headers {
+            for (name, reference) in secret_headers {
+                let (value, warning) = secrets
+                    .resolve(reference, "http.secret_headers")
+                    .map_err(|e| e.to_string())?;
+                log_secret_warning(warning);
+                out.push((name.clone(), value.expose().to_string()));
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -566,5 +670,177 @@ impl CommonSinkPropsRequest {
             batch_count: self.batch_count,
             batch_duration: duration,
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use flow::secret::{SecretContext, SecretPolicy, SecretStore};
+    use std::sync::Arc;
+
+    fn ctx_with(name: &str, value: &str) -> SecretContext {
+        let mut store = SecretStore::empty();
+        store.set(name, value);
+        SecretContext::new(Arc::new(store), SecretPolicy::Warn)
+    }
+
+    fn encryption_req(key_value: SecretRef) -> SinkEncryptionConfigRequest {
+        SinkEncryptionConfigRequest::AesGcm { key: key_value }
+    }
+
+    #[test]
+    fn sink_encryption_key_resolves_from_store() {
+        // Stored value is the base64-encoded 32-byte key text.
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let ctx = ctx_with("sink-aes-key", &key_b64);
+        let cfg = encryption_req(SecretRef::store("sink-aes-key"))
+            .to_encryption_config(&ctx)
+            .expect("resolve store key");
+        assert_eq!(cfg.key_bits, 256);
+        // key_id is derived from the store name.
+        assert_eq!(cfg.key_id, "sink-aes-key");
+    }
+
+    #[test]
+    fn sink_encryption_parses_explicit_algorithm() {
+        let req: SinkEncryptionConfigRequest =
+            serde_json::from_str(r#"{"algorithm":"aes-gcm","key":"store:k"}"#).unwrap();
+        assert_eq!(
+            req,
+            SinkEncryptionConfigRequest::AesGcm {
+                key: SecretRef::store("k")
+            }
+        );
+    }
+
+    #[test]
+    fn sink_encryption_requires_algorithm() {
+        // `algorithm` is mandatory; omitting it is rejected.
+        assert!(
+            serde_json::from_str::<SinkEncryptionConfigRequest>(r#"{"key":"store:k"}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn sink_encryption_rejects_unknown_algorithm_and_fields() {
+        // Unknown algorithm tag -> rejected (no such variant).
+        assert!(
+            serde_json::from_str::<SinkEncryptionConfigRequest>(
+                r#"{"algorithm":"rot13","key":"store:k"}"#
+            )
+            .is_err()
+        );
+        // Field not belonging to the selected algorithm -> rejected.
+        assert!(
+            serde_json::from_str::<SinkEncryptionConfigRequest>(
+                r#"{"algorithm":"aes-gcm","key":"store:k","mac_key":"store:m"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sink_encryption_inline_key_id_is_constant() {
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+        let cfg = encryption_req(SecretRef::inline(key_b64))
+            .to_encryption_config(&SecretContext::empty())
+            .expect("inline key under warn");
+        assert_eq!(cfg.key_id, "inline");
+    }
+
+    #[test]
+    fn sink_encryption_inline_key_still_works() {
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+        let ctx = SecretContext::empty(); // warn policy, empty store
+        let cfg = encryption_req(SecretRef::inline(key_b64))
+            .to_encryption_config(&ctx)
+            .expect("inline key under warn");
+        assert_eq!(cfg.key_bits, 128);
+    }
+
+    #[test]
+    fn sink_encryption_missing_store_key_errors() {
+        let ctx = ctx_with("other", "x");
+        let err = encryption_req(SecretRef::store("does-not-exist"))
+            .to_encryption_config(&ctx)
+            .unwrap_err();
+        assert!(err.contains("does-not-exist"), "{err}");
+    }
+
+    #[test]
+    fn sink_encryption_request_serializes_with_pointer() {
+        let json =
+            serde_json::to_string(&encryption_req(SecretRef::store("sink-aes-key"))).unwrap();
+        assert!(json.contains("store:sink-aes-key"), "{json}");
+    }
+
+    #[test]
+    fn rejects_sensitive_plain_headers() {
+        let mut req = HttpSinkPropsRequest::default();
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer leak".to_string());
+        req.headers = Some(headers);
+        let err = req.reject_sensitive_plain_headers().unwrap_err();
+        assert!(err.contains("Authorization"));
+        // The plain value is not echoed.
+        assert!(!err.contains("leak"));
+    }
+
+    #[test]
+    fn bearer_auth_resolves_to_authorization_header() {
+        let ctx = ctx_with("api-token", "t0ken");
+        let req = HttpSinkPropsRequest {
+            auth: Some(HttpAuthRequest::Bearer {
+                token: SecretRef::store("api-token"),
+            }),
+            ..Default::default()
+        };
+        let headers = req.resolve_secret_headers(&ctx).unwrap();
+        assert_eq!(
+            headers,
+            vec![("Authorization".to_string(), "Bearer t0ken".to_string())]
+        );
+    }
+
+    #[test]
+    fn basic_auth_encodes_credentials() {
+        let ctx = ctx_with("pw", "s3cr3t");
+        let req = HttpSinkPropsRequest {
+            auth: Some(HttpAuthRequest::Basic {
+                username: "alice".to_string(),
+                password: SecretRef::store("pw"),
+            }),
+            ..Default::default()
+        };
+        let headers = req.resolve_secret_headers(&ctx).unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode("alice:s3cr3t");
+        assert_eq!(headers[0].1, format!("Basic {expected}"));
+    }
+
+    #[test]
+    fn secret_headers_resolve_from_store() {
+        let ctx = ctx_with("xkey", "xyz");
+        let mut secret_headers = BTreeMap::new();
+        secret_headers.insert("X-Api-Key".to_string(), SecretRef::store("xkey"));
+        let req = HttpSinkPropsRequest {
+            secret_headers: Some(secret_headers),
+            ..Default::default()
+        };
+        let headers = req.resolve_secret_headers(&ctx).unwrap();
+        assert_eq!(headers, vec![("X-Api-Key".to_string(), "xyz".to_string())]);
+    }
+
+    #[test]
+    fn auth_request_serializes_with_secret_pointer() {
+        let req = HttpSinkPropsRequest {
+            auth: Some(HttpAuthRequest::Bearer {
+                token: SecretRef::store("api-token"),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("store:api-token"));
+        assert!(json.contains("\"type\":\"bearer\""));
     }
 }

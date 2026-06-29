@@ -208,7 +208,14 @@ and random jitter for transient failures (network errors, 5xx, 429).
 - `url: string` (required) — target URL (e.g. `https://example.com/api/metrics`)
 - Optional `method: string` (default: `"POST"`) — HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`
 - Optional `timeout_secs: number` (default: `30`) — per-request timeout in seconds
-- Optional `headers: object` (default: `{}`) — extra headers (e.g. `{ "Authorization": "Bearer token" }`)
+- Optional `headers: object` (default: `{}`) — extra **non-secret** headers (e.g. `{ "X-Env": "prod" }`).
+  Sensitive auth headers (`Authorization`, `Proxy-Authorization`, `Cookie`) are rejected here — use
+  `auth` / `secret_headers` instead so the value never lands in scannable config.
+- Optional `auth: object` — structured authentication. Bearer: `{ "type": "bearer", "token": "store:NAME" }`;
+  Basic: `{ "type": "basic", "username": "alice", "password": "store:NAME" }`. The secret is a
+  `store:NAME` reference into the encrypted secret store (see *Secret references* below).
+- Optional `secret_headers: object` — custom auth headers whose values are secrets: header name →
+  `store:NAME` reference (e.g. `{ "X-Api-Key": "store:my-api-key" }`).
 - Optional `content_type: string` — explicit `Content-Type` header. When omitted, inferred from the
   encoder kind (`application/json` for JSON, `application/octet-stream` for protobuf)
 - Optional `max_body_size: number` (default: `67108864`, i.e. 64 MiB) — maximum single-delivery body
@@ -241,7 +248,7 @@ and random jitter for transient failures (network errors, 5xx, 429).
     "url": "https://example.com/api/submit",
     "method": "PUT",
     "timeout_secs": 10,
-    "headers": { "Authorization": "Bearer xxx" },
+    "auth": { "type": "bearer", "token": "store:submit-api-token" },
     "retry_max_attempts": 3,
     "retry_backoff_ms": 500,
     "retry_max_backoff_ms": 10000
@@ -249,6 +256,34 @@ and random jitter for transient failures (network errors, 5xx, 429).
   "encoder": { "type": "json", "props": {} }
 }
 ```
+
+### Secret references
+
+Sensitive values (HTTP `auth`/`secret_headers`, MQTT `password`, sink encryption `key`) are not
+written inline in pipeline/stream config. Instead they reference an entry in the encrypted secret
+store as `store:NAME`. Manage entries with the local CLI (values are read from a prompt, stdin, or
+`--from-file` — never from the command line):
+
+```bash
+veloflux secrets set submit-api-token --from-file ./token.txt   # or: printf %s "$T" | veloflux secrets set submit-api-token
+veloflux secrets list
+veloflux secrets get submit-api-token   # debug
+veloflux secrets rm  submit-api-token
+```
+
+**Where the store lives.** The CLI and server both use `<data-dir>/secrets.enc`, where `<data-dir>`
+comes from the `--data-dir` flag (default `./tmp`). The CLI does not read the config file, so pass the
+**same `--data-dir`** you start the server with, e.g. `veloflux secrets set k --data-dir /var/lib/veloflux`.
+
+The store is encrypted with a root key from the `VELOFLUX_SECRETS_KEY` environment variable (base64
+32-byte key); without it a built-in key is used, which keeps secrets out of static scanners but is not
+confidential against someone holding the binary. Set the **same** env var for the CLI and the server.
+
+**Inline values and policy.** Any secret field value that does not start with `store:` is treated as
+an inline literal. The `VELOFLUX_SECRETS_POLICY` env var controls handling: `warn` (default) accepts
+inline literals and logs a warning; `strict` rejects them at config apply. Inline literals are written
+verbatim into pipeline config (scannable) — prefer `store:NAME`. Credentials in the wrong place (URL
+userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected regardless of policy.
 
 ## Response Shapes
 

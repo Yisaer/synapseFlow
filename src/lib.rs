@@ -19,6 +19,7 @@ pub mod config;
 pub mod distro;
 pub mod embedded;
 pub mod logging;
+pub mod secrets_cli;
 pub mod server;
 pub mod startup;
 pub use manager::{register_schema, schema_registry, SchemaParser};

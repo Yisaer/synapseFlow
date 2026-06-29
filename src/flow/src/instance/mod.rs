@@ -8,6 +8,7 @@ use crate::connector::{
 use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::pipeline::PipelineManager;
+use crate::secret::SecretContext;
 use crate::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
@@ -110,6 +111,9 @@ pub struct FlowInstance {
     custom_func_registry: Arc<parking_lot::RwLock<Arc<CustomFuncRegistry>>>,
     eventtime_type_registry: Arc<EventtimeTypeRegistry>,
     merger_registry: Arc<MergerRegistry>,
+    // Secret store + policy for resolving `SecretRef` config (VF-51). Installed
+    // at startup; defaults to an empty store so inline configs keep working.
+    secret_ctx: Arc<parking_lot::RwLock<SecretContext>>,
     cpu_metrics_state: Option<FlowInstanceCpuMetricsState>,
 }
 
@@ -264,12 +268,25 @@ impl FlowInstance {
             )),
             eventtime_type_registry: registries.eventtime_type_registry,
             merger_registry: registries.merger_registry,
+            secret_ctx: Arc::new(parking_lot::RwLock::new(SecretContext::empty())),
             cpu_metrics_state: None,
         }
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Snapshot of the secret resolution context (store + policy). Used during
+    /// config application to resolve `SecretRef` fields.
+    pub fn secret_context(&self) -> SecretContext {
+        self.secret_ctx.read().clone()
+    }
+
+    /// Install the secret context (called once at startup after loading the
+    /// encrypted store with the configured root key provider).
+    pub fn set_secret_context(&self, ctx: SecretContext) {
+        *self.secret_ctx.write() = ctx;
     }
 
     pub fn shared_registries(&self) -> FlowInstanceSharedRegistries {

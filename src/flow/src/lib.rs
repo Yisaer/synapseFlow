@@ -19,6 +19,7 @@ pub mod pipeline;
 pub mod planner;
 pub mod processor;
 mod runtime;
+pub mod secret;
 pub mod shared_stream;
 pub mod stateful;
 pub mod test_proto;

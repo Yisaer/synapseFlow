@@ -11,8 +11,9 @@ use tokio::time::sleep;
 use url::Url;
 
 use crate::backpressure_hub::BackpressureHub;
-use crate::connector::ConnectorError;
+use crate::connector::{mask_url_userinfo, url_has_userinfo, ConnectorError};
 use crate::runtime::TaskSpawner;
+use crate::secret::{SecretRef, SecretString};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,39 @@ pub struct SharedMqttClientConfig {
     pub client_id: String,
     pub qos: u8,
     pub max_packet_size: Option<usize>,
+    /// MQTT username (non-secret identifier, plaintext). VF-51 §7.3.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// MQTT password as a config-layer reference (`store:NAME` or inline). This
+    /// is what gets persisted/listed: a store ref serializes to `store:NAME`,
+    /// never the resolved value; inline literals redact in Debug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<SecretRef>,
+    /// Resolved password, injected at registration from the secret store. Never
+    /// serialized (in-memory only); read by `build_mqtt_options`.
+    #[serde(skip)]
+    pub resolved_password: Option<SecretString>,
+}
+
+impl SharedMqttClientConfig {
+    /// Resolve `password` against the secret context, populating
+    /// `resolved_password`. Returns an optional warning message (no value).
+    pub fn resolve_secrets(
+        &mut self,
+        secrets: &crate::secret::SecretContext,
+    ) -> Result<Option<String>, crate::secret::SecretError> {
+        match self.password.as_ref() {
+            Some(reference) => {
+                let (value, warning) = secrets.resolve(reference, "mqtt.password")?;
+                self.resolved_password = Some(value);
+                Ok(warning)
+            }
+            None => {
+                self.resolved_password = None;
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -507,26 +541,56 @@ fn normalize_broker_url(url: &str) -> String {
 }
 
 fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, ConnectorError> {
-    let endpoint = Url::parse(&normalize_broker_url(&config.broker_url)).map_err(|err| {
-        ConnectorError::Connection(format!("invalid broker URL `{}`: {err}", config.broker_url))
+    let normalized = normalize_broker_url(&config.broker_url);
+    // Credentials must live in `username`/`password`, never in the URL. A
+    // userinfo-bearing broker_url is rejected as invalid config (VF-51 §7.3) so
+    // it cannot land in init.json / redb in the first place.
+    if url_has_userinfo(&normalized) {
+        return Err(ConnectorError::Connection(format!(
+            "broker URL `{}` must not embed credentials; use the `username`/`password` fields",
+            mask_url_userinfo(&config.broker_url)
+        )));
+    }
+    let endpoint = Url::parse(&normalized).map_err(|err| {
+        ConnectorError::Connection(format!(
+            "invalid broker URL `{}`: {err}",
+            mask_url_userinfo(&config.broker_url)
+        ))
     })?;
 
     let scheme = endpoint.scheme();
 
     let host = endpoint.host_str().ok_or_else(|| {
-        ConnectorError::Connection(format!("broker URL `{}` missing host", config.broker_url))
+        ConnectorError::Connection(format!(
+            "broker URL `{}` missing host",
+            mask_url_userinfo(&config.broker_url)
+        ))
     })?;
 
     let port = endpoint
         .port()
         .or_else(|| default_port_for_scheme(scheme))
         .ok_or_else(|| {
-            ConnectorError::Connection(format!("broker URL `{}` missing port", config.broker_url))
+            ConnectorError::Connection(format!(
+                "broker URL `{}` missing port",
+                mask_url_userinfo(&config.broker_url)
+            ))
         })?;
 
     let mut options = MqttOptions::new(config.client_id.clone(), host, port);
     let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
     options.set_max_packet_size(max_packet_size, max_packet_size);
+
+    // Wire MQTT credentials (previously dropped). Password is already resolved
+    // from the secret store before reaching the runtime config.
+    if let Some(username) = config.username.as_ref().filter(|u| !u.is_empty()) {
+        let password = config
+            .resolved_password
+            .as_ref()
+            .map(|p| p.expose().to_string())
+            .unwrap_or_default();
+        options.set_credentials(username.clone(), password);
+    }
 
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
@@ -621,6 +685,9 @@ mod tests {
             client_id: "client_shared".to_string(),
             qos: 0,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         };
 
         manager
@@ -658,6 +725,9 @@ mod tests {
             client_id: "client_lazy".to_string(),
             qos: 0,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         };
 
         manager
@@ -706,6 +776,9 @@ mod tests {
             client_id: "client_embedded".to_string(),
             qos: 0,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         };
 
         manager
@@ -771,6 +844,9 @@ mod tests {
             client_id: "shared_client".to_string(),
             qos: 1,
             max_packet_size: Some(16384),
+            username: None,
+            password: None,
+            resolved_password: None,
         };
 
         let options = build_mqtt_options(&config).expect("build shared mqtt options");
@@ -793,6 +869,9 @@ mod tests {
             client_id: "shared_tls_client".to_string(),
             qos: 1,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         };
 
         let options = build_mqtt_options(&config).expect("build secure shared mqtt options");
@@ -804,5 +883,54 @@ mod tests {
         assert_eq!(options.client_id(), "shared_tls_client");
         assert_eq!(options.max_packet_size(), 64 * 1024 * 1024);
         assert!(matches!(options.transport(), Transport::Tls(_)));
+    }
+
+    #[test]
+    fn build_mqtt_options_rejects_broker_url_userinfo() {
+        let config = SharedMqttClientConfig {
+            key: "shared".to_string(),
+            broker_url: "mqtt://alice:s3cr3t@broker.example.com:1883".to_string(),
+            topic: "t".to_string(),
+            client_id: "c".to_string(),
+            qos: 0,
+            max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
+        };
+        let err = build_mqtt_options(&config).unwrap_err().to_string();
+        assert!(err.contains("must not embed credentials"), "{err}");
+        assert!(!err.contains("s3cr3t"), "error leaked password: {err}");
+    }
+
+    #[test]
+    fn resolve_secrets_populates_resolved_password() {
+        use crate::secret::{SecretContext, SecretPolicy, SecretRef, SecretStore};
+
+        let mut store = SecretStore::empty();
+        store.set("mqtt-pass", "s3cr3t");
+        let ctx = SecretContext::new(std::sync::Arc::new(store), SecretPolicy::Warn);
+
+        let mut config = SharedMqttClientConfig {
+            key: "shared".to_string(),
+            broker_url: "broker.example.com".to_string(),
+            topic: "t".to_string(),
+            client_id: "c".to_string(),
+            qos: 0,
+            max_packet_size: None,
+            username: Some("alice".to_string()),
+            password: Some(SecretRef::store("mqtt-pass")),
+            resolved_password: None,
+        };
+        let warning = config.resolve_secrets(&ctx).expect("resolve");
+        assert!(warning.is_none());
+        assert_eq!(
+            config.resolved_password.as_ref().map(|s| s.expose()),
+            Some("s3cr3t")
+        );
+        // Persisted form keeps the pointer, never the value.
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("store:mqtt-pass"));
+        assert!(!json.contains("s3cr3t"));
     }
 }

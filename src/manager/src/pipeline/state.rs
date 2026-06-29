@@ -58,7 +58,12 @@ impl AppState {
             }
         }
 
-        let shared_registries = state.instances.default_instance().shared_registries();
+        let default_instance = state.instances.default_instance();
+        let shared_registries = default_instance.shared_registries();
+        // Non-default instances are freshly built with an empty secret context;
+        // propagate the bootstrapped store/policy from the default instance so
+        // `store:NAME` references resolve everywhere (VF-51).
+        let secret_ctx = default_instance.secret_context();
         for spec in &flow_instances {
             let id = spec.id.trim();
             if id == DEFAULT_FLOW_INSTANCE_ID {
@@ -66,6 +71,7 @@ impl AppState {
             }
 
             let instance = build_in_process_flow_instance(spec, Some(shared_registries.clone()))?;
+            instance.set_secret_context(secret_ctx.clone());
             if state.instances.insert_local_instance(instance).is_some() {
                 return Err(format!("duplicate flow instance id in runtime: {id}"));
             }
@@ -224,5 +230,49 @@ impl AppState {
             permits.push(semaphore.try_acquire_owned()?);
         }
         Ok(permits)
+    }
+}
+
+#[cfg(test)]
+mod secret_propagation_tests {
+    use super::*;
+    use crate::instances::new_default_flow_instance;
+    use flow::secret::{SecretContext, SecretPolicy, SecretRef, SecretStore};
+
+    fn spec(id: &str) -> FlowInstanceSpec {
+        FlowInstanceSpec {
+            id: id.to_string(),
+            ..FlowInstanceSpec::default()
+        }
+    }
+
+    #[test]
+    fn secret_context_propagates_to_non_default_instances() {
+        // Default instance carries a bootstrapped store with `k -> v`.
+        let default = new_default_flow_instance();
+        let mut store = SecretStore::empty();
+        store.set("k", "v");
+        default.set_secret_context(SecretContext::new(
+            std::sync::Arc::new(store),
+            SecretPolicy::Warn,
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let app = AppState::new(
+            default,
+            storage,
+            vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("worker-1")],
+            0,
+        )
+        .expect("app state");
+
+        // The non-default instance resolves the same store key.
+        let worker = app.instances.get("worker-1").expect("worker instance");
+        let ctx = worker.secret_context();
+        let (value, _warn) = ctx
+            .resolve(&SecretRef::store("k"), "test.field")
+            .expect("resolve");
+        assert_eq!(value.expose(), "v");
     }
 }

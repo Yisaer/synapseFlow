@@ -38,7 +38,10 @@ impl NngPubSubSinkConnector {
             .validate()
             .map_err(|err| SinkConnectorError::Other(format!("invalid nng pubsub sink: {err}")))?;
         let url = CString::new(self.config.url.as_str()).map_err(|err| {
-            SinkConnectorError::Other(format!("invalid nng url `{}`: {err}", self.config.url))
+            SinkConnectorError::Other(format!(
+                "invalid nng url `{}`: {err}",
+                crate::connector::mask_url_userinfo(&self.config.url)
+            ))
         })?;
         let socket = pubsub0::Pub0::socket().map_err(|err| {
             SinkConnectorError::Other(format!("nng pub socket open failed: {err}"))

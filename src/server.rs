@@ -200,6 +200,16 @@ pub async fn init(
             return Err(err.into());
         }
     };
+
+    // Load the encrypted secret store (VF-51) and install it on the instance so
+    // `SecretRef` config fields resolve during pipeline application.
+    match flow::secret::bootstrap(std::path::Path::new(&data_dir)) {
+        Ok(ctx) => instance.set_secret_context(ctx),
+        Err(err) => {
+            init_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    }
     tracing::info!(
         mode = init_phase.mode(),
         flow_instance_id = %init_phase.flow_instance_id(),

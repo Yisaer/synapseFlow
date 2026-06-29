@@ -1,5 +1,7 @@
 use crate::connector::nng_pubsub::{strip_topic_prefix, NngPubSubSourceConfig};
-use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
+use crate::connector::{
+    mask_url_userinfo, ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector,
+};
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
 use anng::protocols::pubsub0;
@@ -127,7 +129,10 @@ async fn run_nng_source_loop(
                 &mut shutdown_rx,
                 &mut backoff,
                 max_backoff,
-                ConnectorError::Connection(format!("nng sub dial `{}` failed: {err}", config.url)),
+                ConnectorError::Connection(format!(
+                    "nng sub dial `{}` failed: {err}",
+                    mask_url_userinfo(&config.url)
+                )),
             )
             .await
             {

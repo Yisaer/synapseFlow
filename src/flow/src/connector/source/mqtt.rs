@@ -1,7 +1,9 @@
 //! MQTT source connector supporting shared or standalone clients.
 
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
-use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
+use crate::connector::{
+    mask_url_userinfo, ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector,
+};
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
 use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
@@ -294,14 +296,17 @@ async fn run_standalone_loop(
 fn build_mqtt_options(config: &MqttSourceConfig) -> Result<MqttOptions, ConnectorError> {
     let normalized = normalize_broker_url(&config.broker_url);
     let endpoint = Url::parse(&normalized).map_err(|err| {
-        ConnectorError::Connection(format!("invalid broker URL `{}`: {err}", config.broker_url))
+        ConnectorError::Connection(format!(
+            "invalid broker URL `{}`: {err}",
+            mask_url_userinfo(&config.broker_url)
+        ))
     })?;
     let scheme = endpoint.scheme();
 
     let host = endpoint.host_str().ok_or_else(|| {
         ConnectorError::Connection(format!(
             "broker URL `{}` is missing a host",
-            config.broker_url
+            mask_url_userinfo(&config.broker_url)
         ))
     })?;
 
@@ -311,7 +316,7 @@ fn build_mqtt_options(config: &MqttSourceConfig) -> Result<MqttOptions, Connecto
         .ok_or_else(|| {
             ConnectorError::Connection(format!(
                 "broker URL `{}` is missing a port",
-                config.broker_url
+                mask_url_userinfo(&config.broker_url)
             ))
         })?;
 
@@ -471,6 +476,9 @@ mod tests {
             client_id: "shared_source_client".to_string(),
             qos: 0,
             max_packet_size: None,
+            username: None,
+            password: None,
+            resolved_password: None,
         };
         manager
             .create_client(shared_cfg)

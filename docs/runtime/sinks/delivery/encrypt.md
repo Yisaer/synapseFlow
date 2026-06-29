@@ -9,7 +9,7 @@ Without compression:
 
 ```text
 PhysicalSinkConnector
-└─PhysicalSinkEncrypt(algorithm=aes-gcm, key_bits=256, key_id=sink-aes-v1)
+└─PhysicalSinkEncrypt(algorithm=aes-gcm, key_bits=256, key_id=sink-aes-key)
   └─PhysicalSinkEncoder(encoder=json, ...)
     └─...
 ```
@@ -18,7 +18,7 @@ With compression:
 
 ```text
 PhysicalSinkConnector
-└─PhysicalSinkEncrypt(algorithm=aes-gcm, key_bits=256, key_id=sink-aes-v1)
+└─PhysicalSinkEncrypt(algorithm=aes-gcm, key_bits=256, key_id=sink-aes-key)
   └─PhysicalSinkCompress(codec=gzip)
     └─PhysicalSinkEncoder(encoder=json, ...)
       └─...
@@ -29,37 +29,87 @@ parse or choose the encryption algorithm; they only receive encrypted bytes.
 
 ## Configuration
 
-Encryption is a delivery feature, not a connector-specific property. The JSON API accepts:
+Encryption is a delivery feature, not a connector-specific property. The config is a discriminated
+union keyed on the required `algorithm` field; each algorithm carries only its own parameters. For
+`aes-gcm` the only parameter is `key` — a `SecretRef` (store reference or inline literal):
+
+**Recommended — store reference (VF-51):**
 
 ```json
 {
   "delivery": {
     "encryption": {
       "algorithm": "aes-gcm",
-      "key_id": "sink-aes-v1",
-      "key": {
-        "value": "BASE64_ENCODED_16_24_OR_32_BYTE_KEY",
-        "encoding": "base64"
-      }
+      "key": "store:sink-aes-key"
     }
   }
 }
 ```
 
-`key.encoding` supports `base64` and `hex`. The decoded key length selects the AES-GCM suite:
+`"store:NAME"` resolves `NAME` from the encrypted secret store at config apply time. The pipeline
+config keeps only the pointer — the key material is never written into it.
 
-| Key length | Suite |
-|------------|-------|
-| 16 bytes | AES-128-GCM |
-| 24 bytes | AES-192-GCM |
-| 32 bytes | AES-256-GCM |
+**Inline literal (discouraged):**
 
-Inline key material is an MVP mechanism for local tests and controlled environments. It is still
-secret even when base64 or hex encoded. Long-term production deployments should use a future secret
-reference mechanism rather than storing key material directly in pipeline config.
+```json
+{
+  "delivery": {
+    "encryption": {
+      "algorithm": "aes-gcm",
+      "key": "BASE64_ENCODED_16_24_OR_32_BYTE_KEY"
+    }
+  }
+}
+```
 
-Inline key values are decoded during configuration conversion and are not retained by the runtime
-encryption config. Decoded inline key bytes are held in zeroizing memory and dropped with the writer.
+Any `key` value that does **not** start with `store:` is treated as an inline base64 literal. Whether
+it is allowed depends on the secret policy (`VELOFLUX_SECRETS_POLICY`, default `warn`): `warn` accepts
+it and logs a warning; `strict` rejects config apply. Inline material is still a secret and lands in
+scannable pipeline config — prefer `store:NAME`.
+
+### Field reference
+
+- `algorithm` (required) — selects the suite. Only `aes-gcm` is supported today. The config is a
+  discriminated union: one config selects exactly one suite, each suite carries only its own
+  parameters, and fields not belonging to the selected algorithm are rejected. Future suites (e.g.
+  `chacha20-poly1305`, or an `aes-cbc-hmac` that adds its own `mac_key`) add a variant without
+  affecting `aes-gcm`. The IV/nonce is never a config field — it is generated per delivery and
+  embedded in the ciphertext header.
+
+- `key` (required for `aes-gcm`) — `store:NAME` reference or inline base64 literal. The stored/inline
+  value is **base64-encoded key bytes**; the decoded length selects the AES-GCM suite:
+
+  | Key length | Suite |
+  |------------|-------|
+  | 16 bytes | AES-128-GCM |
+  | 24 bytes | AES-192-GCM |
+  | 32 bytes | AES-256-GCM |
+
+- `key_id` is **not** a config field. It is derived from the store name (`sink-aes-key` above) — or
+  `inline` for an inline key — and recorded in the ciphertext stream header / EXPLAIN as a non-secret
+  identifier.
+
+### Creating the stored key
+
+The store lives at `<data-dir>/secrets.enc` (the same `--data-dir` the server uses; default `./tmp`).
+Create the entry with the local CLI — the value is read from stdin/prompt/`--from-file`, never argv —
+then reference it by name:
+
+```bash
+# generate a 32-byte AES-256 key, base64-encode it, and store it under `sink-aes-key`:
+head -c 32 /dev/urandom | base64 | veloflux secrets set sink-aes-key --data-dir ./tmp
+```
+
+```json
+{ "delivery": { "encryption": { "algorithm": "aes-gcm", "key": "store:sink-aes-key" } } }
+```
+
+The store is encrypted with a root key from `VELOFLUX_SECRETS_KEY` (base64 32-byte key); without it a
+built-in key keeps secrets out of static scanners but is not confidential against someone holding the
+binary. See `docs/runtime/sources/shared_mqtt_client.md` for the full store/root-key model.
+
+Resolved key values are decoded during configuration conversion and are not retained by the runtime
+encryption config. Decoded key bytes are held in zeroizing memory and dropped with the writer.
 The RustCrypto AES-GCM dependency is built with its `zeroize` feature so cipher key material owned by
 the AEAD implementation is also cleared when those values are dropped.
 
