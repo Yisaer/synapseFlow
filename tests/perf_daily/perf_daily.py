@@ -487,7 +487,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--columns", type=int, default=15000)
     p.add_argument("--sql-mode", choices=("explicit", "star"), default="explicit")
 
-    p.add_argument("--broker-url", default="tcp://127.0.0.1:1883")
+    p.add_argument("--broker-url", default="tcp://127.0.0.1:1883",
+                   help="MQTT broker URL used by this script for publishing. "
+                        "Also used as the stream broker_url unless --stream-broker-url is set.")
+    p.add_argument("--stream-broker-url", default=None,
+                   help="MQTT broker URL passed to veloflux when creating the stream "
+                        "(defaults to --broker-url). Use this when veloflux runs in a "
+                        "different network namespace (e.g. QEMU guest).")
     p.add_argument("--topic", default="/perf/daily")
     p.add_argument("--qos", type=int, default=1)
 
@@ -532,6 +538,8 @@ def main(argv: List[str]) -> int:
     broker = parse_tcp_broker_url(args.broker_url)
     wait_for_tcp(broker.host, broker.port, wait_secs=60.0)
 
+    stream_broker_url = args.stream_broker_url or args.broker_url
+
     if args.command in ("provision", "run"):
         provision(
             base_url=args.base_url,
@@ -539,7 +547,7 @@ def main(argv: List[str]) -> int:
             stream_name=args.stream_name,
             pipeline_id=args.pipeline_id,
             columns=args.columns,
-            broker_url=args.broker_url,
+            broker_url=stream_broker_url,
             topic=args.topic,
             qos=args.qos,
             force=args.force,
@@ -615,6 +623,7 @@ def main(argv: List[str]) -> int:
                     "columns": args.columns,
                     "sql_mode": args.sql_mode,
                     "broker_url": args.broker_url,
+                    "stream_broker_url": stream_broker_url,
                     "topic": args.topic,
                     "qos": args.qos,
                     "cases": args.cases,
