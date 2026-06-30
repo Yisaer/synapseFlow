@@ -185,6 +185,9 @@ impl SliceRegistry {
 /// Central registry that tracks shared source streams that are owned by the process.
 pub struct SharedStreamRegistry {
     streams: RwLock<HashMap<String, Arc<SharedStreamInner>>>,
+    /// Synchronous membership index for plan-time source binding. Pipeline planning
+    /// is synchronous, so it must not block_on Tokio locks while bootstrapping.
+    registered_streams: SyncRwLock<HashSet<String>>,
     /// Per-stream append-only slice registries, kept in a **synchronous** side map
     /// (populated at `create_stream`) so plan-time slot resolution needs no `await`.
     slice_registries: SyncRwLock<HashMap<String, Arc<SyncRwLock<SliceRegistry>>>>,
@@ -204,6 +207,7 @@ impl SharedStreamRegistry {
     ) -> Self {
         Self {
             streams: RwLock::new(HashMap::new()),
+            registered_streams: SyncRwLock::new(HashSet::new()),
             slice_registries: SyncRwLock::new(HashMap::new()),
             spawner,
             merger_registry,
@@ -260,6 +264,7 @@ impl SharedStreamRegistry {
         )?;
         let info = inner.snapshot().await;
         streams.insert(info.name.clone(), inner);
+        self.registered_streams.write().insert(info.name.clone());
         Ok(info)
     }
 
@@ -306,21 +311,27 @@ impl SharedStreamRegistry {
 
     /// Drop a shared stream if it is not referenced by any pipelines.
     pub async fn drop_stream(&self, name: &str) -> Result<(), SharedStreamError> {
-        let entry = {
+        let (entry, stream_name) = {
             let mut guard = self.streams.write().await;
-            guard
+            let entry = guard
+                .get(name)
+                .cloned()
+                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?;
+
+            let consumers = entry.consumer_ids().await;
+            if !consumers.is_empty() {
+                return Err(SharedStreamError::InUse(consumers));
+            }
+
+            let entry = guard
                 .remove(name)
-                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
+                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?;
+            let stream_name = entry.name().to_string();
+            self.registered_streams.write().remove(&stream_name);
+            self.slice_registries.write().remove(&stream_name);
+            (entry, stream_name)
         };
 
-        let consumers = entry.consumer_ids().await;
-        if !consumers.is_empty() {
-            let mut guard = self.streams.write().await;
-            guard.insert(name.to_string(), entry);
-            return Err(SharedStreamError::InUse(consumers));
-        }
-
-        let stream_name = entry.name().to_string();
         let _task = self.spawner.spawn(async move {
             if let Err(err) = entry.stop_runtime().await {
                 tracing::error!(stream_name = %stream_name, error = %err, "shared stream shutdown error");
@@ -442,9 +453,13 @@ impl SharedStreamRegistry {
     }
 
     /// Whether the given stream name corresponds to a registered shared stream.
+    pub(crate) fn is_registered_sync(&self, name: &str) -> bool {
+        self.registered_streams.read().contains(name)
+    }
+
+    /// Whether the given stream name corresponds to a registered shared stream.
     pub async fn is_registered(&self, name: &str) -> bool {
-        let guard = self.streams.read().await;
-        guard.contains_key(name)
+        self.is_registered_sync(name)
     }
 }
 
@@ -1393,34 +1408,73 @@ mod tests {
         )]))
     }
 
+    fn test_config(name: &str, schema: Arc<Schema>) -> SharedStreamConfig {
+        let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
+        let decoder = Arc::new(JsonDecoder::new(
+            name.to_string(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
+        SharedStreamConfig::new(name.to_string(), schema)
+            .with_connector(Box::new(connector), decoder)
+    }
+
     #[tokio::test]
     async fn create_list_drop_shared_stream() {
         let registry = SharedStreamRegistry::new(test_spawner());
         let name = format!("shared_stream_test_{}", Uuid::new_v4());
         let schema = test_schema();
-        let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
-        let decoder = Arc::new(JsonDecoder::new(
-            name.clone(),
-            Arc::clone(&schema),
-            JsonMap::new(),
-        ));
-
-        let mut config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema));
-        config.set_connector(Box::new(connector), decoder);
+        let config = test_config(&name, Arc::clone(&schema));
 
         let info = registry.create_stream(config).await.unwrap();
         assert_eq!(info.name, name);
         assert_eq!(info.connector_id, format!("{name}_connector"));
+        assert!(registry.is_registered_sync(&name));
+        assert!(registry.slice_registries.read().contains_key(&name));
 
         let listed = registry.list_streams().await;
         assert!(listed.iter().any(|entry| entry.name == name));
 
         registry.drop_stream(&name).await.unwrap();
+        assert!(!registry.is_registered_sync(&name));
+        assert!(!registry.slice_registries.read().contains_key(&name));
 
         let listed = registry.list_streams().await;
         assert!(
             listed.iter().all(|entry| entry.name != name),
             "shared stream should be removed after drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_stream_keeps_sync_indexes_consistent_for_recreate() {
+        let registry = SharedStreamRegistry::new(test_spawner());
+        let name = format!("shared_stream_recreate_test_{}", Uuid::new_v4());
+        let schema = test_schema();
+
+        registry
+            .create_stream(test_config(&name, Arc::clone(&schema)))
+            .await
+            .unwrap();
+        let first_registry = registry.slice_registry(&name);
+        assert!(registry.is_registered_sync(&name));
+
+        registry.drop_stream(&name).await.unwrap();
+        assert!(!registry.is_registered_sync(&name));
+        assert!(!registry.slice_registries.read().contains_key(&name));
+
+        registry
+            .create_stream(test_config(&name, Arc::clone(&schema)))
+            .await
+            .unwrap();
+        let second_registry = registry.slice_registry(&name);
+
+        assert!(registry.streams.read().await.contains_key(&name));
+        assert!(registry.is_registered_sync(&name));
+        assert!(registry.slice_registries.read().contains_key(&name));
+        assert!(
+            !Arc::ptr_eq(&first_registry, &second_registry),
+            "recreated stream should own the live side-map slice registry"
         );
     }
 

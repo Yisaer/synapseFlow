@@ -249,9 +249,8 @@ fn build_schema_binding(
             .get(&source.name)
             .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
         let schema = definition.schema();
-        let is_shared = shared_stream_registry.is_some_and(|registry| {
-            futures::executor::block_on(registry.is_registered(&source.name))
-        });
+        let is_shared = shared_stream_registry
+            .is_some_and(|registry| registry.is_registered_sync(&source.name));
         let kind = if is_shared {
             SourceBindingKind::Shared
         } else if definition.stream_type() == crate::catalog::StreamType::Memory

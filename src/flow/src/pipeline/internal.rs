@@ -491,9 +491,7 @@ fn build_pipeline_runtime(
                 }
 
                 let schema = definition.schema();
-                let kind = if futures::executor::block_on(
-                    shared_stream_registry.is_registered(&source.name),
-                ) {
+                let kind = if shared_stream_registry.is_registered_sync(&source.name) {
                     SourceBindingKind::Shared
                 } else if definition.stream_type() == crate::catalog::StreamType::Memory
                     && definition.decoder().kind() == "none"
