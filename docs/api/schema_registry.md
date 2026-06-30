@@ -5,6 +5,11 @@ defining, storing, and reusing named schemas in veloflux.
 
 For the REST API contract, see `user_docs/api/schema.md`.
 
+> **Resource IDs.** Named-schema names (used as the store key and as `schema.ref`
+> from a stream) must match `` `[A-Za-z][A-Za-z0-9_]{0,127}` `` — start with an
+> ASCII letter, then ASCII letters, digits, or underscores, up to 128 bytes.
+> Names are case-sensitive and never trimmed.
+
 ## Overview
 
 The schema registry decouples schema definition from stream creation:

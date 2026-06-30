@@ -115,6 +115,11 @@ not an implicit aggregate and it must not silently fall back to `default`.
 - `400 Bad Request`: the stream exists but is not a shared stream
 - `400 Bad Request`: `flow_instance_id` is required when multiple flow instances are declared
 - `400 Bad Request`: `flow_instance_id` is empty or undeclared
+- `400 Bad Request`: the `:name` path segment or `flow_instance_id` is not a valid resource id
+
+The `:name` path segment and the `flow_instance_id` query parameter must match
+`` `[A-Za-z][A-Za-z0-9_]{0,127}` `` (start with an ASCII letter, then ASCII
+letters, digits, or underscores; case-sensitive; not trimmed).
 
 ## Response Shape
 

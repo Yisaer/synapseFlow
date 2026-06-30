@@ -2,6 +2,7 @@ use crate::MQTT_QOS;
 use crate::audit::ResourceMutationLog;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::AppState;
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::storage_bridge;
 use crate::storage_bridge::{stored_stream_from_request, stream_definition_from_stored};
 use axum::{
@@ -505,8 +506,11 @@ pub async fn create_stream_handler(
     let mut req = req;
     req.normalize();
     let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), None);
-    if req.name.trim().is_empty() {
-        let err = "stream name must not be empty".to_string();
+    if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &req.name) {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+    if let Err(err) = validate_stream_connector_key(&req) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -689,6 +693,9 @@ pub async fn describe_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let stored = match state.storage.get_stream(&name) {
         Ok(Some(stream)) => stream,
         Ok(None) => {
@@ -767,6 +774,9 @@ pub async fn shared_stream_stats_handler(
     Path(name): Path<String>,
     Query(query): Query<SharedStreamStatsQuery>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let stored = match state.storage.get_stream(&name) {
         Ok(Some(stream)) => stream,
         Ok(None) => {
@@ -832,7 +842,9 @@ pub async fn upsert_stream_handler(
     Path(name): Path<String>,
     Json(req): Json<UpsertStreamRequest>,
 ) -> impl IntoResponse {
-    let name = name.trim().to_string();
+    if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let audit = ResourceMutationLog::new("stream", "update", name.as_str(), None);
     let _permit = match state.try_acquire_stream_op(&name).await {
         Ok(permit) => permit,
@@ -917,6 +929,10 @@ pub async fn upsert_stream_handler(
     new_req.normalize();
 
     // ── Full validation (same checks as create) ──
+    if let Err(err) = validate_stream_connector_key(&new_req) {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let schema = match build_schema_from_request(&new_req) {
         Ok(s) => s,
         Err(err) => {
@@ -1047,6 +1063,9 @@ pub async fn delete_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let audit = ResourceMutationLog::new("stream", "delete", name.as_str(), None);
     let _permit = match state.try_acquire_stream_op(&name).await {
         Ok(permit) => permit,
@@ -1161,15 +1180,8 @@ fn resolve_shared_stream_stats_flow_instance_id(
 ) -> Result<String, Box<axum::response::Response>> {
     match query.flow_instance_id.as_deref() {
         Some(id) => {
-            let id = id.trim();
-            if id.is_empty() {
-                return Err(Box::new(
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "flow_instance_id must not be empty".to_string(),
-                    )
-                        .into_response(),
-                ));
+            if let Err(err) = validate_resource_id(ResourceIdKind::FlowInstanceId, id) {
+                return Err(Box::new((StatusCode::BAD_REQUEST, err).into_response()));
             }
             if !state.is_declared_instance(id) {
                 return Err(Box::new(
@@ -1361,14 +1373,12 @@ pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Sch
         return Ok(flow::codec::default_video_schema(req.name.clone()));
     }
     if let Some(ref_name) = &req.schema.r#ref {
-        let trimmed = ref_name.trim();
-        if trimmed.is_empty() {
-            return Err("schema ref must not be empty".to_string());
-        }
+        validate_resource_id(ResourceIdKind::SchemaName, ref_name)
+            .map_err(|err| format!("invalid schema ref: {err}"))?;
         return named_schema_store()
-            .get(trimmed)
+            .get(ref_name)
             .map(|schema| (*schema).clone())
-            .ok_or_else(|| format!("referenced schema '{}' not found", trimmed));
+            .ok_or_else(|| format!("referenced schema '{}' not found", ref_name));
     }
     let (schema, _bundle) =
         schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)?;
@@ -1747,6 +1757,23 @@ fn json_semantically_eq(a: &JsonValue, b: &JsonValue) -> bool {
     }
 }
 
+/// Validate the shared MQTT `connector_key` reference (if present) against the
+/// resource-id grammar. The value is already trimmed by [`CreateStreamRequest::normalize`].
+pub(crate) fn validate_stream_connector_key(req: &CreateStreamRequest) -> Result<(), String> {
+    if !req.stream_type.eq_ignore_ascii_case("mqtt") {
+        return Ok(());
+    }
+    if let Some(JsonValue::String(key)) = req.props.fields.get("connector_key") {
+        validate_resource_id(ResourceIdKind::SharedMqttClientKey, key).map_err(|err| {
+            format!(
+                "stream `{}` references invalid mqtt connector_key: {err}",
+                req.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_memory_stream_topic(
     req: &CreateStreamRequest,
     props: &MemoryStreamProps,
@@ -1754,13 +1781,12 @@ pub(crate) fn validate_memory_stream_topic(
     if !req.stream_type.eq_ignore_ascii_case("memory") {
         return Ok(());
     }
-    let topic = props.topic.trim();
-    if topic.is_empty() {
-        return Err(format!(
-            "stream `{}` memory topic must not be empty",
+    validate_resource_id(ResourceIdKind::MemoryTopic, &props.topic).map_err(|err| {
+        format!(
+            "stream `{}` references invalid memory topic: {err}",
             req.name
-        ));
-    }
+        )
+    })?;
 
     Ok(())
 }
@@ -2799,5 +2825,68 @@ mod tests {
             instance.get_stream(&stream_req.name).await.is_ok(),
             "referenced stream must remain installed in runtime after delete conflict",
         );
+    }
+
+    #[tokio::test]
+    async fn create_stream_rejects_invalid_name() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+
+        let mut req = mqtt_stream_request("valid");
+        req.name = "bad-stream".to_string();
+        let response = create_stream_handler(State(state.clone()), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("stream name"), "got: {message}");
+        assert!(
+            state
+                .storage
+                .get_stream("bad-stream")
+                .expect("read stream")
+                .is_none(),
+            "invalid name must not persist",
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_stream_stats_rejects_invalid_flow_instance_id() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+
+        let query = SharedStreamStatsQuery {
+            flow_instance_id: Some("bad-fi".to_string()),
+        };
+        let resp = *resolve_shared_stream_stats_flow_instance_id(&state, &query)
+            .expect_err("invalid flow_instance_id should be rejected");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("flow_instance_id"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn delete_stream_rejects_invalid_path_name() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+
+        let response = delete_stream_handler(State(state), Path("bad-stream".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("stream name"), "got: {message}");
     }
 }

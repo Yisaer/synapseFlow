@@ -147,7 +147,11 @@ WASM binaries are stored under `<base_dir>/wasm_files/<sha256>.wasm`.
 ### POST `/udfs/upload`
 
 Request: `multipart/form-data`
-- Field `name` (text): canonical function name (e.g. `my_udf`)
+- Field `name` (text): canonical function name (e.g. `my_udf`). The name is
+  canonicalized to lowercase, then must match the resource-id grammar
+  `` `[A-Za-z][A-Za-z0-9_]{0,127}` `` (a letter followed by letters, digits, or
+  underscores). `GET`/`DELETE /udfs/:name` apply the same lowercase
+  canonicalization before lookup. Invalid names return `400 Bad Request`.
 - Field `wasm_file` (binary): the `.wasm` file
 
 Response `200 OK`:

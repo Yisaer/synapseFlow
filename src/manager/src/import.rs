@@ -12,8 +12,8 @@ use crate::audit::ResourceMutationLog;
 use crate::export::{
     ExportBundleV1, ExportMemoryTopic, ExportPipelineRunState, ExportUdf, build_export_bundle,
 };
-use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
+use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 use crate::storage_bridge;
 use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
 
@@ -204,10 +204,8 @@ where
     let mut mqtt_configs = Vec::with_capacity(bundle.resources.shared_mqtt_clients.len());
     let mut mqtt_keys = BTreeSet::new();
     for cfg in &bundle.resources.shared_mqtt_clients {
-        let key = cfg.key.trim();
-        if key.is_empty() {
-            return Err("shared mqtt client key must not be empty".to_string());
-        }
+        validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.key)?;
+        let key = cfg.key.as_str();
         if !mqtt_keys.insert(key.to_string()) {
             return Err(format!("duplicate shared mqtt client key in bundle: {key}"));
         }
@@ -222,10 +220,8 @@ where
     let mut schemas = Vec::with_capacity(bundle.resources.schemas.len());
     let mut schema_names = BTreeSet::new();
     for schema in &bundle.resources.schemas {
-        let name = schema.name.trim();
-        if name.is_empty() {
-            return Err("schema name must not be empty".to_string());
-        }
+        validate_resource_id(ResourceIdKind::SchemaName, &schema.name)?;
+        let name = schema.name.as_str();
         if !schema_names.insert(name.to_string()) {
             return Err(format!("duplicate schema name in bundle: {name}"));
         }
@@ -318,10 +314,8 @@ fn validate_import_udfs(udfs: &[ExportUdf]) -> Result<Vec<StoredUdf>, String> {
     let mut names = BTreeSet::new();
     let mut result = Vec::with_capacity(udfs.len());
     for udf in udfs {
-        let name = udf.name.trim();
-        if name.is_empty() {
-            return Err("UDF name must not be empty".to_string());
-        }
+        validate_resource_id(ResourceIdKind::UdfName, &udf.name)?;
+        let name = udf.name.as_str();
         let sha = udf.wasm_sha256.trim();
         if sha.is_empty() {
             return Err(format!("UDF '{name}' has empty wasm_sha256"));
@@ -455,10 +449,8 @@ fn validate_memory_topic(
     topic: &ExportMemoryTopic,
     names: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    let topic_name = topic.topic.trim();
-    if topic_name.is_empty() {
-        return Err("memory topic name must not be empty".to_string());
-    }
+    validate_resource_id(ResourceIdKind::MemoryTopic, &topic.topic)?;
+    let topic_name = topic.topic.as_str();
     if topic.capacity == 0 {
         return Err(format!(
             "memory topic {} capacity must be greater than 0",
@@ -475,9 +467,7 @@ fn validate_stream_request(
     req: &CreateStreamRequest,
     stream_names: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    if req.name.trim().is_empty() {
-        return Err("stream name must not be empty".to_string());
-    }
+    validate_resource_id(ResourceIdKind::StreamName, &req.name)?;
     if !stream_names.insert(req.name.clone()) {
         return Err(format!("duplicate stream name in bundle: {}", req.name));
     }
@@ -490,7 +480,7 @@ fn normalize_pipeline_request(
     let mut normalized = req.clone();
     normalized.normalize();
     normalized.flow_instance_id =
-        Some(canonical_flow_instance_id(req.flow_instance_id.as_deref())?);
+        Some(defaulted_flow_instance_id(req.flow_instance_id.as_deref())?);
     validate_create_request(&normalized)?;
     Ok(normalized)
 }
@@ -515,9 +505,7 @@ fn validate_pipeline_run_state(
     pipeline_ids: &BTreeSet<String>,
     state_ids: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    if run_state.pipeline_id.trim().is_empty() {
-        return Err("pipeline_run_state pipeline_id must not be empty".to_string());
-    }
+    validate_resource_id(ResourceIdKind::PipelineId, &run_state.pipeline_id)?;
     if !state_ids.insert(run_state.pipeline_id.clone()) {
         return Err(format!(
             "duplicate pipeline_run_state entry in bundle: {}",
@@ -531,14 +519,6 @@ fn validate_pipeline_run_state(
         ));
     }
     Ok(())
-}
-
-fn canonical_flow_instance_id(value: Option<&str>) -> Result<String, String> {
-    let id = value.unwrap_or(DEFAULT_FLOW_INSTANCE_ID).trim();
-    if id.is_empty() {
-        return Err("flow_instance_id must not be empty".to_string());
-    }
-    Ok(id.to_string())
 }
 
 fn import_export_busy_response() -> axum::response::Response {
@@ -899,6 +879,95 @@ mod tests {
             serde_json::to_value(&bundle_after.resources).unwrap(),
             serde_json::to_value(&old_bundle.resources).unwrap()
         );
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_stream_name() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.streams[0].name = "bad-stream".to_string();
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(err.contains("stream name"), "unexpected error: {err}");
+        assert!(err.contains("invalid character"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_pipeline_id() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.pipelines[0].id = "bad.pipe".to_string();
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(err.contains("pipeline id"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_flow_instance_id_before_declared_lookup() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        // Use a syntactically invalid id (hyphen): grammar must reject it before
+        // the declared-instance lookup runs, so the error is about the grammar,
+        // not "not declared by config".
+        bundle.resources.pipelines[0].flow_instance_id = Some("bad-fi".to_string());
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(err.contains("flow_instance_id"), "unexpected error: {err}");
+        assert!(
+            !err.contains("not declared by config"),
+            "grammar must be checked before declared lookup: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_shared_mqtt_key() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.shared_mqtt_clients[0].key = "bad/key".to_string();
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(
+            err.contains("shared mqtt client key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_memory_topic() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.memory_topics[0].topic = "bad-topic".to_string();
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(err.contains("memory topic"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_schema_name() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.schemas.push(StoredSchemaSample::invalid());
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(err.contains("schema name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_invalid_udf_name() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.udfs = vec![ExportUdf {
+            name: "bad-udf".to_string(),
+            wasm_sha256: "aaaa".to_string(),
+        }];
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert!(err.contains("UDF name"), "unexpected error: {err}");
+    }
+
+    /// Helper producing an `ExportSchema` with an invalid (hyphenated) name.
+    struct StoredSchemaSample;
+    impl StoredSchemaSample {
+        fn invalid() -> crate::export::ExportSchema {
+            crate::export::ExportSchema {
+                name: "bad-schema".to_string(),
+                schema_type: "json".to_string(),
+                props: serde_json::Map::new(),
+            }
+        }
     }
 
     #[test]

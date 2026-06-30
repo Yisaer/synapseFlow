@@ -4,6 +4,11 @@ This document describes the **Manager** REST API for exporting persisted metadat
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
+> **Resource IDs.** Resource ids in the exported bundle (stream names, pipeline
+> ids, schema names, memory topics, shared MQTT client keys, UDF names, and
+> `flow_instance_id` references) follow `` `[A-Za-z][A-Za-z0-9_]{0,127}` `` — the
+> same grammar required by the create APIs and re-validated on import.
+
 ## Endpoints
 
 ### Export Metadata Bundle

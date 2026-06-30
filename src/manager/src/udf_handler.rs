@@ -10,6 +10,7 @@ use storage::StoredUdf;
 use udf::WasmEngine;
 
 use crate::pipeline::AppState;
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 
 #[derive(Serialize)]
 pub struct UdfInfo {
@@ -50,10 +51,16 @@ pub async fn upload_udf_handler(
         }
     }
 
+    // UDF names are canonicalized to lowercase (the custom function registry is
+    // case-insensitive), then validated against the unified resource-id grammar
+    // (VF-51 §4.3).
     let name = match name {
         Some(n) if !n.trim().is_empty() => n.trim().to_lowercase(),
         _ => return (StatusCode::BAD_REQUEST, "field 'name' is required").into_response(),
     };
+    if let Err(err) = validate_resource_id(ResourceIdKind::UdfName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
 
     let wasm_bytes = match wasm_bytes {
         Some(b) if !b.is_empty() => b,
@@ -195,11 +202,24 @@ pub async fn list_udfs_handler(State(state): State<AppState>) -> impl IntoRespon
     (StatusCode::OK, Json(infos)).into_response()
 }
 
+/// Canonicalize a `:name` path segment for UDF lookup: lowercase to match the
+/// case-insensitive registry, then validate against the resource-id grammar.
+fn canonical_udf_path_name(name: &str) -> Result<String, Box<axum::response::Response>> {
+    let canonical = name.trim().to_lowercase();
+    validate_resource_id(ResourceIdKind::UdfName, &canonical)
+        .map_err(|err| Box::new((StatusCode::BAD_REQUEST, err).into_response()))?;
+    Ok(canonical)
+}
+
 /// GET /udfs/:name
 pub async fn get_udf_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    let name = match canonical_udf_path_name(&name) {
+        Ok(name) => name,
+        Err(resp) => return *resp,
+    };
     match state.storage.get_udf(&name) {
         Ok(Some(udf)) => {
             let size_bytes = state
@@ -235,6 +255,10 @@ pub async fn delete_udf_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    let name = match canonical_udf_path_name(&name) {
+        Ok(name) => name,
+        Err(resp) => return *resp,
+    };
     let stored = match state.storage.get_udf(&name) {
         Ok(Some(udf)) => udf,
         Ok(None) => {
@@ -272,4 +296,30 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_udf_path_name;
+
+    #[test]
+    fn canonical_udf_path_name_lowercases_then_validates() {
+        // Uppercase input is canonicalized to lowercase, matching the
+        // case-insensitive registry, then accepted by the resource-id grammar.
+        assert_eq!(
+            canonical_udf_path_name("MyUdf").expect("valid after canonicalization"),
+            "myudf"
+        );
+        assert_eq!(
+            canonical_udf_path_name("  Add_One  ").expect("trim + lowercase"),
+            "add_one"
+        );
+    }
+
+    #[test]
+    fn canonical_udf_path_name_rejects_invalid_canonical_name() {
+        // A hyphen survives lowercasing and is rejected by the grammar.
+        let resp = canonical_udf_path_name("bad-udf").expect_err("rejected");
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
 }

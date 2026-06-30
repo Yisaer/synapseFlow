@@ -4,6 +4,14 @@ This document describes the **Manager** REST API for importing persisted metadat
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
+> **Resource IDs.** Every resource id in the bundle — stream names, pipeline ids,
+> sink ids, schema names, memory topics, shared MQTT client keys, UDF names, and
+> `flow_instance_id` references — must match `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``,
+> the same grammar enforced by the REST API. Import cannot bypass these rules: a
+> bundle containing any invalid id is rejected as a whole with `400 Bad Request`,
+> naming the first offending field. The same validation is applied to
+> `init.json` at startup.
+
 ## Endpoint
 
 ### Import Metadata Bundle

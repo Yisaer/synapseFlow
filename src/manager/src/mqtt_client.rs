@@ -9,11 +9,10 @@ use storage::StorageError;
 use tokio::sync::TryAcquireError;
 
 use crate::pipeline::AppState;
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::storage_bridge::{mqtt_config_from_stored, stored_mqtt_from_config};
 fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), String> {
-    if cfg.key.trim().is_empty() {
-        return Err("shared mqtt client key must not be empty".to_string());
-    }
+    validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.key)?;
     if cfg.broker_url.trim().is_empty() {
         return Err(format!(
             "shared mqtt client {} broker_url must not be empty",
@@ -209,6 +208,9 @@ pub async fn get_shared_mqtt_client_handler(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_resource_id(ResourceIdKind::SharedMqttClientKey, &key) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     match state.storage.get_mqtt_config(&key) {
         Ok(Some(stored)) => {
             (StatusCode::OK, Json(mqtt_config_from_stored(&stored))).into_response()
@@ -230,6 +232,9 @@ pub async fn delete_shared_mqtt_client_handler(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(err) = validate_resource_id(ResourceIdKind::SharedMqttClientKey, &key) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let _permit = match state
         .try_acquire_shared_mqtt_ops(std::iter::once(key.clone()))
         .await
@@ -351,7 +356,7 @@ mod tests {
                     key: "   ".to_string(),
                     ..shared_mqtt_cfg("shared")
                 },
-                "shared mqtt client key must not be empty",
+                "shared mqtt client key must not be whitespace (expected [A-Za-z][A-Za-z0-9_]{0,127})",
             ),
             (
                 SharedMqttClientConfig {
@@ -398,6 +403,35 @@ mod tests {
                 .expect("list shared mqtt configs")
                 .is_empty(),
             "invalid creates must not persist shared mqtt configs",
+        );
+    }
+
+    #[tokio::test]
+    async fn create_shared_mqtt_client_rejects_invalid_key() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
+
+        let cfg = SharedMqttClientConfig {
+            key: "bad-key".to_string(),
+            ..shared_mqtt_cfg("shared")
+        };
+        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("shared mqtt client key"), "got: {message}");
+        assert!(
+            state
+                .storage
+                .list_mqtt_configs()
+                .expect("list shared mqtt configs")
+                .is_empty(),
+            "invalid key must not persist",
         );
     }
 

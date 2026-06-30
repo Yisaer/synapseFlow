@@ -23,6 +23,7 @@ use super::types::{
     BuildPipelineContextResponse, CollectStatsQuery, CreatePipelineRequest, CreatePipelineResponse,
     GetPipelineResponse, ListPipelineItem, StopPipelineQuery, UpsertPipelineRequest,
 };
+use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 
 fn parse_stop_mode(mode: &str) -> Result<PipelineStopMode, String> {
     match mode.trim().to_ascii_lowercase().as_str() {
@@ -90,12 +91,13 @@ fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
     }
 }
 
-fn canonical_flow_instance_id(value: Option<&str>) -> Result<String, String> {
-    let id = value.unwrap_or(DEFAULT_FLOW_INSTANCE_ID).trim();
-    if id.is_empty() {
-        return Err("flow_instance_id must not be empty".to_string());
-    }
-    Ok(id.to_string())
+/// Validate a `:id` path segment against the resource-id grammar before any
+/// storage access or operation lock is taken (VF-51 §5.3). Returns the
+/// `400 Bad Request` response to send when the id is invalid.
+fn pipeline_path_id_error(id: &str) -> Option<axum::response::Response> {
+    validate_resource_id(ResourceIdKind::PipelineId, id)
+        .err()
+        .map(|err| (StatusCode::BAD_REQUEST, err).into_response())
 }
 
 fn local_instance_response(
@@ -145,7 +147,7 @@ async fn resolve_pipeline_spec(
                 .into_response());
         }
     };
-    let flow_instance_id = canonical_flow_instance_id(req.flow_instance_id.as_deref())
+    let flow_instance_id = defaulted_flow_instance_id(req.flow_instance_id.as_deref())
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err).into_response())?;
     req.flow_instance_id = Some(flow_instance_id.clone());
 
@@ -217,7 +219,7 @@ pub async fn create_pipeline_handler(
 ) -> impl IntoResponse {
     let mut req = req;
     req.normalize();
-    let flow_instance_id = match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
+    let flow_instance_id = match defaulted_flow_instance_id(req.flow_instance_id.as_deref()) {
         Ok(id) => id,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -337,7 +339,9 @@ pub async fn upsert_pipeline_handler(
     Path(id): Path<String>,
     Json(req): Json<UpsertPipelineRequest>,
 ) -> impl IntoResponse {
-    let id = id.trim().to_string();
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -363,7 +367,7 @@ pub async fn upsert_pipeline_handler(
 
     let flow_instance_id = match old_pipeline.as_ref() {
         Some(stored) => match storage_bridge::pipeline_request_from_stored(stored) {
-            Ok(req) => match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
+            Ok(req) => match defaulted_flow_instance_id(req.flow_instance_id.as_deref()) {
                 Ok(id) => id,
                 Err(err) => {
                     return (
@@ -556,6 +560,9 @@ pub async fn get_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let stored = match state.storage.get_pipeline(&id) {
         Ok(Some(pipeline)) => pipeline,
         Ok(None) => {
@@ -581,7 +588,7 @@ pub async fn get_pipeline_handler(
         }
     };
     let mut spec = spec;
-    let flow_instance_id = match canonical_flow_instance_id(spec.flow_instance_id.as_deref()) {
+    let flow_instance_id = match defaulted_flow_instance_id(spec.flow_instance_id.as_deref()) {
         Ok(id) => id,
         Err(err) => {
             return (
@@ -625,6 +632,9 @@ pub async fn build_pipeline_context_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let (_flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
         Err(resp) => return resp,
@@ -656,6 +666,9 @@ pub async fn explain_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let (flow_instance_id, _) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
         Err(resp) => return resp,
@@ -692,6 +705,9 @@ pub async fn collect_pipeline_stats_handler(
     Path(id): Path<String>,
     Query(query): Query<CollectStatsQuery>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -745,6 +761,9 @@ pub async fn start_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -821,6 +840,9 @@ pub async fn stop_pipeline_handler(
     Path(id): Path<String>,
     Query(query): Query<StopPipelineQuery>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -888,6 +910,9 @@ pub async fn delete_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = pipeline_path_id_error(&id) {
+        return resp;
+    }
     let mut audit = ResourceMutationLog::new("pipeline", "delete", id.as_str(), None);
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
@@ -914,7 +939,7 @@ pub async fn delete_pipeline_handler(
         }
     };
     let flow_instance_id = match storage_bridge::pipeline_request_from_stored(&stored) {
-        Ok(req) => match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
+        Ok(req) => match defaulted_flow_instance_id(req.flow_instance_id.as_deref()) {
             Ok(id) => Some(id),
             Err(err) => {
                 tracing::warn!(pipeline_id = %id, error = %err, "invalid stored flow_instance_id while deleting pipeline");
@@ -985,7 +1010,7 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                     }
                 };
                 let flow_instance_id =
-                    match canonical_flow_instance_id(spec.flow_instance_id.as_deref()) {
+                    match defaulted_flow_instance_id(spec.flow_instance_id.as_deref()) {
                         Ok(id) => id,
                         Err(err) => {
                             return (
@@ -1023,7 +1048,7 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pipeline_context_handler, start_pipeline_handler};
+    use super::{build_pipeline_context_handler, create_pipeline_handler, start_pipeline_handler};
     use crate::pipeline::{AppState, CreatePipelineRequest, types};
     use crate::storage_bridge::{
         stored_mqtt_from_config, stored_pipeline_from_request, stored_stream_from_request,
@@ -1360,6 +1385,72 @@ mod tests {
         assert_eq!(
             String::from_utf8(body.to_vec()).expect("utf8 build context body"),
             "shared mqtt client config missing_shared_sink missing from storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_pipeline_rejects_invalid_id() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+
+        let req = CreatePipelineRequest {
+            id: "bad-id".to_string(),
+            flow_instance_id: Some("default".to_string()),
+            sql: "select * from src".to_string(),
+            sources: Vec::new(),
+            sinks: vec![mqtt_sink_request("sink", "shared")],
+            options: Default::default(),
+        };
+        let response = create_pipeline_handler(State(state.clone()), axum::Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("pipeline id"), "got: {message}");
+        assert!(
+            state
+                .storage
+                .get_pipeline("bad-id")
+                .expect("read pipeline")
+                .is_none(),
+            "invalid id must not persist",
+        );
+    }
+
+    #[tokio::test]
+    async fn start_pipeline_rejects_invalid_path_id() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+
+        let response = start_pipeline_handler(State(state.clone()), Path("bad-id".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            state
+                .storage
+                .get_pipeline_run_state("bad-id")
+                .expect("read run state")
+                .is_none(),
+            "invalid path id must reject before mutating run state",
         );
     }
 }

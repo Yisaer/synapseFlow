@@ -71,7 +71,10 @@ Each instance must declare:
 
 Constraints:
 
-- `id` must be non-empty and must not be `default`
+- `id` must match the resource-id grammar `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``
+  (start with an ASCII letter, then ASCII letters, digits, or underscores, up to
+  128 bytes); it is case-sensitive and is not trimmed
+- an extra instance `id` must not be `default`
 - all declared ids must be unique
 - `backend` must be `in_process` (the only valid value); removed values such as
   `worker_process` are rejected during config deserialization

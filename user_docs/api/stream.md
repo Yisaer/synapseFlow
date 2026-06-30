@@ -6,6 +6,15 @@ For named schema management and the proto schema parser, see `user_docs/api/sche
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
+> **Resource IDs.** The stream `name`, a referenced `schema.ref`, a memory
+> stream's `props.topic`, and a shared-client `props.connector_key` must match
+> `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``: start with an ASCII letter, then ASCII
+> letters, digits, or underscores, up to 128 bytes. The stream name doubles as a
+> SQL source identifier, so hyphens and dots are not allowed. IDs are
+> case-sensitive and never trimmed; invalid IDs return `400 Bad Request`. This
+> does **not** apply to external protocol identifiers such as the MQTT
+> `props.topic` or `client_id`.
+
 ## Endpoints
 
 ### Create Stream

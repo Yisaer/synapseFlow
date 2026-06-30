@@ -9,6 +9,12 @@ For agent implementation guidance (workflow, validation loop, do/don't), see `do
 
 For stream management (create/delete) REST APIs, see `user_docs/api/stream.md`.
 
+> **Resource IDs.** Stream names and named-schema names must match
+> `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``. Because a stream name is also used as a
+> SQL source identifier, it is restricted to ASCII letters, digits, and
+> underscores (no hyphens or dots) and is case-sensitive. Column and nested field
+> names inside a schema are not subject to this rule.
+
 ## Manager API
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).

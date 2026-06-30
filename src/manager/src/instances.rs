@@ -61,10 +61,12 @@ pub fn find_default_flow_instance_spec(
 ) -> Result<&FlowInstanceSpec, String> {
     let mut default = None;
     for spec in flow_instances {
-        let id = spec.id.trim();
-        if id.is_empty() {
-            return Err("flow_instances contains an empty id".to_string());
-        }
+        crate::resource_id::validate_resource_id(
+            crate::resource_id::ResourceIdKind::FlowInstanceId,
+            &spec.id,
+        )
+        .map_err(|err| format!("invalid flow_instances id: {err}"))?;
+        let id = spec.id.as_str();
         if id == DEFAULT_FLOW_INSTANCE_ID {
             if default.is_some() {
                 return Err("flow_instances must contain exactly one default instance".to_string());
@@ -165,5 +167,49 @@ impl FlowInstances {
             .collect::<Vec<_>>();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(id: &str) -> FlowInstanceSpec {
+        FlowInstanceSpec {
+            id: id.to_string(),
+            ..FlowInstanceSpec::default()
+        }
+    }
+
+    #[test]
+    fn find_default_accepts_valid_ids_with_single_default() {
+        let specs = vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("worker_1")];
+        let default = find_default_flow_instance_spec(&specs).expect("default found");
+        assert_eq!(default.id, DEFAULT_FLOW_INSTANCE_ID);
+    }
+
+    #[test]
+    fn find_default_rejects_invalid_resource_id() {
+        let specs = vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("worker-1")];
+        let err = find_default_flow_instance_spec(&specs).unwrap_err();
+        assert!(err.contains("invalid flow_instances id"), "got: {err}");
+        assert!(err.contains("flow_instance_id"), "got: {err}");
+    }
+
+    #[test]
+    fn find_default_requires_a_default_instance() {
+        let specs = vec![spec("worker_1")];
+        let err = find_default_flow_instance_spec(&specs).unwrap_err();
+        assert!(err.contains("must contain a default"), "got: {err}");
+    }
+
+    #[test]
+    fn find_default_rejects_two_defaults() {
+        let specs = vec![
+            spec(DEFAULT_FLOW_INSTANCE_ID),
+            spec(DEFAULT_FLOW_INSTANCE_ID),
+        ];
+        let err = find_default_flow_instance_spec(&specs).unwrap_err();
+        assert!(err.contains("exactly one default"), "got: {err}");
     }
 }

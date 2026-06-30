@@ -9,6 +9,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::stream::{named_schema_store, schema_registry};
 use storage::{StorageError, StoredSchema};
 
@@ -45,12 +46,11 @@ pub async fn create_schema_handler(
     Json(req): Json<CreateSchemaRequest>,
 ) -> impl IntoResponse {
     let audit = ResourceMutationLog::new("schema", "create", req.name.as_str(), None);
-    let name = req.name.trim().to_string();
-    if name.is_empty() {
-        let err = "schema name must not be empty".to_string();
+    if let Err(err) = validate_resource_id(ResourceIdKind::SchemaName, &req.name) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let name = req.name.clone();
     if req.schema_type.trim().is_empty() {
         let err = "schema type must not be empty".to_string();
         audit.log_failure(&err);
@@ -106,7 +106,7 @@ pub async fn create_schema_handler(
     audit.log_success();
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({ "name": req.name.trim() })),
+        Json(serde_json::json!({ "name": req.name })),
     )
         .into_response()
 }
@@ -132,10 +132,10 @@ pub async fn get_schema_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let name = name.trim();
-    if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "schema name must not be empty").into_response();
+    if let Err(err) = validate_resource_id(ResourceIdKind::SchemaName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let name = name.as_str();
     match state.storage.get_schema(name) {
         Ok(Some(stored)) => (StatusCode::OK, Json(stored_to_info(&stored))).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, format!("schema {name} not found")).into_response(),
@@ -151,9 +151,8 @@ pub async fn delete_schema_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "schema name must not be empty").into_response();
+    if let Err(err) = validate_resource_id(ResourceIdKind::SchemaName, &name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let audit = ResourceMutationLog::new("schema", "delete", &name, None);
 
@@ -292,4 +291,75 @@ fn find_streams_referencing_schema(
         }
     }
     Ok(referencing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::extract::Path;
+    use storage::StorageManager;
+    use tempfile::TempDir;
+
+    fn build_state(temp_dir: &TempDir) -> AppState {
+        let storage = StorageManager::new(temp_dir.path()).expect("create storage");
+        AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![crate::FlowInstanceSpec {
+                id: "default".to_string(),
+                ..crate::FlowInstanceSpec::default()
+            }],
+            0,
+        )
+        .expect("build app state")
+    }
+
+    #[tokio::test]
+    async fn create_schema_rejects_invalid_name() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        let response = create_schema_handler(
+            State(state.clone()),
+            Json(CreateSchemaRequest {
+                name: "bad-schema".to_string(),
+                schema_type: "json".to_string(),
+                props: JsonMap::new(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("schema name"), "got: {message}");
+        assert!(
+            state
+                .storage
+                .get_schema("bad-schema")
+                .expect("read schema")
+                .is_none(),
+            "invalid name must not persist",
+        );
+    }
+
+    #[tokio::test]
+    async fn get_schema_rejects_invalid_path_name() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        let response = get_schema_handler(State(state), Path("bad-schema".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(message.contains("schema name"), "got: {message}");
+    }
 }

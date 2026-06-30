@@ -49,10 +49,9 @@ impl AppState {
         find_default_flow_instance_spec(&flow_instances)?;
 
         for spec in &flow_instances {
-            let id = spec.id.trim();
-            if id.is_empty() {
-                return Err("flow_instances contains an empty id".to_string());
-            }
+            // `find_default_flow_instance_spec` already validated every id against
+            // the resource-id grammar; the duplicate check uses the canonical id.
+            let id = spec.id.as_str();
             if declared_instances.insert(id.to_string(), ()).is_some() {
                 return Err(format!("duplicate flow instance id in config: {id}"));
             }
@@ -262,17 +261,74 @@ mod secret_propagation_tests {
         let app = AppState::new(
             default,
             storage,
-            vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("worker-1")],
+            vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("worker_1")],
             0,
         )
         .expect("app state");
 
         // The non-default instance resolves the same store key.
-        let worker = app.instances.get("worker-1").expect("worker instance");
+        let worker = app.instances.get("worker_1").expect("worker instance");
         let ctx = worker.secret_context();
         let (value, _warn) = ctx
             .resolve(&SecretRef::store("k"), "test.field")
             .expect("resolve");
         assert_eq!(value.expose(), "v");
+    }
+}
+
+#[cfg(test)]
+mod config_validation_tests {
+    use super::*;
+    use crate::instances::new_default_flow_instance;
+
+    fn spec(id: &str) -> FlowInstanceSpec {
+        FlowInstanceSpec {
+            id: id.to_string(),
+            ..FlowInstanceSpec::default()
+        }
+    }
+
+    fn build(flow_instances: Vec<FlowInstanceSpec>) -> Result<AppState, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        AppState::new(new_default_flow_instance(), storage, flow_instances, 0)
+    }
+
+    #[test]
+    fn app_state_rejects_invalid_flow_instance_id() {
+        let err = build(vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("bad-id")])
+            .err()
+            .expect("expected config error");
+        assert!(err.contains("invalid flow_instances id"), "got: {err}");
+    }
+
+    #[test]
+    fn app_state_rejects_duplicate_flow_instance_ids() {
+        let err = build(vec![
+            spec(DEFAULT_FLOW_INSTANCE_ID),
+            spec("worker_1"),
+            spec("worker_1"),
+        ])
+        .err()
+        .expect("expected config error");
+        assert!(
+            err.contains("duplicate flow instance id in config"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn app_state_requires_a_default_instance() {
+        let err = build(vec![spec("worker_1")])
+            .err()
+            .expect("expected config error");
+        assert!(err.contains("must contain a default"), "got: {err}");
+    }
+
+    #[test]
+    fn app_state_accepts_valid_distinct_ids() {
+        let app = build(vec![spec(DEFAULT_FLOW_INSTANCE_ID), spec("worker_1")])
+            .expect("valid config accepted");
+        assert!(app.is_declared_instance("worker_1"));
     }
 }

@@ -6,6 +6,12 @@ For the design of the schema registry and proto parser, see `docs/api/schema_reg
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
+> **Resource IDs.** The schema `name` (and the `:name` path segment) must match
+> `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``: start with an ASCII letter, then ASCII
+> letters, digits, or underscores, up to 128 bytes. Names are case-sensitive and
+> never trimmed; invalid names return `400 Bad Request`. This applies to schema
+> names only, not to nested column/field names inside the schema.
+
 ## Endpoints
 
 ### Create Schema

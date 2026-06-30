@@ -1,4 +1,5 @@
 use crate::pipeline::AppState;
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use flow::connector::{DEFAULT_MEMORY_PUBSUB_CAPACITY, MemoryPubSubError, MemoryTopicKind};
 use serde::{Deserialize, Serialize};
@@ -46,14 +47,10 @@ pub async fn create_memory_topic_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateMemoryTopicRequest>,
 ) -> impl IntoResponse {
-    let topic = req.topic.trim().to_string();
-    if topic.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "topic must not be empty".to_string(),
-        )
-            .into_response();
+    if let Err(err) = validate_resource_id(ResourceIdKind::MemoryTopic, &req.topic) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let topic = req.topic.clone();
     let capacity = req
         .capacity
         .unwrap_or(DEFAULT_MEMORY_PUBSUB_CAPACITY)
@@ -250,7 +247,40 @@ mod tests {
             .expect("read response body");
         assert_eq!(
             String::from_utf8(body.to_vec()).expect("utf8 response"),
-            "topic must not be empty"
+            "memory topic must not be whitespace (expected [A-Za-z][A-Za-z0-9_]{0,127})"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_memory_topic_rejects_invalid_topic_id() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        let response = create_memory_topic_handler(
+            State(state.clone()),
+            Json(CreateMemoryTopicRequest {
+                topic: "bad-topic".to_string(),
+                kind: MemoryTopicKindRequest::Bytes,
+                capacity: Some(8),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 response");
+        assert!(message.contains("memory topic"), "got: {message}");
+        assert!(message.contains("invalid character"), "got: {message}");
+        assert!(
+            state
+                .storage
+                .get_memory_topic("bad-topic")
+                .expect("read memory topic")
+                .is_none(),
+            "invalid topic must not persist",
         );
     }
 

@@ -1,4 +1,5 @@
 use crate::MQTT_QOS;
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use flow::EncoderRegistry;
 use flow::pipeline::{
     FileRetentionConfig, FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps,
@@ -126,14 +127,20 @@ fn normalized_optional_string(value: Option<String>) -> Option<String> {
 }
 
 pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
-    if req.id.trim().is_empty() {
-        return Err("pipeline id must not be empty".to_string());
-    }
+    validate_resource_id(ResourceIdKind::PipelineId, &req.id)?;
     if req.sql.trim().is_empty() {
         return Err("pipeline sql must not be empty".to_string());
     }
     if req.sinks.is_empty() {
         return Err("pipeline must define at least one sink".to_string());
+    }
+    // Validate user-provided sink ids. Sinks without an explicit id inherit a
+    // generated `{pipeline_id}_sink_{index}` value, which is grammar-safe
+    // because the pipeline id is already validated above.
+    for sink in &req.sinks {
+        if let Some(id) = &sink.id {
+            validate_resource_id(ResourceIdKind::SinkId, id)?;
+        }
     }
     if req.options.data_channel_capacity == 0 {
         return Err("options.data_channel_capacity must be greater than 0".to_string());
@@ -288,6 +295,11 @@ pub(crate) fn build_pipeline_definition(
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid mqtt sink props: {err}"))?;
                 let connector_key = normalized_optional_string(mqtt_props.connector_key);
+                if let Some(key) = &connector_key {
+                    validate_resource_id(ResourceIdKind::SharedMqttClientKey, key).map_err(
+                        |err| format!("mqtt sink references invalid connector_key: {err}"),
+                    )?;
+                }
                 let broker = normalized_optional_string(mqtt_props.broker_url);
                 if connector_key.is_none() && broker.is_none() {
                     return Err("mqtt sink requires broker_url".to_string());
@@ -361,9 +373,8 @@ pub(crate) fn build_pipeline_definition(
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid memory sink props: {err}"))?;
                 let topic = memory_props.topic;
-                if topic.trim().is_empty() {
-                    return Err("memory sink requires topic".to_string());
-                }
+                validate_resource_id(ResourceIdKind::MemoryTopic, &topic)
+                    .map_err(|err| format!("memory sink references invalid topic: {err}"))?;
 
                 let expects_collection = sink_req.encoder.encode_type.eq_ignore_ascii_case("none");
                 let expected_kind = if expects_collection {

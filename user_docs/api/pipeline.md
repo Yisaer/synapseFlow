@@ -4,6 +4,12 @@ This document describes the **Manager** REST API for managing pipelines.
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
+> **Resource IDs.** The pipeline `id`, each `sinks[].id`, and `flow_instance_id`
+> must match `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``: start with an ASCII letter,
+> then ASCII letters, digits, or underscores, up to 128 bytes. IDs are
+> case-sensitive and are never trimmed — leading/trailing whitespace is rejected
+> rather than silently removed. Invalid IDs return `400 Bad Request`.
+
 ## Endpoints
 
 ### Create Pipeline
@@ -16,7 +22,7 @@ Request body: `CreatePipelineRequest`
 
 ```json
 {
-  "id": "demo-pipeline",
+  "id": "demo_pipeline",
   "sql": "SELECT user_id, score FROM source_stream WHERE score > 0",
   "sinks": [
     {

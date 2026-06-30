@@ -345,6 +345,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_init_json_rejects_invalid_stream_name() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let mut bundle = sample_bundle("stream_1");
+        bundle.resources.streams[0].name = "bad-stream".to_string();
+        write_init_json(dir.path(), &bundle);
+
+        let err =
+            apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
+
+        assert!(err.contains("stream name"), "unexpected error: {err}");
+        assert!(err.contains("invalid character"), "unexpected error: {err}");
+        assert!(storage.list_streams().unwrap().is_empty());
+        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
+    }
+
+    #[test]
     fn apply_init_json_rejects_pipeline_referencing_missing_stream() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();

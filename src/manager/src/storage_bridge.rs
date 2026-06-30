@@ -1,10 +1,12 @@
 use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
+use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::startup::StartupPhase;
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
     named_schema_store, sampler_with_decoder_format_props, schema_registry,
-    validate_memory_stream_binding, validate_memory_stream_topic, validate_stream_decoder_config,
+    validate_memory_stream_binding, validate_memory_stream_topic, validate_stream_connector_key,
+    validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -117,6 +119,15 @@ pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<u
     let stored_schemas = storage.list_schemas().map_err(|e| e.to_string())?;
     let count = stored_schemas.len();
     for stored in &stored_schemas {
+        // Defensive: skip historically-invalid schema names (VF-51 §5.2).
+        if let Err(err) = validate_resource_id(ResourceIdKind::SchemaName, &stored.name) {
+            tracing::error!(
+                schema = %stored.name.escape_debug(),
+                error = %err,
+                "skipping stored schema with invalid name"
+            );
+            continue;
+        }
         let props: serde_json::Map<String, serde_json::Value> =
             match serde_json::from_str(&stored.props_json) {
                 Ok(p) => p,
@@ -171,6 +182,12 @@ async fn hydrate_instance_globals_from_storage(
         stream_failures: 0,
     };
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
+        // Defensive: skip historically-invalid topic ids (VF-51 §5.2).
+        if let Err(err) = validate_resource_id(ResourceIdKind::MemoryTopic, &topic.topic) {
+            summary.memory_topic_failures += 1;
+            tracing::error!(topic = %topic.topic.escape_debug(), error = %err, "skipping memory topic with invalid id");
+            continue;
+        }
         let kind = match topic.kind {
             StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
             StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
@@ -182,6 +199,12 @@ async fn hydrate_instance_globals_from_storage(
     }
 
     for cfg in storage.list_mqtt_configs().map_err(|e| e.to_string())? {
+        // Defensive: skip historically-invalid shared mqtt keys (VF-51 §5.2).
+        if let Err(err) = validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.key) {
+            summary.shared_mqtt_failures += 1;
+            tracing::error!(key = %cfg.key.escape_debug(), error = %err, "skipping shared mqtt client with invalid key");
+            continue;
+        }
         if let Err(err) = instance
             .create_shared_mqtt_client(mqtt_config_from_stored(&cfg))
             .await
@@ -223,6 +246,11 @@ async fn restore_stream(
     let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
     let req = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
         .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?;
+    // Defensive: reject historically-invalid resource ids so bad data cannot
+    // re-enter the runtime on restart (VF-51 §5.2). The error is propagated to
+    // the caller, which logs and skips this stream.
+    validate_resource_id(ResourceIdKind::StreamName, &req.name)?;
+    validate_stream_connector_key(&req)?;
     let shared = req.shared;
     validate_stream_decoder_config(&req, def.decoder())?;
     if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
@@ -242,6 +270,9 @@ async fn restore_pipeline(
     instances: &FlowInstances,
 ) -> Result<(), String> {
     let req = pipeline_request_from_stored(&pipeline)?;
+    // Defensive: reject historically-invalid pipeline ids (VF-51 §5.2). The
+    // caller logs and skips on error.
+    validate_resource_id(ResourceIdKind::PipelineId, &req.id)?;
     let flow_instance_id = req
         .flow_instance_id
         .as_deref()
