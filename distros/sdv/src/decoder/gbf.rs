@@ -309,22 +309,24 @@ impl Merger for GbfFusedMerger {
                 last_ts,
                 ..
             } = self;
-            let timestamp = parser.parse_packet_with(data, &mut |can_id, payload| {
-                if !can_decoder.contains_can_id(can_id) {
-                    return;
-                }
-                let start = payload_buf.len() as u32;
-                payload_buf.extend_from_slice(payload);
-                frames.insert(
-                    can_id,
-                    FrameSlot {
+            for packet in parser.split_packets(data) {
+                let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
+                    if !can_decoder.contains_can_id(can_id) {
+                        return;
+                    }
+                    let start = payload_buf.len() as u32;
+                    payload_buf.extend_from_slice(payload);
+                    frames.insert(
                         can_id,
-                        start,
-                        len: payload.len() as u32,
-                    },
-                );
-            })?;
-            *last_ts = timestamp;
+                        FrameSlot {
+                            can_id,
+                            start,
+                            len: payload.len() as u32,
+                        },
+                    );
+                })?;
+                *last_ts = timestamp;
+            }
             return Ok(());
         }
 
@@ -339,37 +341,39 @@ impl Merger for GbfFusedMerger {
             mux_frames,
             last_ts,
         } = self;
-        let timestamp = parser.parse_packet_with(data, &mut |can_id, payload| {
-            if !can_decoder.contains_can_id(can_id) {
-                return;
-            }
-            let mux_value = if let Some(resolver) = mux_resolver.as_ref() {
-                if resolver.is_multiplexed_can_id(can_id) {
-                    match resolver.resolve_mux(can_id, payload) {
-                        Ok(mux_value) => Some(mux_value),
-                        Err(_) => return,
+        for packet in parser.split_packets(data) {
+            let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
+                if !can_decoder.contains_can_id(can_id) {
+                    return;
+                }
+                let mux_value = if let Some(resolver) = mux_resolver.as_ref() {
+                    if resolver.is_multiplexed_can_id(can_id) {
+                        match resolver.resolve_mux(can_id, payload) {
+                            Ok(mux_value) => Some(mux_value),
+                            Err(_) => return,
+                        }
+                    } else {
+                        None
                     }
                 } else {
                     None
+                };
+                let start = payload_buf.len() as u32;
+                payload_buf.extend_from_slice(payload);
+                let slot = FrameSlot {
+                    can_id,
+                    start,
+                    len: payload.len() as u32,
+                };
+                if let Some(mux_value) = mux_value {
+                    let key = MuxFrameKey { can_id, mux_value };
+                    mux_frames.insert(key, slot);
+                } else {
+                    frames.insert(can_id, slot);
                 }
-            } else {
-                None
-            };
-            let start = payload_buf.len() as u32;
-            payload_buf.extend_from_slice(payload);
-            let slot = FrameSlot {
-                can_id,
-                start,
-                len: payload.len() as u32,
-            };
-            if let Some(mux_value) = mux_value {
-                let key = MuxFrameKey { can_id, mux_value };
-                mux_frames.insert(key, slot);
-            } else {
-                frames.insert(can_id, slot);
-            }
-        })?;
-        *last_ts = timestamp;
+            })?;
+            *last_ts = timestamp;
+        }
         Ok(())
     }
 
@@ -604,6 +608,59 @@ mod tests {
                 "value mismatch for `{name}` between fused and direct decode paths"
             );
         }
+    }
+
+    #[test]
+    fn test_fused_merge_splits_concatenated_packets() {
+        use flow::Merger;
+
+        fn push_frame(buf: &mut Vec<u8>, can_id: u16, payload: &[u8]) {
+            buf.push(0x55);
+            buf.extend_from_slice(&can_id.to_be_bytes());
+            buf.push(payload.len() as u8);
+            buf.extend_from_slice(payload);
+        }
+
+        fn packet(ts: u64, can_id: u16, payload: &[u8]) -> Vec<u8> {
+            let mut frames = Vec::new();
+            push_frame(&mut frames, can_id, payload);
+
+            let mut packet = Vec::new();
+            packet.extend_from_slice(&ts.to_be_bytes());
+            packet.extend_from_slice(&(frames.len() as u16).to_be_bytes());
+            packet.extend_from_slice(&frames);
+            packet
+        }
+
+        let payload = [0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44];
+        let mut concatenated = packet(1_000, 0x124A, &payload);
+        concatenated.extend_from_slice(&packet(2_000, 0x1586, &payload));
+
+        let mut fused = get_test_fused();
+        fused
+            .merge(&concatenated)
+            .expect("merge concatenated packets");
+        let batch = fused
+            .decode_window(None)
+            .expect("decode")
+            .expect("fused batch");
+        let row = &batch.rows()[0];
+
+        assert_eq!(
+            row.value_by_name("can", "ts"),
+            Some(&Value::Int64(2_000)),
+            "fused timestamp should use the newest packet in the payload"
+        );
+        assert_ne!(
+            row.value_by_name("can", "Mess0_Sig1"),
+            Some(&Value::Null),
+            "first packet's frame must be merged"
+        );
+        assert_ne!(
+            row.value_by_name("can", "Mess1_Sig1"),
+            Some(&Value::Null),
+            "second packet's frame must be merged"
+        );
     }
 
     #[test]
