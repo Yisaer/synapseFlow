@@ -12,12 +12,14 @@ use datatypes::Value;
 use flow::codec::encoder::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use flow::model::{Collection, Tuple};
 use flow::planner::physical::ByIndexProjection;
-use flow::planner::physical::output_schema::OutputSchema;
+use flow::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Columnar CSV JSON Encoder that accumulates records incrementally.
 pub struct ColumnarCsvJsonEncoder {
     id: String,
+    output_schema: Option<Arc<OutputSchema>>,
     by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
@@ -29,6 +31,7 @@ impl ColumnarCsvJsonEncoder {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            output_schema: None,
             by_index_projection: None,
         }
     }
@@ -40,7 +43,11 @@ impl SinkEncoderFactory for ColumnarCsvJsonEncoder {
     }
 
     fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
+        let output_schema = self.output_schema.clone().ok_or_else(|| {
+            EncodeError::Other("columnar_csv_json encoder requires output schema".to_string())
+        })?;
         Ok(Box::new(ColumnarCsvJsonEncoderRuntime::new(
+            output_schema,
             self.by_index_projection.clone(),
         )))
     }
@@ -55,16 +62,19 @@ impl SinkEncoderFactory for ColumnarCsvJsonEncoder {
     ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(Arc::new(Self {
             id: self.id.clone(),
+            output_schema: self.output_schema.clone(),
             by_index_projection: Some(spec),
         }))
     }
 
     fn with_output_schema(
         self: Arc<Self>,
-        _output_schema: Arc<OutputSchema>,
+        output_schema: Arc<OutputSchema>,
     ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
+        validate_unique_output_names(&output_schema)?;
         Ok(Arc::new(Self {
             id: self.id.clone(),
+            output_schema: Some(output_schema),
             by_index_projection: self.by_index_projection.clone(),
         }))
     }
@@ -72,33 +82,34 @@ impl SinkEncoderFactory for ColumnarCsvJsonEncoder {
 
 struct ColumnarCsvJsonEncoderRuntime {
     agg: ColumnarAggregator,
-    by_index_projection: Option<Arc<ByIndexProjection>>,
+    layout: Arc<ColumnarCsvJsonLayout>,
 }
 
 impl ColumnarCsvJsonEncoderRuntime {
-    fn new(by_index_projection: Option<Arc<ByIndexProjection>>) -> Self {
+    fn new(
+        output_schema: Arc<OutputSchema>,
+        by_index_projection: Option<Arc<ByIndexProjection>>,
+    ) -> Self {
+        let layout = Arc::new(ColumnarCsvJsonLayout::from_output_schema(
+            output_schema,
+            by_index_projection.as_deref(),
+        ));
         Self {
-            agg: ColumnarAggregator::new(by_index_projection.clone()),
-            by_index_projection,
+            agg: ColumnarAggregator::new(Arc::clone(&layout)),
+            layout,
         }
-    }
-}
-
-impl Default for ColumnarCsvJsonEncoderRuntime {
-    fn default() -> Self {
-        Self::new(None)
     }
 }
 
 impl SinkEncoder for ColumnarCsvJsonEncoderRuntime {
     fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
-        self.agg = ColumnarAggregator::new(self.by_index_projection.clone());
+        self.agg = ColumnarAggregator::new(Arc::clone(&self.layout));
         Ok(None)
     }
 
     fn append(&mut self, record: &dyn Collection) -> Result<Option<bytes::Bytes>, EncodeError> {
         for tuple in record.rows() {
-            self.agg.append_tuple(tuple);
+            self.agg.append_tuple(tuple)?;
         }
         Ok(None)
     }
@@ -106,13 +117,41 @@ impl SinkEncoder for ColumnarCsvJsonEncoderRuntime {
     fn finish_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
         let agg = std::mem::replace(
             &mut self.agg,
-            ColumnarAggregator::new(self.by_index_projection.clone()),
+            ColumnarAggregator::new(Arc::clone(&self.layout)),
         );
         agg.finish_bytes().map(bytes::Bytes::from).map(Some)
     }
 
     fn abort_delivery(&mut self) {
-        self.agg = ColumnarAggregator::new(self.by_index_projection.clone());
+        self.agg = ColumnarAggregator::new(Arc::clone(&self.layout));
+    }
+}
+
+struct ColumnarCsvJsonLayout {
+    columns: Arc<[ColumnarOutputColumn]>,
+}
+
+struct ColumnarOutputColumn {
+    name: String,
+    getter: ColumnarValueGetter,
+}
+
+enum ColumnarValueGetter {
+    ByIndex {
+        source_name: Arc<str>,
+        column_index: usize,
+    },
+    OutputSchemaGetter(OutputValueGetter),
+}
+
+impl ColumnarCsvJsonLayout {
+    fn from_output_schema(
+        output_schema: Arc<OutputSchema>,
+        by_index_projection: Option<&ByIndexProjection>,
+    ) -> Self {
+        Self {
+            columns: build_output_columns(&output_schema, by_index_projection).into(),
+        }
     }
 }
 
@@ -121,130 +160,57 @@ impl SinkEncoder for ColumnarCsvJsonEncoderRuntime {
 struct ColumnarAggregator {
     /// Column buffers: index -> accumulated values
     column_buffers: Vec<String>,
-    /// Column names: index -> name. Initialized from the first tuple.
-    column_names: Vec<String>,
-    /// Optional projection spec for by-index encoding
-    by_index_projection: Option<Arc<ByIndexProjection>>,
-}
-
-impl Default for ColumnarAggregator {
-    fn default() -> Self {
-        Self::new(None)
-    }
+    layout: Arc<ColumnarCsvJsonLayout>,
 }
 
 impl ColumnarAggregator {
-    fn new(by_index_projection: Option<Arc<ByIndexProjection>>) -> Self {
+    fn new(layout: Arc<ColumnarCsvJsonLayout>) -> Self {
+        let column_buffers = vec![String::new(); layout.columns.len()];
         Self {
-            column_buffers: Vec::new(),
-            column_names: Vec::new(),
-            by_index_projection,
+            column_buffers,
+            layout,
         }
     }
 
-    fn append_tuple(&mut self, tuple: &Tuple) {
-        // Fast path: use by_index_projection if available
-        if let Some(projection) = self.by_index_projection.clone() {
-            self.append_tuple_by_index(tuple, projection.as_ref());
-        } else {
-            self.append_tuple_all(tuple);
-        }
+    fn append_tuple(&mut self, tuple: &Tuple) -> Result<(), EncodeError> {
+        self.append_tuple_with_output_schema(tuple);
+        Ok(())
     }
 
-    /// Append tuple using by-index projection (fast path - only projected columns)
-    fn append_tuple_by_index(&mut self, tuple: &Tuple, projection: &ByIndexProjection) {
-        let columns = projection.columns();
-        // Initialize column names and buffers from projection spec (first time only)
-        if self.column_names.is_empty() {
-            // First: affiliate columns (computed expressions)
-            if let Some(aff) = tuple.affiliate() {
-                for (key, _) in aff.entries() {
-                    self.column_names.push(key.to_string());
-                    self.column_buffers.push(String::new());
-                }
-            }
-            // Then: projected columns from spec
-            for col in columns {
-                self.column_names.push(col.output_name.to_string());
-                self.column_buffers.push(String::new());
-            }
-        }
-
-        let mut buffers = self.column_buffers.iter_mut();
-        // Affiliate columns first
-        if let Some(aff) = tuple.affiliate() {
-            for (_, value) in aff.entries() {
-                let Some(buf) = buffers.next() else { break };
-                write_value_to_buffer(value, buf);
-                buf.push(',');
-            }
-        }
-        // Then projected columns by index. Projection columns are grouped by source
-        // (SQL declaration order), so resolve `source_name -> message` once per source
-        // run instead of scanning every message for every column (was O(columns x
-        // messages) of string compares per row; now O(columns)).
+    fn append_tuple_with_output_schema(&mut self, tuple: &Tuple) {
         let messages = tuple.messages();
-        let mut cur_src: Option<&str> = None;
-        let mut cur_msg: Option<usize> = None;
-        for col in columns {
-            let Some(buf) = buffers.next() else { break };
-            let src = col.source_name.as_ref();
-            if cur_src != Some(src) {
-                cur_src = Some(src);
-                cur_msg = messages.iter().position(|m| m.source() == src);
-            }
-            // Fast path: the source's first message. value_by_index returns
-            // Some(&Null) for in-range nulls and None only when column_index is out
-            // of range for that first message (schema mismatch, or the value lives in
-            // a later same-source message). On None, fall back to the full scan, which
-            // matches the original tuple.value_by_index semantics exactly.
-            let value = match cur_msg.and_then(|mi| messages[mi].value_by_index(col.column_index)) {
-                Some(value) => Some(value),
-                None => tuple.value_by_index(src, col.column_index),
+        let mut current_source: Option<&str> = None;
+        let mut current_message_index: Option<usize> = None;
+
+        for idx in 0..self.layout.columns.len() {
+            let value = {
+                match &self.layout.columns[idx].getter {
+                    ColumnarValueGetter::ByIndex {
+                        source_name,
+                        column_index,
+                    } => {
+                        let source = source_name.as_ref();
+                        if current_source != Some(source) {
+                            current_source = Some(source);
+                            current_message_index = messages
+                                .iter()
+                                .position(|message| message.source() == source);
+                        }
+                        current_message_index
+                            .and_then(|message_index| {
+                                messages[message_index].value_by_index(*column_index)
+                            })
+                            .or_else(|| tuple.value_by_index(source, *column_index))
+                    }
+                    ColumnarValueGetter::OutputSchemaGetter(getter) => {
+                        value_from_output_schema_getter(tuple, getter)
+                    }
+                }
             };
             if let Some(value) = value {
-                write_value_to_buffer(value, buf);
+                write_value_to_buffer(value, &mut self.column_buffers[idx]);
             }
-            buf.push(',');
-        }
-    }
-
-    /// Append tuple iterating all columns (slow path - no projection)
-    fn append_tuple_all(&mut self, tuple: &Tuple) {
-        // Initialize column names and buffers from the first tuple
-        if self.column_names.is_empty() {
-            if let Some(aff) = tuple.affiliate() {
-                for (key, _) in aff.entries() {
-                    self.column_names.push(key.to_string());
-                    self.column_buffers.push(String::new());
-                }
-            }
-            for msg in tuple.messages() {
-                for (name, _) in msg.entries() {
-                    self.column_names.push(name.to_string());
-                    self.column_buffers.push(String::new());
-                }
-            }
-        }
-
-        let mut i = 0;
-        if let Some(aff) = tuple.affiliate() {
-            for (_, value) in aff.entries() {
-                if i < self.column_buffers.len() {
-                    write_value_to_buffer(value, &mut self.column_buffers[i]);
-                    self.column_buffers[i].push(',');
-                }
-                i += 1;
-            }
-        }
-        for msg in tuple.messages() {
-            for (_, value) in msg.entries() {
-                if i < self.column_buffers.len() {
-                    write_value_to_buffer(value, &mut self.column_buffers[i]);
-                    self.column_buffers[i].push(',');
-                }
-                i += 1;
-            }
+            self.column_buffers[idx].push(',');
         }
     }
 
@@ -256,23 +222,24 @@ impl ColumnarAggregator {
 
         // Pre-calculate capacity: {"key":"val",} per column + braces
         let estimated_size: usize = self
-            .column_names
+            .layout
+            .columns
             .iter()
             .zip(self.column_buffers.iter())
-            .map(|(name, buf)| name.len() + buf.len() + 6) // "name":"val",
+            .map(|(column, buf)| column.name.len() + buf.len() + 6) // "name":"val",
             .sum::<usize>()
             + 2;
 
         let mut result = String::with_capacity(estimated_size);
         result.push('{');
 
-        for (i, key) in self.column_names.iter().enumerate() {
+        for (i, column) in self.layout.columns.iter().enumerate() {
             if i > 0 {
                 result.push(',');
             }
 
             result.push('"');
-            result.push_str(key);
+            result.push_str(&column.name);
             result.push_str("\":\"");
 
             // Get buffer value and trim trailing comma
@@ -292,6 +259,71 @@ impl ColumnarAggregator {
         result.push('}');
         Ok(result.into_bytes())
     }
+}
+
+fn build_output_columns(
+    output_schema: &OutputSchema,
+    by_index_projection: Option<&ByIndexProjection>,
+) -> Vec<ColumnarOutputColumn> {
+    let projection_by_output_index = by_index_projection.map(|projection| {
+        let mut columns = vec![None; output_schema.columns.len()];
+        for projection_column in projection.columns() {
+            if projection_column.output_index < columns.len()
+                && columns[projection_column.output_index].is_none()
+            {
+                columns[projection_column.output_index] = Some(projection_column);
+            }
+        }
+        columns
+    });
+
+    output_schema
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(output_index, column)| {
+            let getter = projection_by_output_index
+                .as_ref()
+                .and_then(|projection_columns| projection_columns[output_index])
+                .map(|projection_column| ColumnarValueGetter::ByIndex {
+                    source_name: Arc::clone(&projection_column.source_name),
+                    column_index: projection_column.column_index,
+                })
+                .unwrap_or_else(|| ColumnarValueGetter::OutputSchemaGetter(column.getter.clone()));
+            ColumnarOutputColumn {
+                name: column.name.to_string(),
+                getter,
+            }
+        })
+        .collect()
+}
+
+fn value_from_output_schema_getter<'a>(
+    tuple: &'a Tuple,
+    getter: &OutputValueGetter,
+) -> Option<&'a Value> {
+    match getter {
+        OutputValueGetter::MessageByName {
+            source_name,
+            column_name,
+        } => tuple.value_by_name(source_name.as_ref(), column_name.as_ref()),
+        OutputValueGetter::Affiliate { column_name } => tuple
+            .affiliate()
+            .and_then(|affiliate| affiliate.value(column_name.as_ref())),
+    }
+}
+
+fn validate_unique_output_names(output_schema: &OutputSchema) -> Result<(), EncodeError> {
+    let mut seen = HashSet::new();
+    for column in output_schema.columns.iter() {
+        if !seen.insert(column.name.as_ref()) {
+            return Err(EncodeError::Other(format!(
+                "columnar_csv_json encoder does not support duplicate output column `{}`",
+                column.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Write a Value directly to a buffer using fast formatting.
@@ -391,6 +423,8 @@ fn value_to_string(value: &Value) -> String {
 mod tests {
     use super::*;
     use flow::model::{Message, RecordBatch};
+    use flow::planner::physical::ByIndexProjectionColumn;
+    use flow::planner::physical::output_schema::{OutputColumn, OutputValueGetter};
     use std::sync::Arc;
 
     fn create_test_tuple(id: i64, name: &str) -> Tuple {
@@ -414,15 +448,65 @@ mod tests {
     }
 
     fn encode_tuples(encoder: &ColumnarCsvJsonEncoder, tuples: Vec<Tuple>) -> Vec<u8> {
-        let mut runtime = encoder.start_encoder().unwrap();
-        runtime.begin_delivery().unwrap();
         let batch = RecordBatch::new(tuples).unwrap();
-        assert!(runtime.append(&batch).unwrap().is_none());
+        encode_batch(encoder, &batch)
+    }
+
+    fn encode_batch(_encoder: &ColumnarCsvJsonEncoder, batch: &RecordBatch) -> Vec<u8> {
+        let factory = Arc::new(ColumnarCsvJsonEncoder::new("test"))
+            .with_output_schema(infer_message_schema(batch))
+            .expect("attach output schema");
+        let mut runtime = factory.start_encoder().unwrap();
+        runtime.begin_delivery().unwrap();
+        assert!(runtime.append(batch).unwrap().is_none());
         runtime.finish_delivery().unwrap().unwrap().to_vec()
     }
 
-    fn encode_batch(encoder: &ColumnarCsvJsonEncoder, batch: &RecordBatch) -> Vec<u8> {
-        let mut runtime = encoder.start_encoder().unwrap();
+    fn infer_message_schema(batch: &RecordBatch) -> Arc<OutputSchema> {
+        let columns = batch
+            .rows()
+            .first()
+            .map(|tuple| {
+                tuple
+                    .messages()
+                    .iter()
+                    .flat_map(|message| {
+                        message.entries().map(|(name, _)| {
+                            (
+                                name.to_string(),
+                                OutputValueGetter::MessageByName {
+                                    source_name: Arc::from(message.source()),
+                                    column_name: Arc::from(name),
+                                },
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        output_schema(
+            columns
+                .iter()
+                .map(|(name, getter)| (name.as_str(), getter.clone()))
+                .collect(),
+        )
+    }
+
+    fn output_schema(columns: Vec<(&str, OutputValueGetter)>) -> Arc<OutputSchema> {
+        Arc::new(OutputSchema::new(
+            columns
+                .into_iter()
+                .map(|(name, getter)| OutputColumn {
+                    name: Arc::from(name),
+                    data_type: datatypes::ConcreteDatatype::Null,
+                    getter,
+                })
+                .collect(),
+        ))
+    }
+
+    fn encode_with_factory(factory: Arc<dyn SinkEncoderFactory>, batch: &RecordBatch) -> Vec<u8> {
+        let mut runtime = factory.start_encoder().unwrap();
         runtime.begin_delivery().unwrap();
         assert!(runtime.append(batch).unwrap().is_none());
         runtime.finish_delivery().unwrap().unwrap().to_vec()
@@ -436,7 +520,15 @@ mod tests {
 
     #[test]
     fn test_start_encoder() {
-        let encoder = ColumnarCsvJsonEncoder::new("test");
+        let encoder = Arc::new(ColumnarCsvJsonEncoder::new("test"))
+            .with_output_schema(output_schema(vec![(
+                "id",
+                OutputValueGetter::MessageByName {
+                    source_name: Arc::from("test"),
+                    column_name: Arc::from("id"),
+                },
+            )]))
+            .expect("attach output schema");
         assert!(encoder.start_encoder().is_ok());
     }
 
@@ -474,7 +566,17 @@ mod tests {
 
     #[test]
     fn test_empty_aggregator() {
-        let aggregator = ColumnarAggregator::default();
+        let layout = Arc::new(ColumnarCsvJsonLayout::from_output_schema(
+            output_schema(vec![(
+                "id",
+                OutputValueGetter::MessageByName {
+                    source_name: Arc::from("test"),
+                    column_name: Arc::from("id"),
+                },
+            )]),
+            None,
+        ));
+        let aggregator = ColumnarAggregator::new(layout);
         let result = aggregator.finish_bytes().unwrap();
         assert!(result.is_empty());
     }
@@ -649,5 +751,123 @@ mod tests {
         assert_eq!(json["u16"], "65535");
         assert_eq!(json["u32"], "4294967295");
         assert_eq!(json["u64"], "1234567890");
+    }
+
+    #[test]
+    fn output_schema_controls_order_and_by_index_value_access() {
+        let keys = vec![
+            Arc::<str>::from("a"),
+            Arc::<str>::from("b"),
+            Arc::<str>::from("c"),
+        ];
+        let values = vec![
+            Arc::new(datatypes::Value::Int64(1)),
+            Arc::new(datatypes::Value::Int64(2)),
+            Arc::new(datatypes::Value::Int64(3)),
+        ];
+        let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
+        let mut tuple = Tuple::new(vec![message]);
+        tuple.add_affiliate_column(Arc::new("x".to_string()), datatypes::Value::Int64(9));
+        let batch = RecordBatch::new(vec![tuple]).unwrap();
+        let schema = output_schema(vec![
+            (
+                "a",
+                OutputValueGetter::MessageByName {
+                    source_name: Arc::from("test"),
+                    column_name: Arc::from("a"),
+                },
+            ),
+            (
+                "x",
+                OutputValueGetter::Affiliate {
+                    column_name: Arc::from("x"),
+                },
+            ),
+            (
+                "c",
+                OutputValueGetter::MessageByName {
+                    source_name: Arc::from("test"),
+                    column_name: Arc::from("c"),
+                },
+            ),
+        ]);
+        let projection = Arc::new(ByIndexProjection::new(vec![
+            ByIndexProjectionColumn::new("test", 0, 0, "a", "a"),
+            ByIndexProjectionColumn::new("test", 2, 2, "c", "c"),
+        ]));
+        let factory = Arc::new(ColumnarCsvJsonEncoder::new("test"))
+            .with_output_schema(schema)
+            .expect("attach output schema")
+            .with_by_index_projection(projection)
+            .expect("attach by-index projection");
+
+        let result = encode_with_factory(factory, &batch);
+        assert_eq!(
+            String::from_utf8(result).unwrap(),
+            r#"{"a":"1","x":"9","c":"3"}"#
+        );
+    }
+
+    #[test]
+    fn output_schema_missing_values_are_encoded_as_empty_cells() {
+        let tuple = create_test_tuple(1, "a");
+        let batch = RecordBatch::new(vec![tuple]).unwrap();
+        let schema = output_schema(vec![(
+            "missing",
+            OutputValueGetter::MessageByName {
+                source_name: Arc::from("test"),
+                column_name: Arc::from("missing"),
+            },
+        )]);
+        let factory = Arc::new(ColumnarCsvJsonEncoder::new("test"))
+            .with_output_schema(schema)
+            .expect("attach output schema");
+
+        let result = encode_with_factory(factory, &batch);
+        assert_eq!(String::from_utf8(result).unwrap(), r#"{"missing":""}"#);
+    }
+
+    #[test]
+    fn output_schema_empty_delivery_stays_empty_bytes() {
+        let batch = RecordBatch::new(vec![]).unwrap();
+        let schema = output_schema(vec![(
+            "a",
+            OutputValueGetter::MessageByName {
+                source_name: Arc::from("test"),
+                column_name: Arc::from("a"),
+            },
+        )]);
+        let factory = Arc::new(ColumnarCsvJsonEncoder::new("test"))
+            .with_output_schema(schema)
+            .expect("attach output schema");
+
+        let result = encode_with_factory(factory, &batch);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn output_schema_rejects_duplicate_names() {
+        let schema = output_schema(vec![
+            (
+                "a",
+                OutputValueGetter::MessageByName {
+                    source_name: Arc::from("test"),
+                    column_name: Arc::from("a"),
+                },
+            ),
+            (
+                "a",
+                OutputValueGetter::MessageByName {
+                    source_name: Arc::from("test"),
+                    column_name: Arc::from("b"),
+                },
+            ),
+        ]);
+
+        let err = match Arc::new(ColumnarCsvJsonEncoder::new("test")).with_output_schema(schema) {
+            Ok(_) => panic!("duplicate names should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("duplicate output column `a`"));
     }
 }

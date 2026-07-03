@@ -3,8 +3,8 @@ use crate::codec::EncoderRegistry;
 use crate::expr::scalar::ColumnRef;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{
-    ByIndexProjection, ByIndexProjectionColumn, PhysicalBarrier, PhysicalPlan,
-    PhysicalProjectField, PhysicalStreamingAggregation, StreamingWindowSpec,
+    output_schema::OutputSchema, ByIndexProjection, ByIndexProjectionColumn, PhysicalBarrier,
+    PhysicalPlan, PhysicalProjectField, PhysicalStreamingAggregation, StreamingWindowSpec,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -30,6 +30,7 @@ pub fn optimize_physical_plan(
             aggregate_registry: Arc::clone(&aggregate_registry),
         }),
         Box::new(StreamingEncoderRewrite),
+        Box::new(AttachEncoderOutputSchema),
         Box::new(ByIndexProjectionAcrossMixedConsumersRewrite),
         Box::new(PartialByIndexRowDiffAndEncoderRewrite),
         Box::new(ByIndexProjectionIntoRowDiffRewrite),
@@ -62,6 +63,9 @@ struct InsertBarrierForFanIn;
 /// This eliminates one data-pass between BatchProcessor and SinkEncoderProcessor
 /// for registered `SinkEncoder` implementations.
 struct StreamingEncoderRewrite;
+
+/// Rule: preserve final encoder output schema before rewrites delay materialization.
+struct AttachEncoderOutputSchema;
 
 /// Rule: detect shared `Project` nodes that are pure `ColumnRef::ByIndex` projections
 /// (with no aliases) directly upstream of encoders, and prepare them for
@@ -212,6 +216,20 @@ impl PhysicalOptRule for StreamingEncoderRewrite {
     }
 }
 
+impl PhysicalOptRule for AttachEncoderOutputSchema {
+    fn name(&self) -> &str {
+        "attach_encoder_output_schema"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        _encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        attach_encoder_output_schema(plan)
+    }
+}
+
 fn fuse_streaming_encoder(plan: Arc<PhysicalPlan>) -> Arc<PhysicalPlan> {
     let children: Vec<Arc<PhysicalPlan>> = plan
         .children()
@@ -237,19 +255,70 @@ fn fuse_streaming_encoder(plan: Arc<PhysicalPlan>) -> Arc<PhysicalPlan> {
             if let PhysicalPlan::Batch(batch) = first_child.as_ref() {
                 let batch_children = first_child.children().to_vec();
                 let fused_index = encoder.base.index();
-                let fused = crate::planner::physical::PhysicalIncSinkEncoder::new(
+                let mut fused = crate::planner::physical::PhysicalIncSinkEncoder::new(
                     batch_children,
                     fused_index,
                     encoder.sink_id.clone(),
                     encoder.encoder.clone(),
                     batch.common.clone(),
                 );
+                fused.output_schema = encoder.output_schema.clone();
                 Arc::new(PhysicalPlan::IncSinkEncoder(fused))
             } else {
                 rebuild_with_children(plan.as_ref(), children)
             }
         }
         _ => rebuild_with_children(plan.as_ref(), children),
+    }
+}
+
+fn attach_encoder_output_schema(plan: Arc<PhysicalPlan>) -> Arc<PhysicalPlan> {
+    let children = plan
+        .children()
+        .iter()
+        .map(|child| attach_encoder_output_schema(Arc::clone(child)))
+        .collect::<Vec<_>>();
+
+    match plan.as_ref() {
+        PhysicalPlan::SinkEncoder(encoder) => {
+            let mut new = encoder.clone();
+            new.base.children = children;
+            new.output_schema =
+                encoder_output_schema_from_single_child("PhysicalSinkEncoder", &new.base.children);
+            Arc::new(PhysicalPlan::SinkEncoder(new))
+        }
+        PhysicalPlan::IncSinkEncoder(encoder) => {
+            let mut new = encoder.clone();
+            new.base.children = children;
+            new.output_schema = encoder_output_schema_from_single_child(
+                "PhysicalIncSinkEncoder",
+                &new.base.children,
+            );
+            Arc::new(PhysicalPlan::IncSinkEncoder(new))
+        }
+        _ => rebuild_with_children(plan.as_ref(), children),
+    }
+}
+
+fn encoder_output_schema_from_single_child(
+    encoder_plan_type: &str,
+    children: &[Arc<PhysicalPlan>],
+) -> Option<Arc<OutputSchema>> {
+    let [child] = children else {
+        return None;
+    };
+    match child.output_schema() {
+        Ok(output_schema) => Some(Arc::new(output_schema)),
+        Err(err) => {
+            tracing::warn!(
+                encoder_plan_type,
+                child_plan_type = child.get_plan_type(),
+                child_plan_index = child.get_plan_index(),
+                error = %err,
+                "failed to derive encoder output schema from child plan"
+            );
+            None
+        }
     }
 }
 
@@ -1232,6 +1301,81 @@ mod tests {
             panic!("expected batch child");
         };
         let PhysicalPlan::Project(project) = batch.base.children()[0].as_ref() else {
+            panic!("expected project child");
+        };
+        assert!(project.passthrough_messages);
+        assert!(project.fields.is_empty());
+    }
+
+    #[test]
+    fn optimized_encoder_preserves_output_schema_after_by_index_rewrite() {
+        let registry = EncoderRegistry::new();
+        registry.register_encoder_with_caps(
+            "test_by_index",
+            Arc::new(|_config| Ok(Arc::new(TestEncoderFactory) as Arc<dyn SinkEncoderFactory>)),
+            true,
+        );
+
+        let source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
+            "s".to_string(),
+            None,
+            test_schema(),
+            None,
+            0,
+        )));
+        let project = Arc::new(PhysicalPlan::Project(PhysicalProject::new(
+            vec![
+                PhysicalProjectField::new(
+                    "a",
+                    sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("a")),
+                    ScalarExpr::Column(ColumnRef::ByIndex {
+                        source_name: "s".to_string(),
+                        column_index: 0,
+                    }),
+                ),
+                PhysicalProjectField::new(
+                    "b",
+                    sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("b")),
+                    ScalarExpr::Column(ColumnRef::ByIndex {
+                        source_name: "s".to_string(),
+                        column_index: 1,
+                    }),
+                ),
+            ],
+            vec![source],
+            1,
+        )));
+        let encoder = Arc::new(PhysicalPlan::SinkEncoder(PhysicalSinkEncoder::new(
+            vec![project],
+            2,
+            "sink".to_string(),
+            SinkEncoderConfig::new("test_by_index", JsonMap::new()),
+            CommonSinkProps::default(),
+        )));
+
+        let optimized = optimize_physical_plan(
+            encoder,
+            &registry,
+            AggregateFunctionRegistry::with_builtins(),
+        );
+        let PhysicalPlan::SinkEncoder(encoder) = optimized.as_ref() else {
+            panic!("expected sink encoder");
+        };
+        let output_schema = encoder
+            .output_schema
+            .as_ref()
+            .expect("encoder output schema should be attached");
+        let names = output_schema
+            .columns
+            .iter()
+            .map(|column| column.name.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(
+            encoder.by_index_projection.is_some(),
+            "encoder should still receive by-index projection"
+        );
+        let PhysicalPlan::Project(project) = encoder.base.children()[0].as_ref() else {
             panic!("expected project child");
         };
         assert!(project.passthrough_messages);

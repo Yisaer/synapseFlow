@@ -1283,11 +1283,13 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::SinkEncoder(encoder) => {
+            validate_encoder_input_child(encoder.base.children.len())?;
             let encoder_impl = context
                 .encoder_registry()?
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let encoder_impl = attach_encoder_output_schema(plan, encoder_impl)?;
+            let encoder_impl =
+                attach_encoder_output_schema(encoder.output_schema.as_ref(), encoder_impl)?;
             let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
                 if !encoder_impl.supports_index_lazy_materialization() {
                     return Err(ProcessorError::InvalidConfiguration(format!(
@@ -1320,11 +1322,13 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::IncSinkEncoder(encoder) => {
+            validate_encoder_input_child(encoder.base.children.len())?;
             let encoder_impl = context
                 .encoder_registry()?
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let encoder_impl = attach_encoder_output_schema(plan, encoder_impl)?;
+            let encoder_impl =
+                attach_encoder_output_schema(encoder.output_schema.as_ref(), encoder_impl)?;
             let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
                 if !encoder_impl.supports_index_lazy_materialization() {
                     return Err(ProcessorError::InvalidConfiguration(format!(
@@ -1524,22 +1528,28 @@ fn sampler_input_schema(plan: &Arc<PhysicalPlan>) -> Option<Arc<datatypes::Schem
     }
 }
 
+fn validate_encoder_input_child(child_count: usize) -> Result<(), ProcessorError> {
+    if child_count != 1 {
+        return Err(ProcessorError::InvalidConfiguration(format!(
+            "encoder processor requires exactly one input child, got {child_count}",
+        )));
+    }
+    Ok(())
+}
+
 fn attach_encoder_output_schema(
-    plan: &Arc<PhysicalPlan>,
+    output_schema: Option<&Arc<crate::planner::physical::output_schema::OutputSchema>>,
     encoder_impl: Arc<dyn crate::codec::encoder::SinkEncoderFactory>,
 ) -> Result<Arc<dyn crate::codec::encoder::SinkEncoderFactory>, ProcessorError> {
-    let input_child = plan.children().first().ok_or_else(|| {
+    let output_schema = output_schema.cloned().ok_or_else(|| {
         ProcessorError::InvalidConfiguration(
-            "encoder processor requires exactly one input child".to_string(),
+            "optimized encoder plan is missing output_schema; encoder.output_schema must be \
+             attached before processor construction"
+                .to_string(),
         )
     })?;
-    let output_schema = input_child.output_schema().map_err(|err| {
-        ProcessorError::InvalidConfiguration(format!(
-            "encoder processor failed to resolve output schema: {err}"
-        ))
-    })?;
     encoder_impl
-        .with_output_schema(Arc::new(output_schema))
+        .with_output_schema(output_schema)
         .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))
 }
 
