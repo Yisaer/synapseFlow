@@ -120,7 +120,7 @@ impl StreamSqlParser {
         for item in &select.projection {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    let field_name = expr.to_string();
+                    let field_name = projection_field_name(expr);
                     select_fields.push(SelectField::new(expr.clone(), None, field_name));
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
@@ -168,6 +168,18 @@ impl StreamSqlParser {
 impl Default for StreamSqlParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn projection_field_name(expr: &Expr) -> String {
+    match expr {
+        Expr::Identifier(ident) => ident.value.clone(),
+        Expr::CompoundIdentifier(idents) => idents
+            .iter()
+            .map(|ident| ident.value.as_str())
+            .collect::<Vec<_>>()
+            .join("."),
+        _ => expr.to_string(),
     }
 }
 
@@ -253,6 +265,25 @@ mod tests {
             Some("full_name".to_string())
         );
         assert_eq!(select_stmt.select_fields[2].field_name, "full_name");
+    }
+
+    #[test]
+    fn test_parse_quoted_identifier_projection_names_are_unquoted() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT `TDU_1.TMInletWaterTempFltSts`, `msg`.`sig`");
+
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.select_fields.len(), 2);
+        assert_eq!(
+            select_stmt.select_fields[0].field_name,
+            "TDU_1.TMInletWaterTempFltSts"
+        );
+        assert_eq!(select_stmt.select_fields[1].field_name, "msg.sig");
+        assert_eq!(
+            select_stmt.select_fields[0].expr.to_string(),
+            "`TDU_1.TMInletWaterTempFltSts`"
+        );
     }
 
     #[test]
