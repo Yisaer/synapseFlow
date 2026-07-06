@@ -24,6 +24,7 @@ jobs:
       contents: read
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -52,6 +53,10 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Install GStreamer build dependencies
         if: matrix.video_feature == 'true'
         run: |
@@ -60,8 +65,7 @@ jobs:
             build-essential \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
-            pkg-config \
-            protobuf-compiler
+            pkg-config
       - name: Build release binary
         run: ${{ matrix.build_cmd }}
       - name: Prepare asset
@@ -149,7 +153,7 @@ jobs:
         if: matrix.build_mode == 'android-cross'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential
+          sudo apt-get install -y build-essential protobuf-compiler
           sdkmanager --install "ndk;${{ matrix.android_ndk_version }}"
           NDK="$ANDROID_HOME/ndk/${{ matrix.android_ndk_version }}"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -251,6 +255,7 @@ jobs:
                 build-essential \
                 ca-certificates \
                 git \
+                libprotobuf-dev \
                 m4 \
                 pkg-config \
                 protobuf-compiler \
@@ -277,7 +282,7 @@ jobs:
       - name: Build cross release binary
         if: matrix.build_mode != 'linux-arm64-container'
         run: |
-          cargo build --release --target ${{ matrix.rust_target }} --no-default-features --features "metrics,profiling,allocator-system,gmp_force_cross"
+          cargo build --release --target ${{ matrix.rust_target }} --no-default-features --features "metrics,profiling,allocator-system"
           mkdir -p target/release-artifacts/${{ matrix.asset_suffix }}
           cp "target/${{ matrix.rust_target }}/release/veloflux" "target/release-artifacts/${{ matrix.asset_suffix }}/veloflux"
       - name: Prepare cross release asset
@@ -330,6 +335,10 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Build Linux FFI shared library
         run: cargo build -p veloflux-ffi --release
       - name: Prepare FFI asset
