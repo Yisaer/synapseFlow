@@ -96,6 +96,13 @@ Behavior:
 
 - encoded-byte sinks carry batching settings on `PhysicalSinkEncoder`
 - direct collection sink paths use `PhysicalBatch` for the same sink-level batching semantics
+- `batch_duration` flushes on a fixed millisecond processing-time grid anchored when the processor
+  starts
+- duration windows are left-closed/right-open; a row arriving on a duration boundary belongs to the
+  next window
+- the first duration window can be partial because the grid is independent of the first row arrival
+- when both `batch_count` and `batch_duration` are set, reaching `batch_count` flushes before the
+  next duration boundary
 
 ## Current Connector-Specific Rules
 

@@ -191,7 +191,7 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
         "default", None,
     ))
     .expect("create flow instance");
-    let interval = Duration::from_millis(200);
+    let interval = Duration::from_millis(100);
     create_stream_with_sampler(
         &instance,
         "latest_stream",
@@ -705,13 +705,14 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
                 SinkOutputConfig::default(),
                 CommonSinkProps {
                     batch_count: Some(2),
-                    batch_duration: Some(Duration::from_millis(800)),
+                    batch_duration: Some(Duration::from_secs(3)),
                 },
             )],
         )
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
     let interval_settle = interval + Duration::from_millis(60);
+    let batch_output_timeout = Duration::from_secs(4);
 
     pipeline.start().await.expect("start pipeline");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -757,7 +758,7 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     tokio::time::sleep(interval_settle).await;
-    let first = recv_next_json(&mut output, Duration::from_millis(600)).await;
+    let first = recv_next_json(&mut output, batch_output_timeout).await;
     assert_eq!(first, serde_json::json!([{"total": 6}, {"total": 6}]));
 
     for value in [0, 0] {
@@ -779,7 +780,7 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     tokio::time::sleep(interval_settle).await;
-    let second = recv_next_json(&mut output, Duration::from_millis(1200)).await;
+    let second = recv_next_json(&mut output, batch_output_timeout).await;
     assert_eq!(
         second,
         serde_json::json!([{"total": 5}]),

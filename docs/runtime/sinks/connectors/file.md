@@ -71,7 +71,9 @@ Rows -> common sink batching -> encoder -> encoded delivery unit -> file sink ->
 
 For row-count rolling, configure `common_sink_props.batch_count`. For example, `batch_count: 2`
 emits one encoded delivery unit after every two rows, so the file sink writes one file per two-row
-batch. `batch_duration` works the same way for time-based delivery boundaries.
+batch. `batch_duration` rolls files on the common sink fixed millisecond processing-time grid.
+Duration windows are left-closed/right-open, the first window can be partial, and a row on a
+duration boundary belongs to the next file.
 
 The file sink itself does not inspect row counts, schema, or encoded content. It only receives bytes
 from the upstream sink delivery path and finalizes one file for each `send(payload)` call. This keeps

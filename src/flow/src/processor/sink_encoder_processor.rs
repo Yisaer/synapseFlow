@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio::time::{sleep, Duration, Sleep};
+use tokio::time::{sleep_until, Duration, Instant, Sleep};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 pub struct SinkEncoderProcessor {
@@ -84,10 +84,26 @@ impl SinkEncoderProcessor {
                 "sink encoder processor requires batch_count > 0 when configured".to_string(),
             ));
         }
-        if matches!(batch_duration, Some(duration) if duration.is_zero()) {
-            return Err(ProcessorError::InvalidConfiguration(
-                "sink encoder processor requires batch_duration > 0 when configured".to_string(),
-            ));
+        if let Some(duration) = batch_duration {
+            let millis = duration.as_millis();
+            if millis == 0 {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "sink encoder processor requires batch_duration >= 1ms when configured"
+                        .to_string(),
+                ));
+            }
+            if !duration.subsec_nanos().is_multiple_of(1_000_000) {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "sink encoder processor requires batch_duration to use millisecond precision"
+                        .to_string(),
+                ));
+            }
+            if u64::try_from(millis).is_err() {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "sink encoder processor requires batch_duration to fit in u64 milliseconds"
+                        .to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -316,6 +332,7 @@ impl SinkEncoderProcessor {
         output: &LinkOutput<StreamData>,
         data_channel_capacity: usize,
         timer: &mut Option<Pin<Box<Sleep>>>,
+        grid_origin: Instant,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         let row_total = collection.num_rows();
@@ -438,15 +455,51 @@ impl SinkEncoderProcessor {
         }
 
         if let Some(duration) = mode.duration() {
-            Self::schedule_timer(timer, duration, delivery.row_count > 0);
+            Self::schedule_timer(timer, grid_origin, duration, delivery.row_count > 0);
         }
         Ok(())
     }
 
-    fn schedule_timer(timer: &mut Option<Pin<Box<Sleep>>>, duration: Duration, has_data: bool) {
+    /// Fixed-grid boundary handling.
+    ///
+    /// The batch flush deadline is aligned to a fixed processing-time grid
+    /// `grid_origin + k * duration` (captured once at processor start), NOT to the
+    /// arrival of each batch's first sample. Anchoring to a fixed grid keeps every
+    /// window the same fixed partition of the timeline, so a periodic source of the
+    /// same period yields exactly `duration / period` rows per window instead of an
+    /// extra boundary sample per batch.
+    ///
+    /// The window is left-closed / right-open `[t, t+duration)`: a sample landing on
+    /// a boundary belongs to the next window. That is realized by the `biased`
+    /// select (the timer arm is polled before the input arm), so the boundary flush
+    /// happens before the coincident sample is appended.
+    ///
+    /// The grid origin is data-independent (processor start), so the first window is
+    /// naturally a partial one — it is emitted as-is; every subsequent window is a
+    /// full-length grid cell.
+    fn next_boundary(grid_origin: Instant, duration: Duration, now: Instant) -> Instant {
+        let elapsed = now.saturating_duration_since(grid_origin);
+        let period_ms = duration.as_millis();
+        let next_boundary_ms = (elapsed.as_millis() / period_ms + 1)
+            .checked_mul(period_ms)
+            .expect("validated batch duration keeps boundary offset representable");
+        let boundary_offset = Duration::from_millis(
+            u64::try_from(next_boundary_ms)
+                .expect("validated batch duration keeps boundary offset within u64 milliseconds"),
+        );
+        grid_origin + boundary_offset
+    }
+
+    fn schedule_timer(
+        timer: &mut Option<Pin<Box<Sleep>>>,
+        grid_origin: Instant,
+        duration: Duration,
+        has_data: bool,
+    ) {
         if has_data {
             if timer.is_none() {
-                *timer = Some(Box::pin(sleep(duration)));
+                let boundary = Self::next_boundary(grid_origin, duration, Instant::now());
+                *timer = Some(Box::pin(sleep_until(boundary)));
             }
         } else if timer.is_some() {
             *timer = None;
@@ -467,6 +520,9 @@ impl Processor for SinkEncoderProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
+        if let Err(err) = Self::validate_batch_config(self.batch_count, self.batch_duration) {
+            return ProcessorStart::failed(spawner, err);
+        }
         let mut encoder = match self.take_encoder() {
             Ok(Some(encoder)) => encoder,
             Ok(None) => {
@@ -489,6 +545,9 @@ impl Processor for SinkEncoderProcessor {
         ProcessorStart::ready(spawner.spawn(async move {
             let mut delivery = DeliveryEncoding::default();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
+            // Fixed grid origin, captured once before any sample arrives so batch
+            // boundaries never re-anchor to a batch's first sample. See `next_boundary`.
+            let grid_origin = Instant::now();
             loop {
                 tokio::select! {
                     biased;
@@ -564,7 +623,7 @@ impl Processor for SinkEncoderProcessor {
                             stats.record_error(err.to_string());
                         }
                         if let Some(duration) = mode.duration() {
-                            SinkEncoderProcessor::schedule_timer(&mut timer, duration, delivery.row_count > 0);
+                            SinkEncoderProcessor::schedule_timer(&mut timer, grid_origin, duration, delivery.row_count > 0);
                         }
                     }
                     item = input_streams.next() => {
@@ -583,6 +642,7 @@ impl Processor for SinkEncoderProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 &mut timer,
+                                                grid_origin,
                                                 &stats,
                                             )
                                         .await;
@@ -641,6 +701,7 @@ impl Processor for SinkEncoderProcessor {
                                         if let Some(duration) = mode.duration() {
                                             SinkEncoderProcessor::schedule_timer(
                                                 &mut timer,
+                                                grid_origin,
                                                 duration,
                                                 delivery.row_count > 0,
                                             );
@@ -961,5 +1022,98 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([{"amount": 1}, {"amount": 2}]));
         handle.await.expect("join").expect("processor result");
+    }
+
+    #[tokio::test]
+    async fn zero_batch_duration_fails_when_started_directly() {
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
+        let runtime = encoder.start_encoder().expect("encoder runtime");
+        let mut processor =
+            SinkEncoderProcessor::new("sink_encoder", runtime, None, Some(Duration::ZERO));
+
+        let start = processor.start(&test_spawner());
+        let err = start
+            .handle
+            .await
+            .expect("join")
+            .expect_err("zero batch duration should fail");
+        assert!(matches!(err, ProcessorError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn batch_duration_must_fit_supported_millisecond_range() {
+        let too_small =
+            SinkEncoderProcessor::validate_batch_config(None, Some(Duration::from_nanos(999)))
+                .expect_err("sub-millisecond duration should be rejected");
+        assert!(matches!(too_small, ProcessorError::InvalidConfiguration(_)));
+
+        let fractional_ms =
+            SinkEncoderProcessor::validate_batch_config(None, Some(Duration::from_micros(1500)))
+                .expect_err("sub-millisecond precision should be rejected");
+        assert!(matches!(
+            fractional_ms,
+            ProcessorError::InvalidConfiguration(_)
+        ));
+
+        let too_large =
+            SinkEncoderProcessor::validate_batch_config(None, Some(Duration::from_secs(u64::MAX)))
+                .expect_err("duration beyond u64 milliseconds should be rejected");
+        assert!(matches!(too_large, ProcessorError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn next_boundary_aligns_to_fixed_grid_and_is_right_open() {
+        let d = Duration::from_secs(10);
+        let origin = Instant::now();
+
+        // Samples arriving at different offsets WITHIN the same cell [0, 10s) all
+        // resolve to the SAME boundary: the grid never re-anchors to a batch's
+        // first sample. This is the core of the fix — without it, each batch's
+        // window started at its first sample's arrival and over-collected by one.
+        for offset_ms in [1u64, 3_000, 9_999] {
+            assert_eq!(
+                SinkEncoderProcessor::next_boundary(
+                    origin,
+                    d,
+                    origin + Duration::from_millis(offset_ms),
+                ),
+                origin + d,
+                "offset {offset_ms}ms must still flush at the same grid boundary",
+            );
+        }
+        assert_eq!(
+            SinkEncoderProcessor::next_boundary(
+                origin,
+                d,
+                origin + Duration::from_nanos(9_999_999_999),
+            ),
+            origin + d,
+            "sub-millisecond elapsed time must not shift the fixed grid boundary",
+        );
+
+        // Subsequent cell.
+        assert_eq!(
+            SinkEncoderProcessor::next_boundary(origin, d, origin + Duration::from_secs(13)),
+            origin + Duration::from_secs(20),
+        );
+
+        // Right-open [t, t+D): a `now` sitting exactly on a grid line opens the new
+        // cell at that line, so its boundary is one full period later (the sample on
+        // the line belongs to the next window, not the one that just closed).
+        assert_eq!(
+            SinkEncoderProcessor::next_boundary(origin, d, origin),
+            origin + d,
+        );
+        assert_eq!(
+            SinkEncoderProcessor::next_boundary(origin, d, origin + d),
+            origin + Duration::from_secs(20),
+        );
+
+        // Catch-up after an idle gap that spans multiple boundaries: jump straight
+        // to the next FUTURE boundary rather than replaying missed ones.
+        assert_eq!(
+            SinkEncoderProcessor::next_boundary(origin, d, origin + Duration::from_secs(35)),
+            origin + Duration::from_secs(40),
+        );
     }
 }

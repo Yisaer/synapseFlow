@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio::time::{sleep, Duration, Sleep};
+use tokio::time::{sleep_until, Duration, Instant, Sleep};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// Processor that buffers collections before releasing them downstream.
@@ -47,6 +47,26 @@ impl BatchProcessor {
         Self::batch_mode(batch_count, batch_duration).map(|_| ())
     }
 
+    fn validate_batch_duration(duration: Duration) -> Result<Duration, ProcessorError> {
+        let millis = duration.as_millis();
+        if millis == 0 {
+            return Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_duration >= 1ms when configured".to_string(),
+            ));
+        }
+        if !duration.subsec_nanos().is_multiple_of(1_000_000) {
+            return Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_duration to use millisecond precision".to_string(),
+            ));
+        }
+        if u64::try_from(millis).is_err() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_duration to fit in u64 milliseconds".to_string(),
+            ));
+        }
+        Ok(duration)
+    }
+
     fn batch_mode(
         batch_count: Option<usize>,
         batch_duration: Option<Duration>,
@@ -55,12 +75,14 @@ impl BatchProcessor {
             (Some(0), _) => Err(ProcessorError::InvalidConfiguration(
                 "batch processor requires batch_count > 0 when configured".to_string(),
             )),
-            (_, Some(duration)) if duration.is_zero() => Err(ProcessorError::InvalidConfiguration(
-                "batch processor requires batch_duration > 0 when configured".to_string(),
-            )),
-            (Some(count), Some(duration)) => Ok(BatchMode::Combined { count, duration }),
+            (Some(count), Some(duration)) => Ok(BatchMode::Combined {
+                count,
+                duration: Self::validate_batch_duration(duration)?,
+            }),
             (Some(count), None) => Ok(BatchMode::CountOnly { count }),
-            (None, Some(duration)) => Ok(BatchMode::DurationOnly { duration }),
+            (None, Some(duration)) => Ok(BatchMode::DurationOnly {
+                duration: Self::validate_batch_duration(duration)?,
+            }),
             (None, None) => Err(ProcessorError::InvalidConfiguration(
                 "batch processor requires batch_count or batch_duration".to_string(),
             )),
@@ -186,10 +208,38 @@ impl BatchProcessor {
         Ok(())
     }
 
-    fn schedule_timer(timer: &mut Option<Pin<Box<Sleep>>>, duration: Duration, has_data: bool) {
+    /// Next flush boundary on a fixed processing-time grid `grid_origin + k*duration`.
+    ///
+    /// The grid origin is captured once at processor start (before any tuple), so
+    /// duration-based batch windows are a fixed partition of the timeline and never
+    /// re-anchor to a batch's first tuple. Combined with the `biased` select (timer
+    /// arm before input arm), the window is left-closed / right-open `[t, t+duration)`
+    /// — a tuple on the boundary falls into the next window. This keeps a periodic
+    /// source of the same period at exactly `duration / period` tuples per window
+    /// instead of over-collecting the closing-edge tuple.
+    fn next_boundary(grid_origin: Instant, duration: Duration, now: Instant) -> Instant {
+        let elapsed = now.saturating_duration_since(grid_origin);
+        let period_ms = duration.as_millis();
+        let next_boundary_ms = (elapsed.as_millis() / period_ms + 1)
+            .checked_mul(period_ms)
+            .expect("validated batch duration keeps boundary offset representable");
+        let boundary_offset = Duration::from_millis(
+            u64::try_from(next_boundary_ms)
+                .expect("validated batch duration keeps boundary offset within u64 milliseconds"),
+        );
+        grid_origin + boundary_offset
+    }
+
+    fn schedule_timer(
+        timer: &mut Option<Pin<Box<Sleep>>>,
+        grid_origin: Instant,
+        duration: Duration,
+        has_data: bool,
+    ) {
         if has_data {
             if timer.is_none() {
-                *timer = Some(Box::pin(sleep(duration)));
+                let boundary = Self::next_boundary(grid_origin, duration, Instant::now());
+                *timer = Some(Box::pin(sleep_until(boundary)));
             }
         } else if timer.is_some() {
             *timer = None;
@@ -220,6 +270,9 @@ impl Processor for BatchProcessor {
         ProcessorStart::ready(spawner.spawn(async move {
             let mut buffer: Vec<Tuple> = Vec::new();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
+            // Fixed grid origin, captured once before any tuple so duration windows
+            // never re-anchor to a batch's first tuple. See `next_boundary`.
+            let grid_origin = Instant::now();
             loop {
                 tokio::select! {
                     biased;
@@ -263,7 +316,7 @@ impl Processor for BatchProcessor {
                         )
                         .await?;
                         if let BatchMode::DurationOnly { duration } | BatchMode::Combined { duration, .. } = &mode {
-                            BatchProcessor::schedule_timer(&mut timer, *duration, !buffer.is_empty());
+                            BatchProcessor::schedule_timer(&mut timer, grid_origin, *duration, !buffer.is_empty());
                         }
                     }
                     item = input_streams.next() => {
@@ -293,6 +346,7 @@ impl Processor for BatchProcessor {
                                             BatchMode::DurationOnly { duration } => {
                                                 BatchProcessor::schedule_timer(
                                                     &mut timer,
+                                                    grid_origin,
                                                     *duration,
                                                     !buffer.is_empty(),
                                                 );
@@ -311,6 +365,7 @@ impl Processor for BatchProcessor {
                                                 if res.is_ok() {
                                                     BatchProcessor::schedule_timer(
                                                         &mut timer,
+                                                        grid_origin,
                                                         *duration,
                                                         !buffer.is_empty(),
                                                     );
@@ -352,6 +407,7 @@ impl Processor for BatchProcessor {
                                         {
                                             BatchProcessor::schedule_timer(
                                                 &mut timer,
+                                                grid_origin,
                                                 *duration,
                                                 !buffer.is_empty(),
                                             );
@@ -503,5 +559,60 @@ mod tests {
         let _ = control_tx.send(ControlSignal::Instant(
             crate::processor::InstantControlSignal::StreamQuickEnd { signal_id: 0 },
         ));
+    }
+
+    #[test]
+    fn batch_duration_must_fit_supported_millisecond_range() {
+        let too_small =
+            BatchProcessor::validate_batch_config(None, Some(Duration::from_nanos(999)))
+                .expect_err("sub-millisecond duration should be rejected");
+        assert!(matches!(too_small, ProcessorError::InvalidConfiguration(_)));
+
+        let fractional_ms =
+            BatchProcessor::validate_batch_config(None, Some(Duration::from_micros(1500)))
+                .expect_err("sub-millisecond precision should be rejected");
+        assert!(matches!(
+            fractional_ms,
+            ProcessorError::InvalidConfiguration(_)
+        ));
+
+        let too_large =
+            BatchProcessor::validate_batch_config(None, Some(Duration::from_secs(u64::MAX)))
+                .expect_err("duration beyond u64 milliseconds should be rejected");
+        assert!(matches!(too_large, ProcessorError::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn next_boundary_aligns_to_fixed_grid_and_is_right_open() {
+        let d = Duration::from_secs(10);
+        let origin = Instant::now();
+
+        // Tuples arriving at different offsets within the same cell [0, 10s) all
+        // resolve to the SAME boundary: the grid never re-anchors to a batch's
+        // first tuple.
+        for offset_ms in [1u64, 3_000, 9_999] {
+            assert_eq!(
+                BatchProcessor::next_boundary(origin, d, origin + Duration::from_millis(offset_ms)),
+                origin + d,
+            );
+        }
+        assert_eq!(
+            BatchProcessor::next_boundary(origin, d, origin + Duration::from_nanos(9_999_999_999)),
+            origin + d,
+        );
+
+        // Right-open [t, t+D): a `now` exactly on a grid line opens the new cell at
+        // that line, so its boundary is one full period later.
+        assert_eq!(BatchProcessor::next_boundary(origin, d, origin), origin + d);
+        assert_eq!(
+            BatchProcessor::next_boundary(origin, d, origin + d),
+            origin + Duration::from_secs(20),
+        );
+
+        // Catch-up across missed boundaries jumps to the next future boundary.
+        assert_eq!(
+            BatchProcessor::next_boundary(origin, d, origin + Duration::from_secs(35)),
+            origin + Duration::from_secs(40),
+        );
     }
 }
