@@ -19,7 +19,8 @@ use flow::{
 };
 use serde_json::Value as JsonValue;
 
-use super::can::{CanDecoder, CanFrame, CanIdMapping, CanMuxKeyResolver};
+use super::can::{CanDecoder, CanIdMapping, CanMuxKeyResolver};
+use super::payload::{GbfPayloadFrame, PayloadDecoder};
 use crate::schema::dbc::load_can_schema;
 use crate::schema::gbf::GbfSchema;
 
@@ -58,48 +59,74 @@ pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
                 })?;
 
             // Validate format type
-            if format_type != "can" {
-                return Err(CodecError::Other(format!(
-                    "unsupported format_type: {format_type}"
-                )));
+            match format_type {
+                "can" => {
+                    let dbc = load_can_schema(format_schema_path).map_err(|e| {
+                        CodecError::Other(format!(
+                            "failed to load can schema from {}: {e}",
+                            format_schema_path
+                        ))
+                    })?;
+
+                    let pattern = config
+                        .props()
+                        .get("signal_name_pattern")
+                        .and_then(JsonValue::as_str)
+                        .map(|s| s.to_string());
+
+                    let clamp_to_range = config
+                        .props()
+                        .get("clamp_to_range")
+                        .and_then(JsonValue::as_bool)
+                        .unwrap_or(true);
+
+                    let mapping = CanIdMapping::from_prop(config.props().get("can_id_mapping"))?;
+
+                    GbfDecoder::new(
+                        stream_name,
+                        schema.clone(),
+                        gbf_schema,
+                        dbc,
+                        pattern,
+                        clamp_to_range,
+                        mapping,
+                    )
+                    .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
+                }
+                "someip" => {
+                    // Load ARXML codec — prefer cached ref, fall back to path.
+                    let codec = if let Some(ref_name) = config
+                        .props()
+                        .get("format_schema_ref")
+                        .and_then(JsonValue::as_str)
+                    {
+                        crate::schema::arxml::get_cached_codec(ref_name).ok_or_else(|| {
+                            CodecError::Other(format!(
+                                "ARXML codec `{ref_name}` not found in cache; \
+                                     register it first via schema.type=\"arxml\""
+                            ))
+                        })?
+                    } else {
+                        let path = format_schema_path;
+                        Arc::new(arxml_converter::ArxmlCodec::load(path).map_err(|e| {
+                            CodecError::Other(format!("failed to load ARXML from {path}: {e}"))
+                        })?)
+                    };
+
+                    let payload_decoder =
+                        Box::new(crate::decoder::someip::SomeIpPayloadDecoder::new(
+                            stream_name,
+                            schema.clone(),
+                            codec,
+                        ));
+
+                    GbfDecoder::with_payload_decoder(gbf_schema, payload_decoder)
+                        .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
+                }
+                other => Err(CodecError::Other(format!(
+                    "unsupported format_type: {other}"
+                ))),
             }
-
-            let dbc = load_can_schema(format_schema_path).map_err(|e| {
-                CodecError::Other(format!(
-                    "failed to load can schema from {}: {e}",
-                    format_schema_path
-                ))
-            })?;
-
-            let pattern = config
-                .props()
-                .get("signal_name_pattern")
-                .and_then(JsonValue::as_str)
-                .map(|s| s.to_string());
-
-            // Clamp decoded values to the DBC min/max range (default true, to
-            // match eKuiper's can_dbc). Set `clamp_to_range: false` to keep raw
-            // out-of-range physical values.
-            let clamp_to_range = config
-                .props()
-                .get("clamp_to_range")
-                .and_then(JsonValue::as_bool)
-                .unwrap_or(true);
-
-            // CAN ID lookup policy (issue #217). Default `raw`; `bus_shift`
-            // reproduces the historical synthetic packing.
-            let mapping = CanIdMapping::from_prop(config.props().get("can_id_mapping"))?;
-
-            GbfDecoder::new(
-                stream_name,
-                schema.clone(),
-                gbf_schema,
-                dbc,
-                pattern,
-                clamp_to_range,
-                mapping,
-            )
-            .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
         }),
     );
 }
@@ -107,11 +134,11 @@ pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
 /// GBF decoder that converts binary packets into RecordBatch based on JSON schema.
 pub struct GbfDecoder {
     parser: crate::codec::gbf_parser::GbfParser,
-    can_decoder: CanDecoder,
+    payload_decoder: Box<dyn PayloadDecoder>,
 }
 
 impl GbfDecoder {
-    /// Create a new GBF decoder.
+    /// Create a new GBF decoder for CAN (DBC JSON).
     pub fn new(
         source_name: impl Into<String>,
         schema: Arc<Schema>,
@@ -121,13 +148,30 @@ impl GbfDecoder {
         clamp_to_range: bool,
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
-        let can_decoder =
-            CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range, mapping)?;
+        let can_decoder = Box::new(CanDecoder::new(
+            source_name,
+            schema,
+            dbc,
+            pattern,
+            clamp_to_range,
+            mapping,
+        )?);
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
-
         Ok(Self {
             parser,
-            can_decoder,
+            payload_decoder: can_decoder,
+        })
+    }
+
+    /// Create a GBF decoder with an arbitrary payload decoder.
+    pub fn with_payload_decoder(
+        gbf_schema: GbfSchema,
+        payload_decoder: Box<dyn PayloadDecoder>,
+    ) -> Result<Self, CodecError> {
+        let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
+        Ok(Self {
+            parser,
+            payload_decoder,
         })
     }
 }
@@ -168,24 +212,27 @@ impl RecordDecoder for GbfDecoder {
 
             // If packet has no frames (e.g., heartbeat or all invalid), decode a
             // single dummy frame so the timestamp-only row is still emitted.
-            let can_frames: Vec<CanFrame> = if frame_slots.is_empty() {
-                vec![CanFrame {
+            let payload_frames: Vec<GbfPayloadFrame<'_>> = if frame_slots.is_empty() {
+                vec![GbfPayloadFrame {
                     timestamp,
-                    can_id: u32::MAX,
+                    format_id: u32::MAX,
                     payload: &[],
                 }]
             } else {
                 frame_slots
                     .iter()
-                    .map(|&(can_id, off, len)| CanFrame {
+                    .map(|&(can_id, off, len)| GbfPayloadFrame {
                         timestamp,
-                        can_id,
+                        format_id: can_id,
                         payload: &packet[off as usize..off as usize + len as usize],
                     })
                     .collect()
             };
 
-            if let Some(tuple) = self.can_decoder.decode_frames(can_frames, projection) {
+            if let Some(tuple) = self
+                .payload_decoder
+                .decode_frames(payload_frames, projection)
+            {
                 all_tuples.push(tuple);
             }
         }
@@ -220,7 +267,7 @@ struct MuxFrameKey {
 /// The sampler calls this type through the generic [`Merger`] trait.
 pub struct GbfFusedMerger {
     parser: crate::codec::gbf_parser::GbfParser,
-    can_decoder: CanDecoder,
+    payload_decoder: Box<dyn PayloadDecoder>,
     mux_resolver: Option<CanMuxKeyResolver>,
     /// All frame payloads for the current interval, concatenated into one
     /// reusable buffer to avoid a per-frame allocation.
@@ -245,12 +292,18 @@ impl GbfFusedMerger {
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
         let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc, mapping);
-        let can_decoder =
-            CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range, mapping)?;
+        let can_decoder = Box::new(CanDecoder::new(
+            source_name,
+            schema,
+            dbc,
+            pattern,
+            clamp_to_range,
+            mapping,
+        )?);
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
         Ok(Self {
             parser,
-            can_decoder,
+            payload_decoder: can_decoder,
             mux_resolver,
             payload_buf: Vec::with_capacity(64 * 8),
             frames: HashMap::with_capacity(64),
@@ -272,20 +325,23 @@ impl GbfFusedMerger {
 
         let ts = self.last_ts;
         let buf = self.payload_buf.as_slice();
-        let mut can_frames: Vec<CanFrame<'_>> =
+        let mut payload_frames: Vec<GbfPayloadFrame<'_>> =
             Vec::with_capacity(self.frames.len().saturating_add(self.mux_frames.len()));
-        can_frames.extend(self.frames.values().map(|slot| CanFrame {
+        payload_frames.extend(self.frames.values().map(|slot| GbfPayloadFrame {
             timestamp: ts,
-            can_id: slot.can_id,
+            format_id: slot.can_id,
             payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
         }));
-        can_frames.extend(self.mux_frames.values().map(|slot| CanFrame {
+        payload_frames.extend(self.mux_frames.values().map(|slot| GbfPayloadFrame {
             timestamp: ts,
-            can_id: slot.can_id,
+            format_id: slot.can_id,
             payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
         }));
 
-        let batch = match self.can_decoder.decode_frames(can_frames, projection) {
+        let batch = match self
+            .payload_decoder
+            .decode_frames(payload_frames, projection)
+        {
             Some(tuple) => Some(RecordBatch::new(vec![tuple])?),
             None => None,
         };
@@ -303,7 +359,7 @@ impl Merger for GbfFusedMerger {
         if self.mux_resolver.is_none() {
             let Self {
                 parser,
-                can_decoder,
+                payload_decoder,
                 payload_buf,
                 frames,
                 last_ts,
@@ -311,7 +367,7 @@ impl Merger for GbfFusedMerger {
             } = self;
             for packet in parser.split_packets(data) {
                 let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
-                    if !can_decoder.contains_can_id(can_id) {
+                    if !payload_decoder.contains_format_id(can_id) {
                         return;
                     }
                     let start = payload_buf.len() as u32;
@@ -334,7 +390,7 @@ impl Merger for GbfFusedMerger {
         // `parser` is borrowed immutably.
         let Self {
             parser,
-            can_decoder,
+            payload_decoder,
             mux_resolver,
             payload_buf,
             frames,
@@ -343,7 +399,7 @@ impl Merger for GbfFusedMerger {
         } = self;
         for packet in parser.split_packets(data) {
             let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
-                if !can_decoder.contains_can_id(can_id) {
+                if !payload_decoder.contains_format_id(can_id) {
                     return;
                 }
                 let mux_value = if let Some(resolver) = mux_resolver.as_ref() {

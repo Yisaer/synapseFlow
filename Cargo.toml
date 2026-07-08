@@ -12,6 +12,7 @@ members = [
     "src/udf",
     "src/veloflux-udf-sdk",
     "distros/sdv",
+    "distros/sdv/arxml_converter",
     "third_party/metrics-exporter-prometheus-shim",
 ]
 resolver = "2"
@@ -78,6 +79,7 @@ proptest = "1"
 rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rumqttd = "0.20.0"
+hex = "0.4"
 uuid = "1"
 
 [[bench]]

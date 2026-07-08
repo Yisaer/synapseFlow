@@ -46,6 +46,7 @@ use flow::{
 };
 use tracing::trace;
 
+use super::payload::{GbfPayloadFrame, PayloadDecoder};
 use crate::schema::dbc::{DbcJson, format_signal_name};
 
 /// A parsed CAN frame with timestamp, ID, and payload.
@@ -795,6 +796,33 @@ impl CanDecoder {
     #[allow(dead_code)]
     pub fn keys(&self) -> &Arc<[Arc<str>]> {
         &self.keys
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PayloadDecoder impl — adapts CanDecoder to the generic GBF trait.
+// ---------------------------------------------------------------------------
+
+impl PayloadDecoder for CanDecoder {
+    #[inline]
+    fn contains_format_id(&self, format_id: u32) -> bool {
+        self.contains_can_id(format_id)
+    }
+
+    fn decode_frames(
+        &self,
+        frames: Vec<GbfPayloadFrame<'_>>,
+        projection: Option<&DecodeProjection>,
+    ) -> Option<Tuple> {
+        let can_frames: Vec<CanFrame<'_>> = frames
+            .iter()
+            .map(|f| CanFrame {
+                timestamp: f.timestamp,
+                can_id: f.format_id,
+                payload: f.payload,
+            })
+            .collect();
+        CanDecoder::decode_frames(self, can_frames, projection)
     }
 }
 

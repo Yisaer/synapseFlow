@@ -1,0 +1,8 @@
+[package]
+name = "arxml_converter"
+version = "0.1.0"
+edition = "2024"
+description = "AUTOSAR ARXML type resolver and binary decoder (CP + AP)"
+
+[dependencies]
+roxmltree = "0.20"

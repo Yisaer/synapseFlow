@@ -1,0 +1,2497 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AUTOSAR xmlns="http://autosar.org/schema/r4.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://autosar.org/schema/r4.0 AUTOSAR_4-2-2.xsd">
+  <AR-PACKAGES>
+    <AR-PACKAGE UUID="fa601ce6-fe3a-49c3-ac82-78ed608151a0">
+      <SHORT-NAME>DataTypes</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="20fa20bf-32dd-4393-a78d-64361dc968bb">
+          <SHORT-NAME>ApplicationDataType</SHORT-NAME>
+          <ELEMENTS>
+            <APPLICATION-ARRAY-DATA-TYPE UUID="adt-9181413f-82f8-4776-96fd-36f7df1f2de7">
+              <SHORT-NAME>adt_WiFiApArray</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi热点数组</L-2>
+              </DESC>
+              <CATEGORY>ARRAY</CATEGORY>
+              <DYNAMIC-ARRAY-SIZE-PROFILE>VSA_LINEAR</DYNAMIC-ARRAY-SIZE-PROFILE>
+              <ELEMENT UUID="a8c00109-57ac-4a53-9b67-68ca5821c0d5">
+                <SHORT-NAME>WiFiApInfo_element</SHORT-NAME>
+                <CATEGORY>STRUCTURE</CATEGORY>
+                <TYPE-TREF DEST="APPLICATION-RECORD-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApInfo</TYPE-TREF>
+                <ARRAY-SIZE-HANDLING>ALL-INDICES-SAME-ARRAY-SIZE</ARRAY-SIZE-HANDLING>
+                <ARRAY-SIZE-SEMANTICS>VARIABLE-SIZE</ARRAY-SIZE-SEMANTICS>
+                <MAX-NUMBER-OF-ELEMENTS>16</MAX-NUMBER-OF-ELEMENTS>
+              </ELEMENT>
+            </APPLICATION-ARRAY-DATA-TYPE>
+            <APPLICATION-RECORD-DATA-TYPE UUID="fd62f80c-5bff-4367-b389-cca2094d08cf">
+              <SHORT-NAME>adt_WiFiApList</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">上报WiFi AP列表</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <ELEMENTS>
+                <APPLICATION-RECORD-ELEMENT UUID="95b7e73b-7bee-4fdb-9431-dc2848727878">
+                  <SHORT-NAME>wiFiApNum</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">wifi热点个数</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApNum</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="d771b1d8-0f03-44fc-aefb-61a2a423d415">
+                  <SHORT-NAME>wiFiApArray</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">wifi热点数组</L-2>
+                  </DESC>
+                  <CATEGORY>ARRAY</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-ARRAY-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApArray</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+              </ELEMENTS>
+            </APPLICATION-RECORD-DATA-TYPE>
+            <APPLICATION-RECORD-DATA-TYPE UUID="ebeebb9f-34bc-411b-8dcb-76596ccb41dc">
+              <SHORT-NAME>adt_WiFiConnStatus</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">Wifi当前连接状态</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <ELEMENTS>
+                <APPLICATION-RECORD-ELEMENT UUID="37290847-73e3-4aad-9100-4d0d63c2b594">
+                  <SHORT-NAME>wiFiApName</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">登入热点ID</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApName</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="2de9eb78-c81c-4c4f-bb16-7b840feb82da">
+                  <SHORT-NAME>wiFiCurConnStatus</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">连接状态</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiCurConnStatus</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="b9d8dbe7-cf60-4197-bb38-443b7c3779a8">
+                  <SHORT-NAME>wiFiStrength</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">信号强度</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiStrength</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="5229aac0-5a56-4d23-8409-b7538cf68233">
+                  <SHORT-NAME>wiFiUploadDataStatus</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">上行数据状态</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiUploadDataStatus</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="2a5acb2f-3ee9-4f3f-888f-b1056607f355">
+                  <SHORT-NAME>wiFiDownloadDataStatus</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">下行数据状态</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiDownloadDataStatus</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="08b144fb-d9e4-4a46-9f81-8b534957e088">
+                  <SHORT-NAME>wiFiLinkedInternet</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">是否是可以上网</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiLinkedInternet</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+              </ELEMENTS>
+            </APPLICATION-RECORD-DATA-TYPE>
+            <APPLICATION-RECORD-DATA-TYPE UUID="bbbc25f6-3316-478c-ad6b-b263cd217773">
+              <SHORT-NAME>adt_WiFiApInfo</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">热点信息</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <ELEMENTS>
+                <APPLICATION-RECORD-ELEMENT UUID="5b535d4f-cc03-4f96-9896-79ccff2a01ea">
+                  <SHORT-NAME>wiFiApName</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">登入热点名称</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApName</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="bba226d1-c05b-4ef9-963a-ca3c13420ba1">
+                  <SHORT-NAME>wiFiStrength</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">信号强度</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiStrength</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+                <APPLICATION-RECORD-ELEMENT UUID="3d433e32-4543-4cc4-9c91-27cf59d50a05">
+                  <SHORT-NAME>wiFiEncryption</SHORT-NAME>
+                  <DESC>
+                    <L-2 L="ZH">加密方式</L-2>
+                  </DESC>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiEncryption</TYPE-TREF>
+                </APPLICATION-RECORD-ELEMENT>
+              </ELEMENTS>
+            </APPLICATION-RECORD-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="49d36122-bd25-4ee7-b185-aa2356d8f272">
+              <SHORT-NAME>adt_WiFiSwitchStatus</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi开关状态</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiSwitchStatus_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiSwitchStatus_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="f7587caf-a580-4d22-93b7-2ca46cfb9289">
+              <SHORT-NAME>adt_WiFiApNum</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi热点个数</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiApNum_dataConstr</DATA-CONSTR-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="521e8a10-2df0-405d-8b91-b04e7a16a699">
+              <SHORT-NAME>adt_WiFiApName</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi热点名称</L-2>
+              </DESC>
+              <CATEGORY>STRING</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <SW-TEXT-PROPS>
+                      <ARRAY-SIZE-SEMANTICS>VARIABLE-SIZE</ARRAY-SIZE-SEMANTICS>
+                      <SW-MAX-TEXT-SIZE>64</SW-MAX-TEXT-SIZE>
+                      <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/utf_8</BASE-TYPE-REF>
+                    </SW-TEXT-PROPS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="f60e93e3-a97e-488b-97b5-f75f1c3fce99">
+              <SHORT-NAME>adt_WiFiCurConnStatus</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiCurConnStatus_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiCurConnStatus_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="163efd61-76fa-42f2-99a5-5b42214c9787">
+              <SHORT-NAME>adt_WiFiStrength</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiStrength_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiStrength_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="b6952b21-7635-40b3-9921-018c4312a34d">
+              <SHORT-NAME>adt_WiFiUploadDataStatus</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiUploadDataStatus_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiUploadDataStatus_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="3fee574e-1fc0-48a5-9f54-d4fd1ed564aa">
+              <SHORT-NAME>adt_WiFiDownloadDataStatus</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiDownloadDataStatus_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiDownloadDataStatus_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="9c9aee3a-166e-4079-93ca-2c7be8754ab1">
+              <SHORT-NAME>adt_WiFiEncryption</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">注：由于TBOX安全要求，只支持2：WPA2，其它值返回失败</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiEncryption_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiEncryption_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="e025f35a-4e55-4c15-801f-581a9e601b66">
+              <SHORT-NAME>adt_WiFiLinkedInternet</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">是否可以上网</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/WiFiLinkedInternet_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_WiFiLinkedInternet_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+            <APPLICATION-PRIMITIVE-DATA-TYPE UUID="b5caafe7-093d-4834-b8c0-bce133520a90">
+              <SHORT-NAME>adt_INI_ReturnCode</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">操作返回值</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <DATA-CONSTR-REF DEST="DATA-CONSTR">/DataTypes/DataConstraints/INI_ReturnCode_dataConstr</DATA-CONSTR-REF>
+                    <COMPU-METHOD-REF DEST="COMPU-METHOD">/DataTypes/CompuMethods/CM_INI_ReturnCode_Enum</COMPU-METHOD-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </APPLICATION-PRIMITIVE-DATA-TYPE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="f566d1ae-15cf-4f20-b8b3-c98960616df2">
+          <SHORT-NAME>DataConstraints</SHORT-NAME>
+          <ELEMENTS>
+            <DATA-CONSTR UUID="f7923169-76c4-444b-a3ab-ff4c28fec066">
+              <SHORT-NAME>WiFiSwitchStatus_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="61bee3ab-55e7-4b1c-b32e-7bb5bb491163">
+              <SHORT-NAME>WiFiApNum_dataConstr</SHORT-NAME>
+              <DATA-CONSTR-RULES>
+                <DATA-CONSTR-RULE>
+                  <PHYS-CONSTRS>
+                    <LOWER-LIMIT>0</LOWER-LIMIT>
+                    <UPPER-LIMIT>16</UPPER-LIMIT>
+                  </PHYS-CONSTRS>
+                </DATA-CONSTR-RULE>
+              </DATA-CONSTR-RULES>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="e66370a7-8249-4de8-b184-be1919912d50">
+              <SHORT-NAME>WiFiCurConnStatus_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="925c697b-1a40-4108-86c5-66598cd69e3a">
+              <SHORT-NAME>WiFiStrength_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="4d836c5c-b64d-4fdb-ab0f-27cd4c1ac67d">
+              <SHORT-NAME>WiFiUploadDataStatus_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="90fc9a8d-cc9c-4459-90eb-52c862cf1cc6">
+              <SHORT-NAME>WiFiDownloadDataStatus_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="dcb61552-6cc3-445d-939f-2bf2331eb0c2">
+              <SHORT-NAME>WiFiEncryption_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="6cddd2c6-6cee-46b7-9dda-d6812891f866">
+              <SHORT-NAME>WiFiLinkedInternet_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+            <DATA-CONSTR UUID="b7e8eef4-f19c-4c5b-a12d-b5f1cdea5f86">
+              <SHORT-NAME>INI_ReturnCode_dataConstr</SHORT-NAME>
+            </DATA-CONSTR>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="25cc2c7e-c27b-47a8-a87a-e8e0a2d49f79">
+          <SHORT-NAME>BaseTypes</SHORT-NAME>
+          <ELEMENTS>
+            <SW-BASE-TYPE UUID="5035bec4-dff3-448a-a7c7-3b05d47da5b6">
+              <SHORT-NAME>uint8</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>8</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>NONE</BASE-TYPE-ENCODING>
+              <BYTE-ORDER>MOST-SIGNIFICANT-BYTE-FIRST</BYTE-ORDER>
+              <NATIVE-DECLARATION>unsigned char</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+            <SW-BASE-TYPE UUID="9c5d3e8e-6ec7-456c-8698-501517e3d5fb">
+              <SHORT-NAME>uint32</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>32</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>NONE</BASE-TYPE-ENCODING>
+              <BYTE-ORDER>MOST-SIGNIFICANT-BYTE-FIRST</BYTE-ORDER>
+              <NATIVE-DECLARATION>unsigned long</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+            <SW-BASE-TYPE UUID="7d30ba96-a21e-4224-8adf-21c16290fbc2">
+              <SHORT-NAME>sint32</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>32</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>2C</BASE-TYPE-ENCODING>
+              <BYTE-ORDER>MOST-SIGNIFICANT-BYTE-FIRST</BYTE-ORDER>
+              <NATIVE-DECLARATION>signed long</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+            <SW-BASE-TYPE UUID="a8394aa8-ecd0-4bd3-83f8-0132925c1a15">
+              <SHORT-NAME>utf_8</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>8</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>UTF-8</BASE-TYPE-ENCODING>
+              <BYTE-ORDER>MOST-SIGNIFICANT-BYTE-FIRST</BYTE-ORDER>
+            </SW-BASE-TYPE>
+            <SW-BASE-TYPE UUID="2a826d3a-e68b-412a-a191-3b0f63bd09bd">
+              <SHORT-NAME>uint16</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>16</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>NONE</BASE-TYPE-ENCODING>
+              <BYTE-ORDER>MOST-SIGNIFICANT-BYTE-FIRST</BYTE-ORDER>
+              <NATIVE-DECLARATION>unsigned short</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="ae380cae-7797-43cb-af49-3460ca4a2f29">
+          <SHORT-NAME>CompuMethods</SHORT-NAME>
+          <ELEMENTS>
+            <COMPU-METHOD UUID="22f41554-7ea4-43b7-8a7c-149773006515">
+              <SHORT-NAME>CM_WiFiSwitchStatus_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">0</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">0</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_CLOSED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_OPEN</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="de4a236c-ab32-4698-be1f-9a5c011709b0">
+              <SHORT-NAME>CM_WiFiCurConnStatus_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_DISCONNECTED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">2</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">2</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_CONNECTING</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">3</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">3</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_CONNECTED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">4</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">4</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_CONNECT_FAILED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">5</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">5</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_CONNECT_FAILED_INVALID_PWD</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="a4bd8ec8-5c3e-4e4a-b799-75c9e280ff71">
+              <SHORT-NAME>CM_WiFiStrength_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">0</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">0</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_STRENGTH_0</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_STRENGTH_1</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">2</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">2</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_STRENGTH_2</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">3</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">3</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_STRENGTH_3</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">4</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">4</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_STRENGTH_4</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">5</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">5</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_STRENGTH_5</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="1f1bb3f2-8a22-4f18-a905-64a163c0392f">
+              <SHORT-NAME>CM_WiFiUploadDataStatus_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">0</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">0</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WiFiUploadDataStatus_NO_DATA</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WiFiUploadDataStatus_HAVE_DATA</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="b6aa5c97-1725-4ceb-8a96-849e95c54662">
+              <SHORT-NAME>CM_WiFiDownloadDataStatus_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">0</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">0</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_NO_DATA</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_HAVE_DATA</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="b03b52ba-8fc2-45f6-b15a-e196bc4c7dce">
+              <SHORT-NAME>CM_WiFiEncryption_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_NON</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">2</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">2</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_WPA2</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">3</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">3</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_WPA</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">4</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">4</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_WEP</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">5</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">5</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_WAPI_PSK</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">6</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">6</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_WIFI_WAPI_CERT</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="ad918220-d4b3-4edb-9174-f5bfee99a107">
+              <SHORT-NAME>CM_WiFiLinkedInternet_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">0</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">0</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_DISCONNECTED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_CONNECTED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+            <COMPU-METHOD UUID="fea39e6c-1b0b-4dec-8909-166f4c5f699f">
+              <SHORT-NAME>CM_INI_ReturnCode_Enum</SHORT-NAME>
+              <CATEGORY>TEXTTABLE</CATEGORY>
+              <COMPU-INTERNAL-TO-PHYS>
+                <COMPU-SCALES>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">0</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">0</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_SUCCESS</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                  <COMPU-SCALE>
+                    <LOWER-LIMIT INTERVAL-TYPE="CLOSED">1</LOWER-LIMIT>
+                    <UPPER-LIMIT INTERVAL-TYPE="CLOSED">1</UPPER-LIMIT>
+                    <COMPU-CONST>
+                      <VT>INI_FAILED</VT>
+                    </COMPU-CONST>
+                  </COMPU-SCALE>
+                </COMPU-SCALES>
+              </COMPU-INTERNAL-TO-PHYS>
+            </COMPU-METHOD>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="2ea230c0-b023-4869-aee6-8e0c85f8299d">
+          <SHORT-NAME>ImplementationDataTypes</SHORT-NAME>
+          <ELEMENTS>
+            <IMPLEMENTATION-DATA-TYPE UUID="5035bec4-dff3-448a-a7c7-3b05d47da5b6">
+              <SHORT-NAME>special_idt_string_uint8</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/uint8</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="9c5d3e8e-6ec7-456c-8698-501517e3d5fb">
+              <SHORT-NAME>special_idt_array_sizeindicator_uint32</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/uint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="e301878d-bd13-44f3-b6a9-6c2fb0268050">
+              <SHORT-NAME>special_idt_string_sizeindicator_uint32</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">utf8 or utf16 package</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/uint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="012391ad-64c5-47ad-8305-e8710ef40226">
+              <SHORT-NAME>WiFiApList</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">上报WiFi AP列表</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="a4bd6094-05b7-41c1-8171-42cdc67260f4">
+                  <SHORT-NAME>wiFiApNum</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApNum</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="a815bcc9-2943-4d25-8cff-76d8c4945d6e">
+                  <SHORT-NAME>wiFiApArray</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApArray</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="355b086a-bead-4379-aa74-c59eeba016c7">
+              <SHORT-NAME>WiFiConnStatus</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">Wifi当前连接状态</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="1943cc32-9f2b-47b4-91f3-26ca1824f94a">
+                  <SHORT-NAME>wiFiApName</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApName</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="428f01f5-47a5-44e3-aea0-272f6638f715">
+                  <SHORT-NAME>wiFiCurConnStatus</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiCurConnStatus</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="12eef2e4-0734-486d-ab35-305362b9b289">
+                  <SHORT-NAME>wiFiStrength</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiStrength</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="f16b96d4-dea9-4fce-b5e4-82e9d66bfb03">
+                  <SHORT-NAME>wiFiUploadDataStatus</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiUploadDataStatus</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="861ba427-96e7-4dd1-bc6a-9a7edb774aa4">
+                  <SHORT-NAME>wiFiDownloadDataStatus</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiDownloadDataStatus</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="d9396250-2f44-42da-9dcd-0fc6a9d0e9bd">
+                  <SHORT-NAME>wiFiLinkedInternet</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiLinkedInternet</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="7d30ba96-a21e-4224-8adf-21c16290fbc2">
+              <SHORT-NAME>WiFiSwitchStatus</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi开关状态</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="272a9e8e-e1ba-4891-a8dd-7a2f0c67900f">
+              <SHORT-NAME>WiFiApInfo</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">热点信息</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="df3b1a89-63d0-45f8-b464-b69166141fc7">
+                  <SHORT-NAME>wiFiApName</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApName</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="1e42fa50-3167-4ee7-8d3a-7fbd9fc3e378">
+                  <SHORT-NAME>wiFiStrength</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiStrength</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="dbacc77f-f551-43ff-9aab-a3cccd83a5e4">
+                  <SHORT-NAME>wiFiEncryption</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiEncryption</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="9181413f-82f8-4776-96fd-36f7df1f2de7">
+              <SHORT-NAME>WiFiApArray</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi热点数组</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <DYNAMIC-ARRAY-SIZE-PROFILE>VSA_LINEAR</DYNAMIC-ARRAY-SIZE-PROFILE>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="d0524647-4a44-4427-b5b4-833323f63a60">
+                  <SHORT-NAME>sizeIndicator</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/special_idt_array_sizeindicator_uint32</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="65b0f649-9d61-41b0-aff2-72232b24ffc7">
+                  <SHORT-NAME>Element</SHORT-NAME>
+                  <CATEGORY>ARRAY</CATEGORY>
+                  <SUB-ELEMENTS>
+                    <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="e565e085-5121-4821-b196-e6c01138451c">
+                      <SHORT-NAME>SubElement</SHORT-NAME>
+                      <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                      <ARRAY-SIZE>16</ARRAY-SIZE>
+                      <ARRAY-SIZE-HANDLING>ALL-INDICES-SAME-ARRAY-SIZE</ARRAY-SIZE-HANDLING>
+                      <ARRAY-SIZE-SEMANTICS>VARIABLE-SIZE</ARRAY-SIZE-SEMANTICS>
+                      <SW-DATA-DEF-PROPS>
+                        <SW-DATA-DEF-PROPS-VARIANTS>
+                          <SW-DATA-DEF-PROPS-CONDITIONAL>
+                            <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApInfo</IMPLEMENTATION-DATA-TYPE-REF>
+                          </SW-DATA-DEF-PROPS-CONDITIONAL>
+                        </SW-DATA-DEF-PROPS-VARIANTS>
+                      </SW-DATA-DEF-PROPS>
+                    </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                  </SUB-ELEMENTS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="dd2cb0ea-2308-4edb-baec-6623d3171e0f">
+              <SHORT-NAME>WiFiApNum</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi热点个数</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="a8394aa8-ecd0-4bd3-83f8-0132925c1a15">
+              <SHORT-NAME>WiFiApName</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">WiFi热点名称</L-2>
+              </DESC>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <DYNAMIC-ARRAY-SIZE-PROFILE>VSA_LINEAR</DYNAMIC-ARRAY-SIZE-PROFILE>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="2a3329b1-8830-4341-9bea-69243020bd1c">
+                  <SHORT-NAME>sizeIndicator</SHORT-NAME>
+                  <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/special_idt_string_sizeindicator_uint32</IMPLEMENTATION-DATA-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="8b3ae850-8ea1-49c2-9b1a-9b103de9f32b">
+                  <SHORT-NAME>special_idt_string_uint8Element</SHORT-NAME>
+                  <CATEGORY>ARRAY</CATEGORY>
+                  <SUB-ELEMENTS>
+                    <IMPLEMENTATION-DATA-TYPE-ELEMENT UUID="b351a1ec-a50d-4556-8f31-c81bb636722e">
+                      <SHORT-NAME>special_idt_string_uint8SubElement</SHORT-NAME>
+                      <CATEGORY>TYPE_REFERENCE</CATEGORY>
+                      <ARRAY-SIZE>64</ARRAY-SIZE>
+                      <ARRAY-SIZE-HANDLING>ALL-INDICES-SAME-ARRAY-SIZE</ARRAY-SIZE-HANDLING>
+                      <ARRAY-SIZE-SEMANTICS>VARIABLE-SIZE</ARRAY-SIZE-SEMANTICS>
+                      <SW-DATA-DEF-PROPS>
+                        <SW-DATA-DEF-PROPS-VARIANTS>
+                          <SW-DATA-DEF-PROPS-CONDITIONAL>
+                            <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/special_idt_string_uint8</IMPLEMENTATION-DATA-TYPE-REF>
+                          </SW-DATA-DEF-PROPS-CONDITIONAL>
+                        </SW-DATA-DEF-PROPS-VARIANTS>
+                      </SW-DATA-DEF-PROPS>
+                    </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                  </SUB-ELEMENTS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="dcef033a-cf66-4acc-8162-66b3ae2d97f0">
+              <SHORT-NAME>WiFiCurConnStatus</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="580c6586-47b0-47fb-8ab1-57ca0beee0fd">
+              <SHORT-NAME>WiFiStrength</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="a08023b9-e99f-4425-80aa-7afa36efd920">
+              <SHORT-NAME>WiFiUploadDataStatus</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="0c0b0d04-b2cd-466d-ab6e-f656cf3199bc">
+              <SHORT-NAME>WiFiDownloadDataStatus</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="664a87b2-f7e7-4550-8431-0000d600c447">
+              <SHORT-NAME>WiFiEncryption</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">注：由于TBOX安全要求，只支持2：WPA2，其它值返回失败</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="169eb8de-78ed-43de-9394-cd762a7dce5a">
+              <SHORT-NAME>WiFiLinkedInternet</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">是否可以上网</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/sint32</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+            <IMPLEMENTATION-DATA-TYPE UUID="2a826d3a-e68b-412a-a191-3b0f63bd09bd">
+              <SHORT-NAME>INI_ReturnCode</SHORT-NAME>
+              <DESC>
+                <L-2 L="ZH">操作返回值</L-2>
+              </DESC>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/uint16</BASE-TYPE-REF>
+                    <SW-CALIBRATION-ACCESS>NOT-ACCESSIBLE</SW-CALIBRATION-ACCESS>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+              <TYPE-EMITTER>RTE</TYPE-EMITTER>
+            </IMPLEMENTATION-DATA-TYPE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="07293a52-1666-4384-b704-d14ed1be5d3e">
+          <SHORT-NAME>Units</SHORT-NAME>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="4e8fc024-4455-4330-95bb-2a4391a8a03a">
+      <SHORT-NAME>SoftwareTypes</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="3b581863-622e-4198-9520-0415953c875e">
+          <SHORT-NAME>ComponentTypes</SHORT-NAME>
+          <ELEMENTS>
+            <APPLICATION-SW-COMPONENT-TYPE UUID="c08d8c60-9576-4ef0-8a90-a23c857474dc">
+              <SHORT-NAME>INI_WiFiStation_1_Provider</SHORT-NAME>
+              <PORTS>
+                <P-PORT-PROTOTYPE UUID="b2291a87-4013-41e3-af02-1e0d298633bc">
+                  <SHORT-NAME>INI_WiFiStation_1_removeWiFiLoginInfo_PPort</SHORT-NAME>
+                  <PROVIDED-COM-SPECS>
+                    <SERVER-COM-SPEC>
+                      <OPERATION-REF DEST="CLIENT-SERVER-OPERATION">/SoftwareTypes/Interfaces/INI_WiFiStation_removeWiFiLoginInfo/removeWiFiLoginInfo</OPERATION-REF>
+                      <QUEUE-LENGTH>1</QUEUE-LENGTH>
+                    </SERVER-COM-SPEC>
+                  </PROVIDED-COM-SPECS>
+                  <PROVIDED-INTERFACE-TREF DEST="CLIENT-SERVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_removeWiFiLoginInfo</PROVIDED-INTERFACE-TREF>
+                </P-PORT-PROTOTYPE>
+                <P-PORT-PROTOTYPE UUID="92312516-191e-44a3-a62d-3f0364ac3dc4">
+                  <SHORT-NAME>INI_WiFiStation_1_reportWiFiApList_PPort</SHORT-NAME>
+                  <PROVIDED-COM-SPECS>
+                    <NONQUEUED-SENDER-COM-SPEC>
+                      <DATA-ELEMENT-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiApList/WiFiApList_param</DATA-ELEMENT-REF>
+                      <HANDLE-OUT-OF-RANGE>IGNORE</HANDLE-OUT-OF-RANGE>
+                      <INIT-VALUE>
+                        <NUMERICAL-VALUE-SPECIFICATION>
+                          <SHORT-LABEL>X0</SHORT-LABEL>
+                          <VALUE>0</VALUE>
+                        </NUMERICAL-VALUE-SPECIFICATION>
+                      </INIT-VALUE>
+                    </NONQUEUED-SENDER-COM-SPEC>
+                  </PROVIDED-COM-SPECS>
+                  <PROVIDED-INTERFACE-TREF DEST="SENDER-RECEIVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiApList</PROVIDED-INTERFACE-TREF>
+                </P-PORT-PROTOTYPE>
+                <P-PORT-PROTOTYPE UUID="66190320-23a4-455f-ac36-b43690100083">
+                  <SHORT-NAME>INI_WiFiStation_1_reportWiFiConnStatus_PPort</SHORT-NAME>
+                  <PROVIDED-COM-SPECS>
+                    <NONQUEUED-SENDER-COM-SPEC>
+                      <DATA-ELEMENT-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiConnStatus/WiFiConnStatus_param</DATA-ELEMENT-REF>
+                      <HANDLE-OUT-OF-RANGE>IGNORE</HANDLE-OUT-OF-RANGE>
+                      <INIT-VALUE>
+                        <NUMERICAL-VALUE-SPECIFICATION>
+                          <SHORT-LABEL>X0</SHORT-LABEL>
+                          <VALUE>0</VALUE>
+                        </NUMERICAL-VALUE-SPECIFICATION>
+                      </INIT-VALUE>
+                    </NONQUEUED-SENDER-COM-SPEC>
+                  </PROVIDED-COM-SPECS>
+                  <PROVIDED-INTERFACE-TREF DEST="SENDER-RECEIVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiConnStatus</PROVIDED-INTERFACE-TREF>
+                </P-PORT-PROTOTYPE>
+                <P-PORT-PROTOTYPE UUID="9e6544dc-2516-4bd1-a885-b752f091d256">
+                  <SHORT-NAME>INI_WiFiStation_1_reportWiFiSwitchStatus_PPort</SHORT-NAME>
+                  <PROVIDED-COM-SPECS>
+                    <NONQUEUED-SENDER-COM-SPEC>
+                      <DATA-ELEMENT-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiSwitchStatus/WiFiSwitchStatus_param</DATA-ELEMENT-REF>
+                      <HANDLE-OUT-OF-RANGE>IGNORE</HANDLE-OUT-OF-RANGE>
+                      <INIT-VALUE>
+                        <NUMERICAL-VALUE-SPECIFICATION>
+                          <SHORT-LABEL>X0</SHORT-LABEL>
+                          <VALUE>0</VALUE>
+                        </NUMERICAL-VALUE-SPECIFICATION>
+                      </INIT-VALUE>
+                    </NONQUEUED-SENDER-COM-SPEC>
+                  </PROVIDED-COM-SPECS>
+                  <PROVIDED-INTERFACE-TREF DEST="SENDER-RECEIVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiSwitchStatus</PROVIDED-INTERFACE-TREF>
+                </P-PORT-PROTOTYPE>
+              </PORTS>
+            </APPLICATION-SW-COMPONENT-TYPE>
+            <APPLICATION-SW-COMPONENT-TYPE UUID="81380b79-4a33-42dc-bc48-4c98cea45edf">
+              <SHORT-NAME>INI_WiFiStation_1_Consumer</SHORT-NAME>
+              <PORTS>
+                <R-PORT-PROTOTYPE UUID="b53de5bc-9c03-4884-9724-417d982cd906">
+                  <SHORT-NAME>INI_WiFiStation_1_removeWiFiLoginInfo_RPort</SHORT-NAME>
+                  <REQUIRED-COM-SPECS>
+                    <CLIENT-COM-SPEC>
+                      <OPERATION-REF DEST="CLIENT-SERVER-OPERATION">/SoftwareTypes/Interfaces/INI_WiFiStation_removeWiFiLoginInfo/removeWiFiLoginInfo</OPERATION-REF>
+                    </CLIENT-COM-SPEC>
+                  </REQUIRED-COM-SPECS>
+                  <REQUIRED-INTERFACE-TREF DEST="CLIENT-SERVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_removeWiFiLoginInfo</REQUIRED-INTERFACE-TREF>
+                </R-PORT-PROTOTYPE>
+                <R-PORT-PROTOTYPE UUID="041b4417-22e4-4219-897c-29d97686c8b4">
+                  <SHORT-NAME>INI_WiFiStation_1_reportWiFiApList_RPort</SHORT-NAME>
+                  <REQUIRED-COM-SPECS>
+                    <NONQUEUED-RECEIVER-COM-SPEC>
+                      <DATA-ELEMENT-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiApList/WiFiApList_param</DATA-ELEMENT-REF>
+                      <HANDLE-OUT-OF-RANGE>IGNORE</HANDLE-OUT-OF-RANGE>
+                    </NONQUEUED-RECEIVER-COM-SPEC>
+                  </REQUIRED-COM-SPECS>
+                  <REQUIRED-INTERFACE-TREF DEST="SENDER-RECEIVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiApList</REQUIRED-INTERFACE-TREF>
+                </R-PORT-PROTOTYPE>
+                <R-PORT-PROTOTYPE UUID="8b43ebdf-b4bc-46cd-b9a6-3785d420c974">
+                  <SHORT-NAME>INI_WiFiStation_1_reportWiFiConnStatus_RPort</SHORT-NAME>
+                  <REQUIRED-COM-SPECS>
+                    <NONQUEUED-RECEIVER-COM-SPEC>
+                      <DATA-ELEMENT-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiConnStatus/WiFiConnStatus_param</DATA-ELEMENT-REF>
+                      <HANDLE-OUT-OF-RANGE>IGNORE</HANDLE-OUT-OF-RANGE>
+                    </NONQUEUED-RECEIVER-COM-SPEC>
+                  </REQUIRED-COM-SPECS>
+                  <REQUIRED-INTERFACE-TREF DEST="SENDER-RECEIVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiConnStatus</REQUIRED-INTERFACE-TREF>
+                </R-PORT-PROTOTYPE>
+                <R-PORT-PROTOTYPE UUID="67d0be05-f125-4b2d-831e-56683a4ad846">
+                  <SHORT-NAME>INI_WiFiStation_1_reportWiFiSwitchStatus_RPort</SHORT-NAME>
+                  <REQUIRED-COM-SPECS>
+                    <NONQUEUED-RECEIVER-COM-SPEC>
+                      <DATA-ELEMENT-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiSwitchStatus/WiFiSwitchStatus_param</DATA-ELEMENT-REF>
+                      <HANDLE-OUT-OF-RANGE>IGNORE</HANDLE-OUT-OF-RANGE>
+                    </NONQUEUED-RECEIVER-COM-SPEC>
+                  </REQUIRED-COM-SPECS>
+                  <REQUIRED-INTERFACE-TREF DEST="SENDER-RECEIVER-INTERFACE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiSwitchStatus</REQUIRED-INTERFACE-TREF>
+                </R-PORT-PROTOTYPE>
+              </PORTS>
+            </APPLICATION-SW-COMPONENT-TYPE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="a924f8f5-d4f7-4b26-8fc2-6ae7202ab19e">
+          <SHORT-NAME>Interfaces</SHORT-NAME>
+          <ELEMENTS>
+            <CLIENT-SERVER-INTERFACE UUID="c36d0187-8740-48f2-b272-14c13f0588fe">
+              <SHORT-NAME>INI_WiFiStation_removeWiFiLoginInfo</SHORT-NAME>
+              <IS-SERVICE>false</IS-SERVICE>
+              <OPERATIONS>
+                <CLIENT-SERVER-OPERATION UUID="742c8e9c-867c-4248-abd3-0777c2851bde">
+                  <SHORT-NAME>removeWiFiLoginInfo</SHORT-NAME>
+                  <ARGUMENTS>
+                    <ARGUMENT-DATA-PROTOTYPE UUID="33c6ea6f-9ed3-4447-86fc-d968d9c1bd91">
+                      <SHORT-NAME>para0</SHORT-NAME>
+                      <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApName</TYPE-TREF>
+                      <DIRECTION>IN</DIRECTION>
+                    </ARGUMENT-DATA-PROTOTYPE>
+                    <ARGUMENT-DATA-PROTOTYPE UUID="5872a1ad-2d12-4e9d-8df7-afc6cb964f30">
+                      <SHORT-NAME>para1</SHORT-NAME>
+                      <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_INI_ReturnCode</TYPE-TREF>
+                      <DIRECTION>OUT</DIRECTION>
+                    </ARGUMENT-DATA-PROTOTYPE>
+                  </ARGUMENTS>
+                </CLIENT-SERVER-OPERATION>
+              </OPERATIONS>
+            </CLIENT-SERVER-INTERFACE>
+            <SENDER-RECEIVER-INTERFACE UUID="789bf42f-6ab9-4f69-9b2d-0479aebe4c71">
+              <SHORT-NAME>INI_WiFiStation_reportWiFiApList</SHORT-NAME>
+              <IS-SERVICE>false</IS-SERVICE>
+              <DATA-ELEMENTS>
+                <VARIABLE-DATA-PROTOTYPE UUID="7ba084d6-9195-4b9b-83ba-60f82b05b072">
+                  <SHORT-NAME>WiFiApList_param</SHORT-NAME>
+                  <TYPE-TREF DEST="APPLICATION-RECORD-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApList</TYPE-TREF>
+                </VARIABLE-DATA-PROTOTYPE>
+              </DATA-ELEMENTS>
+            </SENDER-RECEIVER-INTERFACE>
+            <SENDER-RECEIVER-INTERFACE UUID="119d83e7-7241-4967-a0e1-ba5477aabfcc">
+              <SHORT-NAME>INI_WiFiStation_reportWiFiConnStatus</SHORT-NAME>
+              <IS-SERVICE>false</IS-SERVICE>
+              <DATA-ELEMENTS>
+                <VARIABLE-DATA-PROTOTYPE UUID="6845baed-b625-482b-a29a-882511462106">
+                  <SHORT-NAME>WiFiConnStatus_param</SHORT-NAME>
+                  <TYPE-TREF DEST="APPLICATION-RECORD-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiConnStatus</TYPE-TREF>
+                </VARIABLE-DATA-PROTOTYPE>
+              </DATA-ELEMENTS>
+            </SENDER-RECEIVER-INTERFACE>
+            <SENDER-RECEIVER-INTERFACE UUID="694bc2bc-0211-4e48-b8e5-abd477570244">
+              <SHORT-NAME>INI_WiFiStation_reportWiFiSwitchStatus</SHORT-NAME>
+              <IS-SERVICE>false</IS-SERVICE>
+              <DATA-ELEMENTS>
+                <VARIABLE-DATA-PROTOTYPE UUID="7a90c116-08eb-4018-92d9-6a925287ff43">
+                  <SHORT-NAME>WiFiSwitchStatus_param</SHORT-NAME>
+                  <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiSwitchStatus</TYPE-TREF>
+                </VARIABLE-DATA-PROTOTYPE>
+              </DATA-ELEMENTS>
+            </SENDER-RECEIVER-INTERFACE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="88fd00fe-9eb9-4afb-82a8-ed7909cdcad5">
+      <SHORT-NAME>Communication</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="a4c2b8c5-7ac4-4271-bb82-8e82a77bb41f">
+          <SHORT-NAME>DataTransformation</SHORT-NAME>
+          <ELEMENTS>
+            <DATA-TRANSFORMATION-SET UUID="687ecff4-4a7a-4501-97f7-0b917c9f156d">
+              <SHORT-NAME>Transformer_Configuration</SHORT-NAME>
+              <DATA-TRANSFORMATIONS>
+                <DATA-TRANSFORMATION UUID="b081808f-bfa0-4908-9e4a-1cd20e081791">
+                  <SHORT-NAME>SOME_IP_Default_Transformation</SHORT-NAME>
+                  <TRANSFORMER-CHAIN-REFS>
+                    <TRANSFORMER-CHAIN-REF DEST="TRANSFORMATION-TECHNOLOGY">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformer</TRANSFORMER-CHAIN-REF>
+                  </TRANSFORMER-CHAIN-REFS>
+                </DATA-TRANSFORMATION>
+              </DATA-TRANSFORMATIONS>
+              <TRANSFORMATION-TECHNOLOGYS>
+                <TRANSFORMATION-TECHNOLOGY UUID="351598fc-0c62-46e5-ba79-0dab406c43d5">
+                  <SHORT-NAME>SOME_IP_Default_Transformer</SHORT-NAME>
+                  <BUFFER-PROPERTIES>
+                    <HEADER-LENGTH>64</HEADER-LENGTH>
+                  </BUFFER-PROPERTIES>
+                  <HAS-INTERNAL-STATE>false</HAS-INTERNAL-STATE>
+                  <PROTOCOL>SOMEIP</PROTOCOL>
+                  <TRANSFORMATION-DESCRIPTIONS>
+                    <SOMEIP-TRANSFORMATION-DESCRIPTION>
+                      <ALIGNMENT>8</ALIGNMENT>
+                      <BYTE-ORDER>MOST-SIGNIFICANT-BYTE-FIRST</BYTE-ORDER>
+                      <INTERFACE-VERSION>1</INTERFACE-VERSION>
+                    </SOMEIP-TRANSFORMATION-DESCRIPTION>
+                  </TRANSFORMATION-DESCRIPTIONS>
+                  <TRANSFORMER-CLASS>SERIALIZER</TRANSFORMER-CLASS>
+                  <VERSION>1.0.0</VERSION>
+                </TRANSFORMATION-TECHNOLOGY>
+              </TRANSFORMATION-TECHNOLOGYS>
+            </DATA-TRANSFORMATION-SET>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="5fcdfb43-176b-4e46-95b4-37d8f3ea153b">
+          <SHORT-NAME>PDUs</SHORT-NAME>
+          <ELEMENTS>
+            <GENERAL-PURPOSE-PDU UUID="9795183b-a46f-4dda-9b4e-77dd6c3d38de">
+              <SHORT-NAME>SdInstanceMulticastRxPdu_Vlan62</SHORT-NAME>
+              <CATEGORY>SD</CATEGORY>
+              <LENGTH>183</LENGTH>
+            </GENERAL-PURPOSE-PDU>
+            <GENERAL-PURPOSE-PDU UUID="e0228452-1c36-429a-a5cb-e9124339aaf3">
+              <SHORT-NAME>SdInstanceTxPdu_VLAN62</SHORT-NAME>
+              <CATEGORY>SD</CATEGORY>
+              <LENGTH>183</LENGTH>
+            </GENERAL-PURPOSE-PDU>
+            <GENERAL-PURPOSE-PDU UUID="20a94925-7a8f-45fb-a9e8-dccd776dbffb">
+              <SHORT-NAME>SdInstanceUnicastRxPdu_VLAN62</SHORT-NAME>
+              <CATEGORY>SD</CATEGORY>
+              <LENGTH>183</LENGTH>
+            </GENERAL-PURPOSE-PDU>
+            <I-SIGNAL-I-PDU UUID="4461eb76-eaa4-42a2-8161-952cca364751">
+              <SHORT-NAME>Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SHORT-NAME>
+              <ADMIN-DATA>
+                <SDGS>
+                  <SDG GID="MGC">
+                    <SD GID="SEND-STRATEGY">Cyclic</SD>
+                    <SD GID="FRO-DIV-FACTOR">1000</SD>
+                  </SDG>
+                </SDGS>
+              </ADMIN-DATA>
+              <LENGTH>12</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-CONDITIONS>
+                      <TRANSMISSION-MODE-CONDITION>
+                        <DATA-FILTER>
+                          <DATA-FILTER-TYPE>ALWAYS</DATA-FILTER-TYPE>
+                        </DATA-FILTER>
+                        <I-SIGNAL-IN-I-PDU-REF DEST="I-SIGNAL-TO-I-PDU-MAPPING">/Communication/PDUs/Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1/SigPduMapping_Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</I-SIGNAL-IN-I-PDU-REF>
+                      </TRANSMISSION-MODE-CONDITION>
+                    </TRANSMISSION-MODE-CONDITIONS>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <EVENT-CONTROLLED-TIMING>
+                        <NUMBER-OF-REPETITIONS>0</NUMBER-OF-REPETITIONS>
+                      </EVENT-CONTROLLED-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="48ead34b-4959-484b-bb77-5bd01653ad5d">
+                  <SHORT-NAME>SigPduMapping_Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</I-SIGNAL-REF>
+                  <PACKING-BYTE-ORDER>OPAQUE</PACKING-BYTE-ORDER>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>TRIGGERED</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+            <I-SIGNAL-I-PDU UUID="d715b35e-6f61-48bf-a001-1493322ad83b">
+              <SHORT-NAME>Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1</SHORT-NAME>
+              <ADMIN-DATA>
+                <SDGS>
+                  <SDG GID="MGC">
+                    <SD GID="SEND-STRATEGY">Cyclic</SD>
+                    <SD GID="FRO-DIV-FACTOR">1000</SD>
+                  </SDG>
+                </SDGS>
+              </ADMIN-DATA>
+              <LENGTH>224</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-CONDITIONS>
+                      <TRANSMISSION-MODE-CONDITION>
+                        <DATA-FILTER>
+                          <DATA-FILTER-TYPE>ALWAYS</DATA-FILTER-TYPE>
+                        </DATA-FILTER>
+                        <I-SIGNAL-IN-I-PDU-REF DEST="I-SIGNAL-TO-I-PDU-MAPPING">/Communication/PDUs/Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1/SigPduMapping_Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1</I-SIGNAL-IN-I-PDU-REF>
+                      </TRANSMISSION-MODE-CONDITION>
+                    </TRANSMISSION-MODE-CONDITIONS>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <EVENT-CONTROLLED-TIMING>
+                        <NUMBER-OF-REPETITIONS>0</NUMBER-OF-REPETITIONS>
+                      </EVENT-CONTROLLED-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="0e036862-d777-40fe-a7be-25b553dab02b">
+                  <SHORT-NAME>SigPduMapping_Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1</I-SIGNAL-REF>
+                  <PACKING-BYTE-ORDER>OPAQUE</PACKING-BYTE-ORDER>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>TRIGGERED</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+            <I-SIGNAL-I-PDU UUID="daacfaf7-ae3d-43ae-94f1-aa618dc1b629">
+              <SHORT-NAME>Pdu_Event_reportWiFiApList_INI_WiFiStation_1</SHORT-NAME>
+              <ADMIN-DATA>
+                <SDGS>
+                  <SDG GID="MGC">
+                    <SD GID="SEND-STRATEGY">Cyclic</SD>
+                    <SD GID="FRO-DIV-FACTOR">1000</SD>
+                  </SDG>
+                </SDGS>
+              </ADMIN-DATA>
+              <LENGTH>3280</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-CONDITIONS>
+                      <TRANSMISSION-MODE-CONDITION>
+                        <DATA-FILTER>
+                          <DATA-FILTER-TYPE>ALWAYS</DATA-FILTER-TYPE>
+                        </DATA-FILTER>
+                        <I-SIGNAL-IN-I-PDU-REF DEST="I-SIGNAL-TO-I-PDU-MAPPING">/Communication/PDUs/Pdu_Event_reportWiFiApList_INI_WiFiStation_1/SigPduMapping_Pdu_Event_reportWiFiApList_INI_WiFiStation_1</I-SIGNAL-IN-I-PDU-REF>
+                      </TRANSMISSION-MODE-CONDITION>
+                    </TRANSMISSION-MODE-CONDITIONS>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <EVENT-CONTROLLED-TIMING>
+                        <NUMBER-OF-REPETITIONS>0</NUMBER-OF-REPETITIONS>
+                      </EVENT-CONTROLLED-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="b19b7e68-54e1-46a5-b035-97de78c08f9d">
+                  <SHORT-NAME>SigPduMapping_Pdu_Event_reportWiFiApList_INI_WiFiStation_1</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_Event_reportWiFiApList_INI_WiFiStation_1</I-SIGNAL-REF>
+                  <PACKING-BYTE-ORDER>OPAQUE</PACKING-BYTE-ORDER>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>TRIGGERED</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+            <I-SIGNAL-I-PDU UUID="368520d6-7bc3-4cb3-b145-23c945abd44a">
+              <SHORT-NAME>Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</SHORT-NAME>
+              <LENGTH>10</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-CONDITIONS>
+                      <TRANSMISSION-MODE-CONDITION>
+                        <DATA-FILTER>
+                          <DATA-FILTER-TYPE>ALWAYS</DATA-FILTER-TYPE>
+                        </DATA-FILTER>
+                        <I-SIGNAL-IN-I-PDU-REF DEST="I-SIGNAL-TO-I-PDU-MAPPING">/Communication/PDUs/Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC/SigPduMapping_Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</I-SIGNAL-IN-I-PDU-REF>
+                      </TRANSMISSION-MODE-CONDITION>
+                    </TRANSMISSION-MODE-CONDITIONS>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <EVENT-CONTROLLED-TIMING>
+                        <NUMBER-OF-REPETITIONS>0</NUMBER-OF-REPETITIONS>
+                      </EVENT-CONTROLLED-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="77292aca-6f45-4210-86bd-522f4bf1298a">
+                  <SHORT-NAME>SigPduMapping_Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</I-SIGNAL-REF>
+                  <PACKING-BYTE-ORDER>OPAQUE</PACKING-BYTE-ORDER>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>TRIGGERED</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+            <I-SIGNAL-I-PDU UUID="a94c0920-6885-49f2-a025-baaabf3ba00d">
+              <SHORT-NAME>Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</SHORT-NAME>
+              <LENGTH>204</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-CONDITIONS>
+                      <TRANSMISSION-MODE-CONDITION>
+                        <DATA-FILTER>
+                          <DATA-FILTER-TYPE>ALWAYS</DATA-FILTER-TYPE>
+                        </DATA-FILTER>
+                        <I-SIGNAL-IN-I-PDU-REF DEST="I-SIGNAL-TO-I-PDU-MAPPING">/Communication/PDUs/Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC/SigPduMapping_Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</I-SIGNAL-IN-I-PDU-REF>
+                      </TRANSMISSION-MODE-CONDITION>
+                    </TRANSMISSION-MODE-CONDITIONS>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <EVENT-CONTROLLED-TIMING>
+                        <NUMBER-OF-REPETITIONS>0</NUMBER-OF-REPETITIONS>
+                      </EVENT-CONTROLLED-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="966e8182-ad12-493c-bb60-9dd198f44c57">
+                  <SHORT-NAME>SigPduMapping_Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</I-SIGNAL-REF>
+                  <PACKING-BYTE-ORDER>OPAQUE</PACKING-BYTE-ORDER>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>TRIGGERED</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="e8ffb85c-c93e-4dac-aa33-b523155127d8">
+          <SHORT-NAME>Signals</SHORT-NAME>
+          <ELEMENTS>
+            <I-SIGNAL UUID="1def3c2f-476f-4a63-8374-df55e964f8ae">
+              <SHORT-NAME>Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SHORT-NAME>
+              <DATA-TRANSFORMATIONS>
+                <DATA-TRANSFORMATION-REF-CONDITIONAL>
+                  <DATA-TRANSFORMATION-REF DEST="DATA-TRANSFORMATION">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformation</DATA-TRANSFORMATION-REF>
+                </DATA-TRANSFORMATION-REF-CONDITIONAL>
+              </DATA-TRANSFORMATIONS>
+              <DATA-TYPE-POLICY>TRANSFORMING-I-SIGNAL</DATA-TYPE-POLICY>
+              <LENGTH>96</LENGTH>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+              <TRANSFORMATION-I-SIGNAL-PROPSS>
+                <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+                  <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                    <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                      <CS-ERROR-REACTION>APPLICATION-ONLY</CS-ERROR-REACTION>
+                      <TRANSFORMER-REF DEST="TRANSFORMATION-TECHNOLOGY">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformer</TRANSFORMER-REF>
+                      <MESSAGE-TYPE>NOTIFICATION</MESSAGE-TYPE>
+                      <SESSION-HANDLING-SR>SESSION-HANDLING-INACTIVE</SESSION-HANDLING-SR>
+                    </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                  </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+              </TRANSFORMATION-I-SIGNAL-PROPSS>
+            </I-SIGNAL>
+            <I-SIGNAL UUID="26f075ff-b720-488a-a213-f279a595f833">
+              <SHORT-NAME>Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1</SHORT-NAME>
+              <DATA-TRANSFORMATIONS>
+                <DATA-TRANSFORMATION-REF-CONDITIONAL>
+                  <DATA-TRANSFORMATION-REF DEST="DATA-TRANSFORMATION">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformation</DATA-TRANSFORMATION-REF>
+                </DATA-TRANSFORMATION-REF-CONDITIONAL>
+              </DATA-TRANSFORMATIONS>
+              <DATA-TYPE-POLICY>TRANSFORMING-I-SIGNAL</DATA-TYPE-POLICY>
+              <LENGTH>1792</LENGTH>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiConnStatus_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+              <TRANSFORMATION-I-SIGNAL-PROPSS>
+                <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+                  <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                    <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                      <CS-ERROR-REACTION>APPLICATION-ONLY</CS-ERROR-REACTION>
+                      <TRANSFORMER-REF DEST="TRANSFORMATION-TECHNOLOGY">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformer</TRANSFORMER-REF>
+                      <MESSAGE-TYPE>NOTIFICATION</MESSAGE-TYPE>
+                      <SESSION-HANDLING-SR>SESSION-HANDLING-INACTIVE</SESSION-HANDLING-SR>
+                    </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                  </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+              </TRANSFORMATION-I-SIGNAL-PROPSS>
+            </I-SIGNAL>
+            <I-SIGNAL UUID="27d9072e-89d5-4443-ba0c-f07676540007">
+              <SHORT-NAME>Sig_Event_reportWiFiApList_INI_WiFiStation_1</SHORT-NAME>
+              <DATA-TRANSFORMATIONS>
+                <DATA-TRANSFORMATION-REF-CONDITIONAL>
+                  <DATA-TRANSFORMATION-REF DEST="DATA-TRANSFORMATION">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformation</DATA-TRANSFORMATION-REF>
+                </DATA-TRANSFORMATION-REF-CONDITIONAL>
+              </DATA-TRANSFORMATIONS>
+              <DATA-TYPE-POLICY>TRANSFORMING-I-SIGNAL</DATA-TYPE-POLICY>
+              <LENGTH>26240</LENGTH>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiApList_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+              <TRANSFORMATION-I-SIGNAL-PROPSS>
+                <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+                  <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                    <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                      <CS-ERROR-REACTION>APPLICATION-ONLY</CS-ERROR-REACTION>
+                      <TRANSFORMER-REF DEST="TRANSFORMATION-TECHNOLOGY">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformer</TRANSFORMER-REF>
+                      <MESSAGE-TYPE>NOTIFICATION</MESSAGE-TYPE>
+                      <SESSION-HANDLING-SR>SESSION-HANDLING-INACTIVE</SESSION-HANDLING-SR>
+                    </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                  </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+              </TRANSFORMATION-I-SIGNAL-PROPSS>
+            </I-SIGNAL>
+            <I-SIGNAL UUID="c3f81aba-f4d4-407c-b191-3bea25c6c940">
+              <SHORT-NAME>Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</SHORT-NAME>
+              <DATA-TRANSFORMATIONS>
+                <DATA-TRANSFORMATION-REF-CONDITIONAL>
+                  <DATA-TRANSFORMATION-REF DEST="DATA-TRANSFORMATION">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformation</DATA-TRANSFORMATION-REF>
+                </DATA-TRANSFORMATION-REF-CONDITIONAL>
+              </DATA-TRANSFORMATIONS>
+              <DATA-TYPE-POLICY>TRANSFORMING-I-SIGNAL</DATA-TYPE-POLICY>
+              <LENGTH>80</LENGTH>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</SYSTEM-SIGNAL-REF>
+              <TRANSFORMATION-I-SIGNAL-PROPSS>
+                <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+                  <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                    <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                      <CS-ERROR-REACTION>APPLICATION-ONLY</CS-ERROR-REACTION>
+                      <TRANSFORMER-REF DEST="TRANSFORMATION-TECHNOLOGY">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformer</TRANSFORMER-REF>
+                      <MESSAGE-TYPE>RESPONSE</MESSAGE-TYPE>
+                      <SESSION-HANDLING-SR>SESSION-HANDLING-INACTIVE</SESSION-HANDLING-SR>
+                    </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                  </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+              </TRANSFORMATION-I-SIGNAL-PROPSS>
+            </I-SIGNAL>
+            <I-SIGNAL UUID="1e7a2dbf-52c8-4223-a51b-2e582982f4c3">
+              <SHORT-NAME>Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</SHORT-NAME>
+              <DATA-TRANSFORMATIONS>
+                <DATA-TRANSFORMATION-REF-CONDITIONAL>
+                  <DATA-TRANSFORMATION-REF DEST="DATA-TRANSFORMATION">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformation</DATA-TRANSFORMATION-REF>
+                </DATA-TRANSFORMATION-REF-CONDITIONAL>
+              </DATA-TRANSFORMATIONS>
+              <DATA-TYPE-POLICY>TRANSFORMING-I-SIGNAL</DATA-TYPE-POLICY>
+              <LENGTH>1632</LENGTH>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</SYSTEM-SIGNAL-REF>
+              <TRANSFORMATION-I-SIGNAL-PROPSS>
+                <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+                  <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                    <SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                      <CS-ERROR-REACTION>APPLICATION-ONLY</CS-ERROR-REACTION>
+                      <TRANSFORMER-REF DEST="TRANSFORMATION-TECHNOLOGY">/Communication/DataTransformation/Transformer_Configuration/SOME_IP_Default_Transformer</TRANSFORMER-REF>
+                      <MESSAGE-TYPE>REQUEST</MESSAGE-TYPE>
+                      <SESSION-HANDLING-SR>SESSION-HANDLING-INACTIVE</SESSION-HANDLING-SR>
+                    </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-CONDITIONAL>
+                  </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS-VARIANTS>
+                </SOMEIP-TRANSFORMATION-I-SIGNAL-PROPS>
+              </TRANSFORMATION-I-SIGNAL-PROPSS>
+            </I-SIGNAL>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="a50ef390-6836-42ac-96df-6dd74b54d396">
+          <SHORT-NAME>SystemSignals</SHORT-NAME>
+          <ELEMENTS>
+            <SYSTEM-SIGNAL UUID="5ca6298b-0b97-43a0-b672-3b6b009116ee">
+              <SHORT-NAME>SysSig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+            <SYSTEM-SIGNAL UUID="41bd86d8-b973-4e73-91af-845cb0990eb0">
+              <SHORT-NAME>SysSig_Event_reportWiFiConnStatus_INI_WiFiStation_1</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+            <SYSTEM-SIGNAL UUID="cc002d54-7842-47a6-a0ce-011c37f3e4d5">
+              <SHORT-NAME>SysSig_Event_reportWiFiApList_INI_WiFiStation_1</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+            <SYSTEM-SIGNAL UUID="43481bf0-ccae-4c8f-aeb7-a5e446385606">
+              <SHORT-NAME>SysSig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+            <SYSTEM-SIGNAL UUID="8d1c0b88-8fbd-4805-8f51-20c037b360dc">
+              <SHORT-NAME>SysSig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="b23eadcb-04d8-4aee-803c-5d38f0556439">
+      <SHORT-NAME>SoAdRoutingGroups</SHORT-NAME>
+      <ELEMENTS>
+        <SO-AD-ROUTING-GROUP UUID="0de82a80-d98d-47d1-854f-c19113c8e6fe">
+          <SHORT-NAME>SoAdRG_EG_INI_WiFiStation_EventGroup_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+          <EVENT-GROUP-CONTROL-TYPE>ACTIVATION-UNICAST</EVENT-GROUP-CONTROL-TYPE>
+        </SO-AD-ROUTING-GROUP>
+        <SO-AD-ROUTING-GROUP UUID="372f37bc-8fee-4117-9d7d-e0d11cc8316e">
+          <SHORT-NAME>SoAdRG_Method_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+          <EVENT-GROUP-CONTROL-TYPE>ACTIVATION-UNICAST</EVENT-GROUP-CONTROL-TYPE>
+        </SO-AD-ROUTING-GROUP>
+      </ELEMENTS>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="3102b4b5-9d30-4587-94c1-b9b34c96f46c">
+      <SHORT-NAME>System</SHORT-NAME>
+      <ELEMENTS>
+        <SYSTEM UUID="9db91c6c-cfc8-4ff8-a19b-44564b544533">
+          <SHORT-NAME>SystemDescription</SHORT-NAME>
+          <MAPPINGS>
+            <SYSTEM-MAPPING UUID="a01852ff-c3ab-4a6a-95d5-9835a19ef157">
+              <SHORT-NAME>Mappings</SHORT-NAME>
+              <DATA-MAPPINGS>
+                <CLIENT-SERVER-TO-SIGNAL-MAPPING>
+                  <CALL-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</CALL-SIGNAL-REF>
+                  <CLIENT-SERVER-OPERATION-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="P-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider/INI_WiFiStation_1_removeWiFiLoginInfo_PPort</CONTEXT-PORT-REF>
+                    <TARGET-OPERATION-REF DEST="CLIENT-SERVER-OPERATION">/SoftwareTypes/Interfaces/INI_WiFiStation_removeWiFiLoginInfo/removeWiFiLoginInfo</TARGET-OPERATION-REF>
+                  </CLIENT-SERVER-OPERATION-IREF>
+                  <RETURN-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</RETURN-SIGNAL-REF>
+                </CLIENT-SERVER-TO-SIGNAL-MAPPING>
+                <SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                  <DATA-ELEMENT-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="P-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider/INI_WiFiStation_1_reportWiFiApList_PPort</CONTEXT-PORT-REF>
+                    <TARGET-DATA-PROTOTYPE-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiApList/WiFiApList_param</TARGET-DATA-PROTOTYPE-REF>
+                  </DATA-ELEMENT-IREF>
+                  <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiApList_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+                </SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                <CLIENT-SERVER-TO-SIGNAL-MAPPING>
+                  <CALL-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</CALL-SIGNAL-REF>
+                  <CLIENT-SERVER-OPERATION-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="R-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer/INI_WiFiStation_1_removeWiFiLoginInfo_RPort</CONTEXT-PORT-REF>
+                    <TARGET-OPERATION-REF DEST="CLIENT-SERVER-OPERATION">/SoftwareTypes/Interfaces/INI_WiFiStation_removeWiFiLoginInfo/removeWiFiLoginInfo</TARGET-OPERATION-REF>
+                  </CLIENT-SERVER-OPERATION-IREF>
+                  <RETURN-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</RETURN-SIGNAL-REF>
+                </CLIENT-SERVER-TO-SIGNAL-MAPPING>
+                <SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                  <DATA-ELEMENT-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="R-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer/INI_WiFiStation_1_reportWiFiApList_RPort</CONTEXT-PORT-REF>
+                    <TARGET-DATA-PROTOTYPE-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiApList/WiFiApList_param</TARGET-DATA-PROTOTYPE-REF>
+                  </DATA-ELEMENT-IREF>
+                  <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiApList_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+                </SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                <SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                  <DATA-ELEMENT-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="P-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider/INI_WiFiStation_1_reportWiFiConnStatus_PPort</CONTEXT-PORT-REF>
+                    <TARGET-DATA-PROTOTYPE-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiConnStatus/WiFiConnStatus_param</TARGET-DATA-PROTOTYPE-REF>
+                  </DATA-ELEMENT-IREF>
+                  <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiConnStatus_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+                </SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                <SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                  <DATA-ELEMENT-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="R-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer/INI_WiFiStation_1_reportWiFiConnStatus_RPort</CONTEXT-PORT-REF>
+                    <TARGET-DATA-PROTOTYPE-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiConnStatus/WiFiConnStatus_param</TARGET-DATA-PROTOTYPE-REF>
+                  </DATA-ELEMENT-IREF>
+                  <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiConnStatus_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+                </SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                <SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                  <DATA-ELEMENT-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="P-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider/INI_WiFiStation_1_reportWiFiSwitchStatus_PPort</CONTEXT-PORT-REF>
+                    <TARGET-DATA-PROTOTYPE-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiSwitchStatus/WiFiSwitchStatus_param</TARGET-DATA-PROTOTYPE-REF>
+                  </DATA-ELEMENT-IREF>
+                  <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+                </SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                <SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+                  <DATA-ELEMENT-IREF>
+                    <CONTEXT-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer</CONTEXT-COMPONENT-REF>
+                    <CONTEXT-PORT-REF DEST="R-PORT-PROTOTYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer/INI_WiFiStation_1_reportWiFiSwitchStatus_RPort</CONTEXT-PORT-REF>
+                    <TARGET-DATA-PROTOTYPE-REF DEST="VARIABLE-DATA-PROTOTYPE">/SoftwareTypes/Interfaces/INI_WiFiStation_reportWiFiSwitchStatus/WiFiSwitchStatus_param</TARGET-DATA-PROTOTYPE-REF>
+                  </DATA-ELEMENT-IREF>
+                  <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/SysSig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</SYSTEM-SIGNAL-REF>
+                </SENDER-RECEIVER-TO-SIGNAL-MAPPING>
+              </DATA-MAPPINGS>
+              <SW-MAPPINGS>
+                <SWC-TO-ECU-MAPPING UUID="df62941b-5dc7-40de-922f-d2603c9c5d78">
+                  <SHORT-NAME>SwHwMapping_INI_WiFiStation_1_Provider_TBOX</SHORT-NAME>
+                  <COMPONENT-IREFS>
+                    <COMPONENT-IREF>
+                      <TARGET-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Provider</TARGET-COMPONENT-REF>
+                    </COMPONENT-IREF>
+                  </COMPONENT-IREFS>
+                  <ECU-INSTANCE-REF DEST="ECU-INSTANCE">/Topology/HardwareComponents/TBOX</ECU-INSTANCE-REF>
+                </SWC-TO-ECU-MAPPING>
+                <SWC-TO-ECU-MAPPING UUID="28ff6440-2ad7-4284-b06c-954abfc42931">
+                  <SHORT-NAME>SwHwMapping_INI_WiFiStation_1_Consumer_CDC</SHORT-NAME>
+                  <COMPONENT-IREFS>
+                    <COMPONENT-IREF>
+                      <TARGET-COMPONENT-REF DEST="APPLICATION-SW-COMPONENT-TYPE">/SoftwareTypes/ComponentTypes/INI_WiFiStation_1_Consumer</TARGET-COMPONENT-REF>
+                    </COMPONENT-IREF>
+                  </COMPONENT-IREFS>
+                  <ECU-INSTANCE-REF DEST="ECU-INSTANCE">/Topology/HardwareComponents/CDC</ECU-INSTANCE-REF>
+                </SWC-TO-ECU-MAPPING>
+              </SW-MAPPINGS>
+            </SYSTEM-MAPPING>
+          </MAPPINGS>
+        </SYSTEM>
+      </ELEMENTS>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="f51eff3a-3378-4d3b-af63-784c1847575d">
+      <SHORT-NAME>Topology</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="5f6705e5-4c35-4bb9-b63f-9cec06e065bb">
+          <SHORT-NAME>Clusters</SHORT-NAME>
+          <ELEMENTS>
+            <ETHERNET-CLUSTER UUID="bcfb74c1-ad5a-442f-be89-3ab280d5e59e">
+              <SHORT-NAME>EthernetCluster</SHORT-NAME>
+              <ETHERNET-CLUSTER-VARIANTS>
+                <ETHERNET-CLUSTER-CONDITIONAL>
+                  <PHYSICAL-CHANNELS>
+                    <ETHERNET-PHYSICAL-CHANNEL UUID="998b0aaa-98a2-439d-ae1c-83d2cd6507a3">
+                      <SHORT-NAME>ChannelCommunication_VLAN62</SHORT-NAME>
+                      <CATEGORY>WIRED</CATEGORY>
+                      <COMM-CONNECTORS>
+                        <COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                          <COMMUNICATION-CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/TBOX/TBOX_VLAN62</COMMUNICATION-CONNECTOR-REF>
+                        </COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                        <COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                          <COMMUNICATION-CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/CDC/CDC_VLAN62</COMMUNICATION-CONNECTOR-REF>
+                        </COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                      </COMM-CONNECTORS>
+                      <I-SIGNAL-TRIGGERINGS>
+                        <I-SIGNAL-TRIGGERING UUID="8af706db-295b-4e4b-a949-cff71946a2b2">
+                          <SHORT-NAME>SigTrigger_Sig_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+                          <I-SIGNAL-PORT-REFS>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Sig_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_TBOX_Out</I-SIGNAL-PORT-REF>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Sig_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_CDC_In</I-SIGNAL-PORT-REF>
+                          </I-SIGNAL-PORT-REFS>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_Event_reportWiFiApList_INI_WiFiStation_1</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                        <I-SIGNAL-TRIGGERING UUID="11920ad3-d819-461f-9e83-e19cdefc6b09">
+                          <SHORT-NAME>SigTrigger_Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62</SHORT-NAME>
+                          <I-SIGNAL-PORT-REFS>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_CDC_In</I-SIGNAL-PORT-REF>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_TBOX_Out</I-SIGNAL-PORT-REF>
+                          </I-SIGNAL-PORT-REFS>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                        <I-SIGNAL-TRIGGERING UUID="ef25e45b-5635-4616-87b6-32c76085f139">
+                          <SHORT-NAME>SigTrigger_Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+                          <I-SIGNAL-PORT-REFS>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_CDC_In</I-SIGNAL-PORT-REF>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</I-SIGNAL-PORT-REF>
+                          </I-SIGNAL-PORT-REFS>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                        <I-SIGNAL-TRIGGERING UUID="dda9c9d3-fdf7-4096-b21d-7af018a83c82">
+                          <SHORT-NAME>SigTrigger_Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62</SHORT-NAME>
+                          <I-SIGNAL-PORT-REFS>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_TBOX_In</I-SIGNAL-PORT-REF>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_CDC_Out</I-SIGNAL-PORT-REF>
+                          </I-SIGNAL-PORT-REFS>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                        <I-SIGNAL-TRIGGERING UUID="1d3e1d68-7a2a-4a27-87d4-3b41965dd4ad">
+                          <SHORT-NAME>SigTrigger_Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+                          <I-SIGNAL-PORT-REFS>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_CDC_In</I-SIGNAL-PORT-REF>
+                            <I-SIGNAL-PORT-REF DEST="I-SIGNAL-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</I-SIGNAL-PORT-REF>
+                          </I-SIGNAL-PORT-REFS>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                      </I-SIGNAL-TRIGGERINGS>
+                      <PDU-TRIGGERINGS>
+                        <PDU-TRIGGERING UUID="71985cee-3ab9-4ffa-9011-95394d880b7b">
+                          <SHORT-NAME>PduTrigger_Pdu_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Pdu_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_CDC_In</I-PDU-PORT-REF>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Pdu_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_TBOX_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/Pdu_Event_reportWiFiApList_INI_WiFiStation_1</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SigTrigger_Sig_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="5abd7895-bdf4-4417-bcff-4ff706ced583">
+                          <SHORT-NAME>PduTrigger_Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_CDC_In</I-PDU-PORT-REF>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_TBOX_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SigTrigger_Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="d05df422-1af9-415b-8035-385d090425b6">
+                          <SHORT-NAME>PduTrigger_Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_CDC_In</I-PDU-PORT-REF>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SigTrigger_Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="01f3fc2e-eaa1-4397-b544-fba3fa61428b">
+                          <SHORT-NAME>PduTrigger_Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_TBOX_In</I-PDU-PORT-REF>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_CDC_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SigTrigger_Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="9f1f080c-9866-449e-b399-31198be5363a">
+                          <SHORT-NAME>PduTrigger_Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_CDC_In</I-PDU-PORT-REF>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SigTrigger_Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="f01b5b8b-d02a-41dc-b602-e6a8e22a113f">
+                          <SHORT-NAME>PduTrigger_SdInstanceTxPdu_VLAN62_TBOX</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/SdInstanceTxPdu_VLAN62_VLAN62_TBOX_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="GENERAL-PURPOSE-PDU">/Communication/PDUs/SdInstanceTxPdu_VLAN62</I-PDU-REF>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="b53ae6b6-e613-41c4-bd3d-492b62d32935">
+                          <SHORT-NAME>PduTrigger_SdInstanceUnicastRxPdu_VLAN62_TBOX</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/SdInstanceUnicastRxPdu_VLAN62_VLAN62_TBOX_In</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="GENERAL-PURPOSE-PDU">/Communication/PDUs/SdInstanceUnicastRxPdu_VLAN62</I-PDU-REF>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="d48986a1-10d3-4ae5-ad8a-0969c991d68a">
+                          <SHORT-NAME>PduTrigger_SdInstanceTxPdu_VLAN62_CDC</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/SdInstanceTxPdu_VLAN62_VLAN62_CDC_Out</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="GENERAL-PURPOSE-PDU">/Communication/PDUs/SdInstanceTxPdu_VLAN62</I-PDU-REF>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="222eebf1-a4b6-49bb-b0e7-a12e684fd484">
+                          <SHORT-NAME>PduTrigger_SdInstanceUnicastRxPdu_VLAN62_CDC</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/SdInstanceUnicastRxPdu_VLAN62_VLAN62_CDC_In</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="GENERAL-PURPOSE-PDU">/Communication/PDUs/SdInstanceUnicastRxPdu_VLAN62</I-PDU-REF>
+                        </PDU-TRIGGERING>
+                        <PDU-TRIGGERING UUID="8dd4b470-d1d7-4126-87c5-0f9b50f941f1">
+                          <SHORT-NAME>PduTrigger_SdInstanceMulticastRxPdu_Vlan62</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/TBOX/TBOX_VLAN62/SdInstanceMulticastRxPdu_Vlan62_VLAN62_TBOX_In</I-PDU-PORT-REF>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/HardwareComponents/CDC/CDC_VLAN62/SdInstanceMulticastRxPdu_Vlan62_VLAN62_CDC_In</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="GENERAL-PURPOSE-PDU">/Communication/PDUs/SdInstanceMulticastRxPdu_Vlan62</I-PDU-REF>
+                        </PDU-TRIGGERING>
+                      </PDU-TRIGGERINGS>
+                      <NETWORK-ENDPOINTS>
+                        <NETWORK-ENDPOINT>
+                          <SHORT-NAME>NEP_VLAN62_TBOX_1</SHORT-NAME>
+                          <NETWORK-ENDPOINT-ADDRESSES>
+                            <IPV-4-CONFIGURATION>
+                              <IPV-4-ADDRESS>192.168.62.1</IPV-4-ADDRESS>
+                              <IPV-4-ADDRESS-SOURCE>FIXED</IPV-4-ADDRESS-SOURCE>
+                              <NETWORK-MASK>255.255.255.0</NETWORK-MASK>
+                            </IPV-4-CONFIGURATION>
+                          </NETWORK-ENDPOINT-ADDRESSES>
+                        </NETWORK-ENDPOINT>
+                        <NETWORK-ENDPOINT>
+                          <SHORT-NAME>NEP_VLAN62_CDC_1</SHORT-NAME>
+                          <NETWORK-ENDPOINT-ADDRESSES>
+                            <IPV-4-CONFIGURATION>
+                              <IPV-4-ADDRESS>192.168.62.4</IPV-4-ADDRESS>
+                              <IPV-4-ADDRESS-SOURCE>FIXED</IPV-4-ADDRESS-SOURCE>
+                              <NETWORK-MASK>255.255.255.0</NETWORK-MASK>
+                            </IPV-4-CONFIGURATION>
+                          </NETWORK-ENDPOINT-ADDRESSES>
+                        </NETWORK-ENDPOINT>
+                        <NETWORK-ENDPOINT>
+                          <SHORT-NAME>NEP_SD_VLAN62_Multicast</SHORT-NAME>
+                          <NETWORK-ENDPOINT-ADDRESSES>
+                            <IPV-4-CONFIGURATION>
+                              <IPV-4-ADDRESS>239.0.0.255</IPV-4-ADDRESS>
+                              <IPV-4-ADDRESS-SOURCE>FIXED</IPV-4-ADDRESS-SOURCE>
+                            </IPV-4-CONFIGURATION>
+                          </NETWORK-ENDPOINT-ADDRESSES>
+                        </NETWORK-ENDPOINT>
+                        <NETWORK-ENDPOINT>
+                          <SHORT-NAME>NEP_SD_VLAN62_Any</SHORT-NAME>
+                          <NETWORK-ENDPOINT-ADDRESSES>
+                            <IPV-4-CONFIGURATION>
+                              <IPV-4-ADDRESS>ANY</IPV-4-ADDRESS>
+                            </IPV-4-CONFIGURATION>
+                          </NETWORK-ENDPOINT-ADDRESSES>
+                        </NETWORK-ENDPOINT>
+                      </NETWORK-ENDPOINTS>
+                      <SO-AD-CONFIG>
+                        <CONNECTION-BUNDLES>
+                          <SOCKET-CONNECTION-BUNDLE>
+                            <SHORT-NAME>SCB_VLAN62_TBOX_TCP_30552</SHORT-NAME>
+                            <BUNDLED-CONNECTIONS>
+                              <SOCKET-CONNECTION>
+                                <CLIENT-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SoAddr_VLAN62_CDC_TCP_31452</CLIENT-PORT-REF>
+                                <PDUS>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>2181169157</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62</PDU-TRIGGERING-REF>
+                                    <ROUTING-GROUP-REFS>
+                                      <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_Method_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                    </ROUTING-GROUP-REFS>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>2181169157</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62</PDU-TRIGGERING-REF>
+                                    <ROUTING-GROUP-REFS>
+                                      <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_Method_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                    </ROUTING-GROUP-REFS>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                </PDUS>
+                              </SOCKET-CONNECTION>
+                            </BUNDLED-CONNECTIONS>
+                            <PDUS>
+                              <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                <HEADER-ID>2181201921</HEADER-ID>
+                                <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_Pdu_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62</PDU-TRIGGERING-REF>
+                                <ROUTING-GROUP-REFS>
+                                  <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_EG_INI_WiFiStation_EventGroup_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                </ROUTING-GROUP-REFS>
+                              </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                              <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                <HEADER-ID>2181201922</HEADER-ID>
+                                <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62</PDU-TRIGGERING-REF>
+                                <ROUTING-GROUP-REFS>
+                                  <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_EG_INI_WiFiStation_EventGroup_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                </ROUTING-GROUP-REFS>
+                              </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                              <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                <HEADER-ID>2181201923</HEADER-ID>
+                                <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62</PDU-TRIGGERING-REF>
+                                <ROUTING-GROUP-REFS>
+                                  <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_EG_INI_WiFiStation_EventGroup_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                </ROUTING-GROUP-REFS>
+                              </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                            </PDUS>
+                            <SERVER-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SoAddr_VLAN62_TBOX_TCP_30552</SERVER-PORT-REF>
+                          </SOCKET-CONNECTION-BUNDLE>
+                          <SOCKET-CONNECTION-BUNDLE>
+                            <SHORT-NAME>SDSCB_VLAN62_TBOX</SHORT-NAME>
+                            <BUNDLED-CONNECTIONS>
+                              <SOCKET-CONNECTION>
+                                <CLIENT-IP-ADDR-FROM-CONNECTION-REQUEST>true</CLIENT-IP-ADDR-FROM-CONNECTION-REQUEST>
+                                <CLIENT-PORT-FROM-CONNECTION-REQUEST>true</CLIENT-PORT-FROM-CONNECTION-REQUEST>
+                                <CLIENT-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SDSoAddr_VLAN62_Any</CLIENT-PORT-REF>
+                                <PDUS>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>4294934784</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_SdInstanceTxPdu_VLAN62_TBOX</PDU-TRIGGERING-REF>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>4294934784</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_SdInstanceUnicastRxPdu_VLAN62_TBOX</PDU-TRIGGERING-REF>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                </PDUS>
+                              </SOCKET-CONNECTION>
+                            </BUNDLED-CONNECTIONS>
+                            <SERVER-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SDSoAddr_VLAN62_TBOX</SERVER-PORT-REF>
+                          </SOCKET-CONNECTION-BUNDLE>
+                          <SOCKET-CONNECTION-BUNDLE>
+                            <SHORT-NAME>SDSCB_VLAN62_CDC</SHORT-NAME>
+                            <BUNDLED-CONNECTIONS>
+                              <SOCKET-CONNECTION>
+                                <CLIENT-IP-ADDR-FROM-CONNECTION-REQUEST>true</CLIENT-IP-ADDR-FROM-CONNECTION-REQUEST>
+                                <CLIENT-PORT-FROM-CONNECTION-REQUEST>true</CLIENT-PORT-FROM-CONNECTION-REQUEST>
+                                <CLIENT-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SDSoAddr_VLAN62_Any</CLIENT-PORT-REF>
+                                <PDUS>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>4294934784</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_SdInstanceTxPdu_VLAN62_CDC</PDU-TRIGGERING-REF>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>4294934784</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_SdInstanceUnicastRxPdu_VLAN62_CDC</PDU-TRIGGERING-REF>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                </PDUS>
+                              </SOCKET-CONNECTION>
+                            </BUNDLED-CONNECTIONS>
+                            <SERVER-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SDSoAddr_VLAN62_CDC</SERVER-PORT-REF>
+                          </SOCKET-CONNECTION-BUNDLE>
+                          <SOCKET-CONNECTION-BUNDLE>
+                            <SHORT-NAME>SDSCB_VLAN62_MulticastRx</SHORT-NAME>
+                            <BUNDLED-CONNECTIONS>
+                              <SOCKET-CONNECTION>
+                                <CLIENT-IP-ADDR-FROM-CONNECTION-REQUEST>true</CLIENT-IP-ADDR-FROM-CONNECTION-REQUEST>
+                                <CLIENT-PORT-FROM-CONNECTION-REQUEST>true</CLIENT-PORT-FROM-CONNECTION-REQUEST>
+                                <CLIENT-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SDSoAddr_VLAN62_Any</CLIENT-PORT-REF>
+                                <PDUS>
+                                  <SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                    <HEADER-ID>4294934784</HEADER-ID>
+                                    <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/PduTrigger_SdInstanceMulticastRxPdu_Vlan62</PDU-TRIGGERING-REF>
+                                  </SOCKET-CONNECTION-IPDU-IDENTIFIER>
+                                </PDUS>
+                              </SOCKET-CONNECTION>
+                            </BUNDLED-CONNECTIONS>
+                            <SERVER-PORT-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SDSoAddr_VLAN62_Multicast</SERVER-PORT-REF>
+                          </SOCKET-CONNECTION-BUNDLE>
+                        </CONNECTION-BUNDLES>
+                        <SOCKET-ADDRESSS>
+                          <SOCKET-ADDRESS UUID="5819e292-4cb4-4d7d-9425-e475a44eb93d">
+                            <SHORT-NAME>SoAddr_VLAN62_TBOX_TCP_30552</SHORT-NAME>
+                            <APPLICATION-ENDPOINT>
+                              <SHORT-NAME>AEP_VLAN62_TBOX_TCP_30552</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_VLAN62_TBOX_1</NETWORK-ENDPOINT-REF>
+                              <PROVIDED-SERVICE-INSTANCES>
+                                <PROVIDED-SERVICE-INSTANCE>
+                                  <SHORT-NAME>PSI_INI_WiFiStation_1_TBOX</SHORT-NAME>
+                                  <ROUTING-GROUP-REFS>
+                                    <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_Method_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                  </ROUTING-GROUP-REFS>
+                                  <EVENT-HANDLERS>
+                                    <EVENT-HANDLER>
+                                      <SHORT-NAME>EH_INI_WiFiStation_1_INI_WiFiStation_EventGroup_VLAN62_TBOX</SHORT-NAME>
+                                      <CONSUMED-EVENT-GROUP-REFS>
+                                        <CONSUMED-EVENT-GROUP-REF DEST="CONSUMED-EVENT-GROUP">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SoAddr_VLAN62_CDC_TCP_31452/AEP_VLAN62_CDC_TCP_31452/CSI_INI_WiFiStation_1_CDC/CEG_INI_WiFiStation_1_INI_WiFiStation_EventGroup_VLAN62_CDC</CONSUMED-EVENT-GROUP-REF>
+                                      </CONSUMED-EVENT-GROUP-REFS>
+                                      <ROUTING-GROUP-REFS>
+                                        <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_EG_INI_WiFiStation_EventGroup_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                      </ROUTING-GROUP-REFS>
+                                    </EVENT-HANDLER>
+                                  </EVENT-HANDLERS>
+                                  <INSTANCE-IDENTIFIER>1</INSTANCE-IDENTIFIER>
+                                  <SD-SERVER-CONFIG>
+                                    <INITIAL-OFFER-BEHAVIOR>
+                                      <INITIAL-DELAY-MAX-VALUE>0.1</INITIAL-DELAY-MAX-VALUE>
+                                      <INITIAL-DELAY-MIN-VALUE>0.0</INITIAL-DELAY-MIN-VALUE>
+                                      <INITIAL-REPETITIONS-BASE-DELAY>0.03</INITIAL-REPETITIONS-BASE-DELAY>
+                                      <INITIAL-REPETITIONS-MAX>3</INITIAL-REPETITIONS-MAX>
+                                    </INITIAL-OFFER-BEHAVIOR>
+                                    <OFFER-CYCLIC-DELAY>1.0</OFFER-CYCLIC-DELAY>
+                                    <REQUEST-RESPONSE-DELAY>
+                                      <MAX-VALUE>0.0</MAX-VALUE>
+                                      <MIN-VALUE>0.0</MIN-VALUE>
+                                    </REQUEST-RESPONSE-DELAY>
+                                    <SERVER-SERVICE-MAJOR-VERSION>1</SERVER-SERVICE-MAJOR-VERSION>
+                                    <SERVER-SERVICE-MINOR-VERSION>1</SERVER-SERVICE-MINOR-VERSION>
+                                    <TTL>3</TTL>
+                                  </SD-SERVER-CONFIG>
+                                  <SERVICE-IDENTIFIER>33282</SERVICE-IDENTIFIER>
+                                </PROVIDED-SERVICE-INSTANCE>
+                              </PROVIDED-SERVICE-INSTANCES>
+                              <TP-CONFIGURATION>
+                                <TCP-TP>
+                                  <TCP-TP-PORT>
+                                    <PORT-NUMBER>30552</PORT-NUMBER>
+                                  </TCP-TP-PORT>
+                                </TCP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                            <CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/TBOX/TBOX_VLAN62</CONNECTOR-REF>
+                          </SOCKET-ADDRESS>
+                          <SOCKET-ADDRESS UUID="1b48de68-07d1-49a3-a136-c35e9a0bae8f">
+                            <SHORT-NAME>SoAddr_VLAN62_CDC_TCP_31452</SHORT-NAME>
+                            <APPLICATION-ENDPOINT>
+                              <SHORT-NAME>AEP_VLAN62_CDC_TCP_31452</SHORT-NAME>
+                              <CONSUMED-SERVICE-INSTANCES>
+                                <CONSUMED-SERVICE-INSTANCE>
+                                  <SHORT-NAME>CSI_INI_WiFiStation_1_CDC</SHORT-NAME>
+                                  <ROUTING-GROUP-REFS>
+                                    <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_Method_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                  </ROUTING-GROUP-REFS>
+                                  <CONSUMED-EVENT-GROUPS>
+                                    <CONSUMED-EVENT-GROUP UUID="0536b139-b322-4560-aed4-9f40bf13cd75">
+                                      <SHORT-NAME>CEG_INI_WiFiStation_1_INI_WiFiStation_EventGroup_VLAN62_CDC</SHORT-NAME>
+                                      <APPLICATION-ENDPOINT-REF DEST="APPLICATION-ENDPOINT">/</APPLICATION-ENDPOINT-REF>
+                                      <EVENT-GROUP-IDENTIFIER>1</EVENT-GROUP-IDENTIFIER>
+                                      <ROUTING-GROUP-REFS>
+                                        <ROUTING-GROUP-REF DEST="SO-AD-ROUTING-GROUP">/SoAdRoutingGroups/SoAdRG_EG_INI_WiFiStation_EventGroup_INI_WiFiStation_1_VLAN62</ROUTING-GROUP-REF>
+                                      </ROUTING-GROUP-REFS>
+                                    </CONSUMED-EVENT-GROUP>
+                                  </CONSUMED-EVENT-GROUPS>
+                                  <PROVIDED-SERVICE-INSTANCE-REF DEST="PROVIDED-SERVICE-INSTANCE">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/SoAddr_VLAN62_TBOX_TCP_30552/AEP_VLAN62_TBOX_TCP_30552/PSI_INI_WiFiStation_1_TBOX</PROVIDED-SERVICE-INSTANCE-REF>
+                                  <SD-CLIENT-CONFIG>
+                                    <CLIENT-SERVICE-MAJOR-VERSION>1</CLIENT-SERVICE-MAJOR-VERSION>
+                                    <CLIENT-SERVICE-MINOR-VERSION>1</CLIENT-SERVICE-MINOR-VERSION>
+                                    <INITIAL-FIND-BEHAVIOR>
+                                      <INITIAL-DELAY-MAX-VALUE>0.1</INITIAL-DELAY-MAX-VALUE>
+                                      <INITIAL-DELAY-MIN-VALUE>0.0</INITIAL-DELAY-MIN-VALUE>
+                                      <INITIAL-REPETITIONS-BASE-DELAY>0.03</INITIAL-REPETITIONS-BASE-DELAY>
+                                      <INITIAL-REPETITIONS-MAX>3</INITIAL-REPETITIONS-MAX>
+                                    </INITIAL-FIND-BEHAVIOR>
+                                    <REQUEST-RESPONSE-DELAY>
+                                      <MAX-VALUE>0.0</MAX-VALUE>
+                                      <MIN-VALUE>0.0</MIN-VALUE>
+                                    </REQUEST-RESPONSE-DELAY>
+                                    <TTL>3</TTL>
+                                  </SD-CLIENT-CONFIG>
+                                </CONSUMED-SERVICE-INSTANCE>
+                              </CONSUMED-SERVICE-INSTANCES>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_VLAN62_CDC_1</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <TCP-TP>
+                                  <TCP-TP-PORT>
+                                    <PORT-NUMBER>31452</PORT-NUMBER>
+                                  </TCP-TP-PORT>
+                                </TCP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                            <CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/CDC/CDC_VLAN62</CONNECTOR-REF>
+                          </SOCKET-ADDRESS>
+                          <SOCKET-ADDRESS UUID="3bb1a85c-f1a7-42bf-aaf1-6a13af4d144d">
+                            <SHORT-NAME>SDSoAddr_VLAN62_TBOX</SHORT-NAME>
+                            <APPLICATION-ENDPOINT>
+                              <SHORT-NAME>SDAEP_VLAN62_TBOX</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_VLAN62_TBOX_1</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <UDP-TP>
+                                  <UDP-TP-PORT>
+                                    <PORT-NUMBER>30490</PORT-NUMBER>
+                                  </UDP-TP-PORT>
+                                </UDP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                            <CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/TBOX/TBOX_VLAN62</CONNECTOR-REF>
+                          </SOCKET-ADDRESS>
+                          <SOCKET-ADDRESS UUID="4bfd8f01-4d77-4e85-b0b9-6fdf9cbd1a70">
+                            <SHORT-NAME>SDSoAddr_VLAN62_CDC</SHORT-NAME>
+                            <APPLICATION-ENDPOINT>
+                              <SHORT-NAME>SDAEP_VLAN62_CDC</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_VLAN62_CDC_1</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <UDP-TP>
+                                  <UDP-TP-PORT>
+                                    <PORT-NUMBER>30490</PORT-NUMBER>
+                                  </UDP-TP-PORT>
+                                </UDP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                            <CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/CDC/CDC_VLAN62</CONNECTOR-REF>
+                          </SOCKET-ADDRESS>
+                          <SOCKET-ADDRESS UUID="ef0145bf-8786-4b42-801b-d94cacdceb55">
+                            <SHORT-NAME>SDSoAddr_VLAN62_Multicast</SHORT-NAME>
+                            <APPLICATION-ENDPOINT>
+                              <SHORT-NAME>SDAEP_VLAN62_Multicast</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_SD_VLAN62_Multicast</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <UDP-TP>
+                                  <UDP-TP-PORT>
+                                    <PORT-NUMBER>30490</PORT-NUMBER>
+                                  </UDP-TP-PORT>
+                                </UDP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                            <MULTICAST-CONNECTOR-REFS>
+                              <MULTICAST-CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/TBOX/TBOX_VLAN62</MULTICAST-CONNECTOR-REF>
+                              <MULTICAST-CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/HardwareComponents/CDC/CDC_VLAN62</MULTICAST-CONNECTOR-REF>
+                            </MULTICAST-CONNECTOR-REFS>
+                          </SOCKET-ADDRESS>
+                          <SOCKET-ADDRESS UUID="8754dddd-e426-4f9b-aecc-984fd77b4a5f">
+                            <SHORT-NAME>SDSoAddr_VLAN62_Any</SHORT-NAME>
+                            <APPLICATION-ENDPOINT>
+                              <SHORT-NAME>SDAEP_VLAN62_Any</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_SD_VLAN62_Any</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <UDP-TP>
+                                  <UDP-TP-PORT>
+                                    <PORT-NUMBER>30490</PORT-NUMBER>
+                                  </UDP-TP-PORT>
+                                </UDP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                          </SOCKET-ADDRESS>
+                        </SOCKET-ADDRESSS>
+                      </SO-AD-CONFIG>
+                      <VLAN>
+                        <SHORT-NAME>VLAN62</SHORT-NAME>
+                        <VLAN-IDENTIFIER>62</VLAN-IDENTIFIER>
+                      </VLAN>
+                    </ETHERNET-PHYSICAL-CHANNEL>
+                  </PHYSICAL-CHANNELS>
+                </ETHERNET-CLUSTER-CONDITIONAL>
+              </ETHERNET-CLUSTER-VARIANTS>
+            </ETHERNET-CLUSTER>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="01780f7e-724e-4997-9ccf-9338ed56525b">
+          <SHORT-NAME>HardwareComponents</SHORT-NAME>
+          <ELEMENTS>
+            <ECU-INSTANCE UUID="d8ef8515-0e3a-4bc3-b228-d39de902f994">
+              <SHORT-NAME>TBOX</SHORT-NAME>
+              <COMM-CONTROLLERS>
+                <ETHERNET-COMMUNICATION-CONTROLLER UUID="fbcac72f-7eee-4498-960a-d8f07feebebb">
+                  <SHORT-NAME>TBOX_EthController</SHORT-NAME>
+                  <CATEGORY>WIRED</CATEGORY>
+                  <ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS>
+                    <ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL>
+                      <WAKE-UP-BY-CONTROLLER-SUPPORTED>false</WAKE-UP-BY-CONTROLLER-SUPPORTED>
+                      <COUPLING-PORTS>
+                        <COUPLING-PORT>
+                          <SHORT-NAME>TBOX_Switch</SHORT-NAME>
+                          <CONNECTION-NEGOTIATION-BEHAVIOR>AUTO</CONNECTION-NEGOTIATION-BEHAVIOR>
+                          <PHYSICAL-LAYER-TYPE>100BASE-T1</PHYSICAL-LAYER-TYPE>
+                          <VLAN-MEMBERSHIPS>
+                            <VLAN-MEMBERSHIP>
+                              <VLAN-REF DEST="ETHERNET-PHYSICAL-CHANNEL">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62</VLAN-REF>
+                            </VLAN-MEMBERSHIP>
+                          </VLAN-MEMBERSHIPS>
+                        </COUPLING-PORT>
+                      </COUPLING-PORTS>
+                      <MAC-UNICAST-ADDRESS>02:00:00:00:00:01</MAC-UNICAST-ADDRESS>
+                    </ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL>
+                  </ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS>
+                </ETHERNET-COMMUNICATION-CONTROLLER>
+              </COMM-CONTROLLERS>
+              <CONNECTORS>
+                <ETHERNET-COMMUNICATION-CONNECTOR UUID="9fbf5bfd-6d7c-4eb2-aba4-161e54c1152f">
+                  <SHORT-NAME>TBOX_VLAN62</SHORT-NAME>
+                  <CATEGORY>WIRED</CATEGORY>
+                  <COMM-CONTROLLER-REF DEST="ETHERNET-COMMUNICATION-CONTROLLER">/Topology/HardwareComponents/TBOX/TBOX_EthController</COMM-CONTROLLER-REF>
+                  <ECU-COMM-PORT-INSTANCES>
+                    <I-SIGNAL-PORT UUID="0b835001-9fd6-4384-8386-cf5cae662493">
+                      <SHORT-NAME>Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="00ebe1e0-34ab-446a-b32a-6676a6bc4898">
+                      <SHORT-NAME>Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="2c5dda75-7dc3-46d0-b426-acad6e4c870b">
+                      <SHORT-NAME>Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="eb4dfae5-6834-4078-b327-766d7a1027fe">
+                      <SHORT-NAME>Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="7f2155e3-d8e6-416d-a87d-80dee518a70b">
+                      <SHORT-NAME>Sig_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="4995c7b1-fc82-4257-bd39-624031b39da7">
+                      <SHORT-NAME>Pdu_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="2b4fe327-8060-4914-ab4c-1b945ff6e73e">
+                      <SHORT-NAME>Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="6d11d5e1-ff35-401d-9338-c5968a0f652e">
+                      <SHORT-NAME>Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="9ed8005c-3188-4ea3-a230-fa036f38818a">
+                      <SHORT-NAME>Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_TBOX_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="5f186744-ad7b-4c2f-bb60-a803854ef5c8">
+                      <SHORT-NAME>Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_TBOX_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-PDU-PORT UUID="f5055381-5647-43a1-8c84-f73f87891151">
+                      <SHORT-NAME>SdInstanceMulticastRxPdu_Vlan62_VLAN62_TBOX_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-PDU-PORT UUID="0adcc32e-5bc2-4c5d-aad9-df9325d134dc">
+                      <SHORT-NAME>SdInstanceTxPdu_VLAN62_VLAN62_TBOX_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-PDU-PORT UUID="cef342e1-b2cd-4f2a-a6f5-73501941e2c0">
+                      <SHORT-NAME>SdInstanceUnicastRxPdu_VLAN62_VLAN62_TBOX_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                  </ECU-COMM-PORT-INSTANCES>
+                  <NETWORK-ENDPOINT-REFS>
+                    <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_SD_VLAN62_Multicast</NETWORK-ENDPOINT-REF>
+                    <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_VLAN62_TBOX_1</NETWORK-ENDPOINT-REF>
+                  </NETWORK-ENDPOINT-REFS>
+                </ETHERNET-COMMUNICATION-CONNECTOR>
+              </CONNECTORS>
+              <SLEEP-MODE-SUPPORTED>false</SLEEP-MODE-SUPPORTED>
+              <WAKE-UP-OVER-BUS-SUPPORTED>false</WAKE-UP-OVER-BUS-SUPPORTED>
+            </ECU-INSTANCE>
+            <ECU-INSTANCE UUID="65fd0e85-d25b-4014-a294-e8f9821e3d09">
+              <SHORT-NAME>CDC</SHORT-NAME>
+              <COMM-CONTROLLERS>
+                <ETHERNET-COMMUNICATION-CONTROLLER UUID="09ac6c1f-9f5a-4036-b641-3eafa787a114">
+                  <SHORT-NAME>CDC_EthController</SHORT-NAME>
+                  <CATEGORY>WIRED</CATEGORY>
+                  <ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS>
+                    <ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL>
+                      <WAKE-UP-BY-CONTROLLER-SUPPORTED>false</WAKE-UP-BY-CONTROLLER-SUPPORTED>
+                      <COUPLING-PORTS>
+                        <COUPLING-PORT>
+                          <SHORT-NAME>CDC_Switch</SHORT-NAME>
+                          <CONNECTION-NEGOTIATION-BEHAVIOR>AUTO</CONNECTION-NEGOTIATION-BEHAVIOR>
+                          <PHYSICAL-LAYER-TYPE>100BASE-T1</PHYSICAL-LAYER-TYPE>
+                          <VLAN-MEMBERSHIPS>
+                            <VLAN-MEMBERSHIP>
+                              <VLAN-REF DEST="ETHERNET-PHYSICAL-CHANNEL">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62</VLAN-REF>
+                            </VLAN-MEMBERSHIP>
+                          </VLAN-MEMBERSHIPS>
+                        </COUPLING-PORT>
+                      </COUPLING-PORTS>
+                      <MAC-UNICAST-ADDRESS>02:00:00:00:00:04</MAC-UNICAST-ADDRESS>
+                    </ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL>
+                  </ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS>
+                </ETHERNET-COMMUNICATION-CONTROLLER>
+              </COMM-CONTROLLERS>
+              <CONNECTORS>
+                <ETHERNET-COMMUNICATION-CONNECTOR UUID="87af5c8e-c59e-47f0-85f5-c6949c5858fb">
+                  <SHORT-NAME>CDC_VLAN62</SHORT-NAME>
+                  <CATEGORY>WIRED</CATEGORY>
+                  <COMM-CONTROLLER-REF DEST="ETHERNET-COMMUNICATION-CONTROLLER">/Topology/HardwareComponents/CDC/CDC_EthController</COMM-CONTROLLER-REF>
+                  <ECU-COMM-PORT-INSTANCES>
+                    <I-SIGNAL-PORT UUID="1d2a5c30-d630-4e5a-9dfd-b33fb9b682bd">
+                      <SHORT-NAME>Sig_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="bb8638b6-19ff-4efe-be31-584ab5d535a6">
+                      <SHORT-NAME>Pdu_Event_reportWiFiSwitchStatus_INI_WiFiStation_1_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="0d0c153a-4ac8-4f93-b2d1-bfa49cf0df4c">
+                      <SHORT-NAME>Sig_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="d3ea2f43-247d-4a0b-8502-45df057ded60">
+                      <SHORT-NAME>Pdu_Event_reportWiFiConnStatus_INI_WiFiStation_1_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="8e7b29a7-5d8d-4afb-ab4c-8c6e253de045">
+                      <SHORT-NAME>Sig_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="810589db-103d-4443-8feb-49bff5eb8acd">
+                      <SHORT-NAME>Pdu_Event_reportWiFiApList_INI_WiFiStation_1_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="6e77266b-3e69-4389-800c-04b511ae7b3f">
+                      <SHORT-NAME>Sig_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="4e9039e6-7716-4baa-a827-2aa70ddd18d2">
+                      <SHORT-NAME>Pdu_RR_removeWiFiLoginInfo_return_INI_WiFiStation_1_CDC_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-SIGNAL-PORT UUID="8069aa3f-7ab0-45ce-913f-a7c11caf6575">
+                      <SHORT-NAME>Sig_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_CDC_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-SIGNAL-PORT>
+                    <I-PDU-PORT UUID="332181d5-fbba-4984-aa44-746c193c6e71">
+                      <SHORT-NAME>Pdu_RR_removeWiFiLoginInfo_call_INI_WiFiStation_1_CDC_VLAN62_CDC_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-PDU-PORT UUID="69197570-d678-4c02-bcad-5fedeffc4d46">
+                      <SHORT-NAME>SdInstanceMulticastRxPdu_Vlan62_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-PDU-PORT UUID="5a9d23e2-1bef-4f66-abe7-59ffe5a70e4b">
+                      <SHORT-NAME>SdInstanceTxPdu_VLAN62_VLAN62_CDC_Out</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                    <I-PDU-PORT UUID="3660f413-c5dd-4517-b402-aaef9a54174f">
+                      <SHORT-NAME>SdInstanceUnicastRxPdu_VLAN62_VLAN62_CDC_In</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                  </ECU-COMM-PORT-INSTANCES>
+                  <NETWORK-ENDPOINT-REFS>
+                    <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_SD_VLAN62_Multicast</NETWORK-ENDPOINT-REF>
+                    <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthernetCluster/ChannelCommunication_VLAN62/NEP_VLAN62_CDC_1</NETWORK-ENDPOINT-REF>
+                  </NETWORK-ENDPOINT-REFS>
+                </ETHERNET-COMMUNICATION-CONNECTOR>
+              </CONNECTORS>
+              <SLEEP-MODE-SUPPORTED>false</SLEEP-MODE-SUPPORTED>
+              <WAKE-UP-OVER-BUS-SUPPORTED>false</WAKE-UP-OVER-BUS-SUPPORTED>
+            </ECU-INSTANCE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="54dd6777-1e31-481d-b23b-68ed17ffd4c4">
+      <SHORT-NAME>DataTypeMappingSets</SHORT-NAME>
+      <ELEMENTS>
+        <DATA-TYPE-MAPPING-SET UUID="bf8b64a4-fba5-4693-988d-c05c863e678a">
+          <SHORT-NAME>Data_Type_Mappings</SHORT-NAME>
+          <DATA-TYPE-MAPS>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-RECORD-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApList</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApList</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-RECORD-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiConnStatus</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiConnStatus</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiSwitchStatus</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiSwitchStatus</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-RECORD-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApInfo</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApInfo</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-ARRAY-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApArray</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApArray</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApNum</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApNum</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiApName</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiApName</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiCurConnStatus</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiCurConnStatus</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiStrength</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiStrength</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiUploadDataStatus</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiUploadDataStatus</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiDownloadDataStatus</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiDownloadDataStatus</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiEncryption</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiEncryption</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_WiFiLinkedInternet</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/WiFiLinkedInternet</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/DataTypes/ApplicationDataType/adt_INI_ReturnCode</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/DataTypes/ImplementationDataTypes/INI_ReturnCode</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+          </DATA-TYPE-MAPS>
+        </DATA-TYPE-MAPPING-SET>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>

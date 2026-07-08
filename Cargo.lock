@@ -431,6 +431,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "arxml_converter"
+version = "0.1.0"
+dependencies = [
+ "roxmltree",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4390,6 +4397,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
 name = "rumqttc"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5969,6 +5982,7 @@ dependencies = [
  "datatypes",
  "flate2",
  "flow",
+ "hex",
  "indexmap 1.9.3",
  "manager",
  "parking_lot",
@@ -6013,6 +6027,7 @@ dependencies = [
 name = "veloflux-sdv"
 version = "0.4.0"
 dependencies = [
+ "arxml_converter",
  "base64 0.22.1",
  "bytes",
  "can-dbc",

@@ -16,6 +16,7 @@ pub mod schema;
 /// on the given FlowInstance. Called from both normal startup and worker mode.
 pub fn register(instance: &flow::FlowInstance) {
     schema::register_dbc_schema();
+    schema::register_arxml_schema();
 
     let encoder_registry = instance.encoder_registry();
     encoder_registry.register_encoder(

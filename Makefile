@@ -30,6 +30,10 @@ test:
 	@cd src/flow && $(CARGO) test --features deadlock_detection
 	@cd src/manager && $(CARGO) test --features deadlock_detection
 	@cd src/parser && $(CARGO) test --features deadlock_detection
+	@echo "Building veloflux binary for integration tests..."
+	@$(CARGO) build --bin veloflux --features deadlock_detection
+	@echo "Running distros/sdv tests..."
+	@cd distros/sdv && $(CARGO) test
 
 # --- AC-3: Memory and Concurrency Safety ---
 
@@ -59,6 +63,7 @@ bump-version:
 fmt:
 	@echo "Formatting code..."
 	@$(CARGO) fmt
+	@cd distros/sdv && $(CARGO) fmt
 
 # 运行 Clippy 静态检查
 clippy:
@@ -68,6 +73,8 @@ clippy:
 	@cd src/datatypes && $(CARGO) clippy --features deadlock_detection -- -D warnings -D clippy::await_holding_lock
 	@cd src/flow && $(CARGO) clippy --features deadlock_detection -- -D warnings -D clippy::await_holding_lock
 	@cd src/parser && $(CARGO) clippy --features deadlock_detection -- -D warnings -D clippy::await_holding_lock
+	@echo "Running Clippy for distros/sdv..."
+	@cd distros/sdv && $(CARGO) clippy -- -D warnings -D clippy::await_holding_lock
 
 # 清理构建文件
 clean:
