@@ -21,6 +21,7 @@ use flow::{
 };
 
 use super::payload::{GbfPayloadFrame, PayloadDecoder};
+use crate::schema::arxml::apply_signal_name_pattern;
 
 /// Pre-compiled decode plan for a single SOME/IP message.
 #[derive(Debug, Clone)]
@@ -70,6 +71,7 @@ impl SomeIpPayloadDecoder {
         source_name: impl Into<String>,
         schema: Arc<Schema>,
         codec: Arc<ArxmlCodec>,
+        signal_name_pattern: Option<&str>,
     ) -> Self {
         let source_name: Arc<str> = Arc::from(source_name.into());
         let keys: Arc<[Arc<str>]> = Arc::from(
@@ -82,11 +84,20 @@ impl SomeIpPayloadDecoder {
         let ts_index = keys.iter().position(|k| k.as_ref() == "ts");
         let null_value = Arc::new(Value::Null);
 
+        let signal_name_pattern = signal_name_pattern.unwrap_or("{field}");
+
         // Pre-build all decode plans from known entries.
         let mut plans = HashMap::new();
         let mut plan_index = 0usize;
         for (service_id, method_id) in codec.known_entries() {
-            if let Some(plan) = Self::build_plan(&codec, &keys, service_id, method_id, plan_index) {
+            if let Some(plan) = Self::build_plan(
+                &codec,
+                &keys,
+                signal_name_pattern,
+                service_id,
+                method_id,
+                plan_index,
+            ) {
                 plans.insert((service_id, method_id), plan);
                 plan_index += 1;
             }
@@ -112,13 +123,14 @@ impl SomeIpPayloadDecoder {
     ) -> Result<Self, CodecError> {
         let codec = ArxmlCodec::load(arxml_path)
             .map_err(|e| CodecError::Other(format!("failed to load ARXML: {e}")))?;
-        Ok(Self::new(source_name, schema, Arc::new(codec)))
+        Ok(Self::new(source_name, schema, Arc::new(codec), None))
     }
 
     /// Build a decode plan for one (service_id, method_id) pair.
     fn build_plan(
         codec: &ArxmlCodec,
         keys: &[Arc<str>],
+        signal_name_pattern: &str,
         service_id: u16,
         method_id: u16,
         plan_index: usize,
@@ -134,9 +146,18 @@ impl SomeIpPayloadDecoder {
             arxml_converter::ast::types::DataTypeKind::Structure(s) => &s.fields,
             _ => return None,
         };
+        let (service_name, entry_name) = codec
+            .resolve_entry_names(service_id, method_id)
+            .unwrap_or_else(|_| (format!("0x{service_id:04X}"), format!("0x{method_id:04X}")));
         let mut field_to_index = Vec::new();
         for field in fields {
-            if let Some(idx) = keys.iter().position(|k| k.as_ref() == field.name.as_str()) {
+            let column_name = apply_signal_name_pattern(
+                signal_name_pattern,
+                &service_name,
+                &entry_name,
+                &field.name,
+            );
+            if let Some(idx) = keys.iter().position(|k| k.as_ref() == column_name.as_str()) {
                 field_to_index.push((field.name.clone(), idx));
             }
         }

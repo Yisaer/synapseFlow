@@ -20,13 +20,26 @@ pub fn register_arxml_schema() {
     register_schema("arxml", Arc::new(parse_arxml_schema));
 }
 
-/// Cache of parsed `ArxmlCodec` instances, keyed by a user-chosen name.
-/// Populated lazily when a schema with `arxml_path` is registered.
-static ARXML_CODEC_CACHE: std::sync::LazyLock<std::sync::RwLock<HashMap<String, Arc<ArxmlCodec>>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+/// Parsed ARXML metadata, keyed by a user-chosen schema name or inline stream name.
+#[derive(Clone)]
+pub struct CachedArxmlSchema {
+    pub codec: Arc<ArxmlCodec>,
+    pub signal_name_pattern: Arc<str>,
+}
+
+/// Cache of parsed `ArxmlCodec` instances and their column naming policy.
+/// Populated lazily when an ARXML schema is parsed.
+static ARXML_CODEC_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<HashMap<String, CachedArxmlSchema>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
 /// Retrieve a cached `ArxmlCodec` by name.
 pub fn get_cached_codec(name: &str) -> Option<Arc<ArxmlCodec>> {
+    get_cached_schema(name).map(|schema| schema.codec)
+}
+
+/// Retrieve cached ARXML schema metadata by name.
+pub fn get_cached_schema(name: &str) -> Option<CachedArxmlSchema> {
     ARXML_CODEC_CACHE
         .read()
         .expect("ARXML codec cache lock poisoned")
@@ -34,12 +47,18 @@ pub fn get_cached_codec(name: &str) -> Option<Arc<ArxmlCodec>> {
         .cloned()
 }
 
-/// Store an `ArxmlCodec` in the cache under the given name.
-fn cache_codec(name: String, codec: ArxmlCodec) {
+/// Store ARXML schema metadata in the cache under the given name.
+fn cache_schema(name: String, codec: ArxmlCodec, signal_name_pattern: &str) {
     ARXML_CODEC_CACHE
         .write()
         .expect("ARXML codec cache lock poisoned")
-        .insert(name, Arc::new(codec));
+        .insert(
+            name,
+            CachedArxmlSchema {
+                codec: Arc::new(codec),
+                signal_name_pattern: Arc::from(signal_name_pattern),
+            },
+        );
 }
 
 fn parse_arxml_schema(
@@ -84,7 +103,7 @@ fn parse_arxml_schema(
 
         if let arxml_converter::ast::types::DataTypeKind::Structure(st) = &type_dt.kind {
             for f in &st.fields {
-                let name = apply_pattern(pattern, &service_name, &entry_name, &f.name);
+                let name = apply_signal_name_pattern(pattern, &service_name, &entry_name, &f.name);
                 if field_specs.iter().any(|(n, _)| n == &name) {
                     continue;
                 }
@@ -99,7 +118,7 @@ fn parse_arxml_schema(
         .map(|(name, dt)| ColumnSchema::new(stream_name.to_string(), name, dt))
         .collect();
 
-    cache_codec(stream_name.to_string(), codec);
+    cache_schema(stream_name.to_string(), codec, pattern);
     Ok((Schema::new(columns), None))
 }
 
@@ -158,7 +177,12 @@ fn base_type_to_concrete(base: &str) -> ConcreteDatatype {
 /// Placeholders: `{service}` (service interface), `{method}` or `{event}`
 /// (synonyms for the entry name), and `{field}` (payload field name).
 /// Default pattern is `"{field}"` which preserves raw ARXML field names.
-fn apply_pattern(pattern: &str, service: &str, entry: &str, field: &str) -> String {
+pub(crate) fn apply_signal_name_pattern(
+    pattern: &str,
+    service: &str,
+    entry: &str,
+    field: &str,
+) -> String {
     pattern
         .replace("{service}", service)
         .replace("{method}", entry)

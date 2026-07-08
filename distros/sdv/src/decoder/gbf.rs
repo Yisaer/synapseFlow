@@ -94,30 +94,47 @@ pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
                     .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
                 }
                 "someip" => {
-                    // Load ARXML codec — prefer cached ref, fall back to path.
-                    let codec = if let Some(ref_name) = config
+                    // Load ARXML codec and the schema's column naming policy.
+                    let cached_schema = if let Some(ref_name) = config
                         .props()
                         .get("format_schema_ref")
                         .and_then(JsonValue::as_str)
                     {
-                        crate::schema::arxml::get_cached_codec(ref_name).ok_or_else(|| {
-                            CodecError::Other(format!(
-                                "ARXML codec `{ref_name}` not found in cache; \
+                        Some(
+                            crate::schema::arxml::get_cached_schema(ref_name).ok_or_else(|| {
+                                CodecError::Other(format!(
+                                    "ARXML codec `{ref_name}` not found in cache; \
                                      register it first via schema.type=\"arxml\""
-                            ))
-                        })?
+                                ))
+                            })?,
+                        )
+                    } else {
+                        crate::schema::arxml::get_cached_schema(stream_name)
+                    };
+
+                    let (codec, cached_pattern) = if let Some(cached) = cached_schema {
+                        (cached.codec, Some(cached.signal_name_pattern))
                     } else {
                         let path = format_schema_path;
-                        Arc::new(arxml_converter::ArxmlCodec::load(path).map_err(|e| {
-                            CodecError::Other(format!("failed to load ARXML from {path}: {e}"))
-                        })?)
+                        (
+                            Arc::new(arxml_converter::ArxmlCodec::load(path).map_err(|e| {
+                                CodecError::Other(format!("failed to load ARXML from {path}: {e}"))
+                            })?),
+                            None,
+                        )
                     };
+                    let pattern = config
+                        .props()
+                        .get("signal_name_pattern")
+                        .and_then(JsonValue::as_str)
+                        .or(cached_pattern.as_deref());
 
                     let payload_decoder =
                         Box::new(crate::decoder::someip::SomeIpPayloadDecoder::new(
                             stream_name,
                             schema.clone(),
                             codec,
+                            pattern,
                         ));
 
                     GbfDecoder::with_payload_decoder(gbf_schema, payload_decoder)
