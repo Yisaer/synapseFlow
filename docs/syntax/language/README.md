@@ -2,3 +2,8 @@
 
 This directory contains SQL-visible semantics that are not specific to one connector or runtime
 deployment detail.
+
+- `pipeline_state.md`: Pipeline State concept — approximating pipeline-level runtime counters
+  via processor-local state. Introduces `last_hit_count()` as the first consumer.
+- `stateful_functions.md`: Stateful function semantics (lag, latest, acc_*, etc.).
+- `alias_computing.md`: Alias resolution and computed column semantics.
