@@ -1,6 +1,7 @@
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use crate::processor::processor_state::ProcessorState;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
 
@@ -30,6 +31,9 @@ pub struct PhysicalProject {
     /// This is used by physical rewrite rules that delay `ColumnRef::ByIndex`
     /// materialization into downstream encoders.
     pub passthrough_messages: bool,
+    /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
+    /// When `Some`, `ProjectProcessor` increments the counter after each projected row.
+    pub processor_state: Option<Arc<ProcessorState>>,
 }
 
 impl PhysicalProjectField {
@@ -82,6 +86,7 @@ impl PhysicalProject {
             base,
             fields: fields.into(),
             passthrough_messages: false,
+            processor_state: None,
         }
     }
 
@@ -96,6 +101,7 @@ impl PhysicalProject {
             base,
             fields: fields.into(),
             passthrough_messages: false,
+            processor_state: None,
         }
     }
 }

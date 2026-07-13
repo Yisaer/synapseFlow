@@ -1133,6 +1133,55 @@ fn plan_explain_stateful_table_driven() {
             sql: "SELECT lag(a), lag(a) FILTER (WHERE lag(a)) FROM stream",
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"PhysicalProject"}}"##,
         },
+
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_pipeline_state_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "last_hit_count_select_only",
+            sql: "SELECT last_hit_count() FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[last_hit_count()]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[last_hit_count()]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_count_where_filter",
+            sql: "SELECT a FROM stream WHERE last_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=last_hit_count() < 3"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=last_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_count_select_and_where",
+            sql: "SELECT last_hit_count() FROM stream WHERE last_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=last_hit_count() < 3"],"operator":"Filter"}],"id":"Project_2","info":["fields=[last_hit_count()]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=last_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[last_hit_count()]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_count_with_column_select",
+            sql: "SELECT a, last_hit_count() FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; last_hit_count()]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; last_hit_count()]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_count_with_column_where",
+            sql: "SELECT last_hit_count(), b FROM stream WHERE last_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=last_hit_count() < 3"],"operator":"Filter"}],"id":"Project_2","info":["fields=[last_hit_count(); b]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=last_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[last_hit_count(); b]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_count_with_multi_columns",
+            sql:
+                "SELECT a, b, last_hit_count() FROM stream WHERE flag > 0 AND last_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=flag > 0 AND last_hit_count() < 3"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b; last_hit_count()]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b, flag]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b, flag]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=flag > 0 AND last_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[a; b; last_hit_count()]"],"operator":"PhysicalProject"}}"##,
+        },
     ];
 
     for case in cases {

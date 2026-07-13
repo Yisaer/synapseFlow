@@ -3,6 +3,8 @@ use super::custom_func::CustomFuncRegistry;
 use super::func::{BinaryFunc, UnaryFunc};
 use super::internal_columns::is_internal_derived;
 use super::scalar::ScalarExpr;
+use crate::expr::ProcStateField;
+use crate::processor::processor_state::is_pipeline_state_function;
 use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
 use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator,
@@ -258,6 +260,26 @@ fn convert_expr_to_scalar_internal(
 
         // Function calls like CONCAT(a, b), UPPER(name)
         Expr::Function(Function { name, args, .. }) => {
+            let function_name = name
+                .0
+                .last()
+                .map(|ident| ident.value.to_lowercase())
+                .unwrap_or_default();
+
+            // Pipeline state functions (e.g. last_hit_count()) are converted to
+            // a placeholder that is resolved to ScalarExpr::ProcessorState during
+            // physical plan building.
+            if is_pipeline_state_function(&function_name) {
+                if !args.is_empty() {
+                    return Err(ConversionError::UnsupportedExpression(format!(
+                        "{function_name}() takes zero arguments"
+                    )));
+                }
+                return Ok(ScalarExpr::PipelineState {
+                    field: ProcStateField::LastHitCount,
+                });
+            }
+
             convert_function_call(name, args, bindings, custom_func_registry)
         }
 

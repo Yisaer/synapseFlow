@@ -298,6 +298,8 @@ fn infer_scalar_type(expr: &ScalarExpr, input: &[OutputColumn]) -> Option<Concre
         ScalarExpr::Wildcard { .. }
         | ScalarExpr::FieldAccess { .. }
         | ScalarExpr::ListIndex { .. }
-        | ScalarExpr::CallFunc { .. } => None,
+        | ScalarExpr::CallFunc { .. }
+        | ScalarExpr::PipelineState { .. }
+        | ScalarExpr::ProcessorState { .. } => None,
     }
 }

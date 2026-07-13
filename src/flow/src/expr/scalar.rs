@@ -1,7 +1,9 @@
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
 use crate::model::{Collection, Tuple};
+use crate::processor::processor_state::ProcessorState;
 use datatypes::{ConcreteDatatype, StructField, StructType, StructValue, Value};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// A scalar expression, which can be evaluated to a value.
@@ -59,6 +61,22 @@ pub enum ScalarExpr {
         when_then: Vec<(ScalarExpr, ScalarExpr)>,
         else_expr: Option<Box<ScalarExpr>>,
     },
+    /// A pipeline state function that needs to be resolved to
+    /// [`ScalarExpr::ProcessorState`] during physical plan building.
+    /// Carries the specific field to read; the `Arc<ProcessorState>` is
+    /// injected later by `inject_processor_state`.
+    PipelineState { field: ProcStateField },
+    /// Reads a value from processor-local pipeline state (e.g. `last_hit_count`).
+    ProcessorState {
+        state: Arc<ProcessorState>,
+        field: ProcStateField,
+    },
+}
+
+/// Identifies which field of [`ProcessorState`] a [`ScalarExpr::ProcessorState`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcStateField {
+    LastHitCount,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -246,6 +264,14 @@ impl ScalarExpr {
                     None => Ok(Value::Null),
                 }
             }
+            ScalarExpr::PipelineState { .. } => Err(EvalError::NotImplemented {
+                feature: "ScalarExpr::PipelineState must be resolved before evaluation".to_string(),
+            }),
+            ScalarExpr::ProcessorState { state, field } => match field {
+                ProcStateField::LastHitCount => {
+                    Ok(Value::Uint64(state.last_hit_count.load(Ordering::Relaxed)))
+                }
+            },
         }
     }
 
@@ -397,6 +423,12 @@ impl std::fmt::Debug for ScalarExpr {
                 when_then,
                 else_expr.as_ref()
             ),
+            ScalarExpr::PipelineState { field } => {
+                write!(f, "PipelineState({:?})", field)
+            }
+            ScalarExpr::ProcessorState { field, .. } => {
+                write!(f, "ProcessorState({:?})", field)
+            }
         }
     }
 }
@@ -475,6 +507,13 @@ impl PartialEq for ScalarExpr {
                     else_expr: eb,
                 },
             ) => oa == ob && wa == wb && ea == eb,
+            (ScalarExpr::PipelineState { field: fa }, ScalarExpr::PipelineState { field: fb }) => {
+                fa == fb
+            }
+            (
+                ScalarExpr::ProcessorState { field: fa, .. },
+                ScalarExpr::ProcessorState { field: fb, .. },
+            ) => fa == fb,
             _ => false,
         }
     }

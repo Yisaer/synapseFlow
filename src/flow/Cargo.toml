@@ -65,6 +65,7 @@ prost-build = "0.14"
 [dev-dependencies]
 rumqttd = "0.20.0"
 tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "sync", "time", "test-util"] }
 
 [features]
 deadlock_detection = ["parking_lot/deadlock_detection"]

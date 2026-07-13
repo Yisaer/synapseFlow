@@ -3,17 +3,21 @@
 //! This processor evaluates filter expressions and produces output with filtered records.
 
 use crate::model::Collection;
+use crate::model::RecordBatch;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::processor_state::ProcessorState;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
+use datatypes::Value;
 use futures::stream::StreamExt;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -28,6 +32,8 @@ pub struct FilterProcessor {
     id: String,
     /// Physical filter configuration
     physical_filter: Arc<PhysicalFilter>,
+    /// Processor-local state for pipeline state functions (e.g. last_hit_count).
+    pub(crate) processor_state: Option<Arc<ProcessorState>>,
     /// Input channels for receiving data
     inputs: Vec<LinkReceiver<StreamData>>,
     /// Control input channels
@@ -59,6 +65,7 @@ impl FilterProcessor {
         Self {
             id: id.into(),
             physical_filter,
+            processor_state: None,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -76,21 +83,46 @@ impl FilterProcessor {
     /// Returns None if the plan is not a PhysicalFilter
     pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
         match plan.as_ref() {
-            PhysicalPlan::Filter(filter) => Some(Self::new(id, Arc::new(filter.clone()))),
+            PhysicalPlan::Filter(filter) => {
+                let processor_state = filter.processor_state.clone();
+                let mut proc = Self::new(id, Arc::new(filter.clone()));
+                proc.processor_state = processor_state;
+                Some(proc)
+            }
             _ => None,
         }
     }
 }
 
-/// Apply filter to a collection
+/// Apply filter to a collection, optionally tracking per-row pipeline state.
+///
+/// When `state` is `Some`, each accepted row increments the hit count so that
+/// later rows in the same batch see the updated counter during expression evaluation.
 fn apply_filter(
     input_collection: &dyn Collection,
     filter_expr: &crate::expr::ScalarExpr,
+    state: Option<&ProcessorState>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    // Use the collection's apply_filter method
-    input_collection
-        .apply_filter(filter_expr)
-        .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply filter: {}", e)))
+    match state {
+        Some(state) => {
+            let mut kept = Vec::with_capacity(input_collection.num_rows());
+            for tuple in input_collection.rows() {
+                let result = filter_expr
+                    .eval_with_tuple(tuple)
+                    .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+                if matches!(result, Value::Bool(true)) {
+                    state.last_hit_count.fetch_add(1, Ordering::Relaxed);
+                    kept.push(tuple.clone());
+                }
+            }
+            Ok(Box::new(RecordBatch::new(kept).map_err(|e| {
+                ProcessorError::ProcessingError(e.to_string())
+            })?))
+        }
+        None => input_collection
+            .apply_filter(filter_expr)
+            .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply filter: {}", e))),
+    }
 }
 
 impl Processor for FilterProcessor {
@@ -111,6 +143,7 @@ impl Processor for FilterProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let filter_expr = self.physical_filter.scalar_predicate.clone();
+        let processor_state = self.processor_state.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
 
@@ -153,7 +186,12 @@ impl Processor for FilterProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match apply_filter(collection.as_ref(), &filter_expr) {
+                                        let result = apply_filter(
+                                            collection.as_ref(),
+                                            &filter_expr,
+                                            processor_state.as_deref(),
+                                        );
+                                        match result {
                                             Ok(filtered_collection) => {
                                                 let out_rows = filtered_collection.num_rows();
                                                 // A filter that matches nothing emits nothing

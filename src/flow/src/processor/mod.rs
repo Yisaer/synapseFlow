@@ -24,6 +24,7 @@ pub mod memory_collection_materialize_processor;
 pub mod order_processor;
 pub(crate) mod output_row_accessor;
 pub mod processor_builder;
+pub mod processor_state;
 pub mod project_processor;
 pub mod result_collect_processor;
 pub mod row_diff_processor;
@@ -62,6 +63,7 @@ pub use processor_builder::ProcessorPipeline;
 pub(crate) use processor_builder::{
     create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
 };
+pub use processor_state::ProcessorState;
 pub use project_processor::ProjectProcessor;
 pub use result_collect_processor::ResultCollectProcessor;
 pub use row_diff_processor::RowDiffProcessor;

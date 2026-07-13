@@ -1295,6 +1295,92 @@ async fn pipeline_table_driven_queries() {
                 ],
             }],
         },
+        TestCase {
+            name: "last_hit_count_where_limit",
+            sql: "SELECT a FROM stream WHERE last_hit_count() < 3",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(10),
+                    Value::Int64(20),
+                    Value::Int64(30),
+                    Value::Int64(40),
+                    Value::Int64(50),
+                ],
+            )],
+            expected_rows: 3,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "a".to_string(),
+                expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            }],
+        },
+        TestCase {
+            name: "last_hit_count_select_output",
+            sql: "SELECT last_hit_count() FROM stream WHERE a > 10",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(5),
+                    Value::Int64(15),
+                    Value::Int64(25),
+                    Value::Int64(8),
+                    Value::Int64(35),
+                ],
+            )],
+            expected_rows: 3,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "a".to_string(),
+                    expected_values: vec![
+                        Value::Int64(15),
+                        Value::Int64(25),
+                        Value::Int64(35),
+                    ],
+                },
+                ColumnCheck {
+                    expected_name: "last_hit_count()".to_string(),
+                    expected_values: vec![
+                        Value::Uint64(0),
+                        Value::Uint64(1),
+                        Value::Uint64(2),
+                    ],
+                },
+            ],
+        },
+        TestCase {
+            name: "last_hit_count_select_all",
+            sql: "SELECT last_hit_count() FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(100),
+                    Value::Int64(200),
+                    Value::Int64(300),
+                ],
+            )],
+            expected_rows: 3,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "a".to_string(),
+                    expected_values: vec![
+                        Value::Int64(100),
+                        Value::Int64(200),
+                        Value::Int64(300),
+                    ],
+                },
+                ColumnCheck {
+                    expected_name: "last_hit_count()".to_string(),
+                    expected_values: vec![
+                        Value::Uint64(0),
+                        Value::Uint64(1),
+                        Value::Uint64(2),
+                    ],
+                },
+            ],
+        },
     ];
 
     for test_case in test_cases {

@@ -185,7 +185,7 @@ async fn assert_no_output(output: &mut JsonOutput, timeout_duration: Duration) {
 }
 
 // coverage-covers: processor.sampler.strategy
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sampler_latest_emits_only_last_value_per_interval() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -206,7 +206,7 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
     pipeline.start().await.expect("start pipeline");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
 
     for value in 1..=5 {
         let payload = format!(r#"{{"x": {value}}}"#).into_bytes();
@@ -214,20 +214,33 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
             .send_stream_data("latest_stream", StreamData::bytes(payload))
             .await
             .expect("send data to sampler");
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
+    let sampler_handle = pipeline
+        .processor_stats()
+        .into_iter()
+        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
+        .expect("sampler stats should exist");
+    for _ in 0..20 {
+        if sampler_handle.snapshot().stats.records_in == 5 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        sampler_handle.snapshot().stats.records_in,
+        5,
+        "sampler should consume all inputs before the sampling tick"
+    );
+
+    tokio::time::advance(interval).await;
+    tokio::task::yield_now().await;
+
+    let actual = recv_next_json(&mut output, Duration::from_millis(10)).await;
     assert_eq!(actual, serde_json::json!([{"x": 5}]));
     assert_no_output(&mut output, Duration::from_millis(100)).await;
 
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
+    let sampler_stats = sampler_handle.snapshot().stats;
     assert_eq!(
         sampler_stats.records_in, 5,
         "sampler should observe all inputs"

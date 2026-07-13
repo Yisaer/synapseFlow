@@ -302,8 +302,8 @@ impl BinaryFunc {
             return Ok((Value::Float64(left_f), Value::Float64(right_f)));
         }
 
-        let left_debug = format!("{:?}", &left);
-        let right_debug = format!("{:?}", &right);
+        let left_debug = format!("{:?}", left);
+        let right_debug = format!("{:?}", right);
         Err(EvalError::TypeMismatch {
             expected: "Int64, Float64, or Uint8".to_string(),
             actual: format!("{} and {}", left_debug, right_debug),
@@ -433,8 +433,8 @@ impl BinaryFunc {
                     }
                 }
                 // If both fail, return error
-                let left_debug = format!("{:?}", &left);
-                let right_debug = format!("{:?}", &right);
+                let left_debug = format!("{:?}", left);
+                let right_debug = format!("{:?}", right);
                 Err(EvalError::TypeMismatch {
                     expected: "Int64, Float32, Float64, or String".to_string(),
                     actual: format!("{} and {}", left_debug, right_debug),

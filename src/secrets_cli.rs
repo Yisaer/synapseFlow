@@ -170,7 +170,7 @@ fn cmd_get(rest: &[String]) -> CliResult {
     let store = SecretStore::load(&store_path(&opts.data_dir), provider.as_ref())?;
     let value = store.get(&name)?;
     // Print the raw value to stdout (debug tool). No trailing newline mangling.
-    print!("{}", &*value);
+    print!("{}", *value);
     io::stdout().flush().ok();
     Ok(())
 }

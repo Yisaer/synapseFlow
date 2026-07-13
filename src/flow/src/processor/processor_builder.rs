@@ -1168,11 +1168,12 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::Project(project) => {
-            let processor = ProjectProcessor::new_with_channel_capacities(
+            let mut processor = ProjectProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Arc::new(project.clone()),
                 channel_capacities,
             );
+            processor.processor_state = project.processor_state.clone();
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Project(processor),
             ))
@@ -1220,11 +1221,12 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::Filter(filter) => {
-            let processor = FilterProcessor::new_with_channel_capacities(
+            let mut processor = FilterProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Arc::new(filter.clone()),
                 channel_capacities,
             );
+            processor.processor_state = filter.processor_state.clone();
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Filter(
                 processor,
             )))

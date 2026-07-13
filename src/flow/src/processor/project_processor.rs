@@ -10,11 +10,13 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::processor_state::ProcessorState;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -48,11 +50,12 @@ impl ProjectExecMode {
     fn apply(
         &self,
         collection: Box<dyn Collection>,
+        state: Option<&ProcessorState>,
     ) -> Result<Box<dyn Collection>, ProcessorError> {
         match self {
-            Self::Normal { fields } => apply_projection(collection.as_ref(), fields),
+            Self::Normal { fields } => apply_projection(collection.as_ref(), fields, state),
             Self::Passthrough { fields } => {
-                apply_passthrough_projection(collection.as_ref(), fields)
+                apply_passthrough_projection(collection.as_ref(), fields, state)
             }
         }
     }
@@ -68,6 +71,8 @@ pub struct ProjectProcessor {
     /// Processor identifier
     id: String,
     exec_mode: ProjectExecMode,
+    /// Processor-local state for pipeline state functions (e.g. last_hit_count).
+    pub(crate) processor_state: Option<Arc<ProcessorState>>,
     /// Input channels for receiving data
     inputs: Vec<LinkReceiver<StreamData>>,
     /// Control input channels
@@ -100,6 +105,7 @@ impl ProjectProcessor {
         Self {
             id: id.into(),
             exec_mode,
+            processor_state: None,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -117,7 +123,12 @@ impl ProjectProcessor {
     /// Returns None if the plan is not a PhysicalProject
     pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
         match plan.as_ref() {
-            PhysicalPlan::Project(project) => Some(Self::new(id, Arc::new(project.clone()))),
+            PhysicalPlan::Project(project) => {
+                let processor_state = project.processor_state.clone();
+                let mut proc = Self::new(id, Arc::new(project.clone()));
+                proc.processor_state = processor_state;
+                Some(proc)
+            }
             _ => None,
         }
     }
@@ -127,11 +138,33 @@ impl ProjectProcessor {
 fn apply_projection(
     input_collection: &dyn Collection,
     fields: &[PhysicalProjectField],
+    state: Option<&ProcessorState>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    // Use the collection's apply_projection method
-    input_collection
-        .apply_projection(fields)
-        .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply projection: {}", e)))
+    match state {
+        Some(state) => {
+            let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
+            for tuple in input_collection.rows() {
+                let mut projected_tuple =
+                    Tuple::with_timestamp(Arc::clone(&tuple.messages), tuple.timestamp);
+                for field in fields {
+                    let value = field
+                        .compiled_expr
+                        .eval_with_tuple(tuple)
+                        .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+                    projected_tuple
+                        .add_affiliate_column(Arc::new(field.field_name.to_string()), value);
+                }
+                projected_rows.push(projected_tuple);
+                state.last_hit_count.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(Box::new(RecordBatch::new(projected_rows).map_err(|e| {
+                ProcessorError::ProcessingError(e.to_string())
+            })?))
+        }
+        None => input_collection.apply_projection(fields).map_err(|e| {
+            ProcessorError::ProcessingError(format!("Failed to apply projection: {}", e))
+        }),
+    }
 }
 
 #[derive(Clone)]
@@ -144,6 +177,7 @@ struct AffiliateExpr {
 fn apply_passthrough_projection(
     input_collection: &dyn Collection,
     fields: &[AffiliateExpr],
+    state: Option<&ProcessorState>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
     for tuple in input_collection.rows() {
@@ -159,6 +193,9 @@ fn apply_passthrough_projection(
             projected_tuple.add_affiliate_column(Arc::clone(&field.output_name), value);
         }
         projected_rows.push(projected_tuple);
+        if let Some(state) = state {
+            state.last_hit_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     let projected = RecordBatch::new(projected_rows).map_err(|err| {
@@ -185,8 +222,8 @@ mod tests {
         assert!(input_tuple.affiliate().is_some(), "precondition");
 
         let input = RecordBatch::new(vec![input_tuple]).expect("record batch");
-        let output =
-            apply_passthrough_projection(&input, &[]).expect("passthrough projection succeeds");
+        let output = apply_passthrough_projection(&input, &[], None)
+            .expect("passthrough projection succeeds");
         let out_rows = output.rows();
         assert_eq!(out_rows.len(), 1);
         assert!(
@@ -212,6 +249,7 @@ impl Processor for ProjectProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let exec_mode = self.exec_mode.clone();
+        let processor_state = self.processor_state.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "project processor starting");
@@ -249,7 +287,9 @@ impl Processor for ProjectProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match exec_mode.apply(collection) {
+                                        let result = exec_mode
+                                            .apply(collection, processor_state.as_deref());
+                                        match result {
                                             Ok(projected_collection) => {
                                                 let projected_data =
                                                     StreamData::collection(projected_collection);

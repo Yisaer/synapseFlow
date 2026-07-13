@@ -8,7 +8,7 @@ pub(crate) mod value_compare;
 
 pub use context::EvalContext;
 pub use func::{BinaryFunc, UnaryFunc};
-pub use scalar::ScalarExpr;
+pub use scalar::{ProcStateField, ScalarExpr};
 pub use sql_conversion::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions,
     ConversionError, StreamSqlConverter,

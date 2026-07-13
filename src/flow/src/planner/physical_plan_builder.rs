@@ -3,6 +3,7 @@ use crate::expr::sql_conversion::{
     convert_expr_to_scalar_with_bindings_and_custom_registry, SchemaBinding, SchemaBindingEntry,
     SourceBindingKind,
 };
+use crate::expr::ScalarExpr;
 use crate::planner::logical::{
     aggregation::Aggregation as LogicalAggregation, compute::Compute as LogicalCompute,
     order::Order as LogicalOrder, DataSinkPlan, DataSource as LogicalDataSource,
@@ -23,6 +24,7 @@ use crate::planner::physical::{
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
+use crate::processor::processor_state::ProcessorState;
 use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
 use datatypes::{ConcreteDatatype, Schema};
@@ -1003,6 +1005,86 @@ fn create_physical_data_source_with_builder(
     }
 }
 
+/// Recursively check whether a [`ScalarExpr`] contains any
+/// [`ScalarExpr::PipelineState`] (unresolved pipeline state read).
+fn expr_contains_pipeline_state(expr: &ScalarExpr) -> bool {
+    match expr {
+        ScalarExpr::PipelineState { .. } => true,
+        ScalarExpr::CallUnary { expr: inner, .. } => expr_contains_pipeline_state(inner),
+        ScalarExpr::CallBinary { expr1, expr2, .. } => {
+            expr_contains_pipeline_state(expr1) || expr_contains_pipeline_state(expr2)
+        }
+        ScalarExpr::FieldAccess { expr: inner, .. } => expr_contains_pipeline_state(inner),
+        ScalarExpr::ListIndex { expr, index_expr } => {
+            expr_contains_pipeline_state(expr) || expr_contains_pipeline_state(index_expr)
+        }
+        ScalarExpr::CallFunc { args, .. } => args.iter().any(expr_contains_pipeline_state),
+        ScalarExpr::Case {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            operand
+                .as_ref()
+                .map(|e| expr_contains_pipeline_state(e))
+                .unwrap_or(false)
+                || when_then.iter().any(|(w, t)| {
+                    expr_contains_pipeline_state(w) || expr_contains_pipeline_state(t)
+                })
+                || else_expr
+                    .as_ref()
+                    .map(|e| expr_contains_pipeline_state(e))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Recursively replace every [`ScalarExpr::PipelineState`] in `expr` with
+/// [`ScalarExpr::ProcessorState`] pointing at `state`.
+fn inject_processor_state(expr: &mut ScalarExpr, state: &Arc<ProcessorState>) {
+    match expr {
+        ScalarExpr::PipelineState { field } => {
+            *expr = ScalarExpr::ProcessorState {
+                state: Arc::clone(state),
+                field: field.clone(),
+            };
+        }
+        ScalarExpr::CallUnary { expr: inner, .. } => inject_processor_state(inner, state),
+        ScalarExpr::CallBinary { expr1, expr2, .. } => {
+            inject_processor_state(expr1, state);
+            inject_processor_state(expr2, state);
+        }
+        ScalarExpr::FieldAccess { expr: inner, .. } => inject_processor_state(inner, state),
+        ScalarExpr::ListIndex { expr, index_expr } => {
+            inject_processor_state(expr, state);
+            inject_processor_state(index_expr, state);
+        }
+        ScalarExpr::CallFunc { args, .. } => {
+            for arg in args {
+                inject_processor_state(arg, state);
+            }
+        }
+        ScalarExpr::Case {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(op) = operand {
+                inject_processor_state(op, state);
+            }
+            for (w, t) in when_then {
+                inject_processor_state(w, state);
+                inject_processor_state(t, state);
+            }
+            if let Some(e) = else_expr {
+                inject_processor_state(e, state);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Create a PhysicalFilter from a LogicalFilter using centralized index management with caching
 fn create_physical_filter_with_builder_cached(
     logical_filter: &LogicalFilter,
@@ -1026,7 +1108,7 @@ fn create_physical_filter_with_builder_cached(
     }
 
     // Convert SQL Expr to ScalarExpr
-    let scalar_predicate = convert_expr_to_scalar_with_bindings_and_custom_registry(
+    let mut scalar_predicate = convert_expr_to_scalar_with_bindings_and_custom_registry(
         &logical_filter.predicate,
         bindings,
         registries.custom_func_registry().as_ref(),
@@ -1038,13 +1120,22 @@ fn create_physical_filter_with_builder_cached(
         )
     })?;
 
+    let processor_state = if expr_contains_pipeline_state(&scalar_predicate) {
+        let state = Arc::new(ProcessorState::new());
+        inject_processor_state(&mut scalar_predicate, &state);
+        Some(state)
+    } else {
+        None
+    };
+
     let index = builder.allocate_index();
-    let physical_filter = PhysicalFilter::new(
+    let mut physical_filter = PhysicalFilter::new(
         logical_filter.predicate.clone(),
         scalar_predicate,
         physical_children,
         index,
     );
+    physical_filter.processor_state = processor_state;
     Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
 }
 
@@ -1160,8 +1251,22 @@ fn create_physical_project_with_builder_cached(
         physical_fields.push(physical_field);
     }
 
+    let processor_state = if physical_fields
+        .iter()
+        .any(|f| expr_contains_pipeline_state(&f.compiled_expr))
+    {
+        let state = Arc::new(ProcessorState::new());
+        for field in &mut physical_fields {
+            inject_processor_state(&mut field.compiled_expr, &state);
+        }
+        Some(state)
+    } else {
+        None
+    };
+
     let index = builder.allocate_index();
-    let physical_project = PhysicalProject::new(physical_fields, physical_children, index);
+    let mut physical_project = PhysicalProject::new(physical_fields, physical_children, index);
+    physical_project.processor_state = processor_state;
     Ok(Arc::new(PhysicalPlan::Project(physical_project)))
 }
 
@@ -1202,6 +1307,27 @@ fn create_physical_data_sink_with_builder_cached(
     }
 }
 
+/// Recursively check whether any node in the physical plan tree uses processor state.
+fn plan_uses_processor_state(plan: &Arc<PhysicalPlan>) -> bool {
+    match plan.as_ref() {
+        PhysicalPlan::Filter(f) => {
+            if f.processor_state.is_some() {
+                return true;
+            }
+        }
+        PhysicalPlan::Project(p) if p.processor_state.is_some() => {
+            return true;
+        }
+        _ => {}
+    }
+    for child in plan.children() {
+        if plan_uses_processor_state(child) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Build sink chain using centralized index management
 fn build_sink_chain_with_builder(
     sink: &PipelineSink,
@@ -1209,6 +1335,21 @@ fn build_sink_chain_with_builder(
     registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
+    // Reject pipeline state functions with sink configs that can drop rows
+    // after Filter (RowDiff for delta mode, EmptySuppress for omit_if_empty).
+    if plan_uses_processor_state(input_child) {
+        if sink.output.is_delta() {
+            return Err(
+                "pipeline state functions (e.g. last_hit_count()) are not compatible with output.mode=delta (RowDiff can drop rows after Filter)".to_string(),
+            );
+        }
+        if sink.output.omit_if_empty() {
+            return Err(
+                "pipeline state functions (e.g. last_hit_count()) are not compatible with output.omit_if_empty=true (EmptySuppress can drop rows after Filter)".to_string(),
+            );
+        }
+    }
+
     let row_diff_input =
         create_row_diff_processor_if_needed_with_builder(sink, input_child, builder)?;
     let empty_suppress_input = create_empty_suppress_processor_if_needed_with_builder(

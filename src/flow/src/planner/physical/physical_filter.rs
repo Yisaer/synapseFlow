@@ -1,5 +1,6 @@
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use crate::processor::processor_state::ProcessorState;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
 
@@ -12,6 +13,10 @@ pub struct PhysicalFilter {
     pub base: BasePhysicalPlan,
     pub predicate: Expr,
     pub scalar_predicate: ScalarExpr,
+    /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
+    /// When `Some`, `FilterProcessor` switches to row-by-row iteration and
+    /// increments the counter after each accepted row.
+    pub processor_state: Option<Arc<ProcessorState>>,
 }
 
 impl PhysicalFilter {
@@ -27,6 +32,7 @@ impl PhysicalFilter {
             base,
             predicate,
             scalar_predicate,
+            processor_state: None,
         }
     }
 }

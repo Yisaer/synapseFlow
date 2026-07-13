@@ -1459,6 +1459,23 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                     self.collect_function_arg(arg);
                 }
                 visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
+                // Pipeline state functions (e.g. last_hit_count()) reference
+                // no data columns but still consume the source.
+                // Record an empty column set so the pruner knows the source
+                // is used and can prune to an empty schema.
+                let func_name = func
+                    .name
+                    .0
+                    .last()
+                    .map(|ident| ident.value.to_lowercase())
+                    .unwrap_or_default();
+                if crate::processor::processor_state::is_pipeline_state_function(&func_name) {
+                    for entry in self.bindings.entries() {
+                        self.used_columns
+                            .entry(entry.source_name.clone())
+                            .or_default();
+                    }
+                }
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);
