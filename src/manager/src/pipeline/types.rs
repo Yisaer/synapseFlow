@@ -182,6 +182,14 @@ impl Default for VideoRollingRequest {
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct CreatePipelineQuery {
+    /// When true, the pipeline is started immediately after creation.
+    /// Must not be combined with a schedule.
+    pub(crate) start: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(default)]
 pub(crate) struct CollectStatsQuery {

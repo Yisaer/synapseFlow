@@ -20,8 +20,9 @@ use super::spec::{
 };
 use super::state::AppState;
 use super::types::{
-    BuildPipelineContextResponse, CollectStatsQuery, CreatePipelineRequest, CreatePipelineResponse,
-    GetPipelineResponse, ListPipelineItem, StopPipelineQuery, UpsertPipelineRequest,
+    BuildPipelineContextResponse, CollectStatsQuery, CreatePipelineQuery, CreatePipelineRequest,
+    CreatePipelineResponse, GetPipelineResponse, ListPipelineItem, StopPipelineQuery,
+    UpsertPipelineRequest,
 };
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 
@@ -215,6 +216,7 @@ async fn try_acquire_referenced_stream_ops(
 
 pub async fn create_pipeline_handler(
     State(state): State<AppState>,
+    Query(query): Query<CreatePipelineQuery>,
     Json(req): Json<CreatePipelineRequest>,
 ) -> impl IntoResponse {
     let mut req = req;
@@ -235,6 +237,14 @@ pub async fn create_pipeline_handler(
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+
+    if query.start && req.options.schedule.is_some() {
+        let err = "cannot use start=true with a scheduled pipeline; the scheduler manages pipeline lifecyle"
+            .to_string();
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
     let _permit = match state.try_acquire_pipeline_op(&req.id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&req.id),
@@ -323,12 +333,50 @@ pub async fn create_pipeline_handler(
     };
 
     let snapshot = build_result.snapshot;
+    let pipeline_id = snapshot.definition.id().to_string();
+    let mut status = status_label(snapshot.status);
+
+    if query.start {
+        if let Err(err) = state
+            .storage
+            .put_pipeline_run_state(StoredPipelineRunState {
+                pipeline_id: pipeline_id.clone(),
+                desired_state: StoredPipelineDesiredState::Running,
+            })
+        {
+            tracing::error!(
+                pipeline_id = %pipeline_id,
+                error = %err,
+                "failed to persist desired state after create with start=true"
+            );
+        } else {
+            match instance.start_pipeline(&pipeline_id).await {
+                Ok(_) => {
+                    status = "running".to_string();
+                }
+                Err(err) => {
+                    tracing::error!(
+                        pipeline_id = %pipeline_id,
+                        error = %err,
+                        "failed to start pipeline after create with start=true, leaving stopped"
+                    );
+                    let _ = state
+                        .storage
+                        .put_pipeline_run_state(StoredPipelineRunState {
+                            pipeline_id: pipeline_id.clone(),
+                            desired_state: StoredPipelineDesiredState::Stopped,
+                        });
+                }
+            }
+        }
+    }
+
     audit.log_success();
     (
         StatusCode::CREATED,
         Json(CreatePipelineResponse {
-            id: snapshot.definition.id().to_string(),
-            status: status_label(snapshot.status),
+            id: pipeline_id,
+            status,
         }),
     )
         .into_response()
@@ -1058,7 +1106,7 @@ mod tests {
     };
     use axum::{
         body::to_bytes,
-        extract::{Path, State},
+        extract::{Path, Query, State},
         http::StatusCode,
         response::IntoResponse,
     };
@@ -1408,9 +1456,13 @@ mod tests {
             sinks: vec![mqtt_sink_request("sink", "shared")],
             options: Default::default(),
         };
-        let response = create_pipeline_handler(State(state.clone()), axum::Json(req))
-            .await
-            .into_response();
+        let response = create_pipeline_handler(
+            State(state.clone()),
+            Query(types::CreatePipelineQuery::default()),
+            axum::Json(req),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let body = to_bytes(response.into_body(), 64 * 1024)
