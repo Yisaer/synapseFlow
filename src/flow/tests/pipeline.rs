@@ -30,3 +30,6 @@ mod sink_compress_tests;
 
 #[path = "pipeline/sink_encrypt_tests.rs"]
 mod sink_encrypt_tests;
+
+#[path = "pipeline/column_filter_tests.rs"]
+mod column_filter_tests;

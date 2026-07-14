@@ -1328,6 +1328,143 @@ fn plan_uses_processor_state(plan: &Arc<PhysicalPlan>) -> bool {
     false
 }
 
+/// Insert a `PhysicalColumnFilter` node if the sink's output config specifies
+/// include_columns or exclude_columns.
+///
+/// Column names are validated against the input child's output schema, and
+/// per-column metadata (`keep_specs`) is pre-computed for the runtime processor.
+fn maybe_insert_column_filter(
+    sink: &PipelineSink,
+    input_child: &Arc<PhysicalPlan>,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    if !sink.output.has_column_filter() {
+        return Ok(Arc::clone(input_child));
+    }
+
+    sink.output.validate()?;
+
+    // Validate column names against the input schema.
+    let input_schema = input_child.output_schema().map_err(|err| {
+        format!(
+            "sink `{}` column filter: failed to resolve input output schema: {}",
+            sink.sink_id, err
+        )
+    })?;
+    validate_column_filter_columns(
+        &sink.sink_id,
+        &input_schema,
+        sink.output.include_columns.as_deref(),
+        sink.output.exclude_columns.as_deref(),
+    )?;
+
+    let keep_specs = build_keep_specs(
+        &input_schema,
+        sink.output.include_columns.as_deref(),
+        sink.output.exclude_columns.as_deref(),
+    )?;
+
+    let index = builder.allocate_index();
+    let filter = crate::planner::physical::PhysicalColumnFilter::new(
+        vec![Arc::clone(input_child)],
+        index,
+        sink.sink_id.clone(),
+        sink.output.include_columns.clone(),
+        sink.output.exclude_columns.clone(),
+        keep_specs,
+    );
+    Ok(Arc::new(PhysicalPlan::ColumnFilter(filter)))
+}
+
+fn build_keep_specs(
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    include_columns: Option<&[String]>,
+    exclude_columns: Option<&[String]>,
+) -> Result<Vec<crate::planner::physical::ColumnFilterKeepSpec>, String> {
+    let keep_names = crate::planner::physical::output_schema::column_names_set(
+        output_schema,
+        include_columns,
+        exclude_columns,
+    )?;
+
+    let mut specs = Vec::new();
+    for col in output_schema.columns.iter() {
+        if !keep_names.contains(col.name.as_ref()) {
+            continue;
+        }
+        let (source_name, column_name) = match &col.getter {
+            crate::planner::physical::output_schema::OutputValueGetter::MessageByName {
+                source_name,
+                column_name,
+            } => (Arc::clone(source_name), Arc::clone(column_name)),
+            crate::planner::physical::output_schema::OutputValueGetter::Affiliate {
+                column_name,
+            } => {
+                // Affiliate columns are pass-through (always kept).
+                // We use empty source_name to indicate affiliate.
+                (Arc::from(""), Arc::clone(column_name))
+            }
+        };
+        specs.push(crate::planner::physical::ColumnFilterKeepSpec {
+            source_name,
+            column_name,
+            output_name: Arc::clone(&col.name),
+        });
+    }
+    Ok(specs)
+}
+
+fn validate_column_filter_columns(
+    sink_id: &str,
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    include_columns: Option<&[String]>,
+    exclude_columns: Option<&[String]>,
+) -> Result<(), String> {
+    if let Some(include) = include_columns {
+        for col_name in include {
+            if !output_schema
+                .columns
+                .iter()
+                .any(|c| c.name.as_ref() == col_name.as_str())
+            {
+                let schema_names: Vec<&str> = output_schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.as_ref())
+                    .collect();
+                return Err(format!(
+                    "sink `{}` output.include_columns: column `{}` not found in output schema [{}]",
+                    sink_id,
+                    col_name,
+                    schema_names.join(", ")
+                ));
+            }
+        }
+    }
+    if let Some(exclude) = exclude_columns {
+        for col_name in exclude {
+            if !output_schema
+                .columns
+                .iter()
+                .any(|c| c.name.as_ref() == col_name.as_str())
+            {
+                let schema_names: Vec<&str> = output_schema
+                    .columns
+                    .iter()
+                    .map(|c| c.name.as_ref())
+                    .collect();
+                return Err(format!(
+                    "sink `{}` output.exclude_columns: column `{}` not found in output schema [{}]",
+                    sink_id,
+                    col_name,
+                    schema_names.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build sink chain using centralized index management
 fn build_sink_chain_with_builder(
     sink: &PipelineSink,
@@ -1350,18 +1487,22 @@ fn build_sink_chain_with_builder(
         }
     }
 
+    // Insert ColumnFilter BEFORE RowDiff so that RowDiff only sees the
+    // columns this sink actually needs.
+    let filtered_input = maybe_insert_column_filter(sink, input_child, builder)?;
+
     let row_diff_input =
-        create_row_diff_processor_if_needed_with_builder(sink, input_child, builder)?;
+        create_row_diff_processor_if_needed_with_builder(sink, &filtered_input, builder)?;
     let empty_suppress_input = create_empty_suppress_processor_if_needed_with_builder(
         sink,
-        row_diff_input.as_ref().unwrap_or(input_child),
+        row_diff_input.as_ref().unwrap_or(&filtered_input),
         builder,
     );
     let sink_input = empty_suppress_input
         .as_ref()
         .map(Arc::clone)
         .or_else(|| row_diff_input.as_ref().map(Arc::clone))
-        .unwrap_or_else(|| Arc::clone(input_child));
+        .unwrap_or_else(|| Arc::clone(&filtered_input));
 
     let connector = &sink.connector;
     let connector_kind = connector.connector.kind();

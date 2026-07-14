@@ -69,6 +69,12 @@ pub struct SinkOutputConfig {
     pub mode: SinkOutputMode,
     pub delta: Option<SinkDeltaOutputConfig>,
     pub omit_if_empty: bool,
+    /// If set, only these columns are emitted to this sink (whitelist).
+    /// Mutually exclusive with `exclude_columns`.
+    pub include_columns: Option<Vec<String>>,
+    /// If set, all columns except these are emitted to this sink (blacklist).
+    /// Mutually exclusive with `include_columns`.
+    pub exclude_columns: Option<Vec<String>>,
 }
 
 impl SinkOutputConfig {
@@ -77,6 +83,8 @@ impl SinkOutputConfig {
             mode,
             delta: None,
             omit_if_empty: false,
+            include_columns: None,
+            exclude_columns: None,
         }
     }
 
@@ -116,6 +124,48 @@ impl SinkOutputConfig {
 
     pub fn omit_if_empty(&self) -> bool {
         self.omit_if_empty
+    }
+
+    pub fn with_include_columns(
+        mut self,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.include_columns = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn with_exclude_columns(
+        mut self,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.exclude_columns = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Returns `true` when this sink filters columns via include or exclude.
+    pub fn has_column_filter(&self) -> bool {
+        self.include_columns.is_some() || self.exclude_columns.is_some()
+    }
+
+    /// Validate mutually exclusive constraints.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.include_columns.is_some() && self.exclude_columns.is_some() {
+            return Err(
+                "output.include_columns and output.exclude_columns are mutually exclusive"
+                    .to_string(),
+            );
+        }
+        if let Some(columns) = &self.include_columns {
+            if columns.is_empty() {
+                return Err("output.include_columns must not be empty".to_string());
+            }
+        }
+        if let Some(columns) = &self.exclude_columns {
+            if columns.is_empty() {
+                return Err("output.exclude_columns must not be empty".to_string());
+            }
+        }
+        Ok(())
     }
 }
 

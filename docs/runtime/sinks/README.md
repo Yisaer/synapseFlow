@@ -272,6 +272,7 @@ In particular:
 - [Kuksa Sink](connectors/kuksa.md)
 - [Omit If Empty](output/omit_if_empty.md)
 - [Row Diff Output](output/row_diff_output.md)
+- [Column Filter](output/column_filter.md)
 - [Encoder Transform](encoders/encoder_transform.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)
 - [ByIndexProjectionIntoEncoderRewrite](../../planner/optimize/physical/by_index_projection_into_encoder_rewrite.md)

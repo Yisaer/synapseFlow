@@ -35,6 +35,7 @@ pub fn optimize_physical_plan(
         Box::new(PartialByIndexRowDiffAndEncoderRewrite),
         Box::new(ByIndexProjectionIntoRowDiffRewrite),
         Box::new(ByIndexProjectionIntoEncoderRewrite),
+        Box::new(ColumnFilterProjectionIntersection),
         Box::new(InsertBarrierForFanIn),
     ];
     let mut current = physical_plan;
@@ -87,6 +88,8 @@ struct ByIndexProjectionAcrossMixedConsumersRewrite;
 /// Rule: split a pure by-index `Project -> RowDiff -> Encoder` branch so row diff only late-reads
 /// tracked columns and the downstream encoder late-reads the remaining pass-through columns.
 struct PartialByIndexRowDiffAndEncoderRewrite;
+
+struct ColumnFilterProjectionIntersection;
 
 impl PhysicalOptRule for StreamingAggregationRewrite {
     fn name(&self) -> &str {
@@ -375,6 +378,20 @@ impl PhysicalOptRule for PartialByIndexRowDiffAndEncoderRewrite {
         encoder_registry: &EncoderRegistry,
     ) -> Arc<PhysicalPlan> {
         rewrite_partial_by_index_row_diff_and_encoder(plan, encoder_registry)
+    }
+}
+
+impl PhysicalOptRule for ColumnFilterProjectionIntersection {
+    fn name(&self) -> &str {
+        "column_filter_projection_intersection"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        _encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        intersect_column_filter_projection(plan)
     }
 }
 
@@ -870,9 +887,9 @@ fn build_node_and_consumer_maps(
         for child in plan.children() {
             let child_index = child.get_plan_index();
             let child_consumers = match plan.as_ref() {
-                PhysicalPlan::EmptySuppress(_) | PhysicalPlan::Batch(_) => {
-                    inherited_consumers.clone()
-                }
+                PhysicalPlan::EmptySuppress(_)
+                | PhysicalPlan::Batch(_)
+                | PhysicalPlan::ColumnFilter(_) => inherited_consumers.clone(),
                 PhysicalPlan::RowDiff(row_diff) => vec![ProjectConsumer::RowDiff {
                     row_diff_index: row_diff.base.index(),
                 }],
@@ -1448,6 +1465,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::RowDiff(new))
         }
+        PhysicalPlan::ColumnFilter(filter) => {
+            let mut new = filter.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::ColumnFilter(new))
+        }
         PhysicalPlan::EmptySuppress(empty_suppress) => {
             let mut new = empty_suppress.clone();
             new.base.children = children;
@@ -1550,4 +1572,376 @@ fn rebuild_with_children(
             Arc::new(PhysicalPlan::Sampler(new))
         }
     }
+}
+
+/// Intersect the include/exclude columns of each `PhysicalColumnFilter` with the
+/// by-index projection spec on the nearest upstream projection-carrying node.
+fn intersect_column_filter_projection(plan: Arc<PhysicalPlan>) -> Arc<PhysicalPlan> {
+    let (mut node_map, mut parent_map) = build_node_and_parent_maps(&plan);
+
+    struct PendingChange {
+        target_index: i64,
+        new_target: Arc<PhysicalPlan>,
+        rewire: Option<(i64, i64, Arc<PhysicalPlan>)>,
+    }
+
+    let mut changes: Vec<PendingChange> = Vec::new();
+
+    for (filter_index, filter_node) in &node_map {
+        let PhysicalPlan::ColumnFilter(filter) = filter_node.as_ref() else {
+            continue;
+        };
+
+        let carriers = find_all_projection_carriers_above(*filter_index, &node_map, &parent_map);
+
+        if carriers.is_empty() {
+            continue;
+        }
+
+        let filter_schema = match filter_node.output_schema() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let keep_names = build_keep_names_set(
+            &filter_schema,
+            filter.include_columns.as_deref(),
+            filter.exclude_columns.as_deref(),
+        );
+
+        let shared_schema = match filter_node
+            .children()
+            .first()
+            .and_then(|c| c.output_schema().ok())
+        {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Crop and re-index the projection on each carrier.
+        let filter_child = filter_node.children().first().cloned();
+        let filter_parent_idx = parent_map.get(filter_index).copied();
+
+        for &(target_index, ref target_kind) in &carriers {
+            let projection = match target_kind {
+                ProjectionCarrierKind::RowDiff => {
+                    let Some(target_node) = node_map.get(&target_index) else {
+                        continue;
+                    };
+                    let PhysicalPlan::RowDiff(rd) = target_node.as_ref() else {
+                        continue;
+                    };
+                    rd.late_projection.clone()
+                }
+                ProjectionCarrierKind::SinkEncoder => {
+                    let Some(target_node) = node_map.get(&target_index) else {
+                        continue;
+                    };
+                    match target_node.as_ref() {
+                        PhysicalPlan::SinkEncoder(enc) => enc.by_index_projection.clone(),
+                        PhysicalPlan::IncSinkEncoder(enc) => enc.by_index_projection.clone(),
+                        _ => continue,
+                    }
+                }
+            };
+
+            let Some(projection) = projection else {
+                // No projection to crop, but carrier still exists.
+                // For SinkEncoder with now-empty projection, clear it.
+                if matches!(target_kind, ProjectionCarrierKind::SinkEncoder) {
+                    if let Some(cleared) =
+                        make_encoder_with_empty_projection(target_index, &node_map)
+                    {
+                        changes.push(PendingChange {
+                            target_index,
+                            new_target: cleared,
+                            rewire: None,
+                        });
+                    }
+                }
+                continue;
+            };
+
+            let reindexed = crop_and_reindex_projection(
+                projection.as_ref(),
+                &keep_names,
+                &shared_schema,
+                &filter_schema,
+            );
+
+            let new_target = match target_kind {
+                ProjectionCarrierKind::RowDiff => {
+                    let Some(target_node) = node_map.get(&target_index) else {
+                        continue;
+                    };
+                    let PhysicalPlan::RowDiff(rd) = target_node.as_ref() else {
+                        continue;
+                    };
+                    let mut new_rd = rd.clone();
+                    new_rd.late_projection = Some(Arc::new(reindexed));
+                    Arc::new(PhysicalPlan::RowDiff(new_rd))
+                }
+                ProjectionCarrierKind::SinkEncoder => {
+                    let Some(target_node) = node_map.get(&target_index) else {
+                        continue;
+                    };
+                    match target_node.as_ref() {
+                        PhysicalPlan::SinkEncoder(enc) => {
+                            let mut new_enc = enc.clone();
+                            new_enc.by_index_projection = Some(Arc::new(reindexed));
+                            Arc::new(PhysicalPlan::SinkEncoder(new_enc))
+                        }
+                        PhysicalPlan::IncSinkEncoder(enc) => {
+                            let mut new_enc = enc.clone();
+                            new_enc.by_index_projection = Some(Arc::new(reindexed));
+                            Arc::new(PhysicalPlan::IncSinkEncoder(new_enc))
+                        }
+                        _ => continue,
+                    }
+                }
+            };
+
+            // Only the nearest carrier (first in the list) needs rewiring.
+            let rewire = if target_index == carriers[0].0 {
+                match (&filter_child, filter_parent_idx) {
+                    (Some(child), Some(p)) => Some((p, *filter_index, Arc::clone(child))),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            changes.push(PendingChange {
+                target_index,
+                new_target,
+                rewire,
+            });
+        }
+    }
+
+    for change in &changes {
+        node_map.insert(change.target_index, Arc::clone(&change.new_target));
+        if let Some((parent_idx, old_filter_idx, ref new_child)) = &change.rewire {
+            if let Some(parent_node) = node_map.get(parent_idx) {
+                let new_parent = replace_child(parent_node, *old_filter_idx, Arc::clone(new_child));
+                node_map.insert(*parent_idx, new_parent);
+            }
+        }
+    }
+
+    for (filter_index, filter_node) in &node_map {
+        if matches!(filter_node.as_ref(), PhysicalPlan::ColumnFilter(_)) {
+            parent_map.remove(filter_index);
+        }
+    }
+
+    rebuild_from_maps(plan.get_plan_index(), &node_map, &parent_map)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProjectionCarrierKind {
+    RowDiff,
+    SinkEncoder,
+}
+
+fn find_all_projection_carriers_above(
+    start_index: i64,
+    node_map: &HashMap<i64, Arc<PhysicalPlan>>,
+    parent_map: &HashMap<i64, i64>,
+) -> Vec<(i64, ProjectionCarrierKind)> {
+    let mut carriers = Vec::new();
+    let mut current = start_index;
+    while let Some(&parent_idx) = parent_map.get(&current) {
+        let Some(parent) = node_map.get(&parent_idx) else {
+            break;
+        };
+        match parent.as_ref() {
+            PhysicalPlan::RowDiff(rd) if rd.late_projection.is_some() => {
+                carriers.push((parent_idx, ProjectionCarrierKind::RowDiff));
+                current = parent_idx;
+                continue;
+            }
+            PhysicalPlan::SinkEncoder(enc) if enc.by_index_projection.is_some() => {
+                carriers.push((parent_idx, ProjectionCarrierKind::SinkEncoder));
+                current = parent_idx;
+                continue;
+            }
+            PhysicalPlan::IncSinkEncoder(enc) if enc.by_index_projection.is_some() => {
+                carriers.push((parent_idx, ProjectionCarrierKind::SinkEncoder));
+                current = parent_idx;
+                continue;
+            }
+            PhysicalPlan::EmptySuppress(_) | PhysicalPlan::Batch(_) => {
+                current = parent_idx;
+                continue;
+            }
+            _ => break,
+        }
+    }
+    carriers
+}
+
+fn make_encoder_with_empty_projection(
+    target_index: i64,
+    node_map: &HashMap<i64, Arc<PhysicalPlan>>,
+) -> Option<Arc<PhysicalPlan>> {
+    let target_node = node_map.get(&target_index)?;
+    match target_node.as_ref() {
+        PhysicalPlan::SinkEncoder(enc) => {
+            let mut new_enc = enc.clone();
+            new_enc.by_index_projection = None;
+            Some(Arc::new(PhysicalPlan::SinkEncoder(new_enc)))
+        }
+        PhysicalPlan::IncSinkEncoder(enc) => {
+            let mut new_enc = enc.clone();
+            new_enc.by_index_projection = None;
+            Some(Arc::new(PhysicalPlan::IncSinkEncoder(new_enc)))
+        }
+        _ => None,
+    }
+}
+
+fn build_keep_names_set(
+    filter_schema: &OutputSchema,
+    include_columns: Option<&[String]>,
+    exclude_columns: Option<&[String]>,
+) -> HashSet<String> {
+    match (include_columns, exclude_columns) {
+        (Some(include), None) => include.iter().cloned().collect(),
+        (None, Some(exclude)) => {
+            let exclude_set: HashSet<&str> = exclude.iter().map(|s| s.as_str()).collect();
+            filter_schema
+                .columns
+                .iter()
+                .filter(|c| !exclude_set.contains(c.name.as_ref()))
+                .map(|c| c.name.as_ref().to_string())
+                .collect()
+        }
+        (None, None) => filter_schema
+            .columns
+            .iter()
+            .map(|c| c.name.as_ref().to_string())
+            .collect(),
+        (Some(_), Some(_)) => HashSet::new(),
+    }
+}
+
+fn crop_and_reindex_projection(
+    projection: &ByIndexProjection,
+    keep_names: &HashSet<String>,
+    shared_schema: &OutputSchema,
+    filter_schema: &OutputSchema,
+) -> ByIndexProjection {
+    let mut reindexed = Vec::new();
+    for col in projection.columns() {
+        let col_name = match shared_schema.columns.get(col.output_index) {
+            Some(c) => c.name.as_ref(),
+            None => continue,
+        };
+        if !keep_names.contains(col_name) {
+            continue;
+        }
+        if let Some(actual_idx) = filter_schema
+            .columns
+            .iter()
+            .position(|c| c.name.as_ref() == col_name)
+        {
+            reindexed.push(ByIndexProjectionColumn::new(
+                col.source_name.as_ref(),
+                col.column_index,
+                actual_idx,
+                col.source_column_display.as_ref(),
+                col.output_name.as_ref(),
+            ));
+        }
+    }
+    ByIndexProjection::new(reindexed)
+}
+
+fn build_node_and_parent_maps(
+    root: &Arc<PhysicalPlan>,
+) -> (HashMap<i64, Arc<PhysicalPlan>>, HashMap<i64, i64>) {
+    let mut nodes = HashMap::new();
+    let mut parents = HashMap::new();
+    let mut visited = HashSet::new();
+    build_maps_helper(root, None, &mut nodes, &mut parents, &mut visited);
+    (nodes, parents)
+}
+
+fn build_maps_helper(
+    plan: &Arc<PhysicalPlan>,
+    parent_index: Option<i64>,
+    nodes: &mut HashMap<i64, Arc<PhysicalPlan>>,
+    parents: &mut HashMap<i64, i64>,
+    visited: &mut HashSet<i64>,
+) {
+    let index = plan.get_plan_index();
+    if let Some(p_idx) = parent_index {
+        parents.insert(index, p_idx);
+    }
+    let already_visited = !visited.insert(index);
+    nodes.entry(index).or_insert_with(|| Arc::clone(plan));
+    if !already_visited {
+        for child in plan.children() {
+            build_maps_helper(child, Some(index), nodes, parents, visited);
+        }
+    }
+}
+
+fn replace_child(
+    parent: &Arc<PhysicalPlan>,
+    old_child_index: i64,
+    new_child: Arc<PhysicalPlan>,
+) -> Arc<PhysicalPlan> {
+    let new_children: Vec<_> = parent
+        .children()
+        .iter()
+        .map(|c| {
+            if c.get_plan_index() == old_child_index {
+                Arc::clone(&new_child)
+            } else {
+                Arc::clone(c)
+            }
+        })
+        .collect();
+    rebuild_with_children(parent, new_children)
+}
+
+fn rebuild_from_maps(
+    root_index: i64,
+    node_map: &HashMap<i64, Arc<PhysicalPlan>>,
+    parent_map: &HashMap<i64, i64>,
+) -> Arc<PhysicalPlan> {
+    let mut visited = HashMap::new();
+    rebuild_from_maps_recursive(root_index, node_map, parent_map, &mut visited)
+}
+
+fn rebuild_from_maps_recursive(
+    index: i64,
+    node_map: &HashMap<i64, Arc<PhysicalPlan>>,
+    parent_map: &HashMap<i64, i64>,
+    visited: &mut HashMap<i64, Arc<PhysicalPlan>>,
+) -> Arc<PhysicalPlan> {
+    if let Some(cached) = visited.get(&index) {
+        return Arc::clone(cached);
+    }
+    let node = node_map
+        .get(&index)
+        .cloned()
+        .expect("internal error: node not found during plan rebuild");
+    let new_children: Vec<_> = node
+        .children()
+        .iter()
+        .map(|c| {
+            let c_idx = c.get_plan_index();
+            if parent_map.contains_key(&c_idx) {
+                rebuild_from_maps_recursive(c_idx, node_map, parent_map, visited)
+            } else {
+                Arc::clone(c)
+            }
+        })
+        .collect();
+    let rebuilt = rebuild_with_children(&node, new_children);
+    visited.insert(index, Arc::clone(&rebuilt));
+    rebuilt
 }

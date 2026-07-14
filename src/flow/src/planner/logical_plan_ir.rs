@@ -53,6 +53,10 @@ pub struct SinkOutputIR {
     pub delta: Option<SinkDeltaOutputIR>,
     #[serde(default)]
     pub omit_if_empty: bool,
+    #[serde(default)]
+    pub include_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -915,6 +919,8 @@ fn sink_output_from_ir(output: &SinkOutputIR) -> SinkOutputConfig {
             columns: delta.columns.clone(),
         }),
         omit_if_empty: output.omit_if_empty,
+        include_columns: output.include_columns.clone(),
+        exclude_columns: output.exclude_columns.clone(),
     }
 }
 
@@ -928,6 +934,8 @@ fn sink_output_to_ir(output: &SinkOutputConfig) -> SinkOutputIR {
             columns: delta.columns.clone(),
         }),
         omit_if_empty: output.omit_if_empty,
+        include_columns: output.include_columns.clone(),
+        exclude_columns: output.exclude_columns.clone(),
     }
 }
 

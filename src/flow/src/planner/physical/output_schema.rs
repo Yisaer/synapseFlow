@@ -154,7 +154,18 @@ impl PhysicalPlan {
 
             PhysicalPlan::RowDiff(plan) => Ok(plan.output_schema.as_ref().clone()),
 
+            PhysicalPlan::ColumnFilter(plan) => {
+                let input = passthrough_single_child(self)?;
+                apply_column_filter(&input, &plan.include_columns, &plan.exclude_columns)
+            }
+
             PhysicalPlan::Project(plan) => {
+                // When the Project is passthrough (optimized to delay materialization),
+                // return the input schema unchanged.
+                if plan.passthrough_messages && plan.fields.is_empty() {
+                    return passthrough_single_child(self);
+                }
+
                 let input = passthrough_single_child(self)?;
                 let mut out = Vec::new();
 
@@ -301,5 +312,100 @@ fn infer_scalar_type(expr: &ScalarExpr, input: &[OutputColumn]) -> Option<Concre
         | ScalarExpr::CallFunc { .. }
         | ScalarExpr::PipelineState { .. }
         | ScalarExpr::ProcessorState { .. } => None,
+    }
+}
+
+fn apply_column_filter(
+    input: &OutputSchema,
+    include_columns: &Option<Vec<String>>,
+    exclude_columns: &Option<Vec<String>>,
+) -> Result<OutputSchema, String> {
+    match (include_columns, exclude_columns) {
+        (Some(include), None) => {
+            let mut included = Vec::with_capacity(include.len());
+            for col_name in include {
+                let col = input.columns.iter().find(|c| c.name.as_ref() == col_name.as_str()).ok_or_else(|| {
+                    format!(
+                        "column filter include_columns: column `{}` not found in output schema [{}]",
+                        col_name,
+                        format_column_names(input)
+                    )
+                })?;
+                included.push(col.clone());
+            }
+            Ok(OutputSchema::new(included))
+        }
+        (None, Some(exclude)) => {
+            let excluded_set: std::collections::HashSet<&str> =
+                exclude.iter().map(|s| s.as_str()).collect();
+            let kept: Vec<_> = input
+                .columns
+                .iter()
+                .filter(|c| !excluded_set.contains(c.name.as_ref()))
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                return Err(
+                    "column filter exclude_columns excluded all columns from output schema"
+                        .to_string(),
+                );
+            }
+            Ok(OutputSchema::new(kept))
+        }
+        (None, None) => Ok(input.clone()),
+        (Some(_), Some(_)) => {
+            Err("include_columns and exclude_columns are mutually exclusive".to_string())
+        }
+    }
+}
+
+fn format_column_names(output: &OutputSchema) -> String {
+    let names: Vec<&str> = output.columns.iter().map(|c| c.name.as_ref()).collect();
+    if names.is_empty() {
+        "<empty>".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Build a set of column names to keep, based on include/exclude rules.
+pub fn column_names_set(
+    output_schema: &OutputSchema,
+    include_columns: Option<&[String]>,
+    exclude_columns: Option<&[String]>,
+) -> Result<std::collections::HashSet<String>, String> {
+    match (include_columns, exclude_columns) {
+        (Some(include), None) => {
+            // Validate all include columns exist.
+            for col_name in include {
+                if !output_schema
+                    .columns
+                    .iter()
+                    .any(|c| c.name.as_ref() == col_name.as_str())
+                {
+                    return Err(format!("column filter: column `{col_name}` not found"));
+                }
+            }
+            Ok(include.iter().cloned().collect())
+        }
+        (None, Some(exclude)) => {
+            let exclude_set: std::collections::HashSet<&str> =
+                exclude.iter().map(|s| s.as_str()).collect();
+            Ok(output_schema
+                .columns
+                .iter()
+                .map(|c| c.name.as_ref())
+                .filter(|name| !exclude_set.contains(name))
+                .map(|name| name.to_string())
+                .collect())
+        }
+        (None, None) => Ok(output_schema
+            .columns
+            .iter()
+            .map(|c| c.name.as_ref().to_string())
+            .collect()),
+        (Some(_), Some(_)) => {
+            Err("include_columns and exclude_columns are mutually exclusive".to_string())
+        }
     }
 }

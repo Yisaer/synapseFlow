@@ -28,5 +28,7 @@ Implementation entrypoint: `src/flow/src/planner/optimizer.rs` (`optimize_physic
   [`by_index_projection_into_row_diff_rewrite.md`](by_index_projection_into_row_diff_rewrite.md)
 - `ByIndexProjectionIntoEncoderRewrite` (`by_index_projection_into_encoder_rewrite`):
   [`by_index_projection_into_encoder_rewrite.md`](by_index_projection_into_encoder_rewrite.md)
+- `ColumnFilterProjectionIntersection` (`column_filter_projection_intersection`):
+  [`column_filter_projection_intersection.md`](column_filter_projection_intersection.md)
 - `InsertBarrierForFanIn` (`insert_barrier_for_fan_in`):
   [`../../../runtime/processors/barrier_signal.md`](../../../runtime/processors/barrier_signal.md)

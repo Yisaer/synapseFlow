@@ -368,6 +368,10 @@ pub struct SinkOutputConfigRequest {
     pub delta: Option<SinkDeltaOutputConfigRequest>,
     #[serde(default)]
     pub omit_if_empty: bool,
+    #[serde(default)]
+    pub include_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_columns: Option<Vec<String>>,
 }
 
 impl SinkOutputConfigRequest {
@@ -379,16 +383,36 @@ impl SinkOutputConfigRequest {
                         "sink output.delta is only supported when output.mode=delta".to_string()
                     );
                 }
-                Ok(SinkOutputConfig::new(SinkOutputMode::Full)
-                    .with_omit_if_empty(self.omit_if_empty))
+                let mut config = SinkOutputConfig::new(SinkOutputMode::Full)
+                    .with_omit_if_empty(self.omit_if_empty);
+                if let Some(include) = &self.include_columns {
+                    config = config.with_include_columns(include.iter().cloned());
+                }
+                if let Some(exclude) = &self.exclude_columns {
+                    config = config.with_exclude_columns(exclude.iter().cloned());
+                }
+                config.validate()?;
+                Ok(config)
             }
-            "delta" => Ok(SinkOutputConfig {
-                mode: SinkOutputMode::Delta,
-                delta: self.delta.as_ref().map(|delta| SinkDeltaOutputConfig {
-                    columns: delta.columns.clone(),
-                }),
-                omit_if_empty: self.omit_if_empty,
-            }),
+            "delta" => {
+                let mut config = SinkOutputConfig {
+                    mode: SinkOutputMode::Delta,
+                    delta: self.delta.as_ref().map(|delta| SinkDeltaOutputConfig {
+                        columns: delta.columns.clone(),
+                    }),
+                    omit_if_empty: self.omit_if_empty,
+                    include_columns: None,
+                    exclude_columns: None,
+                };
+                if let Some(include) = &self.include_columns {
+                    config = config.with_include_columns(include.iter().cloned());
+                }
+                if let Some(exclude) = &self.exclude_columns {
+                    config = config.with_exclude_columns(exclude.iter().cloned());
+                }
+                config.validate()?;
+                Ok(config)
+            }
             other => Err(format!(
                 "invalid sink output.mode `{other}` (expected full|delta)"
             )),

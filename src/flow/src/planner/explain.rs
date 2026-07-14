@@ -332,6 +332,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             if sink.common.is_batching_enabled() {
                 info.push("batching=true".to_string());
             }
+            if let Some(include) = &sink.output.include_columns {
+                info.push(format!("output.include_columns=[{}]", include.join(", ")));
+            }
+            if let Some(exclude) = &sink.output.exclude_columns {
+                info.push(format!("output.exclude_columns=[{}]", exclude.join(", ")));
+            }
         }
         LogicalPlan::Tail(tail) => {
             info.push(format!("sink_count={}", tail.base.children.len()));
@@ -830,6 +836,15 @@ fn build_physical_node_with_prefix(
                         .collect::<Vec<_>>();
                     info.push(format!("by_index_projection=[{}]", cols.join("; ")));
                 }
+            }
+        }
+        PhysicalPlan::ColumnFilter(filter) => {
+            info.push(format!("sink_id={}", filter.sink_id));
+            if let Some(include) = &filter.include_columns {
+                info.push(format!("include_columns=[{}]", include.join(", ")));
+            }
+            if let Some(exclude) = &filter.exclude_columns {
+                info.push(format!("exclude_columns=[{}]", exclude.join(", ")));
             }
         }
         PhysicalPlan::EmptySuppress(empty_suppress) => {
