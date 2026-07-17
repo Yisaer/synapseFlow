@@ -104,8 +104,8 @@ async fn someip_explain() {
             "- id                                 | info",
             "  PhysicalResultCollect_5            |",
             &format!("  └─PhysicalSinkConnector_3          | sink_id={sink_id}, connector=nop"),
-            &format!("    └─PhysicalSinkEncoder_4          | sink_id={sink_id}, encoder=json, by_index_projection=[{name}#0->ts; {name}#1->DTE_SlotID; {name}#2->DTE_SlotType; {name}#3->DTE_SlotStatus]"),
-            "      └─PhysicalProject_2            | fields=[], passthrough_messages=true",
+            &format!("    └─PhysicalSinkEncoder_4          | sink_id={sink_id}, encoder=json"),
+            "      └─PhysicalProject_2            | fields=[ts; DTE_SlotID; DTE_SlotType; DTE_SlotStatus]",
             "        └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]",
             &format!("          └─PhysicalDataSource_0     | source={name}, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]"),
         ].join("\n");
@@ -154,17 +154,22 @@ async fn someip_explain() {
             &format!("  Tail_3                 | sink_count=1"),
             &format!("  └─DataSink_2           | sink_id={sink_id}, connector=nop, encoder=json"),
             &format!("    └─Project_1          | fields=[ts; {project_fields}]"),
-            &format!("      └─DataSource_0     | source={name}, decoder=gbf, schema=[ts, {col_flat}]"),
+            &format!(
+                "      └─DataSource_0     | source={name}, decoder=gbf, schema=[ts, {col_flat}]"
+            ),
             "",
             "Physical Plan Explain:",
             "- id                                 | info",
             "  PhysicalResultCollect_5            |",
             &format!("  └─PhysicalSinkConnector_3          | sink_id={sink_id}, connector=nop"),
-            &format!("    └─PhysicalSinkEncoder_4          | sink_id={sink_id}, encoder=json, by_index_projection=[{name}#0->ts; {name}#1->{slot_id}; {name}#2->{slot_type}; {name}#3->{slot_status}]"),
-            "      └─PhysicalProject_2            | fields=[], passthrough_messages=true",
+            &format!("    └─PhysicalSinkEncoder_4          | sink_id={sink_id}, encoder=json"),
+            &format!("      └─PhysicalProject_2            | fields=[ts; {project_fields}]"),
             &format!("        └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, {col_flat}]"),
-            &format!("          └─PhysicalDataSource_0     | source={name}, schema=[ts, {col_flat}]"),
-        ].join("\n");
+            &format!(
+                "          └─PhysicalDataSource_0     | source={name}, schema=[ts, {col_flat}]"
+            ),
+        ]
+        .join("\n");
         assert_explain_eq(&explain, &expected, "case2");
     }
 

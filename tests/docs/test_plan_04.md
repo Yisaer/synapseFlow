@@ -90,7 +90,7 @@
 - The covered cases validate that:
   - `select_star_with_alias_materializes_single_message` preserves full output rows while adding
     aliased columns
-  - `alias_order_and_derived_columns_materialize_from_output_schema` preserves final alias order
+  - `alias_order_and_derived_columns_materialize_from_output_layout` preserves final alias order
     and materializes derived expressions into the collection payload
 
 - Duplicate output-name rejection is covered by

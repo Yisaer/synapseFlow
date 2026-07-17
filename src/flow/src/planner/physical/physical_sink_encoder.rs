@@ -1,6 +1,5 @@
-use crate::planner::physical::output_schema::OutputSchema;
+use crate::planner::physical::output_layout::OutputLayout;
 use crate::planner::physical::BasePhysicalPlan;
-use crate::planner::physical::ByIndexProjection;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use std::fmt;
 use std::sync::Arc;
@@ -14,8 +13,7 @@ pub struct PhysicalSinkEncoder {
     pub sink_id: String,
     pub encoder: SinkEncoderConfig,
     pub common: CommonSinkProps,
-    pub by_index_projection: Option<Arc<ByIndexProjection>>,
-    pub output_schema: Option<Arc<OutputSchema>>,
+    pub output_layout: Option<Arc<OutputLayout>>,
 }
 
 impl PhysicalSinkEncoder {
@@ -31,8 +29,7 @@ impl PhysicalSinkEncoder {
             sink_id,
             encoder,
             common,
-            by_index_projection: None,
-            output_schema: None,
+            output_layout: None,
         }
     }
 }

@@ -71,19 +71,27 @@ impl Message {
 #[derive(Debug, Clone)]
 pub struct AffiliateRow {
     index: HashMap<Arc<str>, usize>,
+    keys: Vec<Arc<str>>,
     values: Vec<Value>,
 }
 
 impl AffiliateRow {
     pub fn new(entries: Vec<(Arc<String>, Value)>) -> Self {
         let mut index = HashMap::with_capacity(entries.len());
+        let mut keys = Vec::with_capacity(entries.len());
         let mut values = Vec::with_capacity(entries.len());
         for (key, value) in entries {
             // Store affiliate keys as `Arc<str>` so lookup by `&str` doesn't allocate.
-            index.insert(Arc::<str>::from(key.as_str()), values.len());
+            let key = Arc::<str>::from(key.as_str());
+            index.insert(Arc::clone(&key), values.len());
+            keys.push(key);
             values.push(value);
         }
-        Self { index, values }
+        Self {
+            index,
+            keys,
+            values,
+        }
     }
 
     /// Insert or overwrite a derived column.
@@ -94,18 +102,22 @@ impl AffiliateRow {
         } else {
             let idx = self.values.len();
             self.values.push(value);
-            self.index.insert(Arc::<str>::from(key.as_str()), idx);
+            let key = Arc::<str>::from(key.as_str());
+            self.index.insert(Arc::clone(&key), idx);
+            self.keys.push(key);
         }
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&Arc<str>, &Value)> {
-        self.index
-            .iter()
-            .map(move |(key, idx)| (key, &self.values[*idx]))
+        self.keys.iter().zip(self.values.iter())
     }
 
     pub fn value(&self, key: &str) -> Option<&Value> {
         self.index.get(key).and_then(|idx| self.values.get(*idx))
+    }
+
+    pub fn value_by_index(&self, index: usize) -> Option<&Value> {
+        self.values.get(index)
     }
 }
 
@@ -227,7 +239,7 @@ impl Tuple {
         let aff_len = self
             .affiliate
             .as_ref()
-            .map(|aff| aff.index.len())
+            .map(|aff| aff.values.len())
             .unwrap_or(0);
         let msg_len: usize = self.messages.iter().map(|msg| msg.values.len()).sum();
         aff_len + msg_len
@@ -246,5 +258,38 @@ impl Tuple {
             return self.messages.first();
         }
         self.messages.iter().find(|msg| msg.source() == source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AffiliateRow;
+    use datatypes::Value;
+    use std::sync::Arc;
+
+    #[test]
+    fn affiliate_row_preserves_indexes_when_values_are_overwritten() {
+        let mut row = AffiliateRow::new(vec![
+            (Arc::new("first".to_string()), Value::Int64(1)),
+            (Arc::new("second".to_string()), Value::Int64(2)),
+        ]);
+
+        row.insert(Arc::new("first".to_string()), Value::Int64(10));
+        row.insert(Arc::new("third".to_string()), Value::Int64(3));
+
+        assert_eq!(row.value_by_index(0), Some(&Value::Int64(10)));
+        assert_eq!(row.value_by_index(1), Some(&Value::Int64(2)));
+        assert_eq!(row.value_by_index(2), Some(&Value::Int64(3)));
+        assert_eq!(row.value_by_index(3), None);
+        assert_eq!(
+            row.entries()
+                .map(|(key, value)| (key.as_ref(), value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first", &Value::Int64(10)),
+                ("second", &Value::Int64(2)),
+                ("third", &Value::Int64(3)),
+            ]
+        );
     }
 }

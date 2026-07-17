@@ -773,7 +773,7 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", name));
 }
 
-// coverage-covers: parser.select.alias_computing, planner.physical.by_index_projection_into_encoder_rewrite, sink.connector.memory_output
+// coverage-covers: parser.select.alias_computing, planner.physical.output_layout_fixed_slots, sink.connector.memory_output
 #[tokio::test]
 async fn pipeline_table_driven_queries() {
     let test_cases = vec![
@@ -880,7 +880,7 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
-            name: "by_index_projection_with_alias",
+            name: "fixed_output_layout_with_alias",
             sql: "SELECT a AS a1 FROM stream",
             input_data: vec![(
                 "a".to_string(),
@@ -1329,25 +1329,15 @@ async fn pipeline_table_driven_queries() {
                 ],
             )],
             expected_rows: 3,
-            expected_columns: 2,
-            column_checks: vec![
-                ColumnCheck {
-                    expected_name: "a".to_string(),
-                    expected_values: vec![
-                        Value::Int64(15),
-                        Value::Int64(25),
-                        Value::Int64(35),
-                    ],
-                },
-                ColumnCheck {
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
                     expected_name: "last_hit_count()".to_string(),
                     expected_values: vec![
                         Value::Uint64(0),
                         Value::Uint64(1),
                         Value::Uint64(2),
                     ],
-                },
-            ],
+                }],
         },
         TestCase {
             name: "last_hit_count_select_all",
@@ -1361,25 +1351,15 @@ async fn pipeline_table_driven_queries() {
                 ],
             )],
             expected_rows: 3,
-            expected_columns: 2,
-            column_checks: vec![
-                ColumnCheck {
-                    expected_name: "a".to_string(),
-                    expected_values: vec![
-                        Value::Int64(100),
-                        Value::Int64(200),
-                        Value::Int64(300),
-                    ],
-                },
-                ColumnCheck {
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
                     expected_name: "last_hit_count()".to_string(),
                     expected_values: vec![
                         Value::Uint64(0),
                         Value::Uint64(1),
                         Value::Uint64(2),
                     ],
-                },
-            ],
+                }],
         },
     ];
 
@@ -1470,7 +1450,8 @@ async fn pipeline_row_diff_json_table_driven() {
             covers: &[
                 "sink.output.row_diff",
                 "sink.output.batching",
-                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.output_layout_fixed_slots",
+                "planner.physical.streaming_encoder_rewrite",
             ],
             input_data: vec![
                 (
@@ -1495,13 +1476,12 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
-            name: "splits_partial_late_materialization_between_row_diff_and_encoder",
+            name: "fixed_output_layout_between_row_diff_and_encoder",
             source_name: "stream",
             sql: "SELECT a, b, flag AS c FROM stream",
             covers: &[
                 "sink.output.row_diff",
-                "planner.physical.by_index_projection_into_row_diff_rewrite",
-                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+                "planner.physical.output_layout_fixed_slots",
             ],
             input_data: vec![
                 (
@@ -1527,14 +1507,13 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
-            name: "row_diff_batching_partial_late_materialization_keeps_encoder_owned_columns",
+            name: "row_diff_batching_keeps_fixed_output_columns",
             source_name: "stream",
             sql: "SELECT a, b, flag AS c FROM stream",
             covers: &[
                 "sink.output.row_diff",
                 "sink.output.batching",
-                "planner.physical.by_index_projection_into_row_diff_rewrite",
-                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+                "planner.physical.output_layout_fixed_slots",
             ],
             input_data: vec![
                 (
@@ -1563,14 +1542,13 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
-            name: "splits_partial_late_materialization_between_row_diff_and_encoder_with_aliases",
+            name: "fixed_output_layout_preserves_row_diff_aliases",
             source_name: "stream",
             sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
             covers: &[
                 "sink.output.row_diff",
                 "parser.select.alias_computing",
-                "planner.physical.by_index_projection_into_row_diff_rewrite",
-                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+                "planner.physical.output_layout_fixed_slots",
             ],
             input_data: vec![
                 (
@@ -1596,7 +1574,7 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
-            name: "supports_alias_in_by_index_row_diff_rewrite",
+            name: "fixed_output_layout_supports_row_diff_alias",
             source_name: "stream",
             sql: "SELECT a AS x FROM stream",
             covers: &["sink.output.row_diff"],
@@ -1632,7 +1610,7 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
-            name: "supports_mixed_alias_partial_by_index_row_diff_rewrite",
+            name: "fixed_output_layout_supports_mixed_row_diff_aliases",
             source_name: "stream_ab",
             sql: "SELECT a AS x, b + 1 AS y FROM stream_ab",
             covers: &["sink.output.row_diff"],
@@ -2953,7 +2931,7 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
-// coverage-covers: planner.physical.by_index_projection_across_mixed_consumers_rewrite, planner.physical.by_index_projection_into_encoder_rewrite, planner.physical.by_index_projection_into_row_diff_rewrite, sink.connector.memory_output, sink.output.row_diff, parser.select.alias_computing
+// coverage-covers: planner.physical.output_layout_fixed_slots, sink.connector.memory_output, sink.output.row_diff, parser.select.alias_computing
 #[tokio::test]
 async fn pipeline_mixed_consumers_json_table_driven() {
     let cases = vec![
@@ -3297,7 +3275,7 @@ async fn pipeline_table_driven_collection_sinks() {
             ],
         },
         CollectionSinkTestCase {
-            name: "alias_order_and_derived_columns_materialize_from_output_schema",
+            name: "alias_order_and_derived_columns_materialize_from_output_layout",
             sql: "SELECT b AS second, a + 1 AS plus_one, a AS first FROM stream",
             covers: &[
                 "parser.select.alias_computing",

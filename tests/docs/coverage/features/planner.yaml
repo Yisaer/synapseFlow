@@ -50,32 +50,11 @@ features:
       - docs/planner/optimize/physical/streaming_encoder_rewrite.md
     status: active
 
-  - id: planner.physical.by_index_projection_across_mixed_consumers_rewrite
-    title: By-index projection across mixed consumers rewrite
-    summary: Delay eligible by-index projection materialization across shared row-diff and encoder branches.
+  - id: planner.physical.output_layout_fixed_slots
+    title: Plan-fixed output layout
+    summary: Resolve final sink output columns through planner-defined tuple and affiliate indexes.
     doc_refs:
-      - docs/planner/optimize/physical/by_index_projection_across_mixed_consumers_rewrite.md
-    status: active
-
-  - id: planner.physical.partial_by_index_row_diff_and_encoder_rewrite
-    title: Partial by-index row diff and encoder rewrite
-    summary: Split eligible by-index projections between row-diff tracking columns and downstream encoder pass-through columns.
-    doc_refs:
-      - docs/planner/optimize/physical/partial_by_index_row_diff_and_encoder_rewrite.md
-    status: active
-
-  - id: planner.physical.by_index_projection_into_encoder_rewrite
-    title: By-index projection into encoder rewrite
-    summary: Fold eligible by-index projections into the encoder planning path.
-    doc_refs:
-      - docs/planner/optimize/physical/by_index_projection_into_encoder_rewrite.md
-    status: active
-
-  - id: planner.physical.by_index_projection_into_row_diff_rewrite
-    title: By-index projection into row diff rewrite
-    summary: Fold eligible by-index projections into the row-diff planning path.
-    doc_refs:
-      - docs/planner/optimize/physical/by_index_projection_into_row_diff_rewrite.md
+      - docs/planner/performance/plan_fixed_output_slots.md
     status: active
 
   - id: planner.physical.sampler_placement

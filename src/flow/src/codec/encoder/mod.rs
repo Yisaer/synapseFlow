@@ -5,8 +5,7 @@ mod proto;
 mod template_transform;
 
 use crate::model::Collection;
-use crate::planner::physical::output_schema::OutputSchema;
-use crate::planner::physical::ByIndexProjection;
+use crate::planner::physical::output_layout::OutputLayout;
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -30,23 +29,10 @@ pub trait SinkEncoderFactory: Send + Sync + 'static {
     fn id(&self) -> &str;
     /// Start a processor-local reusable encoder.
     fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError>;
-    /// Whether this encoder supports index-based lazy materialization (`ByIndexProjection`).
-    fn supports_index_lazy_materialization(&self) -> bool {
-        false
-    }
-    /// Attach a by-index projection spec to enable index-based lazy materialization.
-    fn with_by_index_projection(
+    /// Attach the planner-defined final output layout.
+    fn with_output_layout(
         self: Arc<Self>,
-        _spec: Arc<ByIndexProjection>,
-    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
-        Err(EncodeError::Other(
-            "index lazy materialization is not supported for this encoder".to_string(),
-        ))
-    }
-    /// Attach the final output schema for mask-aware encoding when needed.
-    fn with_output_schema(
-        self: Arc<Self>,
-        _output_schema: Arc<OutputSchema>,
+        _output_layout: Arc<OutputLayout>,
     ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError>;
 }
 

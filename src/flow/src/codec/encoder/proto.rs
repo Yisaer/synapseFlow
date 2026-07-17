@@ -6,8 +6,7 @@
 use super::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use crate::codec::decoder::proto_bundle::{ProtoDescriptorBundle, ProtoFieldInfo};
 use crate::model::{Collection, Tuple};
-use crate::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
-use crate::planner::physical::ByIndexProjection;
+use crate::planner::physical::output_layout::{OutputLayout, OutputValueRef};
 use datatypes::{ConcreteDatatype, StructValue, TimestampValue, Value};
 use std::sync::Arc;
 
@@ -27,7 +26,7 @@ const WIRE_FIXED32: u32 = 5;
 /// sequence).
 pub struct ProtobufEncoder {
     bundle: Arc<ProtoDescriptorBundle>,
-    output_schema: Option<Arc<OutputSchema>>,
+    output_layout: Option<Arc<OutputLayout>>,
 }
 
 impl ProtobufEncoder {
@@ -35,7 +34,7 @@ impl ProtobufEncoder {
     pub fn new(bundle: Arc<ProtoDescriptorBundle>) -> Self {
         Self {
             bundle,
-            output_schema: None,
+            output_layout: None,
         }
     }
 }
@@ -48,44 +47,31 @@ impl SinkEncoderFactory for ProtobufEncoder {
     fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
         Ok(Box::new(ProtobufEncoderRuntime::new(
             Arc::clone(&self.bundle),
-            self.output_schema.clone(),
+            self.output_layout.clone(),
         )))
     }
 
-    fn supports_index_lazy_materialization(&self) -> bool {
-        false
-    }
-
-    fn with_by_index_projection(
+    fn with_output_layout(
         self: Arc<Self>,
-        _spec: Arc<ByIndexProjection>,
-    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
-        Err(EncodeError::Other(
-            "index lazy materialization is not supported for protobuf encoder".to_string(),
-        ))
-    }
-
-    fn with_output_schema(
-        self: Arc<Self>,
-        output_schema: Arc<OutputSchema>,
+        output_layout: Arc<OutputLayout>,
     ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(Arc::new(Self {
             bundle: Arc::clone(&self.bundle),
-            output_schema: Some(output_schema),
+            output_layout: Some(output_layout),
         }))
     }
 }
 
 struct ProtobufEncoderRuntime {
     bundle: Arc<ProtoDescriptorBundle>,
-    output_schema: Option<Arc<OutputSchema>>,
+    output_layout: Option<Arc<OutputLayout>>,
 }
 
 impl ProtobufEncoderRuntime {
-    fn new(bundle: Arc<ProtoDescriptorBundle>, output_schema: Option<Arc<OutputSchema>>) -> Self {
+    fn new(bundle: Arc<ProtoDescriptorBundle>, output_layout: Option<Arc<OutputLayout>>) -> Self {
         Self {
             bundle,
-            output_schema,
+            output_layout,
         }
     }
 }
@@ -102,7 +88,7 @@ impl SinkEncoder for ProtobufEncoderRuntime {
 
         let mut buf = Vec::new();
         for tuple in record.rows() {
-            encode_tuple(&mut buf, tuple, &self.bundle, self.output_schema.as_deref())?;
+            encode_tuple(&mut buf, tuple, &self.bundle, self.output_layout.as_deref())?;
         }
         Ok(Some(buf.into()))
     }
@@ -121,50 +107,25 @@ fn encode_tuple(
     buf: &mut Vec<u8>,
     tuple: &Tuple,
     bundle: &ProtoDescriptorBundle,
-    output_schema: Option<&OutputSchema>,
+    output_layout: Option<&OutputLayout>,
 ) -> Result<(), EncodeError> {
-    if let Some(schema) = output_schema {
-        if let Some(output_mask) = tuple.output_mask() {
-            return encode_tuple_with_output_mask(buf, tuple, bundle, schema, output_mask);
-        }
-        return encode_tuple_with_output_schema(buf, tuple, bundle, schema);
+    let output_layout = output_layout.ok_or_else(|| {
+        EncodeError::Other("protobuf encoding requires the final output layout".to_string())
+    })?;
+    if let Some(output_mask) = tuple.output_mask() {
+        return encode_tuple_with_output_mask(buf, tuple, bundle, output_layout, output_mask);
     }
-
-    // Default path: iterate bundle columns, look up values in tuple by column name.
-    for (field_number, info) in &bundle.field_map {
-        let column_name = bundle
-            .column_names
-            .get(info.column_index)
-            .map(|n| n.as_ref())
-            .ok_or_else(|| {
-                EncodeError::Other(format!(
-                    "column index {} out of bounds in proto descriptor bundle",
-                    info.column_index
-                ))
-            })?;
-
-        let Some(value) = lookup_value_in_tuple(tuple, column_name) else {
-            continue;
-        };
-
-        if value.is_null() {
-            continue;
-        }
-
-        encode_field(buf, *field_number, value, info)?;
-    }
-
-    Ok(())
+    encode_tuple_with_output_layout(buf, tuple, bundle, output_layout)
 }
 
 /// Encode a tuple using output schema columns (no output mask).
-fn encode_tuple_with_output_schema(
+fn encode_tuple_with_output_layout(
     buf: &mut Vec<u8>,
     tuple: &Tuple,
     bundle: &ProtoDescriptorBundle,
-    output_schema: &OutputSchema,
+    output_layout: &OutputLayout,
 ) -> Result<(), EncodeError> {
-    for column in output_schema.columns.iter() {
+    for column in output_layout.columns.iter() {
         let Some(&field_number) = bundle.column_to_field.get(column.name.as_ref()) else {
             continue;
         };
@@ -172,7 +133,7 @@ fn encode_tuple_with_output_schema(
             continue;
         };
 
-        let value = resolve_output_value(tuple, &column.getter).unwrap_or(&Value::Null);
+        let value = resolve_output_value(tuple, &column.value_ref)?;
         if value.is_null() {
             continue;
         }
@@ -188,18 +149,18 @@ fn encode_tuple_with_output_mask(
     buf: &mut Vec<u8>,
     tuple: &Tuple,
     bundle: &ProtoDescriptorBundle,
-    output_schema: &OutputSchema,
+    output_layout: &OutputLayout,
     output_mask: &[bool],
 ) -> Result<(), EncodeError> {
-    if output_mask.len() != output_schema.columns.len() {
+    if output_mask.len() != output_layout.columns.len() {
         return Err(EncodeError::Other(format!(
             "output_mask width {} does not match output schema width {}",
             output_mask.len(),
-            output_schema.columns.len()
+            output_layout.columns.len()
         )));
     }
 
-    for (column, &selected) in output_schema.columns.iter().zip(output_mask.iter()) {
+    for (column, &selected) in output_layout.columns.iter().zip(output_mask.iter()) {
         if !selected {
             continue;
         }
@@ -210,7 +171,7 @@ fn encode_tuple_with_output_mask(
             continue;
         };
 
-        let value = resolve_output_value(tuple, &column.getter).unwrap_or(&Value::Null);
+        let value = resolve_output_value(tuple, &column.value_ref)?;
         if value.is_null() {
             continue;
         }
@@ -220,38 +181,11 @@ fn encode_tuple_with_output_mask(
     Ok(())
 }
 
-/// Look up a value in a tuple by column name across all messages and
-/// affiliate columns.
-fn lookup_value_in_tuple<'a>(tuple: &'a Tuple, column_name: &str) -> Option<&'a Value> {
-    if let Some(aff) = tuple.affiliate() {
-        if let Some(v) = aff.value(column_name) {
-            return Some(v);
-        }
-    }
-    for msg in tuple.messages() {
-        if let Some(v) = msg.value(column_name) {
-            return Some(v);
-        }
-    }
-    None
-}
-
-/// Resolve a value from a tuple via an [`OutputValueGetter`].
-fn resolve_output_value<'a>(tuple: &'a Tuple, getter: &OutputValueGetter) -> Option<&'a Value> {
-    match getter {
-        OutputValueGetter::Affiliate { column_name } => {
-            tuple.affiliate().and_then(|aff| aff.value(column_name))
-        }
-        OutputValueGetter::MessageByName {
-            source_name,
-            column_name,
-        } => tuple.messages().iter().find_map(|message| {
-            if message.source() != source_name.as_ref() {
-                return None;
-            }
-            message.value(column_name)
-        }),
-    }
+fn resolve_output_value<'a>(
+    tuple: &'a Tuple,
+    value_ref: &OutputValueRef,
+) -> Result<&'a Value, EncodeError> {
+    value_ref.resolve(tuple).map_err(EncodeError::Other)
 }
 
 // ── Field encoding ────────────────────────────────────────────────────
@@ -571,6 +505,7 @@ mod tests {
     use crate::codec::decoder::proto_bundle::ProtoDescriptorBundle;
     use crate::codec::decoder::RecordDecoder;
     use crate::model::{batch_from_columns_simple, Collection};
+    use crate::planner::physical::output_layout::OutputColumnLayout;
     use datatypes::{
         BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type,
         Int32Type, Int64Type, ListType, ListValue, Schema, StringType, StructField, StructType,
@@ -605,7 +540,39 @@ mod tests {
     }
 
     fn encode_one(encoder: &ProtobufEncoder, collection: &dyn Collection) -> Vec<u8> {
-        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let tuple = collection
+            .rows()
+            .first()
+            .expect("non-empty test collection");
+        let mut columns = Vec::new();
+        for (message_index, message) in tuple.messages().iter().enumerate() {
+            columns.extend(
+                message
+                    .entries()
+                    .enumerate()
+                    .map(|(value_index, (name, value))| OutputColumnLayout {
+                        name: Arc::from(name),
+                        data_type: value.datatype(),
+                        value_ref: OutputValueRef::Message {
+                            message_index,
+                            value_index,
+                        },
+                    }),
+            );
+        }
+        if let Some(affiliate) = tuple.affiliate() {
+            columns.extend(affiliate.entries().enumerate().map(
+                |(affiliate_index, (name, value))| OutputColumnLayout {
+                    name: Arc::clone(name),
+                    data_type: value.datatype(),
+                    value_ref: OutputValueRef::Affiliate { affiliate_index },
+                },
+            ));
+        }
+        let mut runtime = ProtobufEncoderRuntime::new(
+            Arc::clone(&encoder.bundle),
+            Some(Arc::new(OutputLayout::new(columns))),
+        );
         assert!(runtime.begin_delivery().expect("begin").is_none());
         let chunk = runtime.append(collection).expect("append");
         assert!(runtime.finish_delivery().expect("finish").is_none());

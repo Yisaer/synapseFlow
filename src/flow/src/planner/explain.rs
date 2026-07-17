@@ -796,9 +796,6 @@ fn build_physical_node_with_prefix(
                 .map(|f| format_project_field(&f.original_expr, f.field_name.as_ref()))
                 .collect::<Vec<_>>();
             info.push(format!("fields=[{}]", fields.join("; ")));
-            if project.passthrough_messages {
-                info.push("passthrough_messages=true".to_string());
-            }
         }
         PhysicalPlan::RowDiff(row_diff) => {
             info.push(format!("sink_id={}", row_diff.sink_id));
@@ -812,31 +809,6 @@ fn build_physical_node_with_prefix(
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
-            if let Some(spec) = &row_diff.late_projection {
-                if !spec.is_empty() {
-                    let cols = spec
-                        .columns()
-                        .iter()
-                        .map(|c| {
-                            if c.source_column_display.as_ref() == c.output_name.as_ref() {
-                                format!(
-                                    "{}.{}",
-                                    c.source_name.as_ref(),
-                                    c.source_column_display.as_ref()
-                                )
-                            } else {
-                                format!(
-                                    "{}.{} as {}",
-                                    c.source_name.as_ref(),
-                                    c.source_column_display.as_ref(),
-                                    c.output_name.as_ref()
-                                )
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
-                }
-            }
         }
         PhysicalPlan::ColumnFilter(filter) => {
             info.push(format!("sink_id={}", filter.sink_id));
@@ -967,23 +939,6 @@ fn build_physical_node_with_prefix(
                     info.push(format!("batch_duration_ms={}", duration.as_millis()));
                 }
             }
-            if let Some(spec) = &encoder.by_index_projection {
-                if !spec.is_empty() {
-                    let cols = spec
-                        .columns()
-                        .iter()
-                        .map(|c| {
-                            format!(
-                                "{}#{}->{}",
-                                c.source_name.as_ref(),
-                                c.column_index,
-                                c.output_name.as_ref()
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
-                }
-            }
         }
         PhysicalPlan::IncSinkEncoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
@@ -997,23 +952,6 @@ fn build_physical_node_with_prefix(
                 }
                 if let Some(duration) = encoder.common.batch_duration {
                     info.push(format!("batch_duration_ms={}", duration.as_millis()));
-                }
-            }
-            if let Some(spec) = &encoder.by_index_projection {
-                if !spec.is_empty() {
-                    let cols = spec
-                        .columns()
-                        .iter()
-                        .map(|c| {
-                            format!(
-                                "{}#{}->{}",
-                                c.source_name.as_ref(),
-                                c.column_index,
-                                c.output_name.as_ref()
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
                 }
             }
         }

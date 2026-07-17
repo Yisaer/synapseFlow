@@ -156,60 +156,22 @@ The current implementation uses an internal row-encoding option bundle equivalen
 
 ```rust
 struct JsonRowEncodeOptions<'a> {
-    by_index_projection: Option<&'a ByIndexProjection>,
-    output_schema: Option<&'a OutputSchema>,
+    output_layout: &'a OutputLayout,
     output_mask_mode: OutputMaskMode,
     null_policy: NullColumnPolicy,
 }
 ```
 
 These options are not exposed directly in the pipeline API.
-They are derived from planner rewrites, sink output mode, and encoder configuration.
+They are derived from the planner output layout, sink output mode, and encoder
+configuration.
 
-### `by_index_projection`
-
-Meaning:
-
-- tells the encoder that some output columns should be read lazily from upstream messages by source
-  index / source column mapping instead of requiring earlier full materialization
-
-Function enabled:
-
-- by-index projection into encoder rewrite
-
-Typical source:
-
-- physical optimization rewrites a `Project` directly upstream of the encoder and attaches a
-  `ByIndexProjection` to the encoder
-
-Effect:
-
-- the encoder reads selected columns from upstream messages on demand
-- affiliate fields are still read from the tuple affiliate when needed
-
-Conceptual example:
-
-```text
-Project(a as x, b + 1 as y)
-  -> rewrite
-Encoder(by_index_projection = [stream.a as x])
-```
-
-Result:
-
-- `x` can be read lazily from the original message
-- `y` still comes from already materialized affiliate data
-
-Related function:
-
-- delayed materialization for eligible encoder-owned columns
-
-### `output_schema`
+### `output_layout`
 
 Meaning:
 
-- provides the final output column order and getter mapping that the encoder should use for
-  output-mask-aware or dense output-schema-based rendering
+- provides the final output column order, datatype, and fixed tuple value
+  reference used for every rendering mode
 
 Function enabled:
 
@@ -218,7 +180,7 @@ Function enabled:
 
 Typical source:
 
-- final sink-side output schema built by the planner
+- final sink-side output layout built by the planner
 
 Effect:
 
@@ -231,13 +193,14 @@ Conceptual example:
 SELECT a AS x, b AS y FROM stream
 ```
 
-Final output schema:
+Final output layout:
 
 ```text
 [x, y]
 ```
 
-The encoder uses this schema when it needs final output names rather than raw tuple layout.
+The encoder uses this layout for both final output names and indexed runtime
+value access.
 
 ### `output_mask_mode`
 
@@ -283,7 +246,7 @@ Output:
 
 Meaning:
 
-- ignore sparse omission for template input and expose a dense current-output row
+- ignore sparse omission for template input and expose the dense row-diff output row
 
 Function enabled:
 
@@ -401,8 +364,7 @@ Important limit:
 |---|---|---|
 | `encoder.transform=template` | render one JSON item per row through a template | encoder transform |
 | `encoder.props.omit_null_columns` | omit `null` object fields on native JSON object encoding | null-field omission |
-| `by_index_projection` | late-read eligible columns from upstream messages | by-index projection into encoder rewrite |
-| `output_schema` | align runtime tuple data with final output columns | row-diff aware or schema-based rendering |
+| `output_layout` | align final columns with fixed runtime value references | native, row-diff-aware, and template rendering |
 | `output_mask_mode=HonorMask` | emit sparse fields according to `output_mask` | row-diff sparse JSON encoding |
 | `output_mask_mode=DenseForTemplate` | expose dense `.row` even on row-diff branches | row-diff + template compatibility |
 | `null_policy=KeepNulls` | keep object-field `null` values | legacy / explicit keep-null behavior |
@@ -488,7 +450,7 @@ Configuration:
 
 Derived runtime behavior:
 
-- `output_schema` is required
+- `output_layout` is required
 - `output_mask_mode = HonorMask`
 - changed-to-`null` fields are still emitted
 
@@ -525,7 +487,7 @@ Configuration:
 
 Derived runtime behavior:
 
-- `output_schema` is required
+- `output_layout` is required
 - `output_mask_mode = DenseForTemplate`
 - `null_policy = KeepNulls`
 

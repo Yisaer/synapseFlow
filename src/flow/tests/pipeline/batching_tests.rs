@@ -257,8 +257,8 @@ async fn pipeline_encoder_transform_table_driven() {
                 ),
             ],
             sink_common: CommonSinkProps {
-                batch_count: Some(16),
-                batch_duration: Some(Duration::from_millis(50)),
+                batch_count: Some(3),
+                batch_duration: None,
             },
             encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
             output: Some(SinkOutputConfig::delta()),

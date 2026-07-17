@@ -109,8 +109,8 @@ The exact config field names may evolve, but the semantics should stay:
 
 - `type = json` means the outer payload is still encoded by the JSON encoder.
 - `transform` currently means a template-based transform.
-- The template input context is the current SQL output row under `.row`.
-- On row-diff sink branches, `.row` remains the dense current output row shape; unchanged tracked
+- The template input context is the current encoder input row under `.row`.
+- On row-diff sink branches, `.row` remains the dense row-diff output shape; unchanged tracked
   columns appear as `null` unless a future mask-aware template contract is introduced.
 - `type = none` means no encoder node is built, so any configured `transform` is ignored / has no effect.
 
@@ -260,39 +260,12 @@ Key point:
 - The payload is still collection-based.
 - That is why streaming append semantics are well-defined.
 
-## Behavior With `ByIndexProjectionIntoEncoderRewrite`
+## Behavior With Output Layout
 
-`ByIndexProjectionIntoEncoderRewrite` is not supported when `encoder.transform=template` is
-enabled.
-
-Reason:
-
-- The template is treated as a dynamic row-to-item renderer.
-- The planner cannot reliably derive the exact input column dependency set from the template.
-- The rendered item shape is defined by the template at runtime, not by a planner-visible schema.
-- Therefore the planner cannot safely rewrite the upstream `Project` into passthrough mode for this
-  case.
-
-Physical shape remains:
-
-```text
-Project -> SinkEncoder(json + row template transform) -> SinkConnector
-```
-
-Runtime implication:
-
-1. `Project` still materializes the SQL output row.
-2. The encoder transform consumes that materialized row.
-3. The template renders one transformed JSON item.
-4. The JSON encoder writes that item into the final payload.
-
-This means the delayed-materialization CPU saving from `ByIndexProjectionIntoEncoderRewrite` does
-not apply to `encoder.transform=template`.
-
-## Behavior With By-Index Projection Enabled
-
-When `encoder.transform=template` is enabled, by-index projection into the encoder is not
-applicable because the template needs the materialized output row.
+The template receives a dense row assembled from the same planner-derived
+`OutputLayout` used by native JSON encoding. Direct columns are read from fixed
+message indexes and computed columns from fixed affiliate indexes. A row-diff
+output mask does not make the template context sparse.
 
 Physical shape:
 
@@ -302,7 +275,7 @@ Project -> SinkEncoder(json + row template transform) -> Sink
 
 Per-row execution becomes:
 
-1. Materialize the projected SQL output row.
+1. Resolve the dense projected SQL output row through `OutputLayout`.
 2. Render the current row into one transformed JSON item.
 3. Append that item into the current JSON payload buffer.
 
@@ -312,8 +285,9 @@ Flush execution becomes:
 2. Emit one payload.
 3. Reset encoder state.
 
-This path still avoids the extra standalone batch-then-encode buffering through streaming append, but it does
-not remove project-side row materialization.
+This path still avoids the extra standalone batch-then-encode buffering through
+streaming append. Project materializes only computed expressions; the encoder
+resolves the final dense template row by fixed references.
 
 ## Unsupported Cases In This MVP
 
@@ -340,7 +314,7 @@ Under this design:
 
 - No optimization: supported
 - `PhysicalSinkEncoder`: supported
-- `ByIndexProjectionIntoEncoderRewrite`: not supported when `encoder.transform=template` is enabled
+- Plan-fixed output layout: supported
 
 This provides a practical path for the current sink-batch use case without introducing a separate
 collection transform plan in the first iteration.

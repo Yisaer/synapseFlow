@@ -221,43 +221,39 @@ interactions:
       - sink.output.omit_if_empty
     status: active
 
-  - id: runtime.by_index_alias_memory_output_pairing
-    title: By-index alias memory output pairing
-    summary: Validate by-index encoder projection with SQL-visible aliases through memory output.
+  - id: runtime.fixed_output_alias_memory_output_pairing
+    title: Fixed output alias memory output pairing
+    summary: Validate planner-fixed output references with SQL-visible aliases through memory output.
     features:
       - parser.select.alias_computing
-      - planner.physical.by_index_projection_into_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
       - sink.connector.memory_output
     status: active
 
-  - id: runtime.mixed_consumers_by_index_memory_output_pairing
-    title: Mixed consumers by-index memory output pairing
-    summary: Validate shared by-index projection planning across encoder and row-diff memory-output consumers.
+  - id: runtime.mixed_consumers_fixed_output_memory_pairing
+    title: Mixed consumers fixed output memory pairing
+    summary: Validate shared fixed output layout across encoder and row-diff memory-output consumers.
     features:
-      - planner.physical.by_index_projection_across_mixed_consumers_rewrite
-      - planner.physical.by_index_projection_into_encoder_rewrite
-      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.output_layout_fixed_slots
       - sink.connector.memory_output
       - sink.output.row_diff
     status: active
 
-  - id: runtime.partial_row_diff_late_materialization_pairing
-    title: Partial row-diff late materialization pairing
-    summary: Validate partial row-diff late materialization together with row-diff runtime output.
+  - id: runtime.row_diff_fixed_output_pairing
+    title: Row-diff fixed output pairing
+    summary: Validate planner-fixed value references together with row-diff runtime output.
     features:
-      - planner.physical.by_index_projection_into_row_diff_rewrite
-      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
       - sink.output.row_diff
     status: active
 
-  - id: runtime.row_diff_batching_partial_late_materialization
-    title: Row-diff batching partial late materialization
-    summary: Validate row-diff output with sink batching while partial late materialization keeps encoder-owned columns stable.
+  - id: runtime.row_diff_batching_fixed_output_layout
+    title: Row-diff batching fixed output layout
+    summary: Validate row-diff output with sink batching while fixed output references remain stable.
     features:
       - sink.output.row_diff
       - sink.output.batching
-      - planner.physical.by_index_projection_into_row_diff_rewrite
-      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
   - id: runtime.row_diff_template_transform_pairing
@@ -275,7 +271,7 @@ interactions:
       - sink.output.row_diff
       - sink.output.batching
       - planner.physical.streaming_encoder_rewrite
-      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
   - id: runtime.stateful_cse_boundary_pairing

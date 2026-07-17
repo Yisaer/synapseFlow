@@ -188,27 +188,11 @@ Recommended logical shape:
 
 This avoids polluting the shared relational DAG with a sink-only policy.
 
-## Relationship To Delayed Materialization
+## Relationship To Output Layout
 
-`omit_if_empty` should not change the delayed-materialization endpoint on row-diff branches.
-
-The existing row-diff optimization target is:
-
-```text
-Project -> RowDiff -> ...
-```
-
-If `PhysicalEmptySuppress` is inserted after `PhysicalRowDiff`, that optimization boundary remains
-unchanged:
-
-```text
-Project -> RowDiff -> EmptySuppress -> ...
-```
-
-Therefore:
-
-- `omit_if_empty` should not block `ByIndexProjectionIntoRowDiffRewrite`
-- `omit_if_empty` should not become the delayed-materialization endpoint
+`PhysicalEmptySuppress` preserves the planner-derived `OutputLayout`. On a
+row-diff branch it reads only row metadata and remains after `PhysicalRowDiff`,
+so it neither changes fixed value references nor consumes the output mask.
 
 ## Relationship To Encoder Templates
 

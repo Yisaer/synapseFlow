@@ -60,10 +60,10 @@ Additional notes:
 
 The runtime currently registers the following built-in encoder kinds:
 
-| Encoder | Runtime built-in | Output type | Streaming support | By-index projection support | Notes |
-|--------|-------------------|-------------|-------------------|-----------------------------|-------|
-| `json` | yes | bytes | yes | yes | Encodes a `Collection` as a JSON array payload and supports encoder-local JSON formatting options. |
-| `none` | planner pseudo-mode | collection passthrough | n/a | n/a | No encoder node is built; the connector receives decoded collections directly. |
+| Encoder | Runtime built-in | Output type | Streaming support | Notes |
+|--------|-------------------|-------------|-------------------|-------|
+| `json` | yes | bytes | yes | Encodes a `Collection` as a JSON array payload and supports encoder-local JSON formatting options. |
+| `none` | planner pseudo-mode | collection passthrough | n/a | No encoder node is built; the connector receives decoded collections directly. |
 
 Current transform support:
 
@@ -210,10 +210,9 @@ In multi-sink pipelines:
 - sink-specific suffixes are attached per branch after the shared `Project`
 - physical rewrites must respect shared DAG constraints
 
-This is especially important for encoder-oriented optimizations. For example:
-
-- `ByIndexProjectionIntoEncoderRewrite` is all-or-nothing for a shared `Project`
-- if any downstream encoder cannot honor delayed materialization, the rewrite is not applied
+Each sink branch receives its own final `OutputLayout`. Shared upstream nodes
+must expose a compatible tuple layout to every branch; incompatible fan-in
+layouts are rejected during planning.
 
 ## Current Sink-Side Related Capabilities
 
@@ -235,8 +234,9 @@ These capabilities already exist near the sink boundary:
 4. **Sink encoder lowering**
    - Lowers encoded-byte sinks to `SinkEncoder -> SinkConnector`, with sink-side batch settings handled inside `SinkEncoder`.
 
-5. **By-index projection into encoder rewrite**
-   - Delays materialization of eligible by-index projected columns into the encoder.
+5. **Plan-fixed output layout**
+   - Gives encoders, row-diff, and memory materialization one ordered output
+     contract with fixed tuple value references.
 
 6. **Memory collection materialization**
    - Normalizes collection rows into a stable layout before publishing to memory collection topics.
@@ -275,4 +275,4 @@ In particular:
 - [Column Filter](output/column_filter.md)
 - [Encoder Transform](encoders/encoder_transform.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)
-- [ByIndexProjectionIntoEncoderRewrite](../../planner/optimize/physical/by_index_projection_into_encoder_rewrite.md)
+- [Plan-Fixed Output Layout](../../planner/performance/plan_fixed_output_slots.md)

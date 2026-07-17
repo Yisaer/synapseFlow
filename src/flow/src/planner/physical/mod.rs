@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 pub mod base_physical;
-pub mod by_index_projection;
-pub mod output_schema;
+pub mod output_layout;
 pub mod physical_aggregation;
 pub mod physical_barrier;
 pub mod physical_batch;
@@ -34,12 +33,11 @@ pub mod physical_watermark;
 pub mod physical_window;
 
 pub use base_physical::BasePhysicalPlan;
-pub use by_index_projection::{ByIndexProjection, ByIndexProjectionColumn};
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_barrier::PhysicalBarrier;
 pub use physical_batch::PhysicalBatch;
 pub use physical_collection_layout_normalize::PhysicalCollectionLayoutNormalize;
-pub use physical_column_filter::{ColumnFilterKeepSpec, PhysicalColumnFilter};
+pub use physical_column_filter::PhysicalColumnFilter;
 pub use physical_compute::{PhysicalCompute, PhysicalComputeField};
 pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;

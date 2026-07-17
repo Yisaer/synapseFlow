@@ -55,26 +55,16 @@
 - Encoded sink batching lowering is covered by `encoded_sink_with_batch_lowers_to_sink_encoder`.
 - Template-transform plus batching rewrite is covered by `transform_template_with_batch_uses_sink_encoder`.
 
-### By-index projection rewrite and row-diff planning
+### Fixed output layout and row-diff planning
 
-- By-index projection rewrite coverage includes:
-  - pure by-index rewrite
-  - mixed projection partial rewrite
-  - alias rewrite
-  - wildcard negative guard
-  - transform-enabled negative guard
-  - shared-DAG ineligible guard
-- Representative cases include:
-  - `rewrites_pure_by_index_project_into_encoder`
-  - `rewrites_mixed_projection_delaying_only_by_index_fields`
-  - `rewrites_by_index_with_alias`
-  - `does_not_rewrite_when_contains_wildcard`
-  - `does_not_rewrite_by_index_projection_when_transform_enabled`
-  - `does_not_rewrite_shared_project_when_any_sink_ineligible`
+- Fixed output layout coverage includes decoder slot ordering, direct columns,
+  aliases, computed affiliate values, wildcards, transforms, and shared DAGs.
+- `OutputValueRef::Null` and structural layout violations are covered by focused
+  planner unit tests.
 - Row-diff physical planning coverage includes:
   - standalone row-diff insertion
   - row-diff plus batching
-  - partial late materialization
+  - fixed-layout access for mixed direct and computed projections
   - alias projection
   - memory-collection sink placement
   - wildcard degradation

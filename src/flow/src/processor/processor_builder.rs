@@ -19,15 +19,14 @@ use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggi
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
-    CollectionLayoutNormalizeProcessor, ColumnFilterProcessor, ComputeProcessor, ControlSignal,
-    ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, MemoryCollectionMaterializeProcessor,
-    OrderProcessor, Processor, ProcessorError, ProcessorStart, ProjectProcessor,
-    ResultCollectProcessor, RowDiffProcessor, SamplerProcessor, SharedStreamProcessor,
-    SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor, SinkProcessor,
-    SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
-    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TumblingWindowProcessor,
-    WatermarkProcessor,
+    CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
+    DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, FilterProcessor, Ingress,
+    InstantControlSignal, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
+    ProcessorError, ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor,
+    SamplerProcessor, SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor,
+    SinkEncryptProcessor, SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor,
+    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
+    TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -65,7 +64,7 @@ pub(crate) enum PlanProcessor {
     Decoder(DecoderProcessor),
     /// CollectionLayoutNormalizeProcessor inserted for collection sources that must preserve full schema.
     CollectionLayoutNormalize(CollectionLayoutNormalizeProcessor),
-    /// MemoryCollectionMaterializeProcessor inserted before memory collection sinks.
+    /// MemoryCollectionMaterializeProcessor inserted before direct collection sinks.
     MemoryCollectionMaterialize(MemoryCollectionMaterializeProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
     SharedSource(SharedStreamProcessor),
@@ -79,8 +78,6 @@ pub(crate) enum PlanProcessor {
     Project(ProjectProcessor),
     /// RowDiffProcessor created from PhysicalRowDiff
     RowDiff(RowDiffProcessor),
-    /// ColumnFilterProcessor
-    ColumnFilter(ColumnFilterProcessor),
     /// EmptySuppressProcessor created from PhysicalEmptySuppress
     EmptySuppress(EmptySuppressProcessor),
     /// StatefulFunctionProcessor created from PhysicalStatefulFunction
@@ -322,7 +319,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
             PlanProcessor::RowDiff(p) => p.id(),
-            PlanProcessor::ColumnFilter(p) => p.id(),
             PlanProcessor::EmptySuppress(p) => p.id(),
             PlanProcessor::StatefulFunction(p) => p.id(),
             PlanProcessor::Filter(p) => p.id(),
@@ -355,7 +351,6 @@ impl PlanProcessor {
             PlanProcessor::Order(_) => "order",
             PlanProcessor::Project(_) => "project",
             PlanProcessor::RowDiff(_) => "row_diff",
-            PlanProcessor::ColumnFilter(_) => "column_filter",
             PlanProcessor::EmptySuppress(_) => "empty_suppress",
             PlanProcessor::StatefulFunction(_) => "stateful_function",
             PlanProcessor::Filter(_) => "filter",
@@ -394,7 +389,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.set_stats(stats),
             PlanProcessor::Project(p) => p.set_stats(stats),
             PlanProcessor::RowDiff(p) => p.set_stats(stats),
-            PlanProcessor::ColumnFilter(p) => p.set_stats(stats),
             PlanProcessor::EmptySuppress(p) => p.set_stats(stats),
             PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
             PlanProcessor::Filter(p) => p.set_stats(stats),
@@ -428,7 +422,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.start(spawner),
             PlanProcessor::Project(p) => p.start(spawner),
             PlanProcessor::RowDiff(p) => p.start(spawner),
-            PlanProcessor::ColumnFilter(p) => p.start(spawner),
             PlanProcessor::EmptySuppress(p) => p.start(spawner),
             PlanProcessor::StatefulFunction(p) => p.start(spawner),
             PlanProcessor::Filter(p) => p.start(spawner),
@@ -462,7 +455,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
             PlanProcessor::RowDiff(p) => p.subscribe_output(),
-            PlanProcessor::ColumnFilter(p) => p.subscribe_output(),
             PlanProcessor::EmptySuppress(p) => p.subscribe_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
             PlanProcessor::Filter(p) => p.subscribe_output(),
@@ -496,7 +488,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
             PlanProcessor::RowDiff(p) => p.subscribe_control_output(),
-            PlanProcessor::ColumnFilter(p) => p.subscribe_control_output(),
             PlanProcessor::EmptySuppress(p) => p.subscribe_control_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
@@ -530,7 +521,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
             PlanProcessor::RowDiff(p) => p.add_input(receiver),
-            PlanProcessor::ColumnFilter(p) => p.add_input(receiver),
             PlanProcessor::EmptySuppress(p) => p.add_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
@@ -567,7 +557,6 @@ impl PlanProcessor {
             PlanProcessor::Order(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
             PlanProcessor::RowDiff(p) => p.add_control_input(receiver),
-            PlanProcessor::ColumnFilter(p) => p.add_control_input(receiver),
             PlanProcessor::EmptySuppress(p) => p.add_control_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
@@ -1199,16 +1188,9 @@ fn create_processor_from_plan_node(
                 PlanProcessor::RowDiff(processor),
             ))
         }
-        PhysicalPlan::ColumnFilter(spec) => {
-            let processor = ColumnFilterProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(spec.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::ColumnFilter(processor),
-            ))
-        }
+        PhysicalPlan::ColumnFilter(_) => Err(ProcessorError::InvalidConfiguration(
+            "optimized physical plan still contains planner-only PhysicalColumnFilter".to_string(),
+        )),
         PhysicalPlan::EmptySuppress(spec) => {
             let processor = EmptySuppressProcessor::new_with_channel_capacities(
                 processor_id.clone(),
@@ -1312,20 +1294,7 @@ fn create_processor_from_plan_node(
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let encoder_impl =
-                attach_encoder_output_schema(encoder.output_schema.as_ref(), encoder_impl)?;
-            let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
-                if !encoder_impl.supports_index_lazy_materialization() {
-                    return Err(ProcessorError::InvalidConfiguration(format!(
-                        "encoder kind `{}` does not support index lazy materialization",
-                        encoder.encoder.kind_str()
-                    )));
-                }
-                encoder_impl
-                    .with_by_index_projection(Arc::clone(spec))
-                    .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
-            } else {
-                encoder_impl
-            };
+                attach_encoder_output_layout(encoder.output_layout.as_ref(), encoder_impl)?;
             SinkEncoderProcessor::validate_batch_config(
                 encoder.common.batch_count,
                 encoder.common.batch_duration,
@@ -1351,20 +1320,7 @@ fn create_processor_from_plan_node(
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let encoder_impl =
-                attach_encoder_output_schema(encoder.output_schema.as_ref(), encoder_impl)?;
-            let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
-                if !encoder_impl.supports_index_lazy_materialization() {
-                    return Err(ProcessorError::InvalidConfiguration(format!(
-                        "encoder kind `{}` does not support index lazy materialization",
-                        encoder.encoder.kind_str()
-                    )));
-                }
-                encoder_impl
-                    .with_by_index_projection(Arc::clone(spec))
-                    .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
-            } else {
-                encoder_impl
-            };
+                attach_encoder_output_layout(encoder.output_layout.as_ref(), encoder_impl)?;
             // PhysicalIncSinkEncoder (fused) uses batch params from the original PhysicalBatch.
             SinkEncoderProcessor::validate_batch_config(
                 encoder.common.batch_count,
@@ -1560,19 +1516,19 @@ fn validate_encoder_input_child(child_count: usize) -> Result<(), ProcessorError
     Ok(())
 }
 
-fn attach_encoder_output_schema(
-    output_schema: Option<&Arc<crate::planner::physical::output_schema::OutputSchema>>,
+fn attach_encoder_output_layout(
+    output_layout: Option<&Arc<crate::planner::physical::output_layout::OutputLayout>>,
     encoder_impl: Arc<dyn crate::codec::encoder::SinkEncoderFactory>,
 ) -> Result<Arc<dyn crate::codec::encoder::SinkEncoderFactory>, ProcessorError> {
-    let output_schema = output_schema.cloned().ok_or_else(|| {
+    let output_layout = output_layout.cloned().ok_or_else(|| {
         ProcessorError::InvalidConfiguration(
-            "optimized encoder plan is missing output_schema; encoder.output_schema must be \
+            "optimized encoder plan is missing output_layout; encoder.output_layout must be \
              attached before processor construction"
                 .to_string(),
         )
     })?;
     encoder_impl
-        .with_output_schema(output_schema)
+        .with_output_layout(output_layout)
         .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))
 }
 

@@ -15,7 +15,6 @@ type EncoderFactory = Arc<
 
 struct EncoderEntry {
     factory: EncoderFactory,
-    supports_by_index_projection: bool,
 }
 type DecoderFactory = Arc<
     dyn Fn(&StreamDecoderConfig, Arc<Schema>, &str) -> Result<Arc<dyn RecordDecoder>, CodecError>
@@ -125,22 +124,9 @@ impl EncoderRegistry {
     }
 
     pub fn register_encoder(&self, kind: impl Into<String>, factory: EncoderFactory) {
-        self.register_encoder_with_caps(kind, factory, false);
-    }
-
-    pub fn register_encoder_with_caps(
-        &self,
-        kind: impl Into<String>,
-        factory: EncoderFactory,
-        supports_by_index_projection: bool,
-    ) {
-        self.factories.write().insert(
-            kind.into(),
-            EncoderEntry {
-                factory,
-                supports_by_index_projection,
-            },
-        );
+        self.factories
+            .write()
+            .insert(kind.into(), EncoderEntry { factory });
     }
 
     pub fn instantiate(
@@ -160,16 +146,8 @@ impl EncoderRegistry {
         guard.contains_key(kind)
     }
 
-    pub fn supports_by_index_projection(&self, kind: &str) -> bool {
-        let guard = self.factories.read();
-        guard
-            .get(kind)
-            .map(|entry| entry.supports_by_index_projection)
-            .unwrap_or(false)
-    }
-
     fn register_builtin_encoders(&self) {
-        self.register_encoder_with_caps(
+        self.register_encoder(
             "json",
             Arc::new(|config| {
                 Ok(Arc::new(
@@ -177,7 +155,6 @@ impl EncoderRegistry {
                         .map_err(|err| CodecError::Other(err.to_string()))?,
                 ) as Arc<_>)
             }),
-            true,
         );
         self.register_encoder(
             "protobuf",

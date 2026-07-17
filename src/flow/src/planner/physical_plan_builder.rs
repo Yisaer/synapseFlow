@@ -266,10 +266,10 @@ impl PhysicalPlanBuilder {
         self.node_cache.get(&logical_index).cloned()
     }
 
-    pub fn get_or_create_memory_collection_materialize(
+    pub fn get_or_create_output_layout_materialize(
         &mut self,
         child: Arc<PhysicalPlan>,
-        output_schema: crate::planner::physical::output_schema::OutputSchema,
+        output_layout: crate::planner::physical::output_layout::OutputLayout,
     ) -> Arc<PhysicalPlan> {
         let key = child.get_plan_index();
         if let Some(cached) = self.memory_collection_materialize_cache.get(&key) {
@@ -278,7 +278,7 @@ impl PhysicalPlanBuilder {
 
         let index = self.allocate_index();
         let plan = Arc::new(PhysicalPlan::MemoryCollectionMaterialize(
-            PhysicalMemoryCollectionMaterialize::new(output_schema, child, index),
+            PhysicalMemoryCollectionMaterialize::new(output_layout, child, index),
         ));
         self.memory_collection_materialize_cache
             .insert(key, Arc::clone(&plan));
@@ -1331,8 +1331,8 @@ fn plan_uses_processor_state(plan: &Arc<PhysicalPlan>) -> bool {
 /// Insert a `PhysicalColumnFilter` node if the sink's output config specifies
 /// include_columns or exclude_columns.
 ///
-/// Column names are validated against the input child's output schema, and
-/// per-column metadata (`keep_specs`) is pre-computed for the runtime processor.
+/// The node changes only the planner-owned output layout. Runtime tuples remain
+/// unchanged until a downstream consumer materializes the selected layout.
 fn maybe_insert_column_filter(
     sink: &PipelineSink,
     input_child: &Arc<PhysicalPlan>,
@@ -1344,22 +1344,15 @@ fn maybe_insert_column_filter(
 
     sink.output.validate()?;
 
-    // Validate column names against the input schema.
-    let input_schema = input_child.output_schema().map_err(|err| {
+    let input_layout = input_child.output_layout().map_err(|err| {
         format!(
-            "sink `{}` column filter: failed to resolve input output schema: {}",
+            "sink `{}` column filter: failed to resolve input output layout: {}",
             sink.sink_id, err
         )
     })?;
     validate_column_filter_columns(
         &sink.sink_id,
-        &input_schema,
-        sink.output.include_columns.as_deref(),
-        sink.output.exclude_columns.as_deref(),
-    )?;
-
-    let keep_specs = build_keep_specs(
-        &input_schema,
+        &input_layout,
         sink.output.include_columns.as_deref(),
         sink.output.exclude_columns.as_deref(),
     )?;
@@ -1371,63 +1364,24 @@ fn maybe_insert_column_filter(
         sink.sink_id.clone(),
         sink.output.include_columns.clone(),
         sink.output.exclude_columns.clone(),
-        keep_specs,
     );
     Ok(Arc::new(PhysicalPlan::ColumnFilter(filter)))
 }
 
-fn build_keep_specs(
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
-    include_columns: Option<&[String]>,
-    exclude_columns: Option<&[String]>,
-) -> Result<Vec<crate::planner::physical::ColumnFilterKeepSpec>, String> {
-    let keep_names = crate::planner::physical::output_schema::column_names_set(
-        output_schema,
-        include_columns,
-        exclude_columns,
-    )?;
-
-    let mut specs = Vec::new();
-    for col in output_schema.columns.iter() {
-        if !keep_names.contains(col.name.as_ref()) {
-            continue;
-        }
-        let (source_name, column_name) = match &col.getter {
-            crate::planner::physical::output_schema::OutputValueGetter::MessageByName {
-                source_name,
-                column_name,
-            } => (Arc::clone(source_name), Arc::clone(column_name)),
-            crate::planner::physical::output_schema::OutputValueGetter::Affiliate {
-                column_name,
-            } => {
-                // Affiliate columns are pass-through (always kept).
-                // We use empty source_name to indicate affiliate.
-                (Arc::from(""), Arc::clone(column_name))
-            }
-        };
-        specs.push(crate::planner::physical::ColumnFilterKeepSpec {
-            source_name,
-            column_name,
-            output_name: Arc::clone(&col.name),
-        });
-    }
-    Ok(specs)
-}
-
 fn validate_column_filter_columns(
     sink_id: &str,
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
     include_columns: Option<&[String]>,
     exclude_columns: Option<&[String]>,
 ) -> Result<(), String> {
     if let Some(include) = include_columns {
         for col_name in include {
-            if !output_schema
+            if !output_layout
                 .columns
                 .iter()
                 .any(|c| c.name.as_ref() == col_name.as_str())
             {
-                let schema_names: Vec<&str> = output_schema
+                let schema_names: Vec<&str> = output_layout
                     .columns
                     .iter()
                     .map(|c| c.name.as_ref())
@@ -1443,12 +1397,12 @@ fn validate_column_filter_columns(
     }
     if let Some(exclude) = exclude_columns {
         for col_name in exclude {
-            if !output_schema
+            if !output_layout
                 .columns
                 .iter()
                 .any(|c| c.name.as_ref() == col_name.as_str())
             {
-                let schema_names: Vec<&str> = output_schema
+                let schema_names: Vec<&str> = output_layout
                     .columns
                     .iter()
                     .map(|c| c.name.as_ref())
@@ -1546,16 +1500,16 @@ fn create_row_diff_processor_if_needed_with_builder(
     }
 
     validate_row_diff_sink_path(sink)?;
-    let output_schema = input_child.output_schema()?;
+    let output_layout = input_child.output_layout()?;
     let (tracked_columns, tracked_column_indexes) =
-        resolve_row_diff_tracked_columns(sink, &output_schema)?;
+        resolve_row_diff_tracked_columns(sink, &output_layout)?;
     let row_diff_index = builder.allocate_index();
     let row_diff_plan = PhysicalRowDiff::new(
         vec![Arc::clone(input_child)],
         row_diff_index,
         sink.sink_id.clone(),
         sink.output.clone(),
-        output_schema,
+        output_layout,
         tracked_columns,
         tracked_column_indexes,
     );
@@ -1613,29 +1567,29 @@ fn validate_row_diff_sink_path(sink: &PipelineSink) -> Result<(), String> {
 
 fn resolve_row_diff_tracked_columns(
     sink: &PipelineSink,
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
 ) -> Result<(Vec<Arc<str>>, Vec<usize>), String> {
     if let Some(configured_columns) = sink.output.delta_columns() {
         return resolve_configured_row_diff_tracked_columns(
             sink,
-            output_schema,
+            output_layout,
             configured_columns,
         );
     }
 
     Ok((
-        output_schema
+        output_layout
             .columns
             .iter()
             .map(|column| Arc::clone(&column.name))
             .collect(),
-        (0..output_schema.columns.len()).collect(),
+        (0..output_layout.columns.len()).collect(),
     ))
 }
 
 fn resolve_configured_row_diff_tracked_columns(
     sink: &PipelineSink,
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
     configured_columns: &[String],
 ) -> Result<(Vec<Arc<str>>, Vec<usize>), String> {
     let mut seen = HashSet::<&str>::new();
@@ -1650,7 +1604,7 @@ fn resolve_configured_row_diff_tracked_columns(
             ));
         }
 
-        let matches = output_schema
+        let matches = output_layout
             .columns
             .iter()
             .enumerate()
@@ -1662,7 +1616,7 @@ fn resolve_configured_row_diff_tracked_columns(
                 "sink `{}` row diff output column `{}` is not present in final output schema [{}]",
                 sink.sink_id,
                 configured_column,
-                format_output_column_names(output_schema)
+                format_output_column_names(output_layout)
             ));
         }
 
@@ -1671,7 +1625,7 @@ fn resolve_configured_row_diff_tracked_columns(
                 "sink `{}` row diff output column `{}` is ambiguous in final output schema [{}]",
                 sink.sink_id,
                 configured_column,
-                format_output_column_names(output_schema)
+                format_output_column_names(output_layout)
             ));
         }
 
@@ -1684,9 +1638,9 @@ fn resolve_configured_row_diff_tracked_columns(
 }
 
 fn format_output_column_names(
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
 ) -> String {
-    let names = output_schema
+    let names = output_layout
         .columns
         .iter()
         .map(|column| column.name.as_ref())
@@ -1723,6 +1677,7 @@ fn add_regular_encoder_with_builder(
         }
         let connector_config = connector.connector.clone();
         let mut sink_input = encoder_input;
+        let mut layout_materialized = false;
 
         match &connector_config {
             crate::planner::sink::SinkConnectorConfig::Memory(cfg) => match cfg.kind {
@@ -1733,17 +1688,24 @@ fn add_regular_encoder_with_builder(
                         ));
                 }
                 crate::connector::MemoryTopicKind::Collection => {
-                    let output_schema = sink_input.output_schema()?;
-                    validate_unique_output_columns(sink.sink_id.as_str(), &output_schema)?;
-                    sink_input = builder
-                        .get_or_create_memory_collection_materialize(sink_input, output_schema);
+                    let output_layout = sink_input.output_layout()?;
+                    validate_unique_output_columns(sink.sink_id.as_str(), &output_layout)?;
+                    sink_input =
+                        builder.get_or_create_output_layout_materialize(sink_input, output_layout);
+                    layout_materialized = true;
                 }
             },
             crate::planner::sink::SinkConnectorConfig::Video(_) => {
-                let output_schema = sink_input.output_schema()?;
-                validate_video_sink_input_schema(sink.sink_id.as_str(), &output_schema)?;
+                let output_layout = sink_input.output_layout()?;
+                validate_video_sink_input_schema(sink.sink_id.as_str(), &output_layout)?;
             }
             _ => {}
+        }
+
+        if sink.output.has_column_filter() && !layout_materialized {
+            let output_layout = sink_input.output_layout()?;
+            validate_unique_output_columns(sink.sink_id.as_str(), &output_layout)?;
+            sink_input = builder.get_or_create_output_layout_materialize(sink_input, output_layout);
         }
 
         let connector_config = resolve_connector_content_type(
@@ -1852,39 +1814,39 @@ fn resolve_connector_content_type(
 
 fn validate_video_sink_input_schema(
     sink_id: &str,
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
 ) -> Result<(), String> {
     validate_video_sink_column(
         sink_id,
-        output_schema,
+        output_layout,
         crate::codec::VIDEO_PAYLOAD_COLUMN,
         "bytes",
         is_bytes_datatype,
     )?;
     validate_video_sink_column(
         sink_id,
-        output_schema,
+        output_layout,
         crate::codec::VIDEO_WIDTH_COLUMN,
         "integer",
         is_integer_datatype,
     )?;
     validate_video_sink_column(
         sink_id,
-        output_schema,
+        output_layout,
         crate::codec::VIDEO_HEIGHT_COLUMN,
         "integer",
         is_integer_datatype,
     )?;
     validate_video_sink_column(
         sink_id,
-        output_schema,
+        output_layout,
         crate::codec::VIDEO_FORMAT_COLUMN,
         "string",
         is_string_datatype,
     )?;
     validate_video_sink_column(
         sink_id,
-        output_schema,
+        output_layout,
         crate::codec::VIDEO_TIMESTAMP_COLUMN,
         "timestamp",
         is_timestamp_datatype,
@@ -1893,12 +1855,12 @@ fn validate_video_sink_input_schema(
 
 fn validate_video_sink_column(
     sink_id: &str,
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
     column_name: &str,
     expected: &str,
     matches_expected: fn(&ConcreteDatatype) -> bool,
 ) -> Result<(), String> {
-    let matches = output_schema
+    let matches = output_layout
         .columns
         .iter()
         .filter(|column| column.name.as_ref() == column_name)
@@ -1975,10 +1937,10 @@ fn format_datatype(data_type: &ConcreteDatatype) -> &'static str {
 
 fn validate_unique_output_columns(
     sink_id: &str,
-    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    output_layout: &crate::planner::physical::output_layout::OutputLayout,
 ) -> Result<(), String> {
     let mut seen = HashSet::<String>::new();
-    for col in output_schema.columns.iter() {
+    for col in output_layout.columns.iter() {
         let key = col.name.as_ref().to_string();
         if !seen.insert(key.clone()) {
             return Err(format!(

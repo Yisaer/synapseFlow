@@ -1,4 +1,4 @@
-//! MemoryCollectionMaterializeProcessor - reshapes tuples for memory collection sinks.
+//! MemoryCollectionMaterializeProcessor - reshapes tuples for direct collection sinks.
 
 use crate::model::{Collection, Message, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalMemoryCollectionMaterialize, PhysicalPlan};
@@ -13,7 +13,6 @@ use crate::processor::{
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -47,7 +46,7 @@ impl MemoryCollectionMaterializeProcessor {
             channel_capacities.control,
         );
 
-        let row_accessor = OutputRowAccessor::from_output_schema(&spec.output_schema);
+        let row_accessor = OutputRowAccessor::from_output_layout(&spec.output_layout);
         let keys = row_accessor.column_names();
 
         Self {
@@ -83,15 +82,10 @@ fn materialize_collection(
     shared_keys: &Arc<[Arc<str>]>,
     row_accessor: &mut OutputRowAccessor,
     input: &dyn Collection,
-    processor_id: &str,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    let mut missing = BTreeSet::<String>::new();
     let mut rows = Vec::with_capacity(input.num_rows());
     for tuple in input.rows() {
         let extracted = row_accessor.extract_row(tuple)?;
-        for column_name in extracted.missing_columns() {
-            missing.insert(column_name.as_ref().to_string());
-        }
         let values = extracted.into_values_with_null_fill();
 
         let msg = Arc::new(Message::new_shared_keys(
@@ -104,14 +98,6 @@ fn materialize_collection(
             output_tuple.set_output_mask_shared(mask);
         }
         rows.push(output_tuple);
-    }
-
-    if !missing.is_empty() {
-        tracing::warn!(
-            processor_id = %processor_id,
-            missing_columns = ?missing,
-            "memory collection materialize filled NULL for missing columns"
-        );
     }
 
     let batch = RecordBatch::new(rows)
@@ -185,7 +171,6 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                                             &shared_keys,
                                             &mut row_accessor,
                                             collection.as_ref(),
-                                            &id,
                                         ) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
@@ -280,7 +265,9 @@ impl Processor for MemoryCollectionMaterializeProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planner::physical::output_schema::{OutputColumn, OutputSchema, OutputValueGetter};
+    use crate::planner::physical::output_layout::{
+        OutputColumnLayout, OutputLayout, OutputValueRef,
+    };
     use datatypes::{ConcreteDatatype, Int64Type, Value};
     use std::time::{Duration, SystemTime};
 
@@ -295,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_collection_fills_missing_columns_with_null_and_preserves_mask() {
+    fn materialize_collection_fills_planned_null_columns_and_preserves_mask() {
         let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(456);
         let mut tuple = Tuple::with_timestamp(
             Arc::from(vec![build_message("stream", &["a"], vec![Value::Int64(7)])]),
@@ -305,32 +292,27 @@ mod tests {
         tuple.set_output_mask(vec![true, false, true]);
 
         let input = RecordBatch::new(vec![tuple]).expect("build input collection");
-        let output_schema = OutputSchema::new(vec![
-            OutputColumn {
+        let output_layout = OutputLayout::new(vec![
+            OutputColumnLayout {
                 name: Arc::from("a"),
                 data_type: ConcreteDatatype::Int64(Int64Type),
-                getter: OutputValueGetter::MessageByName {
-                    source_name: Arc::from("stream"),
-                    column_name: Arc::from("a"),
+                value_ref: OutputValueRef::Message {
+                    message_index: 0,
+                    value_index: 0,
                 },
             },
-            OutputColumn {
+            OutputColumnLayout {
                 name: Arc::from("missing_msg"),
                 data_type: ConcreteDatatype::Int64(Int64Type),
-                getter: OutputValueGetter::MessageByName {
-                    source_name: Arc::from("stream"),
-                    column_name: Arc::from("missing_msg"),
-                },
+                value_ref: OutputValueRef::Null,
             },
-            OutputColumn {
+            OutputColumnLayout {
                 name: Arc::from("missing_aff"),
                 data_type: ConcreteDatatype::Int64(Int64Type),
-                getter: OutputValueGetter::Affiliate {
-                    column_name: Arc::from("missing_aff"),
-                },
+                value_ref: OutputValueRef::Null,
             },
         ]);
-        let mut row_accessor = OutputRowAccessor::from_output_schema(&output_schema);
+        let mut row_accessor = OutputRowAccessor::from_output_layout(&output_layout);
         let shared_keys = row_accessor.column_names();
 
         let materialized = materialize_collection(
@@ -338,7 +320,6 @@ mod tests {
             &shared_keys,
             &mut row_accessor,
             &input,
-            "materialize_test",
         )
         .expect("materialize collection");
 

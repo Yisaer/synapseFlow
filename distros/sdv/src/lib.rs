@@ -32,12 +32,11 @@ pub fn register(instance: &flow::FlowInstance) {
         "columnar_json",
         Arc::new(|_config| Ok(Arc::new(encoder::ColumnarJsonEncoder::new()) as Arc<_>)),
     );
-    encoder_registry.register_encoder_with_caps(
+    encoder_registry.register_encoder(
         "columnar_csv_json",
         Arc::new(|_config| {
             Ok(Arc::new(encoder::ColumnarCsvJsonEncoder::new("columnar_csv_json")) as Arc<_>)
         }),
-        true,
     );
 
     let decoder_registry = instance.decoder_registry();

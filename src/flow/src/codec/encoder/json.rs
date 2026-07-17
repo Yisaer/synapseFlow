@@ -1,8 +1,7 @@
 use super::template_transform::JsonTemplateTransform;
 use super::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use crate::model::{Collection, Tuple};
-use crate::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
-use crate::planner::physical::ByIndexProjection;
+use crate::planner::physical::output_layout::{OutputLayout, OutputValueRef};
 use crate::planner::sink::{SinkEncoderConfig, SinkEncoderTransformConfig};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -16,8 +15,7 @@ pub struct JsonEncoder {
     props: JsonMap<String, JsonValue>,
     omit_null_columns: bool,
     transform: Option<Arc<JsonTemplateTransform>>,
-    by_index_projection: Option<Arc<ByIndexProjection>>,
-    output_schema: Option<Arc<OutputSchema>>,
+    output_layout: Option<Arc<OutputLayout>>,
 }
 
 impl JsonEncoder {
@@ -32,8 +30,7 @@ impl JsonEncoder {
             omit_null_columns,
             transform: json_template_transform_from_config(config)?,
             props: config.props().clone(),
-            by_index_projection: None,
-            output_schema: None,
+            output_layout: None,
         })
     }
 
@@ -51,47 +48,21 @@ impl SinkEncoderFactory for JsonEncoder {
     fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
         Ok(Box::new(JsonEncoderRuntime::new(
             self.omit_null_columns,
-            self.by_index_projection.clone(),
             self.transform.clone(),
-            self.output_schema.clone(),
+            self.output_layout.clone(),
         )))
     }
 
-    fn supports_index_lazy_materialization(&self) -> bool {
-        self.transform.is_none()
-    }
-
-    fn with_by_index_projection(
+    fn with_output_layout(
         self: Arc<Self>,
-        spec: Arc<ByIndexProjection>,
-    ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
-        if self.transform.is_some() {
-            return Err(EncodeError::Other(
-                "index lazy materialization is not supported when encoder.transform=template"
-                    .to_string(),
-            ));
-        }
-        Ok(Arc::new(Self {
-            id: self.id.clone(),
-            props: self.props.clone(),
-            omit_null_columns: self.omit_null_columns,
-            transform: self.transform.clone(),
-            by_index_projection: Some(spec),
-            output_schema: self.output_schema.clone(),
-        }))
-    }
-
-    fn with_output_schema(
-        self: Arc<Self>,
-        output_schema: Arc<OutputSchema>,
+        output_layout: Arc<OutputLayout>,
     ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             props: self.props.clone(),
             omit_null_columns: self.omit_null_columns,
             transform: self.transform.clone(),
-            by_index_projection: self.by_index_projection.clone(),
-            output_schema: Some(output_schema),
+            output_layout: Some(output_layout),
         }))
     }
 }
@@ -99,57 +70,44 @@ impl SinkEncoderFactory for JsonEncoder {
 struct JsonEncoderRuntime {
     is_first_row: bool,
     omit_null_columns: bool,
-    by_index_projection: Option<Arc<ByIndexProjection>>,
     transform: Option<Arc<JsonTemplateTransform>>,
-    output_schema: Option<Arc<OutputSchema>>,
+    output_layout: Option<Arc<OutputLayout>>,
 }
 
 impl JsonEncoderRuntime {
     fn new(
         omit_null_columns: bool,
-        by_index_projection: Option<Arc<ByIndexProjection>>,
         transform: Option<Arc<JsonTemplateTransform>>,
-        output_schema: Option<Arc<OutputSchema>>,
+        output_layout: Option<Arc<OutputLayout>>,
     ) -> Self {
         Self {
             is_first_row: true,
             omit_null_columns,
-            by_index_projection,
             transform,
-            output_schema,
+            output_layout,
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct JsonRowEncodeOptions<'a> {
-    by_index_projection: Option<&'a ByIndexProjection>,
-    output_schema: Option<&'a OutputSchema>,
+    output_layout: Option<&'a OutputLayout>,
     output_mask_mode: OutputMaskMode,
     null_policy: NullColumnPolicy,
 }
 
 impl<'a> JsonRowEncodeOptions<'a> {
-    fn native(
-        by_index_projection: Option<&'a ByIndexProjection>,
-        output_schema: Option<&'a OutputSchema>,
-        null_policy: NullColumnPolicy,
-    ) -> Self {
+    fn native(output_layout: Option<&'a OutputLayout>, null_policy: NullColumnPolicy) -> Self {
         Self {
-            by_index_projection,
-            output_schema,
+            output_layout,
             output_mask_mode: OutputMaskMode::HonorMask,
             null_policy,
         }
     }
 
-    fn transform(
-        by_index_projection: Option<&'a ByIndexProjection>,
-        output_schema: Option<&'a OutputSchema>,
-    ) -> Self {
+    fn transform(output_layout: Option<&'a OutputLayout>) -> Self {
         Self {
-            by_index_projection,
-            output_schema,
+            output_layout,
             output_mask_mode: OutputMaskMode::DenseForTemplate,
             null_policy: NullColumnPolicy::KeepNulls,
         }
@@ -189,9 +147,8 @@ impl SinkEncoder for JsonEncoderRuntime {
                 &mut chunk,
                 self.omit_null_columns,
                 tuple,
-                self.by_index_projection.as_deref(),
                 self.transform.as_deref(),
-                self.output_schema.as_deref(),
+                self.output_layout.as_deref(),
             )?;
         }
         Ok(Some(chunk.into()))
@@ -263,88 +220,52 @@ fn tuple_to_json_with_options(
     tuple: &Tuple,
     options: JsonRowEncodeOptions<'_>,
 ) -> Result<JsonValue, EncodeError> {
-    if tuple.output_mask().is_some() {
-        let output_schema = options.output_schema.ok_or_else(|| {
-            let message = match options.output_mask_mode {
-                OutputMaskMode::HonorMask => {
-                    "output_mask-aware JSON encoding requires the final output schema"
-                }
-                OutputMaskMode::DenseForTemplate => {
-                    "output_mask-aware JSON template encoding requires the final output schema"
-                }
-            };
-            EncodeError::Other(message.to_string())
-        })?;
-        return encode_row_from_output_schema(tuple, output_schema, options);
-    }
-
-    encode_row_from_tuple_layout(tuple, options.by_index_projection, options.null_policy)
+    let output_layout = options.output_layout.ok_or_else(|| {
+        EncodeError::Other("JSON encoding requires the final output layout".to_string())
+    })?;
+    encode_row_from_output_layout(tuple, output_layout, options)
 }
 
-fn resolve_by_index_output_value<'a>(
-    tuple: &'a Tuple,
-    by_index_projection: &ByIndexProjection,
-    output_name: &str,
-) -> Option<&'a Value> {
-    by_index_projection.columns().iter().find_map(|column| {
-        if column.output_name.as_ref() != output_name {
-            return None;
-        }
-        tuple.messages().iter().find_map(|message| {
-            if message.source() != column.source_name.as_ref() {
-                return None;
-            }
-            message.value(column.source_column_display.as_ref())
-        })
-    })
-}
-
-fn encode_row_from_output_schema(
+fn encode_row_from_output_layout(
     tuple: &Tuple,
-    output_schema: &OutputSchema,
+    output_layout: &OutputLayout,
     options: JsonRowEncodeOptions<'_>,
 ) -> Result<JsonValue, EncodeError> {
     let mut json_row = JsonMap::new();
     match options.output_mask_mode {
         OutputMaskMode::HonorMask => {
-            let output_mask = tuple.output_mask().ok_or_else(|| {
-                EncodeError::Other(
-                    "output_mask is required for mask-aware JSON encoding".to_string(),
-                )
-            })?;
-            if output_mask.len() != output_schema.columns.len() {
+            let output_mask = tuple.output_mask();
+            if output_mask.is_some_and(|mask| mask.len() != output_layout.columns.len()) {
                 return Err(EncodeError::Other(format!(
                     "output_mask width {} does not match output schema width {}",
-                    output_mask.len(),
-                    output_schema.columns.len()
+                    output_mask.map_or(0, <[bool]>::len),
+                    output_layout.columns.len()
                 )));
             }
 
-            for (column, selected) in output_schema.columns.iter().zip(output_mask.iter()) {
-                if !selected {
+            for (index, column) in output_layout.columns.iter().enumerate() {
+                if output_mask.is_some_and(|mask| !mask[index]) {
                     continue;
                 }
-                let value = resolve_output_value_for_schema_column(
-                    tuple,
-                    options.by_index_projection,
-                    column.name.as_ref(),
-                    &column.getter,
-                )?;
-                json_row.insert(
-                    column.name.as_ref().to_string(),
-                    value_to_json(value, options.null_policy),
-                );
+                let value = resolve_output_value(tuple, &column.value_ref)?;
+                let null_policy = if output_mask.is_some() {
+                    NullColumnPolicy::KeepNulls
+                } else {
+                    options.null_policy
+                };
+                insert_json_field(&mut json_row, column.name.as_ref(), value, null_policy);
             }
         }
         OutputMaskMode::DenseForTemplate => {
-            // Row-diff branches still expose `.row` as the dense current output row. Until the
-            // template contract becomes mask-aware, unchanged tracked columns remain visible as
-            // `null` here.
-            for column in output_schema.columns.iter() {
-                let value = resolve_output_value(tuple, &column.getter).unwrap_or(&Value::Null);
-                json_row.insert(
-                    column.name.as_ref().to_string(),
-                    value_to_json(value, options.null_policy),
+            // Row-diff branches expose `.row` as the dense current output row. The mask controls
+            // incremental emission and does not remove unchanged values from the template input.
+            for column in output_layout.columns.iter() {
+                let value = resolve_output_value(tuple, &column.value_ref)?;
+                insert_json_field(
+                    &mut json_row,
+                    column.name.as_ref(),
+                    value,
+                    options.null_policy,
                 );
             }
         }
@@ -353,96 +274,25 @@ fn encode_row_from_output_schema(
     Ok(JsonValue::Object(json_row))
 }
 
-fn resolve_output_value<'a>(tuple: &'a Tuple, getter: &OutputValueGetter) -> Option<&'a Value> {
-    match getter {
-        OutputValueGetter::Affiliate { column_name } => tuple
-            .affiliate()
-            .and_then(|affiliate| affiliate.value(column_name)),
-        OutputValueGetter::MessageByName {
-            source_name,
-            column_name,
-        } => tuple.messages().iter().find_map(|message| {
-            if message.source() != source_name.as_ref() {
-                return None;
-            }
-            message.value(column_name)
-        }),
-    }
-}
-
-fn resolve_output_value_for_schema_column<'a>(
+fn resolve_output_value<'a>(
     tuple: &'a Tuple,
-    by_index_projection: Option<&ByIndexProjection>,
-    output_name: &str,
-    getter: &OutputValueGetter,
+    value_ref: &OutputValueRef,
 ) -> Result<&'a Value, EncodeError> {
-    by_index_projection
-        .and_then(|projection| resolve_by_index_output_value(tuple, projection, output_name))
-        .or_else(|| resolve_output_value(tuple, getter))
-        .ok_or_else(|| {
-            EncodeError::Other(format!(
-                "output schema column `{output_name}` could not be resolved from runtime tuple"
-            ))
-        })
-}
-
-fn encode_row_from_tuple_layout(
-    tuple: &Tuple,
-    by_index_projection: Option<&ByIndexProjection>,
-    null_policy: NullColumnPolicy,
-) -> Result<JsonValue, EncodeError> {
-    let mut json_row = match by_index_projection {
-        Some(by_index_projection) => JsonMap::with_capacity(by_index_projection.columns().len()),
-        None => JsonMap::with_capacity(tuple.len()),
-    };
-
-    if let Some(by_index_projection) = by_index_projection {
-        if let Some(affiliate) = tuple.affiliate() {
-            for (key, value) in affiliate.entries() {
-                insert_json_field(&mut json_row, key.as_ref(), value, null_policy);
-            }
-        }
-
-        for column in by_index_projection.columns().iter() {
-            let value = tuple
-                .value_by_index(column.source_name.as_ref(), column.column_index)
-                .ok_or_else(|| {
-                    EncodeError::Other(format!(
-                        "by_index_projection column not found: {}#{}",
-                        column.source_name.as_ref(),
-                        column.column_index
-                    ))
-                })?;
-            insert_json_field(
-                &mut json_row,
-                column.output_name.as_ref(),
-                value,
-                null_policy,
-            );
-        }
-    } else {
-        for ((_, column_name), value) in tuple.entries() {
-            insert_json_field(&mut json_row, column_name, value, null_policy);
-        }
-    }
-
-    Ok(JsonValue::Object(json_row))
+    value_ref.resolve(tuple).map_err(EncodeError::Other)
 }
 
 fn append_tuple_json(
     payload: &mut Vec<u8>,
     omit_null_columns: bool,
     tuple: &Tuple,
-    by_index_projection: Option<&ByIndexProjection>,
     transform: Option<&JsonTemplateTransform>,
-    output_schema: Option<&OutputSchema>,
+    output_layout: Option<&OutputLayout>,
 ) -> Result<(), EncodeError> {
     let options = if transform.is_some() {
-        JsonRowEncodeOptions::transform(by_index_projection, output_schema)
+        JsonRowEncodeOptions::transform(output_layout)
     } else {
         JsonRowEncodeOptions::native(
-            by_index_projection,
-            output_schema,
+            output_layout,
             if omit_null_columns {
                 NullColumnPolicy::OmitNullObjectFields
             } else {
@@ -483,6 +333,7 @@ mod tests {
     use super::*;
     use crate::model::batch_from_columns_simple;
     use crate::model::Collection;
+    use crate::planner::physical::output_layout::OutputColumnLayout;
     use crate::planner::sink::SinkEncoderConfig;
     use datatypes::{
         ConcreteDatatype, Int64Type, ListType, ListValue, StringType, StructField, StructType,
@@ -496,8 +347,48 @@ mod tests {
         }
     }
 
+    fn test_output_layout(collection: &dyn Collection) -> Arc<OutputLayout> {
+        let Some(tuple) = collection.rows().first() else {
+            return Arc::new(OutputLayout::new(Vec::new()));
+        };
+        let mut columns = Vec::new();
+        for (message_index, message) in tuple.messages().iter().enumerate() {
+            columns.extend(
+                message
+                    .entries()
+                    .enumerate()
+                    .map(|(value_index, (name, value))| OutputColumnLayout {
+                        name: Arc::from(name),
+                        data_type: value.datatype(),
+                        value_ref: OutputValueRef::Message {
+                            message_index,
+                            value_index,
+                        },
+                    }),
+            );
+        }
+        if let Some(affiliate) = tuple.affiliate() {
+            columns.extend(affiliate.entries().enumerate().map(
+                |(affiliate_index, (name, value))| OutputColumnLayout {
+                    name: Arc::clone(name),
+                    data_type: value.datatype(),
+                    value_ref: OutputValueRef::Affiliate { affiliate_index },
+                },
+            ));
+        }
+        Arc::new(OutputLayout::new(columns))
+    }
+
+    fn test_runtime(encoder: &JsonEncoder, collection: &dyn Collection) -> JsonEncoderRuntime {
+        JsonEncoderRuntime::new(
+            encoder.omit_null_columns,
+            encoder.transform.clone(),
+            Some(test_output_layout(collection)),
+        )
+    }
+
     fn encode_collection(encoder: &JsonEncoder, collection: &dyn Collection) -> Vec<u8> {
-        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let mut runtime = test_runtime(encoder, collection);
         let mut payload = Vec::new();
         extend_optional(
             &mut payload,
@@ -700,13 +591,6 @@ mod tests {
     #[test]
     fn json_encoder_streaming() {
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let mut runtime = encoder.start_encoder().expect("encoder runtime");
-        let mut payload = Vec::new();
-        extend_optional(
-            &mut payload,
-            runtime.begin_delivery().expect("begin delivery"),
-        );
-
         let batch1 = batch_from_columns_simple(vec![
             (
                 "orders".to_string(),
@@ -720,6 +604,12 @@ mod tests {
             ),
         ])
         .expect("batch1");
+        let mut runtime = test_runtime(&encoder, &batch1);
+        let mut payload = Vec::new();
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
+        );
         if let Some(chunk) = runtime.append(&batch1).expect("append batch1") {
             payload.extend_from_slice(&chunk);
         }
@@ -758,7 +648,8 @@ mod tests {
     #[test]
     fn json_encoder_streaming_empty_payload_is_array() {
         let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let mut runtime = encoder.start_encoder().expect("encoder runtime");
+        let empty = crate::model::RecordBatch::new(Vec::new()).expect("empty batch");
+        let mut runtime = test_runtime(&encoder, &empty);
         let mut payload = Vec::new();
         extend_optional(
             &mut payload,
@@ -814,13 +705,6 @@ mod tests {
             "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
         );
         let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let mut runtime = encoder.start_encoder().expect("encoder runtime");
-        let mut payload = Vec::new();
-        extend_optional(
-            &mut payload,
-            runtime.begin_delivery().expect("begin delivery"),
-        );
-
         let batch1 = batch_from_columns_simple(vec![
             (
                 "orders".to_string(),
@@ -834,6 +718,12 @@ mod tests {
             ),
         ])
         .expect("batch1");
+        let mut runtime = test_runtime(&encoder, &batch1);
+        let mut payload = Vec::new();
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
+        );
         if let Some(chunk) = runtime.append(&batch1).expect("append batch1") {
             payload.extend_from_slice(&chunk);
         }
@@ -879,27 +769,6 @@ mod tests {
 
         assert!(
             err.to_string().contains("invalid template"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn json_encoder_transform_disables_index_lazy_materialization() {
-        let config =
-            SinkEncoderConfig::json_with_transform_template("{\"value\":{{ json(.row.amount) }} }");
-        let encoder = Arc::new(JsonEncoder::new("json", &config).expect("encoder"));
-        assert!(
-            !encoder.supports_index_lazy_materialization(),
-            "transform-enabled encoder should disable by-index lazy materialization"
-        );
-        let spec = Arc::new(ByIndexProjection::new(vec![]));
-        let err = match encoder.with_by_index_projection(spec) {
-            Ok(_) => panic!("should reject by-index"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string()
-                .contains("index lazy materialization is not supported"),
             "unexpected error: {err}"
         );
     }

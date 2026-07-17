@@ -71,20 +71,18 @@ Behavior:
     the stream binding (SQL datasource name).
   - Message column **names and order** follow the pipeline's planned output schema (the `SELECT`
     field order after wildcard expansion and aliasing).
-- The sink does **not** evaluate expressions. It only copies values already materialized by
-  upstream processors:
-  - `ColumnRef::ByIndex` outputs (including `a AS x`) are fetched from upstream messages by name.
-  - Derived columns (for example `a + 1 AS x`) are fetched from affiliate columns.
-- Missing columns:
-  - If a required column is not found in either messages or affiliate, the sink fills `NULL` and
-    logs a warning (once per publish call with the missing column list).
+- The sink does **not** evaluate expressions. It copies values through the
+  planner-derived `OutputLayout`: direct columns use fixed message indexes and
+  derived columns use fixed affiliate indexes.
+- A planned `OutputValueRef::Null` is copied as `NULL`. An out-of-range fixed
+  reference is a layout contract violation and returns a processing error.
 - Duplicate output column names are rejected at planning time for `collection` topics.
 
 Implementation note:
 
-- For performance, `PhysicalMemoryCollectionMaterialize` resolves column getters once using the first
-  observed tuple layout and then reads values by index for subsequent rows. Columns that cannot be
-  resolved are treated as permanently missing for that processor instance.
+- `PhysicalMemoryCollectionMaterialize` receives the same immutable
+  `OutputLayout` as encoded sinks and performs no first-row discovery or name
+  lookup fallback.
 
 ## Drop / Lag Behavior (Subscribers)
 

@@ -342,7 +342,6 @@ async fn column_filter_single_sink_exclude() {
 }
 
 #[tokio::test]
-#[ignore = "timeout: needs investigation, possibly decoder=none + delta/computed interaction"]
 async fn column_filter_delta_include() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -397,20 +396,18 @@ async fn column_filter_delta_include() {
     );
     publish_input_collection(&instance, &input_topic, batch, Duration::from_secs(5)).await;
 
+    let result = recv_json(&mut output, Duration::from_secs(5)).await;
+    let rows = result.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
     // Row 1: a=1 (new row, column emitted)
-    let r1 = recv_json(&mut output, Duration::from_secs(5)).await;
-    let row1 = &r1.as_array().unwrap()[0];
+    let row1 = &rows[0];
     assert_eq!(row1["a"], JsonValue::Number(serde_json::Number::from(1)));
     assert!(row1.get("b").is_none(), "b excluded");
 
-    // Row 2: a unchanged
-    let r2 = recv_json(&mut output, Duration::from_secs(5)).await;
-    let row2 = &r2.as_array().unwrap()[0];
-    assert_eq!(
-        row2["a"],
-        JsonValue::Null,
-        "a unchanged → null in delta mode"
-    );
+    // Row 2: a unchanged, so the delta object is empty.
+    let row2 = &rows[1];
+    assert!(row2.get("a").is_none());
     assert!(row2.get("b").is_none());
 
     instance
@@ -428,7 +425,6 @@ async fn column_filter_delta_include() {
 }
 
 #[tokio::test]
-#[ignore = "timeout: needs investigation, possibly decoder=none + delta/computed interaction"]
 async fn column_filter_delta_exclude() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -483,22 +479,20 @@ async fn column_filter_delta_exclude() {
     );
     publish_input_collection(&instance, &input_topic, batch, Duration::from_secs(5)).await;
 
+    let result = recv_json(&mut output, Duration::from_secs(5)).await;
+    let rows = result.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
     // Row 1: {a:1,b:2}
-    let r1 = recv_json(&mut output, Duration::from_secs(5)).await;
-    let row1 = &r1.as_array().unwrap()[0];
+    let row1 = &rows[0];
     assert_eq!(row1["a"], JsonValue::Number(serde_json::Number::from(1)));
     assert_eq!(row1["b"], JsonValue::Number(serde_json::Number::from(2)));
     assert!(row1.get("c").is_none());
 
     // Row 2: a changed, b unchanged
-    let r2 = recv_json(&mut output, Duration::from_secs(5)).await;
-    let row2 = &r2.as_array().unwrap()[0];
+    let row2 = &rows[1];
     assert_eq!(row2["a"], JsonValue::Number(serde_json::Number::from(4)));
-    assert_eq!(
-        row2["b"],
-        JsonValue::Null,
-        "b unchanged → null in delta mode"
-    );
+    assert!(row2.get("b").is_none());
     assert!(row2.get("c").is_none());
 
     instance
@@ -516,7 +510,6 @@ async fn column_filter_delta_exclude() {
 }
 
 #[tokio::test]
-#[ignore = "timeout: needs investigation, possibly decoder=none + delta/computed interaction"]
 async fn column_filter_include_computed_column() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,

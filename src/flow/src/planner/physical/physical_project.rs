@@ -26,11 +26,6 @@ pub struct PhysicalProjectField {
 pub struct PhysicalProject {
     pub base: BasePhysicalPlan,
     pub fields: Arc<[PhysicalProjectField]>,
-    /// Whether this project node should pass through input messages unchanged.
-    ///
-    /// This is used by physical rewrite rules that delay `ColumnRef::ByIndex`
-    /// materialization into downstream encoders.
-    pub passthrough_messages: bool,
     /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
     /// When `Some`, `ProjectProcessor` increments the counter after each projected row.
     pub processor_state: Option<Arc<ProcessorState>>,
@@ -85,7 +80,6 @@ impl PhysicalProject {
         Self {
             base,
             fields: fields.into(),
-            passthrough_messages: false,
             processor_state: None,
         }
     }
@@ -100,7 +94,6 @@ impl PhysicalProject {
         Self {
             base,
             fields: fields.into(),
-            passthrough_messages: false,
             processor_state: None,
         }
     }

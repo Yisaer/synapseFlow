@@ -135,62 +135,48 @@ against the ColumnFilter's output schema, not the shared Project's. This means:
 
 ## Physical Plan Node: `PhysicalColumnFilter`
 
-A new physical plan node type that performs per-sink column selection.
+A planner-only physical node derives the selected `OutputLayout` for each sink branch. It does not
+rewrite the runtime `Tuple`; message and affiliate value references retain their upstream fixed
+indexes.
 
 ### Properties
 
 - **Include/exclude columns**: stored as the filter specification
-- **Output schema**: narrowed to the selected subset
-- **Consumer map behavior**: **transparent** (see below)
-
-### Transparent Consumer Map
-
-`PhysicalColumnFilter` is classified as **transparent** in the consumer map, just like
-`EmptySuppress` and `Batch`. It passes upstream consumers through to its children without
-introducing `ProjectConsumer::Other`.
-
-This is critical because it means inserting ColumnFilter nodes between the shared `Project` and
-`RowDiff`/`Encoders` does not break existing by-index projection rewrite rules. The shared
-`Project` continues to see the same consumer types (`RowDiff` / `SinkEncoder`) and can be
-optimized to passthrough as before.
+- **Output layout**: narrowed to the selected subset
+- **Tuple behavior**: unchanged; excluded values may remain physically present but are invisible
+  to sink output consumers
 
 ### ColumnFilter Elimination
 
-When all columns in the ColumnFilter can be satisfied by the upstream projection, the
-`ColumnFilterProjectionIntersection` optimizer rule (see
-[`column_filter_projection_intersection.md`](../../planner/optimize/physical/column_filter_projection_intersection.md))
-eliminates the ColumnFilter node from the plan by pushing the include/exclude filtering into the
-nearest upstream by-index projection spec (on `RowDiff` or `Encoder`).
+Planner construction resolves row-diff and direct collection materialization from the filtered
+layout. The physical optimizer then attaches that layout to encoders and removes the planner-only
+node. No runtime `ColumnFilterProcessor` is created.
 
 Before optimization:
 
 ```text
-shared Project(passthrough)
+shared Project
   └─ ColumnFilter(include=[a,c])
-      └─ RowDiff(late_projection: [(s,0,0,a), (s,1,1,b), (s,2,2,c), (s,3,3,d)])
+      └─ RowDiff(output_layout=[a,c])
 ```
 
 After optimization:
 
 ```text
-shared Project(passthrough)
-  └─ RowDiff(late_projection: [(s,0,0,a), (s,2,1,c)])
+shared Project
+  └─ RowDiff(output_layout=[a,c])
 ```
 
-The ColumnFilter node is **removed from the plan**. RowDiff re-parents to the shared Project
-directly. The transformation does two things:
-
-1. **Crops** the projection columns to only those that match the include/exclude filter
-2. **Re-indexes** the `output_index` of each projection column to align with the ColumnFilter's
-   narrowed output schema
+The selected layout remains attached to the consumer even though the ColumnFilter node is absent
+from the optimized executable plan.
 
 ## Interaction With Existing Sink Features
 
 ### With Row Diff
 
-- ColumnFilter before RowDiff: diff operates on filtered columns ✅
-- `output.delta.columns` validated against filtered schema ✅
-- ColumnFilter is transparent — by-index rewrite still pushes projection to RowDiff ✅
+- RowDiff captures the filtered layout before the planner-only node is removed
+- `output.delta.columns` is validated against the filtered layout
+- Excluded columns do not participate in diff state
 
 ### With Omit If Empty
 
@@ -202,10 +188,10 @@ suppression should consider the columns the sink actually emits.
 Batching runs after all column filtering and output mode stages. `StreamingEncoderRewrite` fuses
 `Batch → SinkEncoder` as before.
 
-### With By-Index Projection Rewrites
+### With Direct Collection Sinks
 
-See the dedicated optimizer rule document:
-[`column_filter_projection_intersection.md`](../../planner/optimize/physical/column_filter_projection_intersection.md)
+Connectors using `encoder.type=none` cannot interpret `OutputLayout` directly. Their final sink
+boundary materializes the selected layout into a dense collection after row-diff and batching.
 
 ### With Multi-Sink Pipelines
 
@@ -226,22 +212,15 @@ It is not part of `CommonSinkProps` (batching) or connector-specific props.
 At physical plan build time:
 
 1. Validate `include_columns` and `exclude_columns` are not both set
-2. Resolve column names against the upstream output schema
-3. Reject if any column is not found in the schema
+2. Resolve column names against the upstream output layout
+3. Reject if any column is not found in the layout
 4. Reject if the resulting column set is empty
 
 ## Explain
 
-`EXPLAIN` should show the `ColumnFilter` node with its include/exclude configuration and the
-narrowed output schema:
-
-```text
-PhysicalColumnFilter: sink_id=mqtt_speed, include_columns=[speed, rpm], output=[speed, rpm]
-```
-
-After `ColumnFilterProjectionIntersection` optimization, the `ColumnFilter` node is **removed**
-from the plan. `EXPLAIN` will show the shared `Project` connected directly to `RowDiff` (or
-`Encoder`), with the projection spec reflecting only the filtered columns.
+Optimized `EXPLAIN` does not show `PhysicalColumnFilter` because it has no runtime processor. The
+sink's logical explain entry retains `output.include_columns` or `output.exclude_columns`; the
+filtered fixed layout is owned by row-diff, encoder, or final collection materialization.
 
 ## Limitations / Follow-ups
 

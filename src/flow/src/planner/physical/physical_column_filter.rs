@@ -2,20 +2,7 @@ use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
 use std::fmt;
 use std::sync::Arc;
 
-/// Per-column metadata for column filtering.
-/// Resolved to (msg_index, key_index) at runtime on first tuple.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ColumnFilterKeepSpec {
-    pub source_name: Arc<str>,
-    pub column_name: Arc<str>,
-    pub output_name: Arc<str>,
-}
-
-/// Physical plan node that filters columns per sink branch.
-///
-/// Transparent in consumer map (passes through upstream consumers) so that
-/// existing by-index projection rewrite rules continue to fire on the shared
-/// upstream Project.
+/// Planner-only node that narrows the visible output layout for one sink branch.
 #[derive(Clone)]
 pub struct PhysicalColumnFilter {
     pub base: BasePhysicalPlan,
@@ -24,10 +11,6 @@ pub struct PhysicalColumnFilter {
     pub include_columns: Option<Vec<String>>,
     /// If set, all columns except these are emitted.
     pub exclude_columns: Option<Vec<String>>,
-    /// Per-column resolution metadata, computed at plan-build time from the
-    /// child's output schema. Runtime uses this to build index caches on
-    /// first tuple, then performs zero-name-match column reads thereafter.
-    pub keep_specs: Vec<ColumnFilterKeepSpec>,
 }
 
 impl PhysicalColumnFilter {
@@ -37,14 +20,12 @@ impl PhysicalColumnFilter {
         sink_id: String,
         include_columns: Option<Vec<String>>,
         exclude_columns: Option<Vec<String>>,
-        keep_specs: Vec<ColumnFilterKeepSpec>,
     ) -> Self {
         Self {
             base: BasePhysicalPlan::new(children, index),
             sink_id,
             include_columns,
             exclude_columns,
-            keep_specs,
         }
     }
 }

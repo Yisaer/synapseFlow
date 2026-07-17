@@ -5,13 +5,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use flow::codec::encoder::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use flow::model::Collection;
-use flow::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
+use flow::planner::physical::output_layout::{OutputLayout, OutputValueRef};
 
 /// Columnar JSON encoder: batches rows into a single JSON object keyed by column name,
 /// with array values per column. The output schema defines column names and order.
 /// Supports streaming accumulation with incremental JSON writing.
 pub struct ColumnarJsonEncoder {
-    output_schema: Option<Arc<OutputSchema>>,
+    output_layout: Option<Arc<OutputLayout>>,
 }
 
 impl Default for ColumnarJsonEncoder {
@@ -23,7 +23,7 @@ impl Default for ColumnarJsonEncoder {
 impl ColumnarJsonEncoder {
     pub fn new() -> Self {
         Self {
-            output_schema: None,
+            output_layout: None,
         }
     }
 }
@@ -34,19 +34,19 @@ impl SinkEncoderFactory for ColumnarJsonEncoder {
     }
 
     fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
-        let output_schema = self.output_schema.clone().ok_or_else(|| {
+        let output_layout = self.output_layout.clone().ok_or_else(|| {
             EncodeError::Other("columnar_json encoder requires output schema".to_string())
         })?;
-        Ok(Box::new(ColumnarJsonEncoderRuntime::new(output_schema)))
+        Ok(Box::new(ColumnarJsonEncoderRuntime::new(output_layout)))
     }
 
-    fn with_output_schema(
+    fn with_output_layout(
         self: Arc<Self>,
-        output_schema: Arc<OutputSchema>,
+        output_layout: Arc<OutputLayout>,
     ) -> Result<Arc<dyn SinkEncoderFactory>, EncodeError> {
-        validate_unique_output_names(&output_schema)?;
+        validate_unique_output_names(&output_layout)?;
         Ok(Arc::new(Self {
-            output_schema: Some(output_schema),
+            output_layout: Some(output_layout),
         }))
     }
 }
@@ -57,8 +57,8 @@ struct ColumnarJsonEncoderRuntime {
 }
 
 impl ColumnarJsonEncoderRuntime {
-    fn new(output_schema: Arc<OutputSchema>) -> Self {
-        let layout = Arc::new(ColumnarJsonLayout::from_output_schema(output_schema));
+    fn new(output_layout: Arc<OutputLayout>) -> Self {
+        let layout = Arc::new(ColumnarJsonLayout::from_output_layout(output_layout));
         Self {
             agg: ColumnarAggregator::new(Arc::clone(&layout)),
             layout,
@@ -98,17 +98,17 @@ struct ColumnarJsonLayout {
 
 struct ColumnarJsonColumn {
     name: Arc<str>,
-    getter: OutputValueGetter,
+    value_ref: OutputValueRef,
 }
 
 impl ColumnarJsonLayout {
-    fn from_output_schema(output_schema: Arc<OutputSchema>) -> Self {
-        let columns = output_schema
+    fn from_output_layout(output_layout: Arc<OutputLayout>) -> Self {
+        let columns = output_layout
             .columns
             .iter()
             .map(|column| ColumnarJsonColumn {
                 name: Arc::clone(&column.name),
-                getter: column.getter.clone(),
+                value_ref: column.value_ref.clone(),
             })
             .collect::<Vec<_>>();
         Self {
@@ -147,8 +147,11 @@ impl ColumnarAggregator {
         self.row_count += 1;
         for idx in 0..self.layout.columns.len() {
             let column = &self.layout.columns[idx];
-            let value = value_from_getter(tuple, &column.getter);
-            append_json_value(&mut self.buffers[idx], value)?;
+            let value = column
+                .value_ref
+                .resolve(tuple)
+                .map_err(EncodeError::Other)?;
+            append_json_value(&mut self.buffers[idx], Some(value))?;
         }
         Ok(())
     }
@@ -190,24 +193,9 @@ fn append_json_value(
     Ok(())
 }
 
-fn value_from_getter<'a>(
-    tuple: &'a flow::model::Tuple,
-    getter: &OutputValueGetter,
-) -> Option<&'a datatypes::Value> {
-    match getter {
-        OutputValueGetter::MessageByName {
-            source_name,
-            column_name,
-        } => tuple.value_by_name(source_name.as_ref(), column_name.as_ref()),
-        OutputValueGetter::Affiliate { column_name } => tuple
-            .affiliate()
-            .and_then(|affiliate| affiliate.value(column_name.as_ref())),
-    }
-}
-
-fn validate_unique_output_names(output_schema: &OutputSchema) -> Result<(), EncodeError> {
+fn validate_unique_output_names(output_layout: &OutputLayout) -> Result<(), EncodeError> {
     let mut seen = HashSet::new();
-    for column in output_schema.columns.iter() {
+    for column in output_layout.columns.iter() {
         if !seen.insert(column.name.as_ref()) {
             return Err(EncodeError::Other(format!(
                 "columnar_json encoder does not support duplicate output column `{}`",
@@ -302,7 +290,7 @@ where
 mod tests {
     use super::*;
     use flow::model::{Message, RecordBatch, Tuple};
-    use flow::planner::physical::output_schema::{OutputColumn, OutputValueGetter};
+    use flow::planner::physical::output_layout::{OutputColumnLayout, OutputValueRef};
 
     fn make_tuple(source: &str, keys: &[&str], vals: &[datatypes::Value]) -> Tuple {
         let keys_arc: Vec<Arc<str>> = keys.iter().map(|k| Arc::<str>::from(*k)).collect();
@@ -320,7 +308,7 @@ mod tests {
         runtime.finish_delivery().unwrap().unwrap().to_vec()
     }
 
-    fn infer_message_schema(batch: &RecordBatch) -> Arc<OutputSchema> {
+    fn infer_message_schema(batch: &RecordBatch) -> Arc<OutputLayout> {
         let columns = batch
             .rows()
             .first()
@@ -328,44 +316,48 @@ mod tests {
                 tuple
                     .messages()
                     .iter()
-                    .flat_map(|message| {
-                        message.entries().map(|(name, _)| {
-                            (
-                                name.to_string(),
-                                OutputValueGetter::MessageByName {
-                                    source_name: Arc::from(message.source()),
-                                    column_name: Arc::from(name),
-                                },
-                            )
-                        })
+                    .enumerate()
+                    .flat_map(|(message_index, message)| {
+                        message
+                            .entries()
+                            .enumerate()
+                            .map(move |(value_index, (name, _))| {
+                                (
+                                    name.to_string(),
+                                    OutputValueRef::Message {
+                                        message_index,
+                                        value_index,
+                                    },
+                                )
+                            })
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        output_schema(
+        output_layout(
             columns
                 .iter()
-                .map(|(name, getter)| (name.as_str(), getter.clone()))
+                .map(|(name, value_ref)| (name.as_str(), value_ref.clone()))
                 .collect(),
         )
     }
 
-    fn output_schema(columns: Vec<(&str, OutputValueGetter)>) -> Arc<OutputSchema> {
-        Arc::new(OutputSchema::new(
+    fn output_layout(columns: Vec<(&str, OutputValueRef)>) -> Arc<OutputLayout> {
+        Arc::new(OutputLayout::new(
             columns
                 .into_iter()
-                .map(|(name, getter)| OutputColumn {
+                .map(|(name, value_ref)| OutputColumnLayout {
                     name: Arc::from(name),
                     data_type: datatypes::ConcreteDatatype::Null,
-                    getter,
+                    value_ref,
                 })
                 .collect(),
         ))
     }
 
-    fn schema_factory(schema: Arc<OutputSchema>) -> Arc<dyn SinkEncoderFactory> {
+    fn schema_factory(schema: Arc<OutputLayout>) -> Arc<dyn SinkEncoderFactory> {
         Arc::new(ColumnarJsonEncoder::new())
-            .with_output_schema(schema)
+            .with_output_layout(schema)
             .expect("attach output schema")
     }
 
@@ -432,11 +424,11 @@ mod tests {
 
     #[test]
     fn start_encoder_returns_runtime_encoder() {
-        let enc = schema_factory(output_schema(vec![(
+        let enc = schema_factory(output_layout(vec![(
             "a",
-            OutputValueGetter::MessageByName {
-                source_name: Arc::from("src"),
-                column_name: Arc::from("a"),
+            OutputValueRef::Message {
+                message_index: 0,
+                value_index: 0,
             },
         )]));
         assert!(enc.start_encoder().is_ok());
@@ -444,11 +436,11 @@ mod tests {
 
     #[test]
     fn runtime_encoder_works() {
-        let enc = schema_factory(output_schema(vec![(
+        let enc = schema_factory(output_layout(vec![(
             "a",
-            OutputValueGetter::MessageByName {
-                source_name: Arc::from("src"),
-                column_name: Arc::from("a"),
+            OutputValueRef::Message {
+                message_index: 0,
+                value_index: 0,
             },
         )]));
         let mut runtime = enc.start_encoder().expect("encoder runtime");
@@ -528,12 +520,12 @@ mod tests {
 
     #[test]
     fn empty_batch_produces_empty_object() {
-        let layout = Arc::new(ColumnarJsonLayout::from_output_schema(output_schema(vec![
+        let layout = Arc::new(ColumnarJsonLayout::from_output_layout(output_layout(vec![
             (
                 "a",
-                OutputValueGetter::MessageByName {
-                    source_name: Arc::from("src"),
-                    column_name: Arc::from("a"),
+                OutputValueRef::Message {
+                    message_index: 0,
+                    value_index: 0,
                 },
             ),
         ])));
@@ -543,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn output_schema_controls_order_aliases_and_affiliate_columns() {
+    fn output_layout_controls_order_aliases_and_affiliate_columns() {
         let mut tuple = make_tuple(
             "src",
             &["b", "a"],
@@ -551,25 +543,20 @@ mod tests {
         );
         tuple.add_affiliate_column(Arc::new("x".to_string()), datatypes::Value::Int64(9));
         let batch = RecordBatch::new(vec![tuple]).unwrap();
-        let schema = output_schema(vec![
+        let schema = output_layout(vec![
             (
                 "a",
-                OutputValueGetter::MessageByName {
-                    source_name: Arc::from("src"),
-                    column_name: Arc::from("a"),
+                OutputValueRef::Message {
+                    message_index: 0,
+                    value_index: 1,
                 },
             ),
-            (
-                "x",
-                OutputValueGetter::Affiliate {
-                    column_name: Arc::from("x"),
-                },
-            ),
+            ("x", OutputValueRef::Affiliate { affiliate_index: 0 }),
             (
                 "renamed_b",
-                OutputValueGetter::MessageByName {
-                    source_name: Arc::from("src"),
-                    column_name: Arc::from("b"),
+                OutputValueRef::Message {
+                    message_index: 0,
+                    value_index: 0,
                 },
             ),
         ]);
@@ -582,29 +569,23 @@ mod tests {
     }
 
     #[test]
-    fn output_schema_missing_values_are_encoded_as_null() {
+    fn output_layout_missing_values_are_encoded_as_null() {
         let tuple = make_tuple("src", &["a"], &[datatypes::Value::Int64(1)]);
         let batch = RecordBatch::new(vec![tuple]).unwrap();
-        let schema = output_schema(vec![(
-            "missing",
-            OutputValueGetter::MessageByName {
-                source_name: Arc::from("src"),
-                column_name: Arc::from("missing"),
-            },
-        )]);
+        let schema = output_layout(vec![("missing", OutputValueRef::Null)]);
 
         let bytes = encode_with_factory(schema_factory(schema), &batch);
         assert_eq!(String::from_utf8(bytes).unwrap(), r#"{"missing":[null]}"#);
     }
 
     #[test]
-    fn output_schema_empty_delivery_stays_empty_object() {
+    fn output_layout_empty_delivery_stays_empty_object() {
         let batch = RecordBatch::new(vec![]).unwrap();
-        let schema = output_schema(vec![(
+        let schema = output_layout(vec![(
             "a",
-            OutputValueGetter::MessageByName {
-                source_name: Arc::from("src"),
-                column_name: Arc::from("a"),
+            OutputValueRef::Message {
+                message_index: 0,
+                value_index: 0,
             },
         )]);
 
@@ -613,25 +594,25 @@ mod tests {
     }
 
     #[test]
-    fn output_schema_rejects_duplicate_names() {
-        let schema = output_schema(vec![
+    fn output_layout_rejects_duplicate_names() {
+        let schema = output_layout(vec![
             (
                 "a",
-                OutputValueGetter::MessageByName {
-                    source_name: Arc::from("src"),
-                    column_name: Arc::from("a"),
+                OutputValueRef::Message {
+                    message_index: 0,
+                    value_index: 0,
                 },
             ),
             (
                 "a",
-                OutputValueGetter::MessageByName {
-                    source_name: Arc::from("src"),
-                    column_name: Arc::from("b"),
+                OutputValueRef::Message {
+                    message_index: 0,
+                    value_index: 1,
                 },
             ),
         ]);
 
-        let err = match Arc::new(ColumnarJsonEncoder::new()).with_output_schema(schema) {
+        let err = match Arc::new(ColumnarJsonEncoder::new()).with_output_layout(schema) {
             Ok(_) => panic!("duplicate names should be rejected"),
             Err(err) => err,
         };

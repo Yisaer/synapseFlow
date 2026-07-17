@@ -15,16 +15,9 @@ This API is streaming by contract. An encoder that cannot emit incrementally may
 buffer records in `append` and emit the final payload from `finish_delivery`;
 that does not require a separate encoder category.
 
-Registered encoders may declare one additional optimizer capability:
-
-- `supports_by_index_projection` — whether the encoder can perform delayed
-  column materialization via `ByIndexProjection`. Used by the
-  `ByIndexProjectionIntoEncoderRewrite` optimizer rule.
-
-| Encoder   | supports_by_index_projection |
-|-----------|------------------------------|
-| json      | true(!transform)             |
-| protobuf  | false                        |
+The planner binds an `OutputLayout` to each encoder factory. The layout defines
+the ordered output columns and their fixed tuple value references. This contract
+is independent of encoder kind and template configuration.
 
 Current encoder-local documents:
 

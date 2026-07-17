@@ -61,8 +61,8 @@ The fused node carries:
 | `PhysicalSinkEncoder`  | `SinkEncoderProcessor` in `StreamingBatchMode::Immediate`     |
 | `PhysicalIncSinkEncoder` | `SinkEncoderProcessor` in `CountOnly` / `DurationOnly` / `Combined` |
 
-## Interaction With Other Rules
+## Output Layout
 
-This rule runs early in the physical optimization sequence, before all
-`ByIndexProjection*` rules. This ensures `PhysicalIncSinkEncoder` is in place
-before by-index projections are attached.
+Both immediate and incremental sink encoders receive the same planner-derived
+`OutputLayout`. Fusing the batch node does not change fixed value references or
+the logical output order.

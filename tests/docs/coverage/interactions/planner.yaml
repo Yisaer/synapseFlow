@@ -1,36 +1,19 @@
 domain: planner
 interactions:
-  - id: planner.physical.by_index_mixed_consumers
-    title: By-index mixed consumers
-    summary: Validate delayed by-index projection when a shared projection feeds both encoder and row-diff consumers.
-    features:
-      - planner.physical.by_index_projection_across_mixed_consumers_rewrite
-      - planner.physical.by_index_projection_into_encoder_rewrite
-      - planner.physical.by_index_projection_into_row_diff_rewrite
-    status: active
-
-  - id: planner.physical.partial_row_diff_encoder_late_materialization
-    title: Partial row-diff encoder late materialization
-    summary: Validate the split of row-diff-owned columns and encoder-owned pass-through columns during physical planning.
-    features:
-      - planner.physical.by_index_projection_into_row_diff_rewrite
-      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
-    status: active
-
-  - id: planner.physical.alias_by_index_encoder_projection
-    title: Alias by-index encoder projection
-    summary: Validate that by-index projection folded into encoder preserves SQL-visible aliases.
+  - id: planner.physical.alias_fixed_output_layout
+    title: Alias fixed output layout
+    summary: Validate that planner-fixed value references preserve SQL-visible aliases.
     features:
       - parser.select.alias_computing
-      - planner.physical.by_index_projection_into_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
-  - id: planner.physical.alias_by_index_row_diff_projection
-    title: Alias by-index row-diff projection
-    summary: Validate that row-diff late projection preserves SQL-visible aliases when folding by-index projection.
+  - id: planner.physical.row_diff_fixed_output_layout
+    title: Row-diff fixed output layout
+    summary: Validate row-diff and downstream encoders using the same planner-fixed output references.
     features:
-      - parser.select.alias_computing
-      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - sink.output.row_diff
+      - planner.physical.output_layout_fixed_slots
     status: active
 
   - id: planner.physical.transform_batch_streaming_encoder
@@ -41,22 +24,21 @@ interactions:
       - planner.physical.streaming_encoder_rewrite
     status: active
 
-  - id: planner.physical.streaming_encoder_batch_by_index
-    title: Streaming encoder batch by-index rewrite
-    summary: Validate streaming encoder rewrite with sink batching and by-index projection folded into the encoder branch.
+  - id: planner.physical.streaming_encoder_batch_fixed_output_layout
+    title: Streaming encoder batch fixed output layout
+    summary: Validate that streaming encoder batching preserves planner-fixed output references.
     features:
       - sink.output.batching
       - planner.physical.streaming_encoder_rewrite
-      - planner.physical.by_index_projection_into_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
-  - id: planner.physical.row_diff_batching_partial_late_materialization
-    title: Row-diff batching partial late materialization
-    summary: Validate partial late materialization between row-diff tracked columns and batched streaming encoder output.
+  - id: planner.physical.row_diff_batching_fixed_output_layout
+    title: Row-diff batching fixed output layout
+    summary: Validate fixed output references across row-diff and batched streaming encoder output.
     features:
       - sink.output.batching
-      - planner.physical.by_index_projection_into_row_diff_rewrite
-      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
   - id: planner.physical.memory_collection_row_diff_materialize
@@ -65,7 +47,7 @@ interactions:
     features:
       - sink.memory_collection.materialize
       - sink.output.row_diff
-      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
   - id: planner.physical.row_diff_omit_if_empty_empty_suppress
@@ -74,7 +56,7 @@ interactions:
     features:
       - sink.output.row_diff
       - sink.output.omit_if_empty
-      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.output_layout_fixed_slots
     status: active
 
   - id: planner.eventtime.on_change_hidden_column_preservation

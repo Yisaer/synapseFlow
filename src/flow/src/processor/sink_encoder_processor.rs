@@ -778,15 +778,35 @@ mod tests {
     use crate::codec::JsonEncoder;
     use crate::codec::SinkEncoderFactory;
     use crate::model::{batch_from_columns_simple, RecordBatch};
+    use crate::planner::physical::output_layout::{
+        OutputColumnLayout, OutputLayout, OutputValueRef,
+    };
     use crate::planner::sink::SinkEncoderConfig;
     use crate::processor::EncodedDeliveryFlags;
     use crate::runtime::TaskSpawner;
-    use datatypes::Value;
+    use datatypes::{ConcreteDatatype, Int64Type, Value};
     use tokio::runtime::Handle;
     use tokio::time::timeout;
 
     fn test_spawner() -> TaskSpawner {
         TaskSpawner::from_handle(Handle::current())
+    }
+
+    fn test_json_runtime() -> Box<dyn SinkEncoder> {
+        let layout = Arc::new(OutputLayout::new(vec![OutputColumnLayout {
+            name: Arc::from("amount"),
+            data_type: ConcreteDatatype::Int64(Int64Type),
+            value_ref: OutputValueRef::Message {
+                message_index: 0,
+                value_index: 0,
+            },
+        }]));
+        let factory = Arc::new(
+            JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder factory"),
+        )
+        .with_output_layout(layout)
+        .expect("bind output layout");
+        factory.start_encoder().expect("encoder runtime")
     }
 
     async fn recv_output(
@@ -800,8 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_encoder_emits_chunked_delivery_and_count_boundaries() {
-        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let runtime = encoder.start_encoder().expect("encoder runtime");
+        let runtime = test_json_runtime();
         let mut processor = SinkEncoderProcessor::new("sink_encoder", runtime, Some(2), None);
         let (input, input_rx) = broadcast::channel(16);
         processor.add_input(input_rx);
@@ -856,8 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_count_splits_multi_row_collection() {
-        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let runtime = encoder.start_encoder().expect("encoder runtime");
+        let runtime = test_json_runtime();
         let mut processor = SinkEncoderProcessor::new("sink_encoder", runtime, Some(2), None);
         let (input, input_rx) = broadcast::channel(16);
         processor.add_input(input_rx);
@@ -906,8 +924,7 @@ mod tests {
 
     #[tokio::test]
     async fn immediate_empty_collection_emits_single_empty_delivery() {
-        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let runtime = encoder.start_encoder().expect("encoder runtime");
+        let runtime = test_json_runtime();
         let mut processor = SinkEncoderProcessor::new("sink_encoder", runtime, None, None);
         let (input, input_rx) = broadcast::channel(8);
         processor.add_input(input_rx);
@@ -936,8 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_control_flushes_data_before_forwarding_control() {
-        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let runtime = encoder.start_encoder().expect("encoder runtime");
+        let runtime = test_json_runtime();
         let mut processor =
             SinkEncoderProcessor::new("sink_encoder", runtime, None, Some(Duration::from_secs(60)));
         let (input, input_rx) = broadcast::channel(16);
@@ -1026,8 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_batch_duration_fails_when_started_directly() {
-        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
-        let runtime = encoder.start_encoder().expect("encoder runtime");
+        let runtime = test_json_runtime();
         let mut processor =
             SinkEncoderProcessor::new("sink_encoder", runtime, None, Some(Duration::ZERO));
 

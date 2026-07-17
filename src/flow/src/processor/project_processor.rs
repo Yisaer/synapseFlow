@@ -20,47 +20,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-#[derive(Clone)]
-enum ProjectExecMode {
-    Normal { fields: Arc<[PhysicalProjectField]> },
-    Passthrough { fields: Vec<AffiliateExpr> },
-}
-
-impl ProjectExecMode {
-    fn new(physical_project: &PhysicalProject) -> Self {
-        if physical_project.passthrough_messages {
-            Self::Passthrough {
-                fields: physical_project
-                    .fields
-                    .iter()
-                    .map(|field| AffiliateExpr {
-                        output_name: Arc::new(field.field_name.as_ref().to_string()),
-                        field_name: field.field_name.as_ref().to_string(),
-                        expr: field.compiled_expr.clone(),
-                    })
-                    .collect(),
-            }
-        } else {
-            Self::Normal {
-                fields: physical_project.fields.clone(),
-            }
-        }
-    }
-
-    fn apply(
-        &self,
-        collection: Box<dyn Collection>,
-        state: Option<&ProcessorState>,
-    ) -> Result<Box<dyn Collection>, ProcessorError> {
-        match self {
-            Self::Normal { fields } => apply_projection(collection.as_ref(), fields, state),
-            Self::Passthrough { fields } => {
-                apply_passthrough_projection(collection.as_ref(), fields, state)
-            }
-        }
-    }
-}
-
 /// ProjectProcessor - evaluates projection expressions
 ///
 /// This processor:
@@ -70,7 +29,7 @@ impl ProjectExecMode {
 pub struct ProjectProcessor {
     /// Processor identifier
     id: String,
-    exec_mode: ProjectExecMode,
+    fields: Arc<[PhysicalProjectField]>,
     /// Processor-local state for pipeline state functions (e.g. last_hit_count).
     pub(crate) processor_state: Option<Arc<ProcessorState>>,
     /// Input channels for receiving data
@@ -101,10 +60,9 @@ impl ProjectProcessor {
             channel_capacities.control_link_kind,
             channel_capacities.control,
         );
-        let exec_mode = ProjectExecMode::new(physical_project.as_ref());
         Self {
             id: id.into(),
-            exec_mode,
+            fields: Arc::clone(&physical_project.fields),
             processor_state: None,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
@@ -140,57 +98,24 @@ fn apply_projection(
     fields: &[PhysicalProjectField],
     state: Option<&ProcessorState>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    match state {
-        Some(state) => {
-            let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
-            for tuple in input_collection.rows() {
-                let mut projected_tuple =
-                    Tuple::with_timestamp(Arc::clone(&tuple.messages), tuple.timestamp);
-                for field in fields {
-                    let value = field
-                        .compiled_expr
-                        .eval_with_tuple(tuple)
-                        .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-                    projected_tuple
-                        .add_affiliate_column(Arc::new(field.field_name.to_string()), value);
-                }
-                projected_rows.push(projected_tuple);
-                state.last_hit_count.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok(Box::new(RecordBatch::new(projected_rows).map_err(|e| {
-                ProcessorError::ProcessingError(e.to_string())
-            })?))
-        }
-        None => input_collection.apply_projection(fields).map_err(|e| {
-            ProcessorError::ProcessingError(format!("Failed to apply projection: {}", e))
-        }),
-    }
-}
-
-#[derive(Clone)]
-struct AffiliateExpr {
-    output_name: Arc<String>,
-    field_name: String,
-    expr: ScalarExpr,
-}
-
-fn apply_passthrough_projection(
-    input_collection: &dyn Collection,
-    fields: &[AffiliateExpr],
-    state: Option<&ProcessorState>,
-) -> Result<Box<dyn Collection>, ProcessorError> {
     let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
     for tuple in input_collection.rows() {
         let mut projected_tuple =
             Tuple::with_timestamp(Arc::clone(&tuple.messages), tuple.timestamp);
         for field in fields {
-            let value = field.expr.eval_with_tuple(tuple).map_err(|eval_error| {
-                ProcessorError::ProcessingError(format!(
-                    "Failed to evaluate expression for field '{}': {}",
-                    field.field_name, eval_error
-                ))
-            })?;
-            projected_tuple.add_affiliate_column(Arc::clone(&field.output_name), value);
+            if matches!(
+                field.compiled_expr,
+                ScalarExpr::Column(crate::expr::scalar::ColumnRef::ByIndex { .. })
+                    | ScalarExpr::Wildcard { .. }
+            ) {
+                continue;
+            }
+            let value = field
+                .compiled_expr
+                .eval_with_tuple(tuple)
+                .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?;
+            projected_tuple
+                .add_affiliate_column(Arc::new(field.field_name.as_ref().to_string()), value);
         }
         projected_rows.push(projected_tuple);
         if let Some(state) = state {
@@ -198,10 +123,9 @@ fn apply_passthrough_projection(
         }
     }
 
-    let projected = RecordBatch::new(projected_rows).map_err(|err| {
-        ProcessorError::ProcessingError(format!("Failed to apply passthrough projection: {err}"))
-    })?;
-    Ok(Box::new(projected))
+    RecordBatch::new(projected_rows)
+        .map(|batch| Box::new(batch) as Box<dyn Collection>)
+        .map_err(|error| ProcessorError::ProcessingError(error.to_string()))
 }
 
 #[cfg(test)]
@@ -212,7 +136,7 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
-    fn passthrough_empty_projection_drops_upstream_affiliate() {
+    fn empty_projection_drops_upstream_affiliate() {
         let keys = vec![Arc::<str>::from("a")];
         let values = vec![Arc::new(Value::Int64(1))];
         let message = Arc::new(Message::new(Arc::<str>::from("stream"), keys, values));
@@ -222,8 +146,7 @@ mod tests {
         assert!(input_tuple.affiliate().is_some(), "precondition");
 
         let input = RecordBatch::new(vec![input_tuple]).expect("record batch");
-        let output = apply_passthrough_projection(&input, &[], None)
-            .expect("passthrough projection succeeds");
+        let output = apply_projection(&input, &[], None).expect("projection succeeds");
         let out_rows = output.rows();
         assert_eq!(out_rows.len(), 1);
         assert!(
@@ -248,7 +171,7 @@ impl Processor for ProjectProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
-        let exec_mode = self.exec_mode.clone();
+        let fields = Arc::clone(&self.fields);
         let processor_state = self.processor_state.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
@@ -287,8 +210,11 @@ impl Processor for ProjectProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        let result = exec_mode
-                                            .apply(collection, processor_state.as_deref());
+                                        let result = apply_projection(
+                                            collection.as_ref(),
+                                            fields.as_ref(),
+                                            processor_state.as_deref(),
+                                        );
                                         match result {
                                             Ok(projected_collection) => {
                                                 let projected_data =

@@ -584,17 +584,13 @@ either:
 
 This is why connectors such as `kuksa` are poor candidates for the first version.
 
-### With by-index projection into encoder rewrite
+### With plan-fixed output layout
 
-For the first version, `ByIndexProjectionIntoEncoderRewrite` should be disabled on sink branches
-where `output.mode=delta` is enabled.
-
-Reason:
-
-- row diff needs materialized final values for comparison
-- the by-index rewrite intentionally delays value materialization into the encoder
-
-Keeping both in the first iteration would complicate semantics and planner behavior unnecessarily.
+Row diff and the downstream encoder use the same `OutputLayout`. Row diff
+compares tracked output indexes by resolving their fixed value references from
+the input layout, then materializes a dense diff row whose unchanged tracked
+columns are `NULL`. It also attaches an `output_mask` so mask-aware encoders can
+omit unchanged fields while preserving changed-to-`NULL` semantics.
 
 ### With multi-sink pipelines
 
@@ -613,8 +609,7 @@ The first version should focus on the following scope:
 - sink-level `output.mode=delta`
 - optional `output.delta.columns` resolved against the final output schema
 - comparison against the previous emitted row of the same sink branch
-- fixed-schema dense diff rows
-- unchanged columns filled with `NULL`
+- a dense `NULL`-filled diff row accompanied by an output mask
 - runtime `output_mask` metadata for encoders or transports that can use it
 
 Not part of the first version:
@@ -635,10 +630,10 @@ change set.
 - add sink-side `output.mode=delta` configuration
 - add optional `output.delta.columns`
 - add explicit `PhysicalRowDiff` and `RowDiffProcessor`
-- produce dense fixed-schema diff rows with `NULL` fill
+- materialize dense diff rows and mark changed output indexes in `output_mask`
 - add `output_mask` to runtime row metadata
 - preserve the mask on sink paths that rebuild tuples, especially memory collection materialization
-- disable `ByIndexProjectionIntoEncoderRewrite` on row diff branches
+- resolve tracked values through the planner-provided `OutputLayout`
 - keep sink encoder delivery available
 
 At this point, row diff semantics already exist at the runtime row contract level, even if some
