@@ -1540,6 +1540,16 @@ fn validate_row_diff_sink_path(sink: &PipelineSink) -> Result<(), String> {
         return Ok(());
     }
 
+    if matches!(
+        sink.connector.encoder.kind(),
+        crate::planner::sink::SinkEncoderKind::Csv
+    ) {
+        return Err(format!(
+            "sink `{}` does not support output.mode=delta with encoder.type=csv because CSV cannot preserve output_mask semantics",
+            sink.sink_id
+        ));
+    }
+
     if !matches!(
         sink.connector.encoder.kind(),
         crate::planner::sink::SinkEncoderKind::None

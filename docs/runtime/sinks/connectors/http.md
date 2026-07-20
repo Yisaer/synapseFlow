@@ -8,7 +8,7 @@ HTTP request with the complete body. The connector accumulates chunks into an in
 and flushes them on `finish_delivery`.
 
 Like all byte-delivery connectors, encoder/output behavior upstream of the connector materially
-affects what is sent. The HTTP sink requires an encoder (e.g. `json`, `protobuf`) and rejects
+affects what is sent. The HTTP sink requires an encoder (e.g. `json`, `csv`, `protobuf`) and rejects
 `encoder.type=none`.
 
 ## Goals
@@ -33,7 +33,8 @@ HTTP sink definitions accept:
 - Optional `timeout_secs` (default: `30`) — per-request timeout
 - Optional `headers` (default: `{}`) — extra HTTP headers
 - Optional `content_type` — explicit `Content-Type`. When omitted, inferred from encoder kind
-  (`application/json` for JSON, `application/octet-stream` for protobuf)
+  (`application/json` for JSON, `text/csv; charset=utf-8` for CSV,
+  `application/octet-stream` for protobuf)
 - Optional `max_body_size` (default: 64 MiB) — single-delivery body limit
 - Optional `retry_max_attempts` (default: none) — maximum delivery attempts including the first
 - Optional `retry_backoff_ms` (default: `1000`) — initial backoff, doubles each retry
@@ -96,12 +97,12 @@ When retry is not configured (`retry_max_attempts` unset), each delivery is atte
 
 ## Encoder and Output Feature Interaction
 
-- **Encoder**: The HTTP sink requires an encoder (`json`, `protobuf`). `encoder.type=none` is
+- **Encoder**: The HTTP sink requires an encoder (`json`, `csv`, `protobuf`). `encoder.type=none` is
   rejected because the sink needs serialized bytes to send as an HTTP body.
 - **Batching** (`batch_count`, `batch_duration`): Batched rows are encoded into a single delivery
   unit and sent as one HTTP request body.
-- **Delta output**: Row-diff output works with the HTTP sink in the same way as other byte-delivery
-  sinks. The encoder receives the row-diff output and serializes it according to its output schema.
+- **Delta output**: Row-diff output works with compatible encoders. CSV rejects
+  `output.mode=delta` because CSV deliveries require stable dense rows.
 - **Encoder transform**: Template transforms are supported when the encoder is `json`. The
   transform output forms the HTTP body.
 - **Compression / Encryption**: Delivery compression (`gzip`, `zstd`) and encryption (`aes-gcm`) are
@@ -114,6 +115,7 @@ When `content_type` is not explicitly configured:
 | Encoder type | Inferred `Content-Type` |
 |---|---|
 | `json` | `application/json` |
+| `csv` | `text/csv; charset=utf-8` |
 | `protobuf` | `application/octet-stream` |
 | Other / custom | (no Content-Type header set) |
 

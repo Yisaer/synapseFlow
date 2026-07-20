@@ -50,6 +50,27 @@ PhysicalSinkEncoder -> EncodedDelivery -> FileSinkConnector delivery -> one file
 The file sink does not add delimiters, newlines, headers, or framing. If the output should be
 newline-delimited JSON or another framed format, that behavior belongs to the encoder.
 
+For CSV output, select the built-in CSV encoder and choose a `.csv` suffix explicitly:
+
+```json
+{
+  "props": {
+    "path": "/var/lib/veloflux/output",
+    "filename_suffix": ".csv"
+  },
+  "encoder": {
+    "type": "csv",
+    "props": {
+      "delimiter": ",",
+      "header": true
+    }
+  }
+}
+```
+
+Each rolled or batched file is one CSV delivery unit and therefore gets its own header when
+`header=true`.
+
 Existing common batching controls the delivery unit boundary:
 
 - Without batching, each encoded output payload is written as one file.
@@ -147,8 +168,9 @@ scan and delete.
 
 ## Output Mode
 
-`output.mode=delta` is allowed. The file sink writes encoded bytes as-is and does not interpret
-insert, update, or delete events. Delete representation is encoder-owned.
+`output.mode=delta` is allowed when the selected encoder supports it. The file sink writes encoded
+bytes as-is and does not interpret insert, update, or delete events. The CSV encoder rejects delta
+mode because it requires stable dense rows.
 
 ## Future Compatibility
 

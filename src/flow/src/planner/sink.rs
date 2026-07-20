@@ -312,6 +312,7 @@ impl Eq for SinkEncoderConfig {}
 /// Supported encoder kinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SinkEncoderKind {
+    Csv,
     Json,
     Protobuf,
     None,
@@ -341,6 +342,7 @@ impl SinkEncoderTransformConfig {
 impl SinkEncoderKind {
     pub fn as_str(&self) -> &str {
         match self {
+            SinkEncoderKind::Csv => "csv",
             SinkEncoderKind::Json => "json",
             SinkEncoderKind::Protobuf => "protobuf",
             SinkEncoderKind::None => "none",
@@ -352,6 +354,7 @@ impl SinkEncoderKind {
 impl From<String> for SinkEncoderKind {
     fn from(value: String) -> Self {
         match value.as_str() {
+            "csv" => SinkEncoderKind::Csv,
             "json" => SinkEncoderKind::Json,
             "protobuf" => SinkEncoderKind::Protobuf,
             "none" => SinkEncoderKind::None,
@@ -363,6 +366,7 @@ impl From<String> for SinkEncoderKind {
 impl From<&str> for SinkEncoderKind {
     fn from(value: &str) -> Self {
         match value {
+            "csv" => SinkEncoderKind::Csv,
             "json" => SinkEncoderKind::Json,
             "protobuf" => SinkEncoderKind::Protobuf,
             "none" => SinkEncoderKind::None,
@@ -383,6 +387,10 @@ impl SinkEncoderConfig {
 
     pub fn json() -> Self {
         Self::new(SinkEncoderKind::Json, JsonMap::new())
+    }
+
+    pub fn csv() -> Self {
+        Self::new(SinkEncoderKind::Csv, JsonMap::new())
     }
 
     pub fn json_with_transform_template(template: impl Into<String>) -> Self {
@@ -407,6 +415,34 @@ impl SinkEncoderConfig {
             Some(value) => value
                 .as_bool()
                 .ok_or_else(|| "encoder.props.omit_null_columns must be a boolean".to_string()),
+        }
+    }
+
+    pub fn csv_delimiter(&self) -> Result<u8, String> {
+        let delimiter = match self.props.get("delimiter") {
+            None => return Ok(b','),
+            Some(JsonValue::String(value)) => value.as_bytes(),
+            Some(_) => {
+                return Err("encoder.props.delimiter must be a string".to_string());
+            }
+        };
+        if delimiter.len() != 1 || !delimiter[0].is_ascii() {
+            return Err("encoder.props.delimiter must contain exactly one ASCII byte".to_string());
+        }
+        if matches!(delimiter[0], b'"' | b'\r' | b'\n') {
+            return Err(
+                "encoder.props.delimiter must not be a quote or line terminator".to_string(),
+            );
+        }
+        Ok(delimiter[0])
+    }
+
+    pub fn csv_header(&self) -> Result<bool, String> {
+        match self.props.get("header") {
+            None => Ok(false),
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "encoder.props.header must be a boolean".to_string()),
         }
     }
 
@@ -455,6 +491,11 @@ impl SinkEncoderConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if matches!(self.kind, SinkEncoderKind::Csv) {
+            self.csv_delimiter()?;
+            self.csv_header()?;
+        }
+
         if matches!(self.kind, SinkEncoderKind::Json) {
             self.json_omit_null_columns()?;
         }
@@ -543,6 +584,41 @@ mod tests {
             .expect_err("non-boolean omit_null_columns should be rejected");
         assert!(
             err.contains("omit_null_columns must be a boolean"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn csv_encoder_validates_props() {
+        let mut props = JsonMap::new();
+        props.insert("delimiter".to_string(), JsonValue::String("::".to_string()));
+        let err = SinkEncoderConfig::new("csv", props)
+            .validate()
+            .expect_err("multi-byte delimiter should fail");
+        assert!(
+            err.contains("exactly one ASCII byte"),
+            "unexpected error: {err}"
+        );
+
+        let mut props = JsonMap::new();
+        props.insert("header".to_string(), JsonValue::String("true".to_string()));
+        let err = SinkEncoderConfig::new("csv", props)
+            .validate()
+            .expect_err("non-boolean header should fail");
+        assert!(
+            err.contains("header must be a boolean"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn csv_encoder_rejects_template_transform() {
+        let err = SinkEncoderConfig::csv()
+            .with_transform_template("{{ json(.row) }}")
+            .validate()
+            .expect_err("CSV transform should fail");
+        assert!(
+            err.contains("only supported for encoder.type=json"),
             "unexpected error: {err}"
         );
     }

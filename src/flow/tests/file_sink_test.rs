@@ -4,9 +4,10 @@ use flow::connector::{MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{FileSinkProps, PipelineDefinition};
 use flow::planner::sink::CommonSinkProps;
 use flow::{
-    CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition, SinkProps, SinkType,
+    CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition, SinkEncoderConfig,
+    SinkProps, SinkType,
 };
-use serde_json::json;
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -141,6 +142,110 @@ async fn memory_source_feeds_file_sink_pipeline() {
         .expect("stop pipeline");
     instance
         .delete_pipeline(pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
+// coverage-covers: sink.encoder.csv_output, sink.connector.file_output
+#[tokio::test]
+async fn csv_encoder_writes_parseable_file_delivery() {
+    let instance = test_instance();
+    let source_name = format!("memory_stream_{}", uuid::Uuid::new_v4().as_simple());
+    let input_topic = format!("tests.file.csv.input.{}", uuid::Uuid::new_v4());
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input topic");
+    let stream = StreamDefinition::new(
+        source_name.clone(),
+        json_schema(&source_name),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_stream(stream, false)
+        .await
+        .expect("create memory stream");
+
+    let output_dir = tempfile::tempdir().expect("output tempdir");
+    let pipeline_id = format!("memory_to_csv_file_{}", uuid::Uuid::new_v4().as_simple());
+    let mut encoder_props = JsonMap::new();
+    encoder_props.insert("header".to_string(), JsonValue::Bool(true));
+    let sink = SinkDefinition::new(
+        "file_sink",
+        SinkType::File,
+        SinkProps::File(
+            FileSinkProps::new(output_dir.path().to_string_lossy(), "values_")
+                .with_filename_suffix(".csv"),
+        ),
+    )
+    .with_encoder(SinkEncoderConfig::new("csv", encoder_props));
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        format!("SELECT v AS value FROM {source_name}"),
+        vec![sink],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start pipeline");
+
+    instance
+        .wait_for_memory_subscribers(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            1,
+            FILE_SINK_TEST_TIMEOUT,
+        )
+        .await
+        .expect("wait for memory source");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open memory publisher");
+    publisher
+        .publish_bytes(bytes::Bytes::from_static(br#"[{"v":7},{"v":8}]"#))
+        .expect("publish memory input");
+
+    let file_path = wait_for_generated_files(output_dir.path(), 1)
+        .await
+        .remove(0);
+    assert_eq!(
+        file_path.extension().and_then(|value| value.to_str()),
+        Some("csv")
+    );
+    let file_bytes = fs::read(file_path).expect("read CSV file");
+    assert_eq!(file_bytes, b"value\n7\n8\n");
+    let mut reader = csv::Reader::from_reader(file_bytes.as_slice());
+    assert_eq!(reader.headers().expect("CSV header").get(0), Some("value"));
+    let values = reader
+        .records()
+        .map(|record| {
+            record
+                .expect("valid CSV record")
+                .get(0)
+                .expect("value field")
+                .parse::<i64>()
+                .expect("integer value")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![7, 8]);
+
+    instance
+        .stop_pipeline(
+            &pipeline_id,
+            PipelineStopMode::Quick,
+            FILE_SINK_TEST_TIMEOUT,
+        )
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
         .await
         .expect("delete pipeline");
 }

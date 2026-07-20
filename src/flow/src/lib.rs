@@ -33,7 +33,7 @@ pub use catalog::{
     VideoRtspTransport, VideoStreamProps,
 };
 pub use codec::{
-    AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec,
+    AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec, CsvEncoder,
     DecoderRegistry, EncodeError, EncoderRegistry, EncryptError, EncryptWriter,
     EncryptionAlgorithm, InlineEncryptionKey, JsonDecoder, JsonEncoder, Merger, MergerRegistry,
     ProtoDescriptorBundle, ProtoFieldInfo, ProtobufDecoder, RecordDecoder, SecretBytes,
@@ -76,7 +76,7 @@ pub use planner::optimize_logical_plan;
 pub use planner::optimize_physical_plan;
 pub use planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
-    SinkDeltaOutputConfig, SinkEncoderConfig, SinkOutputConfig, SinkOutputMode,
+    SinkDeltaOutputConfig, SinkEncoderConfig, SinkEncoderKind, SinkOutputConfig, SinkOutputMode,
 };
 pub use processor::{ControlSignal, ProcessorError, StreamData};
 pub use shared_stream::{

@@ -69,6 +69,7 @@ nng_pubsub = ["flow/nng_pubsub", "veloflux_sdv/nng_pubsub"]
 
 [dev-dependencies]
 bytes = "1"
+csv = "1.4"
 criterion = "0.5"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 axum = { version = "0.7", features = ["macros", "json"] }

@@ -23,7 +23,7 @@ At a high level, sink-side delivery in veloFlux is split into four layers:
 
 2. **Sink encoder**
    - Converts a `Collection` into bytes when the connector expects bytes payloads.
-   - Examples: `json`, `none`.
+   - Examples: `json`, `csv`, `none`.
 
 3. **Delivery transforms**
    - Transform encoded delivery bytes before they reach the connector.
@@ -63,11 +63,14 @@ The runtime currently registers the following built-in encoder kinds:
 | Encoder | Runtime built-in | Output type | Streaming support | Notes |
 |--------|-------------------|-------------|-------------------|-------|
 | `json` | yes | bytes | yes | Encodes a `Collection` as a JSON array payload and supports encoder-local JSON formatting options. |
+| `csv` | yes | bytes | yes | Encodes the fixed output layout as UTF-8 CSV and supports configurable delimiter and per-delivery headers. |
 | `none` | planner pseudo-mode | collection passthrough | n/a | No encoder node is built; the connector receives decoded collections directly. |
 
 Current transform support:
 
 - `encoder.transform=template` is only supported for `encoder.type=json`.
+- `encoder.type=csv` supports `props.delimiter` and `props.header`, requires `output.mode=full`, and
+  does not support encoder transforms.
 - The transform is item-level (`row -> transformed JSON item`), not a standalone collection
   transform stage.
 - When `encoder.type=none`, any configured transform is ignored by design.
@@ -76,6 +79,7 @@ Current transform support:
 
 See also:
 
+- [CSV Sink Encoder](encoders/csv.md)
 - [Encoder Transform](encoders/encoder_transform.md)
 - [Delivery Compression](delivery/compress.md)
 - [Delivery Encryption](delivery/encrypt.md)

@@ -42,6 +42,13 @@ features:
       - docs/runtime/sinks/encoders/encoder_transform.md
     status: active
 
+  - id: sink.encoder.csv_output
+    title: CSV sink encoder
+    summary: Encode the planner-fixed sink output layout as configurable streaming CSV bytes.
+    doc_refs:
+      - docs/runtime/sinks/encoders/csv.md
+    status: active
+
   - id: sink.output.row_diff
     title: Row diff output
     summary: Produce row-diff output according to the documented sink-output contract.

@@ -33,6 +33,16 @@ interactions:
       - planner.physical.output_layout_fixed_slots
     status: active
 
+  - id: planner.physical.csv_encoder_fixed_output_layout
+    title: CSV encoder fixed output layout
+    summary: Validate CSV planning and batching against planner-fixed aliases, direct slots, and computed slots.
+    features:
+      - sink.encoder.csv_output
+      - sink.output.batching
+      - planner.physical.streaming_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
   - id: planner.physical.row_diff_batching_fixed_output_layout
     title: Row-diff batching fixed output layout
     summary: Validate fixed output references across row-diff and batched streaming encoder output.

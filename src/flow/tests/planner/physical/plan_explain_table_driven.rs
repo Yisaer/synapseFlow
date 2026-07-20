@@ -396,6 +396,23 @@ fn build_nop_json_sink(sink_id: &'static str, batch_count: Option<usize>) -> Pip
     }
 }
 
+fn build_nop_csv_sink(sink_id: &'static str, batch_count: Option<usize>) -> PipelineSink {
+    let connector = PipelineSinkConnector::new(
+        "test_connector",
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+        SinkEncoderConfig::csv(),
+    );
+    let sink = PipelineSink::new(sink_id, connector);
+    match batch_count {
+        None => sink,
+        Some(batch_count) => {
+            let mut common_props = CommonSinkProps::default();
+            common_props.batch_count = Some(batch_count);
+            sink.with_common_props(common_props)
+        }
+    }
+}
+
 fn build_nop_json_delta_sink(sink_id: &'static str, batch_count: Option<usize>) -> PipelineSink {
     build_nop_json_delta_sink_with_columns(sink_id, batch_count, None)
 }
@@ -543,19 +560,22 @@ fn build_kuksa_sink_with_batch(sink_id: &'static str, batch_count: usize) -> Pip
 }
 
 fn explain_json(sql: &str, sinks: Vec<PipelineSink>) -> String {
+    explain_json_result(sql, sinks).expect("explain")
+}
+
+fn explain_json_result(sql: &str, sinks: Vec<PipelineSink>) -> Result<String, String> {
     let registries = PipelineRegistries::new_with_builtin();
     let stream_defs = setup_streams();
 
-    let select_stmt = parse_sql(sql).expect("parse sql");
+    let select_stmt = parse_sql(sql).map_err(|err| err.to_string())?;
 
     let bindings = bindings_for_select(&select_stmt, &stream_defs);
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
+    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
 
     let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
 
     let physical_plan =
-        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
-            .expect("physical");
+        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)?;
 
     let physical_plan = flow::optimize_physical_plan(
         physical_plan,
@@ -569,7 +589,7 @@ fn explain_json(sql: &str, sinks: Vec<PipelineSink>) -> String {
     );
     println!("{sql}");
     println!("{}", explain.to_pretty_string());
-    explain.to_json().to_string()
+    Ok(explain.to_json().to_string())
 }
 
 fn explain_json_with_source_inputs(
@@ -1138,6 +1158,80 @@ fn plan_explain_pipeline_state_table_driven() {
     for case in cases {
         let got = explain_json_string(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_csv_encoder_table_driven() {
+    enum Expected {
+        Explain(&'static str),
+        ErrorContains(&'static str),
+    }
+
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sink: PipelineSink,
+        covers: &'static [&'static str],
+        expected: Expected,
+    }
+
+    let cases = vec![
+        Case {
+            name: "csv_encoder_uses_fixed_output_layout",
+            sql: "SELECT a AS vin, b + 1 AS adjusted FROM stream_ab",
+            sink: build_nop_csv_sink("test_sink", None),
+            covers: &[
+                "sink.encoder.csv_output",
+                "planner.physical.output_layout_fixed_slots",
+            ],
+            expected: Expected::Explain(
+                r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as vin; b + 1 as adjusted]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=csv"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as vin; b + 1 as adjusted]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=csv"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            ),
+        },
+        Case {
+            name: "csv_encoder_batching_uses_incremental_encoder",
+            sql: "SELECT a FROM stream_enc",
+            sink: build_nop_csv_sink("test_sink", Some(2)),
+            covers: &[
+                "sink.encoder.csv_output",
+                "sink.output.batching",
+                "planner.physical.streaming_encoder_rewrite",
+                "planner.physical.output_layout_fixed_slots",
+            ],
+            expected: Expected::Explain(
+                r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_enc","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=csv","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_enc","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalIncSinkEncoder_5","info":["sink_id=test_sink","encoder=csv","batch_count=2"],"operator":"PhysicalIncSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+            ),
+        },
+        Case {
+            name: "csv_encoder_rejects_delta_output",
+            sql: "SELECT a FROM stream",
+            sink: build_nop_csv_sink("test_sink", None).with_output(SinkOutputConfig::delta()),
+            covers: &["sink.encoder.csv_output", "sink.output.row_diff"],
+            expected: Expected::ErrorContains(
+                "does not support output.mode=delta with encoder.type=csv",
+            ),
+        },
+    ];
+
+    for case in cases {
+        assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
+        match case.expected {
+            Expected::Explain(expected) => {
+                let got = explain_json_result(case.sql, vec![case.sink])
+                    .unwrap_or_else(|err| panic!("case={} unexpected error: {err}", case.name));
+                assert_eq!(got, expected, "case={}", case.name);
+            }
+            Expected::ErrorContains(expected) => {
+                let err = explain_json_result(case.sql, vec![case.sink])
+                    .expect_err("CSV delta output should fail planning");
+                assert!(
+                    err.contains(expected),
+                    "case={} unexpected error: {err}",
+                    case.name
+                );
+            }
+        }
     }
 }
 

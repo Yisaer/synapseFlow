@@ -54,6 +54,8 @@
 
 - Encoded sink batching lowering is covered by `encoded_sink_with_batch_lowers_to_sink_encoder`.
 - Template-transform plus batching rewrite is covered by `transform_template_with_batch_uses_sink_encoder`.
+- CSV fixed-layout planning, streaming batching lowering, and delta-mode rejection are covered by
+  `plan_explain_csv_encoder_table_driven`.
 
 ### Fixed output layout and row-diff planning
 
@@ -137,6 +139,9 @@
   - `pipeline_encoder_transform_table_driven`
 - Graceful-stop flushing of a partial batch is covered by `sink_encoder_flushes_partial_batch_on_graceful_stop`.
 - Row-diff plus batching plus omit-if-empty runtime behavior is covered by `delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones`.
+- CSV fixed-layout batching and per-delivery headers are covered by
+  `csv_encoder_batches_fixed_layout_rows_with_header_per_delivery`.
+- CSV-to-file round-trip parsing is covered by `csv_encoder_writes_parseable_file_delivery`.
 
 ### Sampler runtime
 

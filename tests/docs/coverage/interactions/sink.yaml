@@ -8,6 +8,22 @@ interactions:
       - sink.output.omit_if_empty
     status: active
 
+  - id: sink.csv_batched_delivery
+    title: CSV encoder batched delivery
+    summary: Validate fixed-layout CSV records and one header per common sink batch delivery.
+    features:
+      - sink.encoder.csv_output
+      - sink.output.batching
+    status: active
+
+  - id: sink.csv_file_delivery
+    title: CSV encoder file delivery
+    summary: Validate parseable CSV bytes delivered through the file sink connector.
+    features:
+      - sink.encoder.csv_output
+      - sink.connector.file_output
+    status: active
+
   - id: sink.encoder_gzip_file_delivery
     title: Encoder + gzip compress + file connector delivery
     summary: Validate that encoder output passes through gzip compression and is correctly written by the file connector.

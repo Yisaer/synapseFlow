@@ -91,6 +91,7 @@ impl HttpSinkConfig {
 /// Infer a Content-Type header value from the encoder kind string.
 fn infer_content_type_for_encoder(encoder_kind: Option<&str>) -> Option<String> {
     match encoder_kind {
+        Some("csv") => Some("text/csv; charset=utf-8".to_string()),
         Some("json") => Some("application/json".to_string()),
         Some("protobuf") => Some("application/octet-stream".to_string()),
         _ => None,
@@ -521,6 +522,13 @@ mod tests {
             cfg.content_type.as_deref(),
             Some("application/octet-stream")
         );
+    }
+
+    #[test]
+    fn infer_content_type_csv() {
+        let cfg =
+            HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(Some("csv"));
+        assert_eq!(cfg.content_type.as_deref(), Some("text/csv; charset=utf-8"));
     }
 
     #[test]

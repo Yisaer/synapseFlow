@@ -94,6 +94,7 @@ async fn run_batch_case(case: BatchCase) {
 struct BatchBytesCase {
     name: &'static str,
     sql: &'static str,
+    covers: &'static [&'static str],
     input_data: Vec<(String, Vec<Value>)>,
     sink_common: CommonSinkProps,
     encoder: SinkEncoderConfig,
@@ -123,6 +124,7 @@ async fn recv_next_bytes(
 
 async fn run_batch_bytes_case(case: BatchBytesCase) {
     println!("Running test: {}", case.name);
+    assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -219,6 +221,7 @@ async fn pipeline_encoder_transform_table_driven() {
         BatchBytesCase {
             name: "sink_encoder_flushes_transformed_json_bytes",
             sql: "SELECT a + 1 AS c, b + 10 AS d FROM stream",
+            covers: &["sink.encoder.transform", "sink.output.batching"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -246,6 +249,11 @@ async fn pipeline_encoder_transform_table_driven() {
         BatchBytesCase {
             name: "delta_transform_batched_output_keeps_dense_rows_and_flushes_correctly",
             sql: "SELECT a, b FROM stream",
+            covers: &[
+                "sink.encoder.transform",
+                "sink.output.row_diff",
+                "sink.output.batching",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -263,6 +271,36 @@ async fn pipeline_encoder_transform_table_driven() {
             encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
             output: Some(SinkOutputConfig::delta()),
             expected_batches: vec![br#"[{"a":1,"b":10},{"a":null,"b":null},{"a":2,"b":null}]"#],
+        },
+        BatchBytesCase {
+            name: "csv_encoder_batches_fixed_layout_rows_with_header_per_delivery",
+            sql: "SELECT a AS vin, b + 10 AS total FROM stream",
+            covers: &[
+                "sink.encoder.csv_output",
+                "sink.output.batching",
+                "planner.physical.output_layout_fixed_slots",
+            ],
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(2), Value::Int64(4), Value::Int64(6)],
+                ),
+            ],
+            sink_common: CommonSinkProps {
+                batch_count: Some(2),
+                batch_duration: Some(Duration::from_millis(50)),
+            },
+            encoder: {
+                let mut props = JsonMap::new();
+                props.insert("header".to_string(), JsonValue::Bool(true));
+                SinkEncoderConfig::new("csv", props)
+            },
+            output: None,
+            expected_batches: vec![b"vin,total\n1,12\n3,14\n", b"vin,total\n5,16\n"],
         },
     ];
 

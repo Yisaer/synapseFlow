@@ -2,7 +2,7 @@ use super::decoder::{proto::ProtobufDecoder, JsonDecoder, RecordDecoder};
 use super::encoder::SinkEncoderFactory;
 use super::CodecError;
 use crate::catalog::StreamDecoderConfig;
-use crate::codec::encoder::{JsonEncoder, ProtobufEncoder};
+use crate::codec::encoder::{CsvEncoder, JsonEncoder, ProtobufEncoder};
 use crate::planner::sink::SinkEncoderConfig;
 use datatypes::Schema;
 use parking_lot::RwLock;
@@ -147,6 +147,15 @@ impl EncoderRegistry {
     }
 
     fn register_builtin_encoders(&self) {
+        self.register_encoder(
+            "csv",
+            Arc::new(|config| {
+                Ok(Arc::new(
+                    CsvEncoder::new(config.kind_str().to_string(), config)
+                        .map_err(|err| CodecError::Other(err.to_string()))?,
+                ) as Arc<_>)
+            }),
+        );
         self.register_encoder(
             "json",
             Arc::new(|config| {

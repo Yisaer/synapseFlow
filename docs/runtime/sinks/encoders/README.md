@@ -21,6 +21,7 @@ is independent of encoder kind and template configuration.
 
 Current encoder-local documents:
 
+- [CSV Sink Encoder](csv.md)
 - [Encoder Transform](encoder_transform.md)
 - [JSON Encoder Options](json_encoder_options.md)
 - [JSON Null Field Omission](json_null_column_omit.md)

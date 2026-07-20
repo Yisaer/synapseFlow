@@ -12,7 +12,9 @@ pub use decoder::{
     proto_bundle::{ProtoDescriptorBundle, ProtoFieldInfo},
     CodecError, JsonDecoder, RecordDecoder,
 };
-pub use encoder::{EncodeError, JsonEncoder, ProtobufEncoder, SinkEncoder, SinkEncoderFactory};
+pub use encoder::{
+    CsvEncoder, EncodeError, JsonEncoder, ProtobufEncoder, SinkEncoder, SinkEncoderFactory,
+};
 pub use encrypt::{
     AesGcmStreamWriter, EncryptError, EncryptWriter, EncryptionAlgorithm, InlineEncryptionKey,
     SecretBytes, SecretEncoding, SinkEncryptionConfig,

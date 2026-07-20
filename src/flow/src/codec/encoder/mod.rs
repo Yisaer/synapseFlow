@@ -1,5 +1,6 @@
 //! Encoder abstractions for turning collection-backed input records into outbound sink payloads.
 
+mod csv;
 mod json;
 mod proto;
 mod template_transform;
@@ -9,6 +10,7 @@ use crate::planner::physical::output_layout::OutputLayout;
 use bytes::Bytes;
 use std::sync::Arc;
 
+pub use csv::CsvEncoder;
 pub use json::JsonEncoder;
 pub use proto::ProtobufEncoder;
 
