@@ -146,6 +146,14 @@ pub struct MetadataExportSnapshot {
     pub udfs: Vec<StoredUdf>,
 }
 
+/// Information about an uploaded file returned by the list API.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UploadFileInfo {
+    pub name: String,
+    pub size_bytes: u64,
+    pub modified_at: u64,
+}
+
 pub struct MetadataStorage {
     db: Database,
     db_path: PathBuf,
@@ -640,6 +648,78 @@ impl MetadataStorage {
     }
 }
 
+/// Recursively copy upload files from src to dst. Returns the count of copied files.
+fn copy_uploads_recursive(src: &Path, dst: &Path) -> Result<usize, StorageError> {
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(src).map_err(StorageError::io)? {
+        let entry = entry.map_err(StorageError::io)?;
+        let file_type = entry.file_type().map_err(StorageError::io)?;
+        let raw_name = entry.file_name().to_string_lossy().into_owned();
+        if raw_name.starts_with('.') && raw_name.ends_with(".tmp") {
+            continue;
+        }
+        if file_type.is_dir() {
+            let sub_dst = dst.join(&raw_name);
+            std::fs::create_dir_all(&sub_dst).map_err(StorageError::io)?;
+            copied += copy_uploads_recursive(&entry.path(), &sub_dst)?;
+        } else if file_type.is_file() {
+            let target = dst.join(&raw_name);
+            std::fs::copy(entry.path(), &target).map_err(StorageError::io)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+                    .map_err(StorageError::io)?;
+            }
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+/// Helper: recursively collect files from an uploads subdirectory.
+fn collect_upload_entries(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<UploadFileInfo>,
+) -> Result<(), StorageError> {
+    for entry in std::fs::read_dir(dir).map_err(StorageError::io)? {
+        let entry = entry.map_err(StorageError::io)?;
+        let file_type = entry.file_type().map_err(StorageError::io)?;
+        let raw_name = entry.file_name().to_string_lossy().into_owned();
+        if raw_name.starts_with('.') && raw_name.ends_with(".tmp") {
+            continue;
+        }
+        if file_type.is_dir() {
+            let sub_prefix = if prefix.is_empty() {
+                raw_name.clone()
+            } else {
+                format!("{prefix}/{raw_name}")
+            };
+            collect_upload_entries(&entry.path(), &sub_prefix, files)?;
+        } else if file_type.is_file() {
+            let metadata = entry.metadata().map_err(StorageError::io)?;
+            let name = if prefix.is_empty() {
+                raw_name
+            } else {
+                format!("{prefix}/{raw_name}")
+            };
+            let modified_at = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            files.push(UploadFileInfo {
+                name,
+                size_bytes: metadata.len(),
+                modified_at,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Facade that exposes storage capabilities; currently only metadata, future namespaces can be added.
 pub struct StorageManager {
     metadata: MetadataStorage,
@@ -668,6 +748,77 @@ impl StorageManager {
     /// Returns the directory where WASM UDF binaries are persisted.
     pub fn wasm_files_dir(&self) -> PathBuf {
         self.base_dir.join("wasm_files")
+    }
+
+    /// Returns the directory where uploaded user files are persisted.
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.base_dir.join("uploads")
+    }
+
+    /// Save an uploaded file to the uploads directory. Overwrites if a file with
+    /// the same name already exists. Uses a temp-file-and-rename pattern to avoid
+    /// partial writes.
+    pub fn save_upload(&self, name: &str, data: &[u8]) -> Result<(), StorageError> {
+        let target = self.uploads_dir().join(name);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(StorageError::io)?;
+        }
+        let file_stem = target.file_name().ok_or_else(|| {
+            StorageError::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "empty file name",
+            ))
+        })?;
+        let tmp = target.with_file_name(format!(".{}.tmp", file_stem.to_string_lossy()));
+        fs::write(&tmp, data).map_err(StorageError::io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+                .map_err(StorageError::io)?;
+        }
+        fs::rename(&tmp, &target).map_err(StorageError::io)?;
+        Ok(())
+    }
+
+    /// Read an uploaded file from the uploads directory.
+    pub fn read_upload(&self, name: &str) -> Result<Vec<u8>, StorageError> {
+        let path = self.uploads_dir().join(name);
+        fs::read(&path).map_err(StorageError::io)
+    }
+
+    /// Delete an uploaded file. Returns Ok(true) if deleted, Ok(false) if not found.
+    pub fn delete_upload(&self, name: &str) -> Result<bool, StorageError> {
+        let path = self.uploads_dir().join(name);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(StorageError::io(e)),
+        }
+    }
+
+    /// List all files in the uploads directory recursively with metadata.
+    pub fn list_uploads(&self) -> Result<Vec<UploadFileInfo>, StorageError> {
+        let uploads_dir = self.uploads_dir();
+        if !uploads_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        collect_upload_entries(&uploads_dir, "", &mut files)?;
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(files)
+    }
+
+    /// Copy files from a source uploads directory into the data-dir uploads
+    /// directory. Handles nested subdirectories. Skips temp files. Returns the
+    /// count of copied files.
+    pub fn copy_uploads_from_dir(&self, src_dir: &Path) -> Result<usize, StorageError> {
+        if !src_dir.exists() || !src_dir.is_dir() {
+            return Ok(0);
+        }
+        let dst_dir = self.uploads_dir();
+        fs::create_dir_all(&dst_dir).map_err(StorageError::io)?;
+        copy_uploads_recursive(src_dir, &dst_dir)
     }
 
     pub fn create_stream(&self, stream: StoredStream) -> Result<(), StorageError> {
@@ -1096,5 +1247,112 @@ mod tests {
             Some(run_state)
         );
         assert_eq!(storage.get_init_apply_meta().unwrap(), Some(meta));
+    }
+
+    #[test]
+    fn upload_save_read_roundtrip() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        storage.save_upload("test.txt", b"hello world").unwrap();
+        let data = storage.read_upload("test.txt").unwrap();
+        assert_eq!(data, b"hello world");
+    }
+
+    #[test]
+    fn upload_overwrite() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        storage.save_upload("conf.txt", b"old").unwrap();
+        storage.save_upload("conf.txt", b"new").unwrap();
+        let data = storage.read_upload("conf.txt").unwrap();
+        assert_eq!(data, b"new");
+    }
+
+    #[test]
+    fn upload_delete_nonexistent_returns_false() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        assert!(!storage.delete_upload("missing.txt").unwrap());
+    }
+
+    #[test]
+    fn upload_list_empty_and_nonempty() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let list = storage.list_uploads().unwrap();
+        assert!(list.is_empty());
+
+        storage.save_upload("a.txt", b"a").unwrap();
+        storage.save_upload("b.txt", b"bb").unwrap();
+
+        let list = storage.list_uploads().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "a.txt");
+        assert_eq!(list[0].size_bytes, 1);
+        assert_eq!(list[1].name, "b.txt");
+        assert_eq!(list[1].size_bytes, 2);
+    }
+
+    #[test]
+    fn upload_list_includes_nested_files() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        storage
+            .save_upload("proto/sensor.proto", b"syntax proto3")
+            .unwrap();
+        storage
+            .save_upload("proto/common/types.proto", b"message T {}")
+            .unwrap();
+        storage.save_upload("dbc/can.dbc", b"VERSION").unwrap();
+
+        let list = storage.list_uploads().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].name, "dbc/can.dbc");
+        assert_eq!(list[1].name, "proto/common/types.proto");
+        assert_eq!(list[2].name, "proto/sensor.proto");
+    }
+
+    #[test]
+    fn upload_copy_uploads_from_dir_copies_files() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let src = dir.path().join("src_uploads");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("cert.pem"), b"cert-data").unwrap();
+        std::fs::write(src.join("sub/key.pem"), b"key-data").unwrap();
+
+        let copied = storage.copy_uploads_from_dir(&src).unwrap();
+        assert_eq!(copied, 2);
+
+        assert_eq!(
+            storage.read_upload("cert.pem").unwrap(),
+            b"cert-data".to_vec()
+        );
+        assert_eq!(
+            storage.read_upload("sub/key.pem").unwrap(),
+            b"key-data".to_vec()
+        );
+    }
+
+    #[test]
+    fn upload_save_read_nested_path() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        storage
+            .save_upload("proto/sub/sensor.proto", b"message Sensor {}")
+            .unwrap();
+        let data = storage.read_upload("proto/sub/sensor.proto").unwrap();
+        assert_eq!(data, b"message Sensor {}");
+
+        let list = storage.list_uploads().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "proto/sub/sensor.proto");
     }
 }

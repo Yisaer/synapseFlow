@@ -13,6 +13,34 @@ use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::stream::{named_schema_store, schema_registry};
 use storage::{StorageError, StoredSchema};
 
+/// Schema props keys that may reference a local file path.
+const PROTO_PATH_KEY: &str = "proto_path";
+const DBC_SCHEMA_PATH_KEY: &str = "schema_path";
+
+/// Resolve file-path props through the uploads directory before falling back to
+/// the raw value. For any non-empty value, try `data_dir/uploads/<value>` first;
+/// if that file exists, replace with the full path. Otherwise leave the value
+/// unchanged (backward compatible with local filesystem paths).
+fn resolve_prop_paths(props: &mut serde_json::Map<String, serde_json::Value>, state: &AppState) {
+    let keys: &[&str] = &[PROTO_PATH_KEY, DBC_SCHEMA_PATH_KEY];
+    for key in keys {
+        let Some(val) = props.get(*key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let trimmed = val.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let uploads_path = state.storage.uploads_dir().join(trimmed);
+        if uploads_path.exists() {
+            props.insert(
+                (*key).to_string(),
+                serde_json::Value::String(uploads_path.to_string_lossy().into_owned()),
+            );
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CreateSchemaRequest {
     pub name: String,
@@ -57,8 +85,10 @@ pub async fn create_schema_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let (schema, proto_bundle) = match schema_registry().parse(&req.schema_type, &name, &req.props)
-    {
+    let mut props = req.props.clone();
+    resolve_prop_paths(&mut props, &state);
+
+    let (schema, proto_bundle) = match schema_registry().parse(&req.schema_type, &name, &props) {
         Ok(s) => s,
         Err(err) => {
             audit.log_failure(&err);
@@ -361,5 +391,86 @@ mod tests {
             .expect("read response body");
         let message = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(message.contains("schema name"), "got: {message}");
+    }
+
+    #[test]
+    fn resolve_prop_path_replaces_when_upload_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = build_state(&temp_dir);
+        state
+            .storage
+            .save_upload("sensor.proto", b"syntax = \"proto3\";")
+            .unwrap();
+
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "proto_path".to_string(),
+            serde_json::Value::String("sensor.proto".to_string()),
+        );
+        resolve_prop_paths(&mut props, &state);
+
+        let resolved = props["proto_path"].as_str().unwrap();
+        assert!(
+            resolved.contains("uploads/sensor.proto"),
+            "expected path to contain uploads/sensor.proto, got: {resolved}"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_path_keeps_original_when_upload_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = build_state(&temp_dir);
+
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "proto_path".to_string(),
+            serde_json::Value::String("not_uploaded.proto".to_string()),
+        );
+        resolve_prop_paths(&mut props, &state);
+
+        assert_eq!(props["proto_path"].as_str().unwrap(), "not_uploaded.proto");
+    }
+
+    #[test]
+    fn resolve_prop_path_falls_back_when_upload_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = build_state(&temp_dir);
+
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "proto_path".to_string(),
+            serde_json::Value::String("/etc/veloflux/sensor.proto".to_string()),
+        );
+        resolve_prop_paths(&mut props, &state);
+
+        // Neither uploads/etc/veloflux/sensor.proto nor /etc/veloflux/sensor.proto exists,
+        // so the value stays unchanged for the proto parser to try as a local path.
+        assert_eq!(
+            props["proto_path"].as_str().unwrap(),
+            "/etc/veloflux/sensor.proto"
+        );
+    }
+
+    #[test]
+    fn resolve_prop_path_works_with_subdirectory_upload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = build_state(&temp_dir);
+        state
+            .storage
+            .save_upload("proto/sensor.proto", b"syntax = \"proto3\";")
+            .unwrap();
+
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "proto_path".to_string(),
+            serde_json::Value::String("proto/sensor.proto".to_string()),
+        );
+        resolve_prop_paths(&mut props, &state);
+
+        let resolved = props["proto_path"].as_str().unwrap();
+        assert!(
+            resolved.contains("uploads/proto/sensor.proto"),
+            "expected path to contain uploads/proto/sensor.proto, got: {resolved}"
+        );
     }
 }

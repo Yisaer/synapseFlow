@@ -104,12 +104,26 @@ pub async fn import_storage_handler(
     let udf_count = snapshot.udfs.len();
     if udf_count > 0 {
         let wasm_src = tmp.path().join("wasm_files");
-        if let Err(err) =
-            validate_and_copy_udfs(&snapshot.udfs, &wasm_src, &state.storage.wasm_files_dir())
-        {
+        if let Err(err) = validate_and_copy_udfs_for_import(
+            &snapshot.udfs,
+            &wasm_src,
+            &state.storage.wasm_files_dir(),
+        ) {
             audit.log_failure(&err);
             return (StatusCode::BAD_REQUEST, err).into_response();
         }
+    }
+
+    // Copy upload files from the archive. This is best-effort: if the archive
+    // has no uploads/ directory, no files are affected.
+    let uploads_src = tmp.path().join("uploads");
+    if let Err(err) = state.storage.copy_uploads_from_dir(&uploads_src) {
+        audit.log_failure(&format!("copy uploads from archive: {err}"));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to copy uploaded files: {err}"),
+        )
+            .into_response();
     }
 
     let previous_bundle = match build_export_bundle(state.storage.as_ref()) {
@@ -335,7 +349,7 @@ fn validate_import_udfs(udfs: &[ExportUdf]) -> Result<Vec<StoredUdf>, String> {
 /// Validate each imported UDF's WASM file and copy it to the shared wasm directory.
 /// Checks: file exists, SHA-256 matches, module is valid, metadata name matches.
 #[cfg(feature = "wasm_udf")]
-fn validate_and_copy_udfs(
+pub(crate) fn validate_and_copy_udfs_for_import(
     udfs: &[StoredUdf],
     wasm_src_dir: &std::path::Path,
     wasm_dst_dir: &std::path::Path,
@@ -385,7 +399,7 @@ fn validate_and_copy_udfs(
 }
 
 #[cfg(not(feature = "wasm_udf"))]
-fn validate_and_copy_udfs(
+pub(crate) fn validate_and_copy_udfs_for_import(
     udfs: &[StoredUdf],
     wasm_src_dir: &std::path::Path,
     wasm_dst_dir: &std::path::Path,
@@ -634,7 +648,38 @@ mod tests {
         }
     }
 
-    fn build_tar_gz_for_test(bundle: &ExportBundleV1, wasm_dir: &std::path::Path) -> Vec<u8> {
+    fn add_uploads_to_tar_for_test(
+        tar: &mut tar::Builder<impl std::io::Write>,
+        dir: &std::path::Path,
+        tar_prefix: &str,
+    ) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') && name.ends_with(".tmp") {
+                continue;
+            }
+            let entry_name = format!("{tar_prefix}/{name}");
+            if file_type.is_dir() {
+                add_uploads_to_tar_for_test(tar, &entry.path(), &entry_name);
+            } else if file_type.is_file() {
+                let data = std::fs::read(entry.path()).unwrap();
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append_data(&mut header, &entry_name, data.as_slice())
+                    .unwrap();
+            }
+        }
+    }
+
+    fn build_tar_gz_for_test(
+        bundle: &ExportBundleV1,
+        wasm_dir: &std::path::Path,
+        uploads_dir: &std::path::Path,
+    ) -> Vec<u8> {
         let metadata_json = serde_json::to_vec(bundle).unwrap();
         let udf_shas: Vec<String> = bundle
             .resources
@@ -667,6 +712,10 @@ mod tests {
                     tar.append_data(&mut header, &entry_name, data.as_slice())
                         .unwrap();
                 }
+            }
+
+            if uploads_dir.exists() {
+                add_uploads_to_tar_for_test(&mut tar, uploads_dir, "uploads");
             }
 
             let gz = tar.into_inner().unwrap();
@@ -817,7 +866,11 @@ mod tests {
         )
         .expect("create app state");
 
-        let tar_gz = build_tar_gz_for_test(&new_bundle, &dir.path().join("wasm_files"));
+        let tar_gz = build_tar_gz_for_test(
+            &new_bundle,
+            &dir.path().join("wasm_files"),
+            &dir.path().join("uploads"),
+        );
         let body = axum::body::Bytes::from(tar_gz);
 
         let response = import_storage_handler(State(state.clone()), body)
@@ -865,7 +918,11 @@ mod tests {
         )
         .expect("create app state");
 
-        let tar_gz = build_tar_gz_for_test(&invalid_bundle, &dir.path().join("wasm_files"));
+        let tar_gz = build_tar_gz_for_test(
+            &invalid_bundle,
+            &dir.path().join("wasm_files"),
+            &dir.path().join("uploads"),
+        );
         let body = axum::body::Bytes::from(tar_gz);
 
         let response = import_storage_handler(State(state.clone()), body)
@@ -998,5 +1055,109 @@ mod tests {
 
         assert!(snapshot.streams.is_empty());
         assert_eq!(snapshot.pipelines.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_import_uploads_roundtrip() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        // Seed storage with a stream and an upload file
+        let bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
+        storage
+            .replace_metadata_snapshot(
+                validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot"),
+            )
+            .expect("seed snapshot");
+        storage
+            .save_upload("ca-cert.pem", b"certificate data")
+            .unwrap();
+
+        // Build tar.gz (same as export handler)
+        let exported_bundle = crate::export::build_export_bundle(&storage).unwrap();
+        let tar_gz = build_tar_gz_for_test(
+            &exported_bundle,
+            &storage.wasm_files_dir(),
+            &storage.uploads_dir(),
+        );
+
+        // Create fresh storage and import
+        let dir2 = tempdir().unwrap();
+        let storage2 = StorageManager::new(dir2.path()).unwrap();
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage2,
+            vec![sample_default_instance_spec()],
+            0,
+        )
+        .unwrap();
+
+        let body = axum::body::Bytes::from(tar_gz);
+        let response = import_storage_handler(State(state.clone()), body)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify upload file survived
+        let list = state.storage.list_uploads().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "ca-cert.pem");
+        assert_eq!(list[0].size_bytes, 16);
+        let data = state.storage.read_upload("ca-cert.pem").unwrap();
+        assert_eq!(data, b"certificate data");
+
+        // Verify stream also survived
+        assert!(state.storage.get_stream("stream_1").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn export_import_nested_uploads_roundtrip() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
+        storage
+            .replace_metadata_snapshot(
+                validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot"),
+            )
+            .expect("seed snapshot");
+        storage
+            .save_upload("proto/sensor.proto", b"message Sensor {}")
+            .unwrap();
+        storage
+            .save_upload("proto/common/types.proto", b"message T {}")
+            .unwrap();
+
+        let exported_bundle = crate::export::build_export_bundle(&storage).unwrap();
+        let tar_gz = build_tar_gz_for_test(
+            &exported_bundle,
+            &storage.wasm_files_dir(),
+            &storage.uploads_dir(),
+        );
+
+        let dir2 = tempdir().unwrap();
+        let storage2 = StorageManager::new(dir2.path()).unwrap();
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage2,
+            vec![sample_default_instance_spec()],
+            0,
+        )
+        .unwrap();
+
+        let body = axum::body::Bytes::from(tar_gz);
+        let response = import_storage_handler(State(state.clone()), body)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let list = state.storage.list_uploads().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "proto/common/types.proto");
+        assert_eq!(list[1].name, "proto/sensor.proto");
+        assert_eq!(
+            state.storage.read_upload("proto/sensor.proto").unwrap(),
+            b"message Sensor {}"
+        );
     }
 }

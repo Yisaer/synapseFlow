@@ -95,8 +95,9 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
         .map(|u| u.wasm_sha256.clone())
         .collect();
     let wasm_dir = state.storage.wasm_files_dir();
+    let uploads_dir = state.storage.uploads_dir();
 
-    let tar_gz = match build_tar_gz(&bundle, &udf_shas, &wasm_dir) {
+    let tar_gz = match build_tar_gz(&bundle, &udf_shas, &wasm_dir, &uploads_dir) {
         Ok(data) => data,
         Err(err) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
@@ -129,10 +130,45 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
         .into_response()
 }
 
+fn add_uploads_to_tar<W: std::io::Write>(
+    tar: &mut tar::Builder<W>,
+    dir: &std::path::Path,
+    tar_prefix: &str,
+) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read uploads dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("read upload entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("stat upload file: {e}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            continue;
+        }
+        let entry_name = format!("{tar_prefix}/{name}");
+        if file_type.is_dir() {
+            add_uploads_to_tar(tar, &entry.path(), &entry_name)?;
+        } else if file_type.is_file() {
+            let data = std::fs::read(entry.path())
+                .map_err(|e| format!("read upload file {}: {e}", entry.path().display()))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, &entry_name, data.as_slice())
+                .map_err(|e| format!("write {entry_name} to tar: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn build_tar_gz(
     bundle: &ExportBundleV1,
     udf_shas: &[String],
     wasm_dir: &std::path::Path,
+    uploads_dir: &std::path::Path,
 ) -> Result<Vec<u8>, String> {
     let metadata_json =
         serde_json::to_vec(bundle).map_err(|e| format!("serialize export bundle: {e}"))?;
@@ -164,6 +200,10 @@ fn build_tar_gz(
             tar.append_data(&mut header, &entry_name, wasm_bytes.as_slice())
                 .map_err(|e| format!("write {entry_name} to tar: {e}"))?;
         }
+
+        // Write each upload file (recursive)
+        add_uploads_to_tar(&mut tar, uploads_dir, "uploads")
+            .map_err(|e| format!("write uploads to tar: {e}"))?;
 
         let gz = tar.into_inner().map_err(|e| format!("finish tar: {e}"))?;
         gz.finish().map_err(|e| format!("finish gzip: {e}"))?;

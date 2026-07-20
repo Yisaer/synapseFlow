@@ -21,7 +21,9 @@ mod status;
 pub mod storage_bridge;
 mod stream;
 #[cfg(feature = "wasm_udf")]
+#[cfg(feature = "wasm_udf")]
 mod udf_handler;
+mod upload_handler;
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -126,6 +128,12 @@ fn build_app(state: AppState) -> Router {
             "/mqtt/clients/:key",
             get(mqtt_client::get_shared_mqtt_client_handler)
                 .delete(mqtt_client::delete_shared_mqtt_client_handler),
+        )
+        .route("/files/upload", post(upload_handler::upload_file_handler))
+        .route("/files", get(upload_handler::list_files_handler))
+        .route(
+            "/files/:name",
+            get(upload_handler::get_file_handler).delete(upload_handler::delete_file_handler),
         )
         .route("/metrics", get(metrics_handler))
         .route("/status", get(status::status_handler))

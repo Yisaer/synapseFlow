@@ -63,6 +63,11 @@ impl ResourceIdKind {
 
 const GRAMMAR_HINT: &str = "expected [A-Za-z][A-Za-z0-9_]{0,127}";
 
+/// Maximum upload file name length in bytes (255).
+pub(crate) const MAX_UPLOAD_NAME_LEN: usize = 255;
+
+const UPLOAD_NAME_GRAMMAR_HINT: &str = "expected [a-zA-Z0-9][a-zA-Z0-9._/-]{0,254} (no leading/trailing /, no //, no .., no \\, no control chars)";
+
 /// Validate `value` against the unified resource-id grammar.
 ///
 /// On failure returns a message that names the field, explains the specific
@@ -121,6 +126,106 @@ pub(crate) fn validate_resource_id(kind: ResourceIdKind, value: &str) -> Result<
 pub(crate) fn parse_resource_id(kind: ResourceIdKind, value: &str) -> Result<String, String> {
     validate_resource_id(kind, value)?;
     Ok(value.to_string())
+}
+
+/// Validate a file name for uploaded files. Supports subdirectories via `/`
+/// separators.
+///
+/// Grammar: segments separated by `/`, each segment matching
+/// `[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}`. No leading/trailing `/`, no `//`, no `..`,
+/// no `\\`, no control characters.
+pub(crate) fn validate_upload_file_name(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!(
+            "file name must not be empty ({UPLOAD_NAME_GRAMMAR_HINT})"
+        ));
+    }
+    if value.trim().is_empty() {
+        return Err(format!(
+            "file name must not be whitespace ({UPLOAD_NAME_GRAMMAR_HINT})"
+        ));
+    }
+    if value.trim() != value {
+        return Err(format!(
+            "file name must not have leading or trailing whitespace ({UPLOAD_NAME_GRAMMAR_HINT}); got `{}`",
+            value.escape_debug()
+        ));
+    }
+    if value.len() > MAX_UPLOAD_NAME_LEN {
+        return Err(format!(
+            "file name must be at most {MAX_UPLOAD_NAME_LEN} bytes ({UPLOAD_NAME_GRAMMAR_HINT}); got {} bytes",
+            value.len()
+        ));
+    }
+    // Must not start with `/`.
+    if value.starts_with('/') {
+        return Err(format!(
+            "file name must not start with / ({UPLOAD_NAME_GRAMMAR_HINT}); got `{}`",
+            value.escape_debug()
+        ));
+    }
+    // Must not end with `/`.
+    if value.ends_with('/') {
+        return Err(format!(
+            "file name must not end with / ({UPLOAD_NAME_GRAMMAR_HINT}); got `{}`",
+            value.escape_debug()
+        ));
+    }
+    // Each segment must be a valid filename.
+    for segment in value.split('/') {
+        validate_upload_segment(segment)?;
+    }
+    Ok(())
+}
+
+/// Validate a single path segment (no `/` allowed).
+fn validate_upload_segment(segment: &str) -> Result<(), String> {
+    if segment.is_empty() {
+        return Err(format!(
+            "file name contains empty path segment ({UPLOAD_NAME_GRAMMAR_HINT}); got `{}`",
+            segment.escape_debug()
+        ));
+    }
+    // File name segment must start with a letter or digit (not a dot).
+    let first = segment.chars().next().expect("non-empty segment");
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!(
+            "file name segment must start with a letter or digit ({UPLOAD_NAME_GRAMMAR_HINT}); got `{}`",
+            segment.escape_debug()
+        ));
+    }
+    for ch in segment.chars() {
+        if ch == '\\' {
+            return Err(format!(
+                "file name contains invalid character `{}` ({UPLOAD_NAME_GRAMMAR_HINT})",
+                ch.escape_debug()
+            ));
+        }
+        if ch.is_control() {
+            return Err(format!(
+                "file name contains control character ({UPLOAD_NAME_GRAMMAR_HINT})"
+            ));
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-') {
+            return Err(format!(
+                "file name contains invalid character `{}` ({UPLOAD_NAME_GRAMMAR_HINT})",
+                ch.escape_debug()
+            ));
+        }
+    }
+    // Reject path traversal: `..` as a standalone segment or `..something`
+    let lower = segment.to_ascii_lowercase();
+    if lower == ".." || lower.starts_with("..") {
+        return Err(format!(
+            "file name segment contains path traversal ({UPLOAD_NAME_GRAMMAR_HINT})"
+        ));
+    }
+    if segment.len() > MAX_UPLOAD_NAME_LEN {
+        return Err(format!(
+            "file name segment must be at most {MAX_UPLOAD_NAME_LEN} bytes ({UPLOAD_NAME_GRAMMAR_HINT})"
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve and validate an optional `flow_instance_id`.
@@ -211,6 +316,51 @@ mod tests {
             parse_resource_id(ResourceIdKind::StreamName, "pipe").unwrap(),
             "pipe"
         );
+    }
+
+    #[test]
+    fn validate_upload_file_name_accepts_valid_names() {
+        for value in [
+            "ca-cert.pem",
+            "client-key.pem",
+            "descriptor.proto",
+            "a.txt",
+            "my_cert-2026.crt",
+            "A",
+            "proto/sensor.proto",
+            "dbc/can/chassis.dbc",
+        ] {
+            assert!(
+                validate_upload_file_name(value).is_ok(),
+                "expected `{value}` to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_upload_file_name_rejects_invalid_names() {
+        let cases = [
+            ("", "empty"),
+            (".hidden", "starts with dot"),
+            ("../escape", "path traversal .."),
+            ("a/../b", "path traversal in segment"),
+            ("/leading", "leading slash"),
+            ("trailing/", "trailing slash"),
+            ("a//b", "empty segment"),
+            ("key\\path", "contains backslash"),
+            ("a\nb", "contains newline"),
+            ("spaced name", "contains space"),
+            ("name:colon", "contains colon"),
+            ("  leading", "leading whitespace"),
+            ("trailing ", "trailing whitespace"),
+            ("/onlyslash/", "starts and ends with /"),
+        ];
+        for (value, desc) in cases {
+            assert!(
+                validate_upload_file_name(value).is_err(),
+                "({desc}) expected `{value}` to be rejected"
+            );
+        }
     }
 
     #[test]
