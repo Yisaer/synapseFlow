@@ -1426,6 +1426,8 @@ fn build_sink_chain_with_builder(
     registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
+    sink.retry.validate()?;
+
     // Reject pipeline state functions with sink configs that can drop rows
     // after Filter (RowDiff for delta mode, EmptySuppress for omit_if_empty).
     if plan_uses_processor_state(input_child) {
@@ -1729,6 +1731,7 @@ fn add_regular_encoder_with_builder(
                 sink.forward_to_result,
                 connector_config,
                 None,
+                sink.retry.clone(),
             ),
         ))
     } else {
@@ -1801,6 +1804,7 @@ fn add_regular_encoder_with_builder(
                 sink.forward_to_result,
                 connector_config,
                 Some(encoder_index),
+                sink.retry.clone(),
             ),
         ))
     }

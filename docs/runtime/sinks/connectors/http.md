@@ -14,7 +14,7 @@ affects what is sent. The HTTP sink requires an encoder (e.g. `json`, `csv`, `pr
 ## Goals
 
 - Define the runtime contract of the HTTP sink connector.
-- Document configuration parameters including retry behavior.
+- Document HTTP-specific configuration parameters and the common sink retry behavior.
 - Explain how encoder and sink-output features interact with HTTP delivery.
 - Specify `Content-Type` inference rules.
 
@@ -36,14 +36,18 @@ HTTP sink definitions accept:
   (`application/json` for JSON, `text/csv; charset=utf-8` for CSV,
   `application/octet-stream` for protobuf)
 - Optional `max_body_size` (default: 64 MiB) — single-delivery body limit
-- Optional `retry_max_attempts` (default: none) — maximum delivery attempts including the first
-- Optional `retry_backoff_ms` (default: `1000`) — initial backoff, doubles each retry
-- Optional `retry_max_backoff_ms` (default: `30000`) — backoff upper bound
+- Optional common sink-level `retry` config:
+  - `max_attempts` (default: none) — maximum delivery attempts including the first
+  - `initial_backoff_ms` (default: `1000`) — initial backoff, doubles each retry
+  - `max_backoff_ms` (default: `30000`) — backoff upper bound
+  - `jitter` (accepted, not yet applied; current backoff is deterministic)
 - encoder config (required)
 - sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
   props)
 
-Manager validates `url` as required and rejects `encoder.type=none`.
+Manager validates `url` as required and rejects `encoder.type=none`. Legacy HTTP props
+`retry_max_attempts`, `retry_backoff_ms`, and `retry_max_backoff_ms` are still accepted as
+compatibility input and are converted to the common sink-level retry config.
 
 ## Delivery Lifecycle
 
@@ -58,9 +62,9 @@ write_chunk(bytes)                  // called 0..N times
 finish_delivery()
   └─ send HTTP request with buffer as body
      └─ on 2xx: return DeliveryResult
-     └─ on 5xx/429: retry (if configured) with exponential backoff + jitter
-     └─ on 4xx (not 429): return error immediately (no retry)
-     └─ on network error: retry (if configured)
+     └─ on 5xx/429: return SinkConnectorError::Transient
+     └─ on 4xx (not 429): return SinkConnectorError::Permanent
+     └─ on network error: return SinkConnectorError::Transient
 
 abort_delivery()
   └─ buffer.clear()                 // discard partial delivery
@@ -68,7 +72,11 @@ abort_delivery()
 
 ## Retry Strategy
 
-The HTTP sink supports configurable retry for transient failures. Retryable errors include:
+Retry is implemented by `SinkProcessor`, not by the HTTP connector. The HTTP connector performs one
+request per `finish_delivery()` call and classifies failures so the processor can make the retry
+decision.
+
+Retryable HTTP failures include:
 
 | Category | Examples | Retried |
 |---|---|---|
@@ -77,23 +85,24 @@ The HTTP sink supports configurable retry for transient failures. Retryable erro
 | Rate limiting | 429 Too Many Requests | ✅ |
 | Client errors | 400, 401, 403, 404 | ❌ |
 
-Retry uses **exponential backoff with random jitter** (±25% of current backoff):
+Retry uses deterministic exponential backoff:
 
-1. First attempt fails → wait `backoff_ms + jitter` ms
+1. First attempt fails → wait `initial_backoff_ms`
 2. Backoff doubles each attempt, capped at `max_backoff_ms`
 3. Loop until success or `max_attempts` exhausted
 
-When retry is not configured (`retry_max_attempts` unset), each delivery is attempted exactly once.
+When retry is not configured (`retry.max_attempts` unset), each delivery is attempted exactly once.
 
 ## Hot Path Considerations
 
 - `start_delivery` and `write_chunk` are constant-time operations that append to a `Vec<u8>`. No
   I/O is performed.
-- `finish_delivery` is the only method that performs network I/O. It is called from a tokio async
-  context, so other pipeline branches are not blocked.
-- The body buffer is converted to `bytes::Bytes` (ref-counted) before the retry loop, making retry
-  clones nearly free.
-- A `max_body_size` guard prevents unbounded memory growth from large or long-lived deliveries.
+- `finish_delivery` is the only connector method that performs network I/O. It is called from a
+  tokio async context, so other pipeline branches are not blocked.
+- The `SinkProcessor` retains the completed encoded payload while retries are pending and replays
+  the full delivery on each attempt.
+- `max_body_size` is exposed to `SinkProcessor`, so oversized encoded deliveries are rejected while
+  being accumulated and before a connector attempt is made.
 
 ## Encoder and Output Feature Interaction
 
@@ -125,15 +134,16 @@ Explicit `content_type` always takes precedence.
 ## Error Handling
 
 - URL validation occurs in `ready()`. Invalid URLs are rejected before the pipeline is started.
-- Non-retryable errors (4xx client errors) are propagated as `SinkConnectorError` and logged.
-- Retryable errors generate `WARN`-level log entries for each retry attempt, including attempt
-  number and backoff duration.
-- Exhausted retries produce an error containing the total attempt count.
+- Permanent errors (4xx client errors) are propagated as `SinkConnectorError::Permanent`.
+- Transient errors (network errors, 5xx, 429) are propagated as `SinkConnectorError::Transient`.
+- Connector errors are classified for logs and metrics. The processor retries every connector
+  delivery error until `max_attempts` is exhausted.
+- Exhausted retries are logged, then the delivery is dropped and processing continues.
 
 ## Testing
 
 - **Unit tests** (`connector/sink/http.rs`): config defaults, builder methods, content-type
-  inference, retry status classification, retryable error detection.
+  inference, and status classification.
 - **E2E tests** (`tests/e2e/http_sink_e2e.rs`): full pipeline with mock stream source → JSON
   decoder → HTTP sink → embedded axum test server. Verifies correct method, Content-Type, and
   JSON body delivery.

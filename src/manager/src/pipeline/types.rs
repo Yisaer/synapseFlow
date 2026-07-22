@@ -4,7 +4,9 @@ use flow::codec::{
     SinkEncryptionConfig,
 };
 use flow::connector::SharedMqttClientConfig;
-use flow::pipeline::{SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig};
+use flow::pipeline::{
+    SinkRetryConfig, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
+};
 use flow::planner::sink::{
     CommonSinkProps, SinkDeltaOutputConfig, SinkOutputConfig, SinkOutputMode,
 };
@@ -300,6 +302,8 @@ pub struct CreatePipelineSinkRequest {
     pub output: Option<SinkOutputConfigRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<SinkDeliveryConfigRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<SinkRetryConfigRequest>,
 }
 
 impl CreatePipelineSinkRequest {
@@ -434,6 +438,39 @@ pub struct SinkDeliveryConfigRequest {
     pub compression: Option<SinkCompressionConfigRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encryption: Option<SinkEncryptionConfigRequest>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SinkRetryConfigRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_backoff_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_backoff_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<bool>,
+}
+
+impl SinkRetryConfigRequest {
+    pub(super) fn to_retry_config(&self) -> Result<SinkRetryConfig, String> {
+        let mut config = SinkRetryConfig {
+            max_attempts: self.max_attempts,
+            ..SinkRetryConfig::default()
+        };
+        if let Some(initial_backoff_ms) = self.initial_backoff_ms {
+            config.initial_backoff_ms = initial_backoff_ms;
+        }
+        if let Some(max_backoff_ms) = self.max_backoff_ms {
+            config.max_backoff_ms = max_backoff_ms;
+        }
+        if let Some(jitter) = self.jitter {
+            config.jitter = jitter;
+        }
+        config.validate()?;
+        Ok(config)
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]

@@ -13,7 +13,7 @@ use flow::connector::sink::video::{
 use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
 use flow::expr::func::EvalError;
 use flow::planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
-use flow::planner::sink::CustomSinkConnectorConfig;
+use flow::planner::sink::{CustomSinkConnectorConfig, SinkRetryConfig};
 use flow::planner::{
     create_physical_plan_with_build_options, optimize_logical_plan_with_options,
     PhysicalPlanBuildOptions,
@@ -2152,5 +2152,38 @@ fn plan_explain_batch_table_driven() {
                 fragment
             );
         }
+    }
+}
+
+#[test]
+fn plan_explain_sink_retry_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sinks: Vec<PipelineSink>,
+        expected: &'static str,
+    }
+
+    let cases = vec![Case {
+        name: "sink_retry_with_max_attempts",
+        sql: "SELECT a FROM stream",
+        sinks: vec![PipelineSink::new(
+            "test_sink",
+            PipelineSinkConnector::new(
+                "test_connector",
+                SinkConnectorConfig::Nop(NopSinkConfig::default()),
+                SinkEncoderConfig::json(),
+            ),
+        )
+        .with_retry(SinkRetryConfig {
+            max_attempts: Some(3),
+            ..Default::default()
+        })],
+        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","retry_max_attempts=3","retry_initial_backoff_ms=1000","retry_max_backoff_ms=30000","retry_jitter=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop","retry_max_attempts=3","retry_initial_backoff_ms=1000","retry_max_backoff_ms=30000","retry_jitter=true"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+    }];
+
+    for case in cases {
+        let got = explain_json(case.sql, case.sinks);
+        assert_eq!(got, case.expected, "case={}", case.name);
     }
 }

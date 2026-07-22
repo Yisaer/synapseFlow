@@ -4,10 +4,13 @@ use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry, MergerRegistry}
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
     MemoryPublisher, MemoryTopicKind, MockSourceHandle, MqttClientManager, SharedMqttClientConfig,
+    SinkConnector,
 };
 use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::pipeline::PipelineManager;
+use crate::planner::sink::SinkConnectorConfig;
+use crate::runtime::TaskSpawner;
 use crate::secret::SecretContext;
 use crate::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
@@ -400,6 +403,27 @@ impl FlowInstance {
         self.memory_pubsub_registry
             .wait_for_subscribers(topic, kind, min, timeout)
             .await
+    }
+
+    /// Register a custom sink connector factory under the given kind name.
+    #[allow(dead_code)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn register_sink_connector(
+        &self,
+        kind: impl Into<String>,
+        factory: Arc<
+            dyn Fn(
+                    &str,
+                    &SinkConnectorConfig,
+                    &str,
+                    &MqttClientManager,
+                    &TaskSpawner,
+                ) -> Result<Box<dyn SinkConnector>, ConnectorError>
+                + Send
+                + Sync,
+        >,
+    ) {
+        self.connector_registry.register_sink_factory(kind, factory);
     }
 }
 

@@ -1434,6 +1434,12 @@ fn create_processor_from_plan_node(
                 )
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             processor.add_connector(connector_impl);
+            sink_plan
+                .connector
+                .retry
+                .validate()
+                .map_err(ProcessorError::InvalidConfiguration)?;
+            processor.set_retry_config(sink_plan.connector.retry.clone());
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Sink(
                 processor,
             )))

@@ -21,7 +21,7 @@ pub use api::{
     FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps,
     NngPubSubSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
     PipelineScheduleConfig, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition,
-    SinkProps, SinkType, SourceDefinition, SourceInputConfig, SourceInputMode,
+    SinkProps, SinkRetryConfig, SinkType, SourceDefinition, SourceInputConfig, SourceInputMode,
     SourceOnChangeConfig, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 pub(crate) use context::PipelineContext;

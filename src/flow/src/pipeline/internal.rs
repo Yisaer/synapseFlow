@@ -3,7 +3,7 @@ use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::sink::file::{
     FileRetentionConfig as FileSinkRetentionConfig, FileSinkConfig,
 };
-use crate::connector::sink::http::{HttpMethod, HttpRetryConfig, HttpSinkConfig};
+use crate::connector::sink::http::{HttpMethod, HttpSinkConfig};
 use crate::connector::sink::video::{
     VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig,
     VideoRollingConfig as VideoSinkRollingConfig, VideoSinkTargetConfig,
@@ -701,7 +701,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Nop => {
@@ -725,7 +726,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Kuksa => {
@@ -758,7 +760,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Kura => {
@@ -791,7 +794,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Video => {
@@ -856,7 +860,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Memory => {
@@ -891,7 +896,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::File => {
@@ -929,7 +935,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::NngPubSub => {
@@ -962,7 +969,8 @@ fn build_sinks_from_definition(
                     .with_encryption(sink.encryption.clone());
                     let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                         .with_common_props(sink.common.clone())
-                        .with_output(sink.output.clone());
+                        .with_output(sink.output.clone())
+                        .with_retry(sink.retry.clone());
                     sinks.push(pipeline_sink);
                 }
                 #[cfg(not(feature = "nng_pubsub"))]
@@ -1011,17 +1019,6 @@ fn build_sinks_from_definition(
                 if let Some(max_size) = props.max_body_size {
                     http_cfg = http_cfg.with_max_body_size(max_size);
                 }
-                let mut retry_cfg = HttpRetryConfig::default();
-                if let Some(max_attempts) = props.retry_max_attempts {
-                    retry_cfg.max_attempts = Some(max_attempts);
-                }
-                if let Some(backoff_ms) = props.retry_backoff_ms {
-                    retry_cfg.initial_backoff_ms = backoff_ms;
-                }
-                if let Some(max_backoff_ms) = props.retry_max_backoff_ms {
-                    retry_cfg.max_backoff_ms = max_backoff_ms;
-                }
-                http_cfg = http_cfg.with_retry(retry_cfg);
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Http(http_cfg),
@@ -1031,7 +1028,8 @@ fn build_sinks_from_definition(
                 .with_encryption(sink.encryption.clone());
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone())
-                    .with_output(sink.output.clone());
+                    .with_output(sink.output.clone())
+                    .with_retry(sink.retry.clone());
                 sinks.push(pipeline_sink);
             }
         }

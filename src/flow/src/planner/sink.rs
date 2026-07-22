@@ -12,6 +12,55 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Retry configuration for sink deliveries.
+///
+/// Shared across all sink connector types. When `max_attempts` is `None`,
+/// each delivery is attempted exactly once (no retry).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SinkRetryConfig {
+    /// Maximum delivery attempts including the first one.
+    /// `None` means no retry. Default: `None` (single attempt).
+    pub max_attempts: Option<usize>,
+    /// Initial backoff in milliseconds, doubles after each failed attempt.
+    /// Default: 1000 (1 second).
+    pub initial_backoff_ms: u64,
+    /// Upper bound on backoff in milliseconds.
+    /// Default: 30000 (30 seconds).
+    pub max_backoff_ms: u64,
+    /// Reserved for adding randomized backoff jitter. Current backoff is deterministic.
+    /// Default: true.
+    pub jitter: bool,
+}
+
+impl Default for SinkRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: None,
+            initial_backoff_ms: 1000,
+            max_backoff_ms: 30000,
+            jitter: true,
+        }
+    }
+}
+
+impl SinkRetryConfig {
+    /// Validate the configuration. Returns an error for invalid combinations.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(max) = self.max_attempts {
+            if max == 0 {
+                return Err("retry.max_attempts must be >= 1".into());
+            }
+        }
+        if self.initial_backoff_ms == 0 {
+            return Err("retry.initial_backoff_ms must be > 0".into());
+        }
+        if self.max_backoff_ms < self.initial_backoff_ms {
+            return Err("retry.max_backoff_ms must be >= retry.initial_backoff_ms".into());
+        }
+        Ok(())
+    }
+}
+
 /// Declarative description of a sink processor in the logical/physical plans.
 #[derive(Clone)]
 pub struct PipelineSink {
@@ -20,6 +69,7 @@ pub struct PipelineSink {
     pub common: CommonSinkProps,
     pub output: SinkOutputConfig,
     pub connector: PipelineSinkConnector,
+    pub retry: SinkRetryConfig,
 }
 
 impl PipelineSink {
@@ -31,6 +81,7 @@ impl PipelineSink {
             common: CommonSinkProps::default(),
             output: SinkOutputConfig::default(),
             connector,
+            retry: SinkRetryConfig::default(),
         }
     }
 
@@ -49,6 +100,11 @@ impl PipelineSink {
         self.output = output;
         self
     }
+
+    pub fn with_retry(mut self, retry: SinkRetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
 }
 
 impl fmt::Debug for PipelineSink {
@@ -59,6 +115,7 @@ impl fmt::Debug for PipelineSink {
             .field("common", &self.common)
             .field("output", &self.output)
             .field("connector", &self.connector)
+            .field("retry", &self.retry)
             .finish()
     }
 }

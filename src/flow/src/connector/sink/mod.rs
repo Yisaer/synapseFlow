@@ -15,6 +15,13 @@ pub trait SinkConnector: Send + Sync + 'static {
     /// Identifier for logging/metrics.
     fn id(&self) -> &str;
 
+    /// Maximum encoded payload size accepted for one delivery.
+    ///
+    /// Connectors that do not have a fixed delivery-size limit return `None`.
+    fn max_delivery_bytes(&self) -> Option<usize> {
+        None
+    }
+
     /// Start a new encoded delivery.
     async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
         Err(SinkConnectorError::Other(format!(
@@ -71,9 +78,28 @@ pub trait SinkConnector: Send + Sync + 'static {
 #[derive(thiserror::Error, Debug)]
 pub enum SinkConnectorError {
     /// Connector is not available anymore (e.g. channel closed).
+    /// This is permanent — the delivery must not be retried.
     #[error("connector unavailable: {0}")]
     Unavailable(String),
-    /// Any custom error surfaced by the connector.
+
+    /// Transient failure — the delivery can be retried after backoff.
+    /// Examples: network timeout, connection refused, 5xx, 429.
+    #[error("transient failure: {0}")]
+    Transient(String),
+
+    /// Permanent failure — the delivery must NOT be retried.
+    /// Examples: 400 Bad Request, 404 Not Found, invalid payload.
+    #[error("permanent failure: {0}")]
+    Permanent(String),
+
+    /// Acknowledgement uncertain — request may or may not have succeeded.
+    /// Logged distinctly so operators can identify possible duplicate deliveries.
+    /// Examples: MQTT QoS 1 PUBACK timeout, HTTP response lost mid-stream.
+    #[error("acknowledgement uncertain: {0}")]
+    Uncertain(String),
+
+    /// Catch-all for errors that don't fall into the categories above.
+    /// Treated as permanent by default.
     #[error("{0}")]
     Other(String),
 }

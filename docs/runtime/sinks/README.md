@@ -7,6 +7,7 @@ This directory documents sink-side behavior in veloFlux:
 - which sink connectors are built into the runtime
 - how sink encoders are attached
 - which sink-level common properties are applied before delivery
+- how sink-level retry is handled
 - how planner/physical plan stages are ordered near the sink boundary
 - where future sink-side output features should live
 
@@ -15,7 +16,7 @@ separated.
 
 ## Layer Model
 
-At a high level, sink-side delivery in veloFlux is split into four layers:
+At a high level, sink-side delivery in veloFlux is split into five layers:
 
 1. **Sink connector**
    - Delivers the final payload to an external system or in-process destination.
@@ -29,7 +30,12 @@ At a high level, sink-side delivery in veloFlux is split into four layers:
    - Transform encoded delivery bytes before they reach the connector.
    - Examples: gzip/zstd compression and AES-GCM encryption.
 
-4. **Common sink properties**
+4. **Sink retry**
+   - Retains a failed encoded delivery at the `SinkProcessor` layer and replays the full connector
+     delivery sequence after backoff.
+   - See `retry.md`.
+
+5. **Common sink properties**
    - Planner-managed sink-side behavior shared across connectors.
    - Today this mainly means sink batching.
 

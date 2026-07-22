@@ -338,6 +338,19 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             if let Some(exclude) = &sink.output.exclude_columns {
                 info.push(format!("output.exclude_columns=[{}]", exclude.join(", ")));
             }
+            // Retry configuration (only emitted when explicitly configured)
+            if let Some(max_attempts) = sink.retry.max_attempts {
+                info.push(format!("retry_max_attempts={}", max_attempts));
+                info.push(format!(
+                    "retry_initial_backoff_ms={}",
+                    sink.retry.initial_backoff_ms
+                ));
+                info.push(format!(
+                    "retry_max_backoff_ms={}",
+                    sink.retry.max_backoff_ms
+                ));
+                info.push(format!("retry_jitter={}", sink.retry.jitter));
+            }
         }
         LogicalPlan::Tail(tail) => {
             info.push(format!("sink_count={}", tail.base.children.len()));
@@ -912,6 +925,19 @@ fn build_physical_node_with_prefix(
             {
                 info.push(format!("topic={}", cfg.topic));
                 info.push(format!("kind={}", cfg.kind));
+            }
+            // Retry configuration (only emitted when explicitly configured)
+            if let Some(max_attempts) = sink.connector.retry.max_attempts {
+                info.push(format!("retry_max_attempts={}", max_attempts));
+                info.push(format!(
+                    "retry_initial_backoff_ms={}",
+                    sink.connector.retry.initial_backoff_ms
+                ));
+                info.push(format!(
+                    "retry_max_backoff_ms={}",
+                    sink.connector.retry.max_backoff_ms
+                ));
+                info.push(format!("retry_jitter={}", sink.connector.retry.jitter));
             }
         }
         PhysicalPlan::SinkCompress(compress) => {

@@ -1,5 +1,5 @@
 use crate::planner::physical::BasePhysicalPlan;
-use crate::planner::sink::SinkConnectorConfig;
+use crate::planner::sink::{SinkConnectorConfig, SinkRetryConfig};
 use std::fmt;
 use std::sync::Arc;
 
@@ -40,6 +40,7 @@ pub struct PhysicalSinkConnector {
     pub forward_to_result: bool,
     pub connector: SinkConnectorConfig,
     pub encoder_plan_index: Option<i64>,
+    pub retry: SinkRetryConfig,
 }
 
 impl PhysicalSinkConnector {
@@ -48,12 +49,14 @@ impl PhysicalSinkConnector {
         forward_to_result: bool,
         connector: SinkConnectorConfig,
         encoder_plan_index: Option<i64>,
+        retry: SinkRetryConfig,
     ) -> Self {
         Self {
             sink_id,
             forward_to_result,
             connector,
             encoder_plan_index,
+            retry,
         }
     }
 }

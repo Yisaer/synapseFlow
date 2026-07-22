@@ -4,8 +4,8 @@ use flow::EncoderRegistry;
 use flow::pipeline::{
     FileRetentionConfig, FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps,
     MemorySinkProps, MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineDefinition,
-    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition,
-    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkRetryConfig, SinkType,
+    SourceDefinition, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -471,16 +471,19 @@ pub(crate) fn build_pipeline_definition(
                 if let Some(max_size) = http_props.max_body_size {
                     props = props.with_max_body_size(max_size);
                 }
+                // Collect retry config from HTTP request props (applied at sink level below).
+                let mut http_retry = SinkRetryConfig::default();
                 if let Some(max_attempts) = http_props.retry_max_attempts {
-                    props = props.with_retry_max_attempts(max_attempts);
+                    http_retry.max_attempts = Some(max_attempts);
                 }
                 if let Some(backoff_ms) = http_props.retry_backoff_ms {
-                    props = props.with_retry_backoff_ms(backoff_ms);
+                    http_retry.initial_backoff_ms = backoff_ms;
                 }
                 if let Some(max_backoff_ms) = http_props.retry_max_backoff_ms {
-                    props = props.with_retry_max_backoff_ms(max_backoff_ms);
+                    http_retry.max_backoff_ms = max_backoff_ms;
                 }
                 SinkDefinition::new(sink_id.clone(), SinkType::Http, SinkProps::Http(props))
+                    .with_retry(http_retry)
             }
             other => return Err(format!("unsupported sink type: {other}")),
         };
@@ -553,6 +556,10 @@ pub(crate) fn build_pipeline_definition(
                     sink_definition.with_encryption(encryption.to_encryption_config(&secret_ctx)?);
             }
         }
+        if let Some(retry) = sink_req.retry.as_ref() {
+            sink_definition = sink_definition.with_retry(retry.to_retry_config()?);
+        }
+        sink_definition.retry.validate()?;
         sinks.push(sink_definition);
     }
     let schedule = req

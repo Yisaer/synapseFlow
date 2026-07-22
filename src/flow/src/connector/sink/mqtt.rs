@@ -103,7 +103,7 @@ impl SinkClient {
             SinkClient::Shared(shared) => shared
                 .publish(topic.to_string(), qos, retain, payload)
                 .await
-                .map_err(|err| SinkConnectorError::Other(format!("mqtt publish error: {err}"))),
+                .map_err(|err| SinkConnectorError::Transient(format!("mqtt publish error: {err}"))),
             SinkClient::Standalone(standalone) => {
                 standalone.publish(topic, qos, retain, payload).await
             }
@@ -181,13 +181,26 @@ impl StandaloneMqttClient {
                 .last_error()
                 .map(|err| format!("mqtt not connected: {err}"))
                 .unwrap_or_else(|| "mqtt not connected".to_string());
-            return Err(SinkConnectorError::Other(message));
+            // Connection is not established — transient, may recover.
+            return Err(SinkConnectorError::Transient(message));
         }
 
         self.client
             .publish(topic.to_string(), qos, retain, payload)
             .await
-            .map_err(|err| SinkConnectorError::Other(format!("mqtt publish error: {err}")))
+            .map_err(|err| {
+                // For QoS 1 and 2, the outcome is uncertain when the publish
+                // call itself fails: the message may have been partially
+                // delivered or acknowledged.
+                if matches!(qos, QoS::AtLeastOnce | QoS::ExactlyOnce) {
+                    SinkConnectorError::Uncertain(format!(
+                        "mqtt publish error (QoS {:?}): {err}",
+                        qos
+                    ))
+                } else {
+                    SinkConnectorError::Transient(format!("mqtt publish error: {err}"))
+                }
+            })
     }
 
     async fn shutdown(self) -> Result<(), SinkConnectorError> {
@@ -281,7 +294,7 @@ impl MqttSinkConnector {
             0 => Ok(QoS::AtMostOnce),
             1 => Ok(QoS::AtLeastOnce),
             2 => Ok(QoS::ExactlyOnce),
-            other => Err(SinkConnectorError::Other(format!(
+            other => Err(SinkConnectorError::Permanent(format!(
                 "unsupported MQTT QoS level: {other}"
             ))),
         }
@@ -292,6 +305,10 @@ impl MqttSinkConnector {
 impl SinkConnector for MqttSinkConnector {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn max_delivery_bytes(&self) -> Option<usize> {
+        self.config.max_packet_size
     }
 
     async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
@@ -313,7 +330,7 @@ impl SinkConnector for MqttSinkConnector {
 
     async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
         let payload = self.buffer.take().ok_or_else(|| {
-            SinkConnectorError::Other(format!(
+            SinkConnectorError::Permanent(format!(
                 "mqtt sink `{}` finished without active delivery",
                 self.id
             ))
@@ -334,7 +351,7 @@ impl SinkConnector for MqttSinkConnector {
                 })?;
             Ok(DeliveryResult { bytes_written })
         } else {
-            Err(SinkConnectorError::Unavailable(format!(
+            Err(SinkConnectorError::Transient(format!(
                 "mqtt sink `{}` not connected",
                 self.id
             )))

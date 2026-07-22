@@ -1,5 +1,6 @@
 use crate::catalog::Catalog;
 use crate::codec::{CompressionCodec, SinkEncryptionConfig};
+pub use crate::planner::sink::SinkRetryConfig;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkOutputConfig};
 use crate::PipelineRegistries;
 use std::collections::HashMap;
@@ -189,12 +190,6 @@ pub struct HttpSinkProps {
     pub content_type: Option<String>,
     /// Maximum single-delivery body size in bytes, defaults to 64 MiB.
     pub max_body_size: Option<usize>,
-    /// Maximum retry attempts, defaults to `None` (no retry).
-    pub retry_max_attempts: Option<usize>,
-    /// Initial backoff in milliseconds between retries, defaults to 1000.
-    pub retry_backoff_ms: Option<u64>,
-    /// Maximum backoff in milliseconds between retries, defaults to 30000.
-    pub retry_max_backoff_ms: Option<u64>,
 }
 
 impl HttpSinkProps {
@@ -207,9 +202,6 @@ impl HttpSinkProps {
             headers: HashMap::new(),
             content_type: None,
             max_body_size: None,
-            retry_max_attempts: None,
-            retry_backoff_ms: None,
-            retry_max_backoff_ms: None,
         }
     }
 
@@ -240,24 +232,6 @@ impl HttpSinkProps {
     /// Set the maximum body size for a single delivery.
     pub fn with_max_body_size(mut self, max_bytes: usize) -> Self {
         self.max_body_size = Some(max_bytes);
-        self
-    }
-
-    /// Set the maximum number of retry attempts.
-    pub fn with_retry_max_attempts(mut self, max_attempts: usize) -> Self {
-        self.retry_max_attempts = Some(max_attempts);
-        self
-    }
-
-    /// Set the initial backoff duration in milliseconds.
-    pub fn with_retry_backoff_ms(mut self, backoff_ms: u64) -> Self {
-        self.retry_backoff_ms = Some(backoff_ms);
-        self
-    }
-
-    /// Set the maximum backoff duration in milliseconds.
-    pub fn with_retry_max_backoff_ms(mut self, max_backoff_ms: u64) -> Self {
-        self.retry_max_backoff_ms = Some(max_backoff_ms);
         self
     }
 }
@@ -421,6 +395,7 @@ pub struct SinkDefinition {
     pub output: SinkOutputConfig,
     pub compression: Option<CompressionCodec>,
     pub encryption: Option<SinkEncryptionConfig>,
+    pub retry: SinkRetryConfig,
 }
 
 impl SinkDefinition {
@@ -435,6 +410,7 @@ impl SinkDefinition {
             output: SinkOutputConfig::default(),
             compression: None,
             encryption: None,
+            retry: SinkRetryConfig::default(),
         }
     }
 
@@ -460,6 +436,11 @@ impl SinkDefinition {
 
     pub fn with_encryption(mut self, encryption: SinkEncryptionConfig) -> Self {
         self.encryption = Some(encryption);
+        self
+    }
+
+    pub fn with_retry(mut self, retry: SinkRetryConfig) -> Self {
+        self.retry = retry;
         self
     }
 }

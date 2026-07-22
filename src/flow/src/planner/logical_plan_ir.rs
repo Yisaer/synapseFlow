@@ -1051,11 +1051,6 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "max_body_size": cfg.max_body_size,
                 "content_type": cfg.content_type,
                 "headers": cfg.headers,
-                "retry": {
-                    "max_attempts": cfg.retry.max_attempts,
-                    "initial_backoff_ms": cfg.retry.initial_backoff_ms,
-                    "max_backoff_ms": cfg.retry.max_backoff_ms,
-                },
             }),
         ),
         SinkConnectorConfig::Video(cfg) => {
