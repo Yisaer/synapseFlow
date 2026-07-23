@@ -1,4 +1,7 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
+use super::{
+    bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix,
+    write_schema_zip,
+};
 use flow::connector::{MemoryData, MemoryTopicKind};
 use reqwest::StatusCode;
 use std::path::PathBuf;
@@ -280,21 +283,16 @@ async fn create_stream(
     packet_path: &str,
     signal_name_pattern: Option<&str>,
 ) {
-    let mut props = serde_json::json!({"schema_path": arxml_path});
-    if let Some(p) = signal_name_pattern {
-        props["signal_name_pattern"] = serde_json::json!(p);
-    }
+    let schema_path = complete_gbf_schema_path(name, arxml_path, packet_path, signal_name_pattern);
+    let schema_name = format!("{name}_schema");
+    install_gbf_schema(http, base, &schema_name, &schema_path).await;
     let resp = http
         .post(format!("{base}/streams"))
         .json(&serde_json::json!({
             "name": name, "type": "mqtt",
-            "schema": {"type": "arxml", "props": props},
+            "schema": {"ref": schema_name},
             "props": {"broker_url": "tcp://127.0.0.1:1883", "topic": "x", "qos": 0},
-            "decoder": {"type": "gbf", "props": {
-                "schema_path": packet_path,
-                "format_type": "someip",
-                "format_schema_path": arxml_path,
-            }}
+            "decoder": {"type": "gbf", "props": {}}
         }))
         .send()
         .await
@@ -364,21 +362,16 @@ async fn create_memory_stream(
     packet_path: &str,
     signal_name_pattern: Option<&str>,
 ) {
-    let mut props = serde_json::json!({"schema_path": arxml_path});
-    if let Some(p) = signal_name_pattern {
-        props["signal_name_pattern"] = serde_json::json!(p);
-    }
+    let schema_path = complete_gbf_schema_path(name, arxml_path, packet_path, signal_name_pattern);
+    let schema_name = format!("{name}_schema");
+    install_gbf_schema(http, base, &schema_name, &schema_path).await;
     let resp = http
         .post(format!("{base}/streams"))
         .json(&serde_json::json!({
             "name": name, "type": "memory",
-            "schema": {"type": "arxml", "props": props},
+            "schema": {"ref": schema_name},
             "props": {"topic": input_topic},
-            "decoder": {"type": "gbf", "props": {
-                "schema_path": packet_path,
-                "format_type": "someip",
-                "format_schema_path": arxml_path,
-            }}
+            "decoder": {"type": "gbf", "props": {}}
         }))
         .send()
         .await
@@ -387,6 +380,52 @@ async fn create_memory_stream(
         resp.status(),
         StatusCode::CREATED,
         "stream {name}: {}",
+        resp.text().await.unwrap_or_default()
+    );
+}
+
+fn complete_gbf_schema_path(
+    name: &str,
+    arxml_path: &str,
+    packet_path: &str,
+    signal_name_pattern: Option<&str>,
+) -> String {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(packet_path).expect("read GBF packet layout"))
+            .expect("parse GBF packet layout");
+    let mut format_props = serde_json::json!({"arxml_path": "format/system.arxml"});
+    if let Some(pattern) = signal_name_pattern {
+        format_props["signal_name_pattern"] = serde_json::json!(pattern);
+    }
+    document["format"] = serde_json::json!({"type": "someip", "props": format_props});
+    let entry = serde_json::to_vec_pretty(&document).expect("encode complete GBF schema");
+    let arxml = std::fs::read(arxml_path).expect("read private ARXML source");
+    let archive = std::env::temp_dir().join(format!("veloflux-{name}.zip"));
+    write_schema_zip(
+        &archive,
+        &[
+            ("someip_packet.json", &entry),
+            ("someip_packet/format/system.arxml", &arxml),
+        ],
+    );
+    archive.to_string_lossy().into_owned()
+}
+
+async fn install_gbf_schema(http: &reqwest::Client, base: &str, name: &str, archive_path: &str) {
+    let resp = http
+        .post(format!("{base}/schemas"))
+        .json(&serde_json::json!({
+            "name": name,
+            "type": "gbf",
+            "props": {"schema_path": archive_path}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "schema {name}: {}",
         resp.text().await.unwrap_or_default()
     );
 }

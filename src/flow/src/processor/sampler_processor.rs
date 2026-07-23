@@ -19,6 +19,7 @@ use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
@@ -100,6 +101,7 @@ pub struct SamplerProcessor {
     merger_registry: Option<Arc<MergerRegistry>>,
     /// Output schema used to build a fused (decode-capable) Packer merger.
     merger_schema: Option<Arc<Schema>>,
+    merger_schema_artifact: Option<Arc<dyn Any + Send + Sync>>,
     /// Shared decode state for projection pushdown into the fused decode path.
     applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
 }
@@ -130,6 +132,7 @@ impl SamplerProcessor {
             stats: Arc::new(ProcessorStats::default()),
             merger_registry: None,
             merger_schema: None,
+            merger_schema_artifact: None,
             applied_decode_state: None,
         }
     }
@@ -151,6 +154,10 @@ impl SamplerProcessor {
     /// mergers that build an embedded decoder for the fused path).
     pub fn set_merger_schema(&mut self, schema: Arc<Schema>) {
         self.merger_schema = Some(schema);
+    }
+
+    pub fn set_merger_schema_artifact(&mut self, artifact: Arc<dyn Any + Send + Sync>) {
+        self.merger_schema_artifact = Some(artifact);
     }
 
     /// Provide shared decode state so the fused decode path can apply the
@@ -190,6 +197,7 @@ impl Processor for SamplerProcessor {
 
         let merger_registry = self.merger_registry.clone();
         let merger_schema = self.merger_schema.clone();
+        let merger_schema_artifact = self.merger_schema_artifact.clone();
         let applied_decode_state = self.applied_decode_state.clone();
 
         ProcessorStart::ready(spawner.spawn(async move {
@@ -200,6 +208,7 @@ impl Processor for SamplerProcessor {
                 strategy,
                 merger_registry,
                 merger_schema,
+                merger_schema_artifact,
                 applied_decode_state,
             )?;
             let mut control_active = control_active;
@@ -335,6 +344,7 @@ impl StrategyState {
         strategy: SamplingStrategy,
         registry: Option<Arc<MergerRegistry>>,
         schema: Option<Arc<Schema>>,
+        schema_artifact: Option<Arc<dyn Any + Send + Sync>>,
         applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
     ) -> Result<Self, ProcessorError> {
         match strategy {
@@ -351,7 +361,12 @@ impl StrategyState {
                     )
                 })?;
                 let merger_instance = registry
-                    .instantiate(&props.merger.merger_type, &props.merger.props, schema)
+                    .instantiate_with_schema_artifact(
+                        &props.merger.merger_type,
+                        &props.merger.props,
+                        schema,
+                        schema_artifact,
+                    )
                     .map_err(|e| ProcessorError::InvalidConfiguration(e.to_string()))?;
                 Ok(StrategyState::Packer {
                     merger: merger_instance,

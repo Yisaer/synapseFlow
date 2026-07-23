@@ -1,15 +1,17 @@
 //! Integration test for the fused GBF merger as wired through the production
 //! `MergerRegistry` path (the same path `SamplerProcessor`'s Packer strategy
-//! uses). Verifies that when the merger config carries the CAN format schema,
-//! the registry builds a decode-capable merger that emits a decoded collection
-//! directly (skipping the GBF re-encode + re-parse round-trip).
+//! uses). Verifies that the decoder and merger can share the same compiled DBC
+//! artifact while the merger emits a decoded collection directly.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use flow::FlowInstance;
 use flow::instance::{FlowInstanceDedicatedRuntimeOptions, FlowInstanceOptions};
-use serde_json::{Map, Value};
-use veloflux_sdv::schema::dbc::{load_dbc_json, schema_from_dbc};
+use serde_json::Map;
+use veloflux_sdv::schema::dbc::CompiledDbcSchema;
+use veloflux_sdv::schema::dbc::load_dbc_json;
+use veloflux_sdv::schema::gbf::{CompiledGbfSchema, GbfSchema};
 
 fn fixture(rel: &str) -> String {
     format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel)
@@ -40,28 +42,26 @@ fn registry_builds_fused_gbf_merger_and_decodes() {
 
     // Schema the framework would hand the merger (derived from the DBC).
     let dbc = load_dbc_json(&fixture("src/tests/sim.json")).expect("load dbc json");
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+    let compiled = Arc::new(CompiledDbcSchema::new(dbc, "{sig}"));
+    let schema = Arc::new(compiled.schema("can"));
 
-    // Merger props now carry the CAN format schema, which activates fusion.
-    let mut props = Map::new();
-    props.insert(
-        "schema".to_string(),
-        Value::String(fixture("src/tests/spi_packet.json")),
-    );
-    props.insert(
-        "format_schema_path".to_string(),
-        Value::String(fixture("src/tests/sim.json")),
-    );
-    props.insert("format_type".to_string(), Value::String("can".to_string()));
-    // sim.json frames are bus-prefixed (bus.id = 1) -> historical bus_shift packing.
-    props.insert(
-        "can_id_mapping".to_string(),
-        serde_json::json!({ "mode": "bus_shift", "bits": 12 }),
-    );
+    // The complete GBF artifact carries both layout and format configuration.
+    let props = Map::new();
 
+    let layout = GbfSchema::load(&fixture("src/tests/spi_packet.json")).expect("load GBF layout");
+    let compiled = Arc::new(
+        CompiledGbfSchema::can(
+            layout,
+            compiled,
+            true,
+            veloflux_sdv::decoder::CanIdMapping::BusShift { bits: 12 },
+        )
+        .expect("compile GBF schema"),
+    );
+    let artifact: Arc<dyn Any + Send + Sync> = compiled;
     let mut merger = instance
         .merger_registry()
-        .instantiate("gbf", &props, Arc::clone(&schema))
+        .instantiate_with_schema_artifact("gbf", &props, Arc::clone(&schema), Some(artifact))
         .expect("instantiate fused gbf merger");
 
     assert!(
@@ -123,7 +123,7 @@ fn registry_builds_fused_gbf_merger_and_decodes() {
 }
 
 #[test]
-fn registry_rejects_gbf_merger_without_format_schema_path() {
+fn registry_rejects_gbf_merger_without_schema_artifact() {
     let instance = FlowInstance::new(FlowInstanceOptions::dedicated_runtime(
         "default",
         None,
@@ -133,23 +133,20 @@ fn registry_rejects_gbf_merger_without_format_schema_path() {
     veloflux_sdv::register(&instance);
 
     let dbc = load_dbc_json(&fixture("src/tests/sim.json")).expect("load dbc json");
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+    let compiled = CompiledDbcSchema::new(dbc, "{sig}");
+    let schema = Arc::new(compiled.schema("can"));
 
-    let mut props = Map::new();
-    props.insert(
-        "schema".to_string(),
-        Value::String(fixture("src/tests/spi_packet.json")),
-    );
+    let props = Map::new();
 
     let err = match instance
         .merger_registry()
         .instantiate("gbf", &props, schema)
     {
-        Ok(_) => panic!("gbf merger must require format schema"),
+        Ok(_) => panic!("gbf merger must require a schema artifact"),
         Err(err) => err,
     };
     assert!(
-        err.to_string().contains("format_schema_path"),
+        err.to_string().contains("resolved GBF schema"),
         "unexpected error: {err}"
     );
 }

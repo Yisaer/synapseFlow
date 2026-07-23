@@ -96,8 +96,9 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
         .collect();
     let wasm_dir = state.storage.wasm_files_dir();
     let uploads_dir = state.storage.uploads_dir();
+    let schemas_dir = state.storage.schemas_dir();
 
-    let tar_gz = match build_tar_gz(&bundle, &udf_shas, &wasm_dir, &uploads_dir) {
+    let tar_gz = match build_tar_gz(&bundle, &udf_shas, &wasm_dir, &uploads_dir, &schemas_dir) {
         Ok(data) => data,
         Err(err) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
@@ -164,11 +165,12 @@ fn add_uploads_to_tar<W: std::io::Write>(
     Ok(())
 }
 
-fn build_tar_gz(
+pub(crate) fn build_tar_gz(
     bundle: &ExportBundleV1,
     udf_shas: &[String],
     wasm_dir: &std::path::Path,
     uploads_dir: &std::path::Path,
+    schemas_dir: &std::path::Path,
 ) -> Result<Vec<u8>, String> {
     let metadata_json =
         serde_json::to_vec(bundle).map_err(|e| format!("serialize export bundle: {e}"))?;
@@ -204,6 +206,8 @@ fn build_tar_gz(
         // Write each upload file (recursive)
         add_uploads_to_tar(&mut tar, uploads_dir, "uploads")
             .map_err(|e| format!("write uploads to tar: {e}"))?;
+        add_uploads_to_tar(&mut tar, schemas_dir, "schemas")
+            .map_err(|e| format!("write schemas to tar: {e}"))?;
 
         let gz = tar.into_inner().map_err(|e| format!("finish tar: {e}"))?;
         gz.finish().map_err(|e| format!("finish gzip: {e}"))?;

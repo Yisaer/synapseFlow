@@ -2,6 +2,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeSet;
+use std::path::Path;
 use storage::{
     MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
     StoredSchema, StoredUdf,
@@ -14,6 +15,7 @@ use crate::export::{
 };
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
+use crate::schema::source::{PreparedSchemaTree, resolve_props_from_root};
 use crate::storage_bridge;
 use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
 
@@ -91,8 +93,18 @@ pub async fn import_storage_handler(
         }
     };
 
-    let snapshot = match validate_and_build_snapshot(&bundle, &|id| state.is_declared_instance(id))
-    {
+    let schemas_src = tmp.path().join("schemas");
+    let mut schema_tree = match PreparedSchemaTree::prepare(&state.storage, &schemas_src) {
+        Ok(tree) => tree,
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+    let schema_validation_root = schema_tree.staged_root().unwrap_or(&schemas_src);
+    let snapshot = match validate_and_build_snapshot(&bundle, Some(schema_validation_root), &|id| {
+        state.is_declared_instance(id)
+    }) {
         Ok(snapshot) => snapshot,
         Err(err) => {
             audit.log_failure(&err);
@@ -125,6 +137,10 @@ pub async fn import_storage_handler(
         )
             .into_response();
     }
+    if let Err(err) = schema_tree.activate() {
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
 
     let previous_bundle = match build_export_bundle(state.storage.as_ref()) {
         Ok(bundle) => bundle,
@@ -145,10 +161,14 @@ pub async fn import_storage_handler(
     };
 
     if let Err(err) = state.storage.replace_metadata_snapshot(snapshot) {
-        let err = format!("replace metadata snapshot in storage: {err}");
+        let mut err = format!("replace metadata snapshot in storage: {err}");
+        if let Err(rollback_err) = schema_tree.rollback() {
+            err = format!("{err}; rollback schema sources: {rollback_err}");
+        }
         audit.log_failure(&err);
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
+    schema_tree.finish();
 
     // Re-hydrate NamedSchemaStore from the newly imported storage
     reload_schemas_from_storage(state.storage.as_ref());
@@ -199,6 +219,7 @@ fn validate_pipeline_stream_references(
 fn validate_and_build_snapshot_inner<F>(
     bundle: &ExportBundleV1,
     existing_stream_names: &BTreeSet<String>,
+    schema_source_root: Option<&Path>,
     is_declared_instance: &F,
 ) -> Result<MetadataExportSnapshot, String>
 where
@@ -251,8 +272,12 @@ where
     // Validate each imported schema through the schema registry
     let mut available_schema_names: BTreeSet<String> = BTreeSet::new();
     for stored in &schemas {
-        let props: JsonMap<String, JsonValue> = serde_json::from_str(&stored.props_json)
+        let mut props: JsonMap<String, JsonValue> = serde_json::from_str(&stored.props_json)
             .map_err(|err| format!("schema {} has invalid props JSON: {err}", stored.name))?;
+        if let Some(root) = schema_source_root {
+            resolve_props_from_root(root, &stored.name, &stored.schema_type, &mut props)
+                .map_err(|err| format!("schema {} has invalid source: {err}", stored.name))?;
+        }
         match schema_registry().parse(&stored.schema_type, &stored.name, &props) {
             Ok(_) => {}
             Err(err) => {
@@ -440,23 +465,35 @@ fn sha256_hex(data: &[u8]) -> String {
 
 pub(crate) fn validate_and_build_snapshot<F>(
     bundle: &ExportBundleV1,
+    schema_source_root: Option<&Path>,
     is_declared_instance: &F,
 ) -> Result<MetadataExportSnapshot, String>
 where
     F: Fn(&str) -> bool,
 {
-    validate_and_build_snapshot_inner(bundle, &BTreeSet::new(), is_declared_instance)
+    validate_and_build_snapshot_inner(
+        bundle,
+        &BTreeSet::new(),
+        schema_source_root,
+        is_declared_instance,
+    )
 }
 
 pub(crate) fn validate_and_build_snapshot_with_existing_streams<F>(
     bundle: &ExportBundleV1,
     existing_stream_names: &BTreeSet<String>,
+    schema_source_root: Option<&Path>,
     is_declared_instance: &F,
 ) -> Result<MetadataExportSnapshot, String>
 where
     F: Fn(&str) -> bool,
 {
-    validate_and_build_snapshot_inner(bundle, existing_stream_names, is_declared_instance)
+    validate_and_build_snapshot_inner(
+        bundle,
+        existing_stream_names,
+        schema_source_root,
+        is_declared_instance,
+    )
 }
 
 fn validate_memory_topic(
@@ -648,78 +685,79 @@ mod tests {
         }
     }
 
-    fn add_uploads_to_tar_for_test(
-        tar: &mut tar::Builder<impl std::io::Write>,
-        dir: &std::path::Path,
-        tar_prefix: &str,
-    ) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let file_type = entry.file_type().unwrap();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') && name.ends_with(".tmp") {
-                continue;
-            }
-            let entry_name = format!("{tar_prefix}/{name}");
-            if file_type.is_dir() {
-                add_uploads_to_tar_for_test(tar, &entry.path(), &entry_name);
-            } else if file_type.is_file() {
-                let data = std::fs::read(entry.path()).unwrap();
-                let mut header = tar::Header::new_gnu();
-                header.set_size(data.len() as u64);
-                header.set_mode(0o644);
-                header.set_cksum();
-                tar.append_data(&mut header, &entry_name, data.as_slice())
-                    .unwrap();
-            }
-        }
+    fn add_file_backed_proto_schema(bundle: &mut ExportBundleV1, schemas_root: &std::path::Path) {
+        let schema_dir = schemas_root.join("proto/simple_schema");
+        std::fs::create_dir_all(&schema_dir).expect("create proto schema directory");
+        std::fs::write(
+            schema_dir.join("simple.proto"),
+            b"syntax = \"proto3\"; message Simple { int64 value = 1; }",
+        )
+        .expect("write proto schema");
+        bundle.resources.schemas.push(crate::export::ExportSchema {
+            name: "simple_schema".to_string(),
+            schema_type: "proto".to_string(),
+            props: serde_json::from_value(serde_json::json!({
+                "proto_path": "simple.proto",
+                "message_type": "Simple"
+            }))
+            .expect("proto props"),
+        });
+        bundle.resources.streams[0].schema =
+            serde_json::from_value(serde_json::json!({"ref": "simple_schema"}))
+                .expect("schema ref");
     }
 
     fn build_tar_gz_for_test(
         bundle: &ExportBundleV1,
         wasm_dir: &std::path::Path,
         uploads_dir: &std::path::Path,
+        schemas_dir: &std::path::Path,
     ) -> Vec<u8> {
-        let metadata_json = serde_json::to_vec(bundle).unwrap();
         let udf_shas: Vec<String> = bundle
             .resources
             .udfs
             .iter()
             .map(|u| u.wasm_sha256.clone())
             .collect();
+        crate::export::build_tar_gz(bundle, &udf_shas, wasm_dir, uploads_dir, schemas_dir)
+            .expect("build test export")
+    }
 
+    #[cfg(unix)]
+    fn build_tar_gz_with_symlinked_proto(
+        bundle: &ExportBundleV1,
+        target: &std::path::Path,
+    ) -> Vec<u8> {
+        let metadata = serde_json::to_vec(bundle).expect("serialize metadata");
         let mut tar_gz = Vec::new();
         {
             let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
-            let mut tar = tar::Builder::new(gz);
+            let mut builder = tar::Builder::new(gz);
 
-            let mut header = tar::Header::new_gnu();
-            header.set_size(metadata_json.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
-                .unwrap();
+            let mut metadata_header = tar::Header::new_gnu();
+            metadata_header.set_mode(0o600);
+            metadata_header.set_size(metadata.len() as u64);
+            builder
+                .append_data(&mut metadata_header, "metadata.json", metadata.as_slice())
+                .expect("append metadata");
 
-            for sha in &udf_shas {
-                let wasm_path = wasm_dir.join(format!("{sha}.wasm"));
-                if wasm_path.exists() {
-                    let data = std::fs::read(&wasm_path).unwrap();
-                    let entry_name = format!("wasm_files/{sha}.wasm");
-                    let mut header = tar::Header::new_gnu();
-                    header.set_size(data.len() as u64);
-                    header.set_mode(0o644);
-                    header.set_cksum();
-                    tar.append_data(&mut header, &entry_name, data.as_slice())
-                        .unwrap();
-                }
-            }
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_entry_type(tar::EntryType::Symlink);
+            link_header.set_mode(0o777);
+            link_header.set_size(0);
+            builder
+                .append_link(
+                    &mut link_header,
+                    "schemas/proto/simple_schema/simple.proto",
+                    target,
+                )
+                .expect("append schema symlink");
 
-            if uploads_dir.exists() {
-                add_uploads_to_tar_for_test(&mut tar, uploads_dir, "uploads");
-            }
-
-            let gz = tar.into_inner().unwrap();
-            gz.finish().unwrap();
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
         }
         tar_gz
     }
@@ -736,7 +774,7 @@ mod tests {
             .memory_topics
             .push(bundle.resources.memory_topics[0].clone());
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate memory topic in bundle: topic_a");
     }
 
@@ -748,7 +786,7 @@ mod tests {
             .shared_mqtt_clients
             .push(bundle.resources.shared_mqtt_clients[0].clone());
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate shared mqtt client key in bundle: mqtt_a");
     }
 
@@ -760,7 +798,7 @@ mod tests {
             .streams
             .push(sample_stream_request("stream_a"));
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate stream name in bundle: stream_a");
     }
 
@@ -772,7 +810,7 @@ mod tests {
             .pipelines
             .push(sample_pipeline_request("pipe_a", "stream_a"));
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate pipeline id in bundle: pipe_a");
     }
 
@@ -784,7 +822,7 @@ mod tests {
             .pipeline_run_states
             .push(bundle.resources.pipeline_run_states[0].clone());
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate pipeline_run_state entry in bundle: pipe_a");
     }
 
@@ -793,7 +831,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.pipeline_run_states[0].pipeline_id = "pipe_missing".to_string();
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(
             err,
             "pipeline_run_state references missing pipeline: pipe_missing"
@@ -805,7 +843,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.pipelines[0].flow_instance_id = Some("unknown".to_string());
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "flow instance unknown is not declared by config");
     }
 
@@ -814,8 +852,8 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.pipelines[0].flow_instance_id = None;
 
-        let snapshot =
-            validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot");
+        let snapshot = validate_and_build_snapshot(&bundle, None, &is_default_instance)
+            .expect("build snapshot");
         let normalized =
             crate::storage_bridge::pipeline_request_from_stored(&snapshot.pipelines[0])
                 .expect("decode normalized pipeline");
@@ -840,7 +878,7 @@ mod tests {
             },
         ];
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate UDF name in bundle: my_udf");
     }
 
@@ -853,7 +891,7 @@ mod tests {
 
         storage
             .replace_metadata_snapshot(
-                validate_and_build_snapshot(&old_bundle, &is_default_instance)
+                validate_and_build_snapshot(&old_bundle, None, &is_default_instance)
                     .expect("build old snapshot"),
             )
             .expect("seed old snapshot");
@@ -870,6 +908,7 @@ mod tests {
             &new_bundle,
             &dir.path().join("wasm_files"),
             &dir.path().join("uploads"),
+            &dir.path().join("schemas"),
         );
         let body = axum::body::Bytes::from(tar_gz);
 
@@ -905,7 +944,7 @@ mod tests {
 
         storage
             .replace_metadata_snapshot(
-                validate_and_build_snapshot(&old_bundle, &is_default_instance)
+                validate_and_build_snapshot(&old_bundle, None, &is_default_instance)
                     .expect("build old snapshot"),
             )
             .expect("seed old snapshot");
@@ -922,6 +961,7 @@ mod tests {
             &invalid_bundle,
             &dir.path().join("wasm_files"),
             &dir.path().join("uploads"),
+            &dir.path().join("schemas"),
         );
         let body = axum::body::Bytes::from(tar_gz);
 
@@ -943,7 +983,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.streams[0].name = "bad-stream".to_string();
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("stream name"), "unexpected error: {err}");
         assert!(err.contains("invalid character"), "unexpected error: {err}");
     }
@@ -953,7 +993,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.pipelines[0].id = "bad.pipe".to_string();
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("pipeline id"), "unexpected error: {err}");
     }
 
@@ -965,7 +1005,7 @@ mod tests {
         // not "not declared by config".
         bundle.resources.pipelines[0].flow_instance_id = Some("bad-fi".to_string());
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("flow_instance_id"), "unexpected error: {err}");
         assert!(
             !err.contains("not declared by config"),
@@ -978,7 +1018,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.shared_mqtt_clients[0].key = "bad/key".to_string();
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(
             err.contains("shared mqtt client key"),
             "unexpected error: {err}"
@@ -990,7 +1030,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.memory_topics[0].topic = "bad-topic".to_string();
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("memory topic"), "unexpected error: {err}");
     }
 
@@ -999,7 +1039,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.schemas.push(StoredSchemaSample::invalid());
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("schema name"), "unexpected error: {err}");
     }
 
@@ -1011,7 +1051,7 @@ mod tests {
             wasm_sha256: "aaaa".to_string(),
         }];
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("UDF name"), "unexpected error: {err}");
     }
 
@@ -1032,7 +1072,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.pipelines[0] = sample_pipeline_request("pipe_a", "missing_stream");
 
-        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(
             err,
             "pipeline pipe_a references missing stream: missing_stream"
@@ -1049,6 +1089,7 @@ mod tests {
         let snapshot = validate_and_build_snapshot_with_existing_streams(
             &bundle,
             &existing_stream_names,
+            None,
             &is_default_instance,
         )
         .expect("should allow reference to existing stream");
@@ -1066,7 +1107,8 @@ mod tests {
         let bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
         storage
             .replace_metadata_snapshot(
-                validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot"),
+                validate_and_build_snapshot(&bundle, None, &is_default_instance)
+                    .expect("build snapshot"),
             )
             .expect("seed snapshot");
         storage
@@ -1079,6 +1121,7 @@ mod tests {
             &exported_bundle,
             &storage.wasm_files_dir(),
             &storage.uploads_dir(),
+            &storage.schemas_dir(),
         );
 
         // Create fresh storage and import
@@ -1118,7 +1161,8 @@ mod tests {
         let bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
         storage
             .replace_metadata_snapshot(
-                validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot"),
+                validate_and_build_snapshot(&bundle, None, &is_default_instance)
+                    .expect("build snapshot"),
             )
             .expect("seed snapshot");
         storage
@@ -1133,6 +1177,7 @@ mod tests {
             &exported_bundle,
             &storage.wasm_files_dir(),
             &storage.uploads_dir(),
+            &storage.schemas_dir(),
         );
 
         let dir2 = tempdir().unwrap();
@@ -1159,5 +1204,119 @@ mod tests {
             state.storage.read_upload("proto/sensor.proto").unwrap(),
             b"message Sensor {}"
         );
+    }
+
+    #[tokio::test]
+    async fn export_import_file_backed_proto_schema_roundtrip() {
+        let source_dir = tempdir().unwrap();
+        let source_storage = StorageManager::new(source_dir.path()).unwrap();
+        let mut bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
+        add_file_backed_proto_schema(&mut bundle, &source_storage.schemas_dir());
+        source_storage
+            .replace_metadata_snapshot(
+                validate_and_build_snapshot(
+                    &bundle,
+                    Some(&source_storage.schemas_dir()),
+                    &is_default_instance,
+                )
+                .expect("build source snapshot"),
+            )
+            .expect("seed source snapshot");
+
+        let exported_bundle = crate::export::build_export_bundle(&source_storage).unwrap();
+        assert_eq!(
+            exported_bundle.resources.schemas[0]
+                .props
+                .get("proto_path")
+                .and_then(JsonValue::as_str),
+            Some("simple.proto")
+        );
+        let tar_gz = build_tar_gz_for_test(
+            &exported_bundle,
+            &source_storage.wasm_files_dir(),
+            &source_storage.uploads_dir(),
+            &source_storage.schemas_dir(),
+        );
+
+        let target_dir = tempdir().unwrap();
+        let target_storage = StorageManager::new(target_dir.path()).unwrap();
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            target_storage,
+            vec![sample_default_instance_spec()],
+            0,
+        )
+        .unwrap();
+
+        let response =
+            import_storage_handler(State(state.clone()), axum::body::Bytes::from(tar_gz))
+                .await
+                .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stored = state
+            .storage
+            .get_schema("simple_schema")
+            .unwrap()
+            .expect("stored schema");
+        let props: JsonMap<String, JsonValue> =
+            serde_json::from_str(&stored.props_json).expect("stored props");
+        assert_eq!(
+            props.get("proto_path").and_then(JsonValue::as_str),
+            Some("simple.proto")
+        );
+        assert!(
+            state
+                .storage
+                .schemas_dir()
+                .join("proto/simple_schema/simple.proto")
+                .is_file()
+        );
+        assert!(named_schema_store().get("simple_schema").is_some());
+        assert!(state.storage.get_stream("stream_1").unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn import_rejects_symlinked_schema_before_parsing() {
+        let source_dir = tempdir().unwrap();
+        let source_storage = StorageManager::new(source_dir.path()).unwrap();
+        let mut bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
+        add_file_backed_proto_schema(&mut bundle, &source_storage.schemas_dir());
+
+        let external_dir = tempdir().unwrap();
+        let external_proto = external_dir.path().join("external.proto");
+        std::fs::write(
+            &external_proto,
+            b"syntax = \"proto3\"; message Simple { int64 value = 1; }",
+        )
+        .expect("write external proto");
+        let tar_gz = build_tar_gz_with_symlinked_proto(&bundle, &external_proto);
+
+        let target_dir = tempdir().unwrap();
+        let target_storage = StorageManager::new(target_dir.path()).unwrap();
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            target_storage,
+            vec![sample_default_instance_spec()],
+            0,
+        )
+        .unwrap();
+
+        let response =
+            import_storage_handler(State(state.clone()), axum::body::Bytes::from(tar_gz))
+                .await
+                .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let body = String::from_utf8(body.to_vec()).expect("response body is UTF-8");
+        assert!(
+            body.contains("is not a regular file or directory"),
+            "{body}"
+        );
+        assert!(state.storage.list_schemas().unwrap().is_empty());
+        assert!(state.storage.list_streams().unwrap().is_empty());
     }
 }

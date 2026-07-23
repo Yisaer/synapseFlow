@@ -1,4 +1,7 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
+use super::{
+    bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix,
+    write_schema_zip,
+};
 use reqwest::StatusCode;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
@@ -187,8 +190,8 @@ async fn protobuf_encoder_covers_all_value_types() {
 
     // ── 2. Write proto file to temp dir ────────────────────────────
 
-    let proto_path = temp_dir.path().join("simple.proto");
-    std::fs::write(&proto_path, SIMPLE_PROTO).expect("write proto file");
+    let proto_path = temp_dir.path().join("simple.zip");
+    write_schema_zip(&proto_path, &[("simple.proto", SIMPLE_PROTO.as_bytes())]);
 
     // ── 3. Create proto schema via REST ────────────────────────────
 

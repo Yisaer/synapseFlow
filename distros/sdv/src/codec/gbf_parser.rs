@@ -187,6 +187,7 @@ pub(crate) struct OptTypeDef {
 }
 
 /// GBF parser that converts binary packets into structured frames based on JSON schema.
+#[derive(Clone)]
 pub struct GbfParser {
     packet_def: OptTypeDef,
     field_map: SchemaFieldMap,

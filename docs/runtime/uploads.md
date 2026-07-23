@@ -118,6 +118,12 @@ init.tar.gz
   metadata.json
   wasm_files/
     <sha256>.wasm
+  schemas/
+    <type>/
+      <name>/
+        <entry>
+        <entry-stem>/
+          <companion files>
   uploads/
     ca-cert.pem
     descriptor.proto
@@ -128,16 +134,24 @@ init.tar.gz
 On startup (`init_process.rs`):
 
 1. Unpack `init.tar.gz` to a temporary directory.
-2. Load `metadata.json` → validate → apply init snapshot to redb (existing `init.json` logic).
-3. If `uploads/` directory exists in the archive → validate each entry name → copy files
+2. Copy the extracted schema sources to a sanitized staging tree that rejects symlinks and
+   special files.
+3. Load `metadata.json` and validate file-backed schemas only against the sanitized
+   `schemas/<type>/<name>/` tree.
+4. Install schema sources under `data_dir/schemas/` from that same staging tree. A schema
+   installation failure does not
+   commit metadata or advance the init apply marker.
+5. Apply the validated init snapshot and init apply marker to redb in one transaction.
+6. If `uploads/` directory exists in the archive → validate each entry name → copy files
    to `data_dir/uploads/` (overwrite).
-4. The apply is **not atomic** across metadata and uploads: metadata goes through redb
+7. The apply is **not atomic** across metadata and uploads: metadata goes through redb
    transactions, uploads are filesystem copies. If uploads copy fails after metadata commit,
    the init apply metadata is still advanced (uploads are non-critical; a missing file
    surfaces as a runtime error when a connector tries to open it).
 
-The non-atomicity is a documented trade-off. Since uploads have no transactional semantics on
-disk, we accept eventual consistency rather than blocking.
+The upload non-atomicity is a documented trade-off. Installed schema sources are different:
+schema metadata directly references them, so they must be validated and installed before the
+metadata transaction commits.
 
 ## API Design
 

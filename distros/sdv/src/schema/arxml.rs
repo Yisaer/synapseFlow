@@ -3,7 +3,6 @@
 //! Parses AUTOSAR ARXML files via `arxml_converter` and generates
 //! veloFlux column schemas from the discovered data type fields.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arxml_converter::ArxmlCodec;
@@ -11,8 +10,7 @@ use datatypes::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type, Int16Type,
     Int32Type, Int64Type, Schema, StringType, Uint8Type, Uint16Type, Uint32Type, Uint64Type,
 };
-use flow::ProtoDescriptorBundle;
-use manager::register_schema;
+use manager::{ParsedSchema, register_schema};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// Register the `arxml` schema parser in the global schema registry.
@@ -20,51 +18,27 @@ pub fn register_arxml_schema() {
     register_schema("arxml", Arc::new(parse_arxml_schema));
 }
 
-/// Parsed ARXML metadata, keyed by a user-chosen schema name or inline stream name.
+/// Immutable ARXML schema artifact shared by planning and runtime decoders.
 #[derive(Clone)]
-pub struct CachedArxmlSchema {
-    pub codec: Arc<ArxmlCodec>,
-    pub signal_name_pattern: Arc<str>,
+pub struct CompiledArxmlSchema {
+    codec: Arc<ArxmlCodec>,
+    signal_name_pattern: Arc<str>,
 }
 
-/// Cache of parsed `ArxmlCodec` instances and their column naming policy.
-/// Populated lazily when an ARXML schema is parsed.
-static ARXML_CODEC_CACHE: std::sync::LazyLock<
-    std::sync::RwLock<HashMap<String, CachedArxmlSchema>>,
-> = std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+impl CompiledArxmlSchema {
+    pub fn codec(&self) -> Arc<ArxmlCodec> {
+        Arc::clone(&self.codec)
+    }
 
-/// Retrieve a cached `ArxmlCodec` by name.
-pub fn get_cached_codec(name: &str) -> Option<Arc<ArxmlCodec>> {
-    get_cached_schema(name).map(|schema| schema.codec)
-}
-
-/// Retrieve cached ARXML schema metadata by name.
-pub fn get_cached_schema(name: &str) -> Option<CachedArxmlSchema> {
-    ARXML_CODEC_CACHE
-        .read()
-        .expect("ARXML codec cache lock poisoned")
-        .get(name)
-        .cloned()
-}
-
-/// Store ARXML schema metadata in the cache under the given name.
-fn cache_schema(name: String, codec: ArxmlCodec, signal_name_pattern: &str) {
-    ARXML_CODEC_CACHE
-        .write()
-        .expect("ARXML codec cache lock poisoned")
-        .insert(
-            name,
-            CachedArxmlSchema {
-                codec: Arc::new(codec),
-                signal_name_pattern: Arc::from(signal_name_pattern),
-            },
-        );
+    pub fn signal_name_pattern(&self) -> &str {
+        &self.signal_name_pattern
+    }
 }
 
 fn parse_arxml_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
-) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
+) -> Result<ParsedSchema, String> {
     let arxml_path = props
         .get("schema_path")
         .and_then(|v| v.as_str())
@@ -75,6 +49,16 @@ fn parse_arxml_schema(
         .and_then(|v| v.as_str())
         .unwrap_or("{field}");
 
+    let (schema, artifact) = compile_arxml_schema(stream_name, arxml_path, pattern)?;
+    Ok((schema, None, Some(artifact)))
+}
+
+/// Compile an ARXML source for either a standalone schema or a private GBF format.
+pub fn compile_arxml_schema(
+    stream_name: &str,
+    arxml_path: &str,
+    signal_name_pattern: &str,
+) -> Result<(Schema, Arc<CompiledArxmlSchema>), String> {
     let codec = ArxmlCodec::load(arxml_path).map_err(|e| format!("failed to load ARXML: {e}"))?;
 
     // Enumerate all known entries and collect their field name/type specs.
@@ -103,7 +87,12 @@ fn parse_arxml_schema(
 
         if let arxml_converter::ast::types::DataTypeKind::Structure(st) = &type_dt.kind {
             for f in &st.fields {
-                let name = apply_signal_name_pattern(pattern, &service_name, &entry_name, &f.name);
+                let name = apply_signal_name_pattern(
+                    signal_name_pattern,
+                    &service_name,
+                    &entry_name,
+                    &f.name,
+                );
                 if field_specs.iter().any(|(n, _)| n == &name) {
                     continue;
                 }
@@ -118,8 +107,11 @@ fn parse_arxml_schema(
         .map(|(name, dt)| ColumnSchema::new(stream_name.to_string(), name, dt))
         .collect();
 
-    cache_schema(stream_name.to_string(), codec, pattern);
-    Ok((Schema::new(columns), None))
+    let artifact = Arc::new(CompiledArxmlSchema {
+        codec: Arc::new(codec),
+        signal_name_pattern: Arc::from(signal_name_pattern),
+    });
+    Ok((Schema::new(columns), artifact))
 }
 
 /// Recursively resolve an ARXML type reference to a ConcreteDatatype.
@@ -229,7 +221,7 @@ mod tests {
             serde_json::Value::String(arxml_path.to_string()),
         );
 
-        let (schema, _) = parse_arxml_schema("test", &props).expect("parse schema");
+        let (schema, _, _) = parse_arxml_schema("test", &props).expect("parse schema");
 
         assert!(
             schema.column_schemas().len() > 1,

@@ -35,6 +35,7 @@ The current bundle contains:
 - memory topics
 - shared MQTT client configs
 - streams
+- named schemas
 - pipelines
 - pipeline desired-state records
 - WASM UDFs (metadata + `.wasm` binaries)
@@ -54,9 +55,10 @@ The exported payload is versioned as `ExportBundleV1` and includes:
 - `resources.pipeline_run_states`
 - `resources.udfs`
 
-Export is delivered as a **tar.gz archive** containing `metadata.json` plus a `wasm_files/`
-directory with one `.wasm` binary per UDF, keyed by SHA-256. The previous JSON-only format is no
-longer supported.
+Export is delivered as a **tar.gz archive** containing `metadata.json`, a `wasm_files/`
+directory with one `.wasm` binary per UDF keyed by SHA-256, and the installed source tree for
+file-backed schemas under `schemas/<type>/<name>/`. The previous JSON-only format is no longer
+supported.
 
 Export sorts each resource collection by stable identity before serialization. This is a design
 choice for deterministic diffs and predictable operator review, not a semantic ordering guarantee.
@@ -79,13 +81,20 @@ Import validates the bundle before touching storage. Current checks include:
 - SHA-256 of the extracted `.wasm` file must match the declared value
 - when the `wasm_udf` feature is enabled, the `.wasm` module must pass
   `WasmEngine::validate` and its metadata name must match the declared UDF name
+- each file-backed schema entry filename must be a single path segment
+- the extracted schema tree is copied to an internal staging directory that accepts only regular
+  files and directories; symlinks and special files are rejected before schema parsing
+- each file-backed schema must parse from
+  `schemas/<type>/<name>/<entry>` in that sanitized staging tree; validation never falls back to
+  the raw archive extraction directory or process working directory
 
 Validation is whole-bundle and strict. There is no best-effort acceptance of a partially valid
 bundle.
 
 Import accepts a tar.gz body (`application/gzip`). The archive is unpacked to a temporary
-directory, `metadata.json` is parsed and validated, and `.wasm` files are copied to the
-shared `wasm_files/` directory after validation.
+directory, schema sources are copied to a sanitized staging tree, `metadata.json` and staged
+schema sources are parsed and validated, and `.wasm` files are copied to the shared
+`wasm_files/` directory after validation.
 
 ## Replace Semantics
 
@@ -94,7 +103,9 @@ Import uses replace semantics.
 That means:
 
 - manager validates the incoming bundle
+- manager prepares and activates the imported installed-schema tree
 - storage replaces the entire metadata snapshot in one write transaction
+- a metadata replacement failure restores the previous installed-schema tree
 - absent resources are removed from storage
 
 Import does not merge old and new snapshots resource by resource. The incoming bundle is treated as

@@ -23,6 +23,7 @@ use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatu
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -167,18 +168,18 @@ impl Default for DecoderConfigRequest {
     }
 }
 
-pub type SchemaParser = dyn Fn(
-        &str,
-        &JsonMap<String, JsonValue>,
-    ) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String>
-    + Send
-    + Sync;
+pub type SchemaArtifact = Arc<dyn Any + Send + Sync>;
+pub type ParsedSchema = (
+    Schema,
+    Option<Arc<ProtoDescriptorBundle>>,
+    Option<SchemaArtifact>,
+);
+pub type SchemaParser =
+    dyn Fn(&str, &JsonMap<String, JsonValue>) -> Result<ParsedSchema, String> + Send + Sync;
 
 /// Registry for schema parsers, enabling pluggable schema declaration formats.
 pub struct SchemaRegistry {
     parsers: RwLock<HashMap<String, Arc<SchemaParser>>>,
-    /// Cache of pre-built protobuf descriptor bundles, keyed by (proto_path, message_type).
-    proto_bundles: RwLock<HashMap<(String, String), Arc<ProtoDescriptorBundle>>>,
 }
 
 impl Default for SchemaRegistry {
@@ -191,7 +192,6 @@ impl SchemaRegistry {
     pub fn new() -> Self {
         Self {
             parsers: RwLock::new(HashMap::new()),
-            proto_bundles: RwLock::new(HashMap::new()),
         }
     }
 
@@ -203,7 +203,7 @@ impl SchemaRegistry {
             Arc::new(|stream_name, props| {
                 let (schema, bundle) =
                     crate::schema::proto::parse_proto_schema(stream_name, props)?;
-                Ok((schema, Some(Arc::new(bundle))))
+                Ok((schema, Some(Arc::new(bundle)), None))
             }),
         );
         registry
@@ -218,43 +218,14 @@ impl SchemaRegistry {
         schema_type: &str,
         stream_name: &str,
         props: &JsonMap<String, JsonValue>,
-    ) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
-        let guard = self.parsers.read();
-        let parser = guard
-            .get(schema_type)
-            .ok_or_else(|| format!("schema type `{schema_type}` not registered"))?;
-        let (schema, bundle) = parser(stream_name, props)?;
-        if let Some(ref bundle) = bundle {
-            let proto_path = props
-                .get("proto_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let message_type = props
-                .get("message_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !proto_path.is_empty() && !message_type.is_empty() {
-                self.proto_bundles
-                    .write()
-                    .entry((proto_path, message_type))
-                    .or_insert_with(|| Arc::clone(bundle));
-            }
-        }
-        Ok((schema, bundle))
-    }
-
-    /// Retrieve a cached [`ProtoDescriptorBundle`] for the given proto file and message type.
-    pub fn get_proto_bundle(
-        &self,
-        proto_path: &str,
-        message_type: &str,
-    ) -> Option<Arc<ProtoDescriptorBundle>> {
-        self.proto_bundles
+    ) -> Result<ParsedSchema, String> {
+        let parser = self
+            .parsers
             .read()
-            .get(&(proto_path.to_string(), message_type.to_string()))
+            .get(schema_type)
             .cloned()
+            .ok_or_else(|| format!("schema type `{schema_type}` not registered"))?;
+        parser(stream_name, props)
     }
 }
 
@@ -277,38 +248,83 @@ pub fn register_schema(kind: impl Into<String>, parser: Arc<SchemaParser>) {
 /// For proto-based schemas, the corresponding [`ProtoDescriptorBundle`] is
 /// also stored so the protobuf decoder can retrieve it without re-parsing.
 pub struct NamedSchemaStore {
-    schemas: RwLock<HashMap<String, Arc<Schema>>>,
-    proto_bundles: RwLock<HashMap<String, Arc<ProtoDescriptorBundle>>>,
+    schemas: RwLock<HashMap<String, ResolvedSchema>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ResolvedSchema {
+    pub(crate) logical_schema: Arc<Schema>,
+    proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
+    artifact: Option<SchemaArtifact>,
+}
+
+impl ResolvedSchema {
+    fn new(
+        schema: Schema,
+        proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
+        artifact: Option<SchemaArtifact>,
+    ) -> Self {
+        Self {
+            logical_schema: Arc::new(schema),
+            proto_bundle,
+            artifact,
+        }
+    }
 }
 
 impl NamedSchemaStore {
     pub fn new() -> Self {
         Self {
             schemas: RwLock::new(HashMap::new()),
-            proto_bundles: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn insert(&self, name: String, schema: Schema) {
-        self.schemas.write().insert(name, Arc::new(schema));
+        self.insert_resolved(name, schema, None, None);
     }
 
-    pub fn insert_with_bundle(&self, name: String, schema: Schema, bundle: ProtoDescriptorBundle) {
-        self.schemas.write().insert(name.clone(), Arc::new(schema));
-        self.proto_bundles.write().insert(name, Arc::new(bundle));
+    pub fn insert_resolved(
+        &self,
+        name: String,
+        schema: Schema,
+        proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
+        artifact: Option<SchemaArtifact>,
+    ) {
+        self.schemas
+            .write()
+            .insert(name, ResolvedSchema::new(schema, proto_bundle, artifact));
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Schema>> {
-        self.schemas.read().get(name).cloned()
+        self.schemas
+            .read()
+            .get(name)
+            .map(|resolved| Arc::clone(&resolved.logical_schema))
     }
 
     pub fn get_proto_bundle(&self, name: &str) -> Option<Arc<ProtoDescriptorBundle>> {
-        self.proto_bundles.read().get(name).cloned()
+        self.schemas
+            .read()
+            .get(name)
+            .and_then(|resolved| resolved.proto_bundle.clone())
+    }
+
+    pub fn get_artifact(&self, name: &str) -> Option<SchemaArtifact> {
+        self.schemas
+            .read()
+            .get(name)
+            .and_then(|resolved| resolved.artifact.clone())
+    }
+
+    pub(crate) fn get_resolved(&self, name: &str) -> Option<ResolvedSchema> {
+        self.schemas.read().get(name).cloned()
     }
 
     pub fn remove(&self, name: &str) -> Option<Arc<Schema>> {
-        self.proto_bundles.write().remove(name);
-        self.schemas.write().remove(name)
+        self.schemas
+            .write()
+            .remove(name)
+            .map(|resolved| resolved.logical_schema)
     }
 
     pub fn list_names(&self) -> Vec<String> {
@@ -319,7 +335,6 @@ impl NamedSchemaStore {
 
     /// Remove all entries from the store.
     pub fn clear(&self) {
-        self.proto_bundles.write().clear();
         self.schemas.write().clear();
     }
 }
@@ -525,7 +540,7 @@ pub async fn create_stream_handler(
                 .into_response();
         }
     };
-    let schema = match build_schema_from_request(&req) {
+    let resolved_schema = match resolve_schema_from_request(&req) {
         Ok(schema) => schema,
         Err(err) => {
             audit.log_failure(&err);
@@ -542,7 +557,7 @@ pub async fn create_stream_handler(
     };
 
     let decoder_registry = state.instances.default_instance().decoder_registry();
-    let decoder = match build_stream_decoder(&req, decoder_registry.as_ref()) {
+    let decoder = match build_stream_decoder(&req, decoder_registry.as_ref(), &resolved_schema) {
         Ok(config) => config,
         Err(err) => {
             audit.log_failure(&err);
@@ -592,8 +607,12 @@ pub async fn create_stream_handler(
         }
     }
 
-    let mut definition =
-        StreamDefinition::new(req.name.clone(), Arc::new(schema), stream_props, decoder);
+    let mut definition = StreamDefinition::new(
+        req.name.clone(),
+        Arc::clone(&resolved_schema.logical_schema),
+        stream_props,
+        decoder,
+    );
     if let Some(cfg) = &req.eventtime {
         definition = definition.with_eventtime(EventtimeDefinition::new(
             cfg.column.clone(),
@@ -601,7 +620,7 @@ pub async fn create_stream_handler(
         ));
     }
 
-    if let Some(sampler) = sampler_with_decoder_format_props(&req) {
+    if let Some(sampler) = req.sampler.clone() {
         definition = definition.with_sampler(sampler);
     }
 
@@ -933,7 +952,7 @@ pub async fn upsert_stream_handler(
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let schema = match build_schema_from_request(&new_req) {
+    let resolved_schema = match resolve_schema_from_request(&new_req) {
         Ok(s) => s,
         Err(err) => {
             audit.log_failure(&err);
@@ -950,7 +969,8 @@ pub async fn upsert_stream_handler(
     };
 
     let decoder_registry = state.instances.default_instance().decoder_registry();
-    let decoder = match build_stream_decoder(&new_req, decoder_registry.as_ref()) {
+    let decoder = match build_stream_decoder(&new_req, decoder_registry.as_ref(), &resolved_schema)
+    {
         Ok(config) => config,
         Err(err) => {
             audit.log_failure(&err);
@@ -1003,7 +1023,7 @@ pub async fn upsert_stream_handler(
     // Build new definition.
     let mut definition = StreamDefinition::new(
         new_req.name.clone(),
-        Arc::new(schema),
+        Arc::clone(&resolved_schema.logical_schema),
         stream_props,
         decoder,
     );
@@ -1013,7 +1033,7 @@ pub async fn upsert_stream_handler(
             cfg.eventtime_type.clone(),
         ));
     }
-    if let Some(sampler) = sampler_with_decoder_format_props(&new_req) {
+    if let Some(sampler) = new_req.sampler.clone() {
         definition = definition.with_sampler(sampler);
     }
 
@@ -1349,11 +1369,11 @@ fn duration_millis_u64(duration: std::time::Duration) -> u64 {
 fn parse_json_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
-) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
+) -> Result<ParsedSchema, String> {
     let schema_value = JsonValue::Object(props.clone());
     let schema_req: StreamSchemaRequest = serde_json::from_value(schema_value)
         .map_err(|err| format!("invalid json schema: {err}"))?;
-    schema_from_columns(stream_name, &schema_req).map(|s| (s, None))
+    schema_from_columns(stream_name, &schema_req).map(|s| (s, None, None))
 }
 
 fn schema_from_columns(
@@ -1368,22 +1388,36 @@ fn schema_from_columns(
     columns.map(Schema::new)
 }
 
-pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
+pub(crate) fn resolve_schema_from_request(
+    req: &CreateStreamRequest,
+) -> Result<ResolvedSchema, String> {
     if req.stream_type.eq_ignore_ascii_case("video") {
-        return Ok(flow::codec::default_video_schema(req.name.clone()));
+        return Ok(ResolvedSchema::new(
+            flow::codec::default_video_schema(req.name.clone()),
+            None,
+            None,
+        ));
     }
     if let Some(ref_name) = &req.schema.r#ref {
         validate_resource_id(ResourceIdKind::SchemaName, ref_name)
             .map_err(|err| format!("invalid schema ref: {err}"))?;
         return named_schema_store()
-            .get(ref_name)
-            .map(|schema| (*schema).clone())
+            .get_resolved(ref_name)
             .ok_or_else(|| format!("referenced schema '{}' not found", ref_name));
     }
-    let (schema, _bundle) =
+    if req.schema.props.contains_key("schema_path") || req.schema.props.contains_key("proto_path") {
+        return Err(
+            "file-backed schemas must be installed with POST /schemas and referenced by schema ID"
+                .to_string(),
+        );
+    }
+    let (schema, bundle, artifact) =
         schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)?;
-    // Bundle is cached in SchemaRegistry; stream decoder will look it up later.
-    Ok(schema)
+    Ok(ResolvedSchema::new(schema, bundle, artifact))
+}
+
+pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
+    resolve_schema_from_request(req).map(|resolved| (*resolved.logical_schema).clone())
 }
 
 pub(crate) fn build_stream_props(
@@ -1527,6 +1561,7 @@ fn build_video_stream_props(req: VideoStreamPropsRequest) -> Result<StreamProps,
 pub(crate) fn build_stream_decoder(
     req: &CreateStreamRequest,
     decoder_registry: &DecoderRegistry,
+    resolved_schema: &ResolvedSchema,
 ) -> Result<StreamDecoderConfig, String> {
     if req.stream_type.eq_ignore_ascii_case("video")
         && req.decoder.decode_type.eq_ignore_ascii_case("json")
@@ -1549,80 +1584,15 @@ pub(crate) fn build_stream_decoder(
     }
     let mut config =
         StreamDecoderConfig::new(decoder_config.decode_type.clone(), decoder_config.props);
-    // Attach proto descriptor bundle for protobuf decoders.
-    if config.kind().eq_ignore_ascii_case("protobuf") {
-        let bundle = if let Some(ref schema_name) = req.schema.r#ref {
-            let trimmed = schema_name.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                named_schema_store().get_proto_bundle(trimmed)
-            }
-        } else {
-            // Inline schema — look up from SchemaRegistry cache.
-            let proto_path = req
-                .schema
-                .props
-                .get("proto_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let message_type = req
-                .schema
-                .props
-                .get("message_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if proto_path.is_empty() || message_type.is_empty() {
-                None
-            } else {
-                schema_registry().get_proto_bundle(proto_path, message_type)
-            }
-        };
-        if let Some(bundle) = bundle {
-            config = config.with_proto_bundle(bundle);
-        }
+    if config.kind().eq_ignore_ascii_case("protobuf")
+        && let Some(bundle) = &resolved_schema.proto_bundle
+    {
+        config = config.with_proto_bundle(Arc::clone(bundle));
+    }
+    if let Some(artifact) = &resolved_schema.artifact {
+        config = config.with_schema_artifact(Arc::clone(artifact));
     }
     Ok(config)
-}
-
-pub(crate) fn sampler_with_decoder_format_props(
-    req: &CreateStreamRequest,
-) -> Option<SamplerConfig> {
-    let mut sampler = req.sampler.clone()?;
-    propagate_gbf_decoder_format_props(&req.decoder, &mut sampler);
-    Some(sampler)
-}
-
-/// GBF format props that flow from the `gbf` decoder to a paired `gbf` packer
-/// merger. They must be both forwarded (so the fused merger keys frames like the
-/// decoder) and conflict-checked, so the two passes share one list to avoid
-/// drift (see issue #217).
-const GBF_FORWARDED_FORMAT_PROPS: [&str; 5] = [
-    "format_type",
-    "format_schema_path",
-    "signal_name_pattern",
-    "clamp_to_range",
-    "can_id_mapping",
-];
-
-fn propagate_gbf_decoder_format_props(decoder: &DecoderConfigRequest, sampler: &mut SamplerConfig) {
-    if !decoder.decode_type.eq_ignore_ascii_case("gbf") {
-        return;
-    }
-    let SamplingStrategy::Packer { props } = &mut sampler.strategy else {
-        return;
-    };
-    if !props.merger.merger_type.eq_ignore_ascii_case("gbf") {
-        return;
-    }
-
-    for key in GBF_FORWARDED_FORMAT_PROPS {
-        if !props.merger.props.contains_key(key)
-            && let Some(value) = decoder.props.get(key)
-        {
-            props.merger.props.insert(key.to_string(), value.clone());
-        }
-    }
 }
 
 pub(crate) fn validate_stream_decoder_config(
@@ -1688,7 +1658,6 @@ pub(crate) fn validate_stream_decoder_config(
             req.name
         ));
     }
-    validate_gbf_packer_format_props(req)?;
     Ok(())
 }
 
@@ -1700,61 +1669,6 @@ fn uses_gbf_packer(req: &CreateStreamRequest) -> bool {
         return false;
     };
     props.merger.merger_type.eq_ignore_ascii_case("gbf")
-}
-
-fn validate_gbf_packer_format_props(req: &CreateStreamRequest) -> Result<(), String> {
-    if !req.decoder.decode_type.eq_ignore_ascii_case("gbf") {
-        return Ok(());
-    }
-    let Some(sampler) = &req.sampler else {
-        return Ok(());
-    };
-    let SamplingStrategy::Packer { props } = &sampler.strategy else {
-        return Ok(());
-    };
-    if !props.merger.merger_type.eq_ignore_ascii_case("gbf") {
-        return Ok(());
-    }
-
-    for key in GBF_FORWARDED_FORMAT_PROPS {
-        let Some(decoder_value) = req.decoder.props.get(key) else {
-            continue;
-        };
-        let Some(merger_value) = props.merger.props.get(key) else {
-            continue;
-        };
-        if !json_semantically_eq(decoder_value, merger_value) {
-            return Err(format!(
-                "stream `{}` sampler merger prop `{}` conflicts with decoder prop `{}`",
-                req.name, key, key
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Compare two JSON values for *semantic* equality, treating numbers by their
-/// `f64` value so `12` and `12.0` are equal. Config layers (templating/Helm)
-/// often render integers as floats, and `can_id_mapping`'s `bits` accepts both,
-/// so a raw `Value` comparison would flag `bits: 12` vs `bits: 12.0` as a
-/// spurious decoder/merger conflict.
-fn json_semantically_eq(a: &JsonValue, b: &JsonValue) -> bool {
-    match (a, b) {
-        (JsonValue::Number(x), JsonValue::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(xf), Some(yf)) => xf == yf,
-            _ => x == y,
-        },
-        (JsonValue::Array(xs), JsonValue::Array(ys)) => {
-            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| json_semantically_eq(x, y))
-        }
-        (JsonValue::Object(xs), JsonValue::Object(ys)) => {
-            xs.len() == ys.len()
-                && xs
-                    .iter()
-                    .all(|(k, x)| ys.get(k).is_some_and(|y| json_semantically_eq(x, y)))
-        }
-        _ => a == b,
-    }
 }
 
 /// Validate the shared MQTT `connector_key` reference (if present) against the
@@ -2095,16 +2009,21 @@ mod tests {
         req: &CreateStreamRequest,
         decoder_registry: &flow::DecoderRegistry,
     ) -> StreamDefinition {
-        let schema = build_schema_from_request(req).expect("build schema from request");
+        let resolved_schema =
+            resolve_schema_from_request(req).expect("resolve schema from request");
         let props =
             build_stream_props(&req.stream_type, &req.props).expect("build stream props from req");
-        let decoder =
-            build_stream_decoder(req, decoder_registry).expect("build stream decoder from req");
+        let decoder = build_stream_decoder(req, decoder_registry, &resolved_schema)
+            .expect("build stream decoder from req");
         validate_stream_decoder_config(req, &decoder)
             .expect("validate stream decoder configuration");
 
-        let mut definition =
-            StreamDefinition::new(req.name.clone(), Arc::new(schema), props, decoder);
+        let mut definition = StreamDefinition::new(
+            req.name.clone(),
+            Arc::clone(&resolved_schema.logical_schema),
+            props,
+            decoder,
+        );
         if let Some(cfg) = &req.eventtime {
             definition = definition.with_eventtime(EventtimeDefinition::new(
                 cfg.column.clone(),
@@ -2115,75 +2034,6 @@ mod tests {
             definition = definition.with_sampler(sampler.clone());
         }
         definition
-    }
-
-    #[test]
-    fn sampler_with_decoder_format_props_copies_gbf_decoder_props() {
-        let mut req = mqtt_stream_request("gbf_stream");
-        req.decoder = DecoderConfigRequest {
-            decode_type: "gbf".to_string(),
-            props: json!({
-                "format_type": "can",
-                "format_schema_path": "/tmp/can.json",
-                "signal_name_pattern": "{sig}",
-                "clamp_to_range": false,
-                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
-            })
-            .as_object()
-            .expect("decoder props")
-            .clone(),
-        };
-        req.sampler = Some(
-            serde_json::from_value(json!({
-                "interval": "100ms",
-                "strategy": {
-                    "type": "packer",
-                    "props": {
-                        "merger": {
-                            "type": "gbf",
-                            "props": {
-                                "schema": "/tmp/spi_packet.json",
-                                "format_type": "custom"
-                            }
-                        }
-                    }
-                }
-            }))
-            .expect("sampler config"),
-        );
-
-        let sampler = sampler_with_decoder_format_props(&req).expect("sampler");
-        let SamplingStrategy::Packer { props } = sampler.strategy else {
-            panic!("expected packer sampler")
-        };
-        let merger_props = props.merger.props;
-        assert_eq!(
-            merger_props.get("format_type").and_then(|v| v.as_str()),
-            Some("custom"),
-            "explicit merger prop must not be overwritten"
-        );
-        assert_eq!(
-            merger_props
-                .get("format_schema_path")
-                .and_then(|v| v.as_str()),
-            Some("/tmp/can.json")
-        );
-        assert_eq!(
-            merger_props
-                .get("signal_name_pattern")
-                .and_then(|v| v.as_str()),
-            Some("{sig}")
-        );
-        assert_eq!(
-            merger_props.get("clamp_to_range").and_then(|v| v.as_bool()),
-            Some(false)
-        );
-        // The CAN ID mapping must reach the fused merger so it keys frames the
-        // same way as the decoder (issue #217).
-        assert_eq!(
-            merger_props.get("can_id_mapping"),
-            Some(&json!({ "mode": "bus_shift", "bits": 12 }))
-        );
     }
 
     fn pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
@@ -2347,10 +2197,17 @@ mod tests {
     #[test]
     fn build_stream_decoder_rejects_unknown_non_none_decoder_type() {
         let mut req = base_stream_request("mqtt");
+        req.schema.props = json!({"columns": []})
+            .as_object()
+            .expect("schema props")
+            .clone();
         req.decoder.decode_type = "unknown_decoder".to_string();
         let instance = crate::new_default_flow_instance();
+        let resolved_schema = resolve_schema_from_request(&req).expect("resolve schema");
 
-        let err = build_stream_decoder(&req, instance.decoder_registry().as_ref()).unwrap_err();
+        let err =
+            build_stream_decoder(&req, instance.decoder_registry().as_ref(), &resolved_schema)
+                .unwrap_err();
         assert_eq!(err, "decoder kind `unknown_decoder` not registered");
     }
 
@@ -2499,96 +2356,6 @@ mod tests {
             err,
             "stream `stream_test` sampler merger type `gbf` requires decoder type `gbf`"
         );
-    }
-
-    #[test]
-    fn validate_stream_decoder_config_rejects_conflicting_gbf_merger_format_props() {
-        let mut req = base_stream_request("mqtt");
-        req.decoder = DecoderConfigRequest {
-            decode_type: "gbf".to_string(),
-            props: json!({
-                "format_type": "can",
-                "format_schema_path": "/tmp/can.json"
-            })
-            .as_object()
-            .expect("decoder props")
-            .clone(),
-        };
-        req.sampler = Some(
-            serde_json::from_value(json!({
-                "interval": "100ms",
-                "strategy": {
-                    "type": "packer",
-                    "props": {
-                        "merger": {
-                            "type": "gbf",
-                            "props": {
-                                "schema": "/tmp/spi_packet.json",
-                                "format_type": "custom",
-                                "format_schema_path": "/tmp/can.json"
-                            }
-                        }
-                    }
-                }
-            }))
-            .expect("sampler"),
-        );
-        let decoder = StreamDecoderConfig::new("gbf", JsonMap::new());
-
-        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
-        assert_eq!(
-            err,
-            "stream `stream_test` sampler merger prop `format_type` conflicts with decoder prop `format_type`"
-        );
-    }
-
-    #[test]
-    fn validate_gbf_merger_can_id_mapping_int_and_float_bits_are_not_a_conflict() {
-        // decoder uses integer `bits`, merger uses float `bits` — both resolve to
-        // the same mapping, so this must NOT be flagged as a conflict (#217/#202).
-        let mut req = base_stream_request("mqtt");
-        req.decoder = DecoderConfigRequest {
-            decode_type: "gbf".to_string(),
-            props: json!({
-                "format_type": "can",
-                "format_schema_path": "/tmp/can.json",
-                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
-            })
-            .as_object()
-            .expect("decoder props")
-            .clone(),
-        };
-        req.sampler = Some(
-            serde_json::from_value(json!({
-                "interval": "100ms",
-                "strategy": {
-                    "type": "packer",
-                    "props": {
-                        "merger": {
-                            "type": "gbf",
-                            "props": {
-                                "schema": "/tmp/spi_packet.json",
-                                "can_id_mapping": { "mode": "bus_shift", "bits": 12.0 }
-                            }
-                        }
-                    }
-                }
-            }))
-            .expect("sampler"),
-        );
-        let decoder = StreamDecoderConfig::new("gbf", JsonMap::new());
-        assert!(validate_stream_decoder_config(&req, &decoder).is_ok());
-
-        // A genuine mismatch (different bits) is still rejected.
-        if let Some(sampler) = &mut req.sampler
-            && let SamplingStrategy::Packer { props } = &mut sampler.strategy
-        {
-            props.merger.props.insert(
-                "can_id_mapping".to_string(),
-                json!({ "mode": "bus_shift", "bits": 8 }),
-            );
-        }
-        assert!(validate_stream_decoder_config(&req, &decoder).is_err());
     }
 
     #[tokio::test]

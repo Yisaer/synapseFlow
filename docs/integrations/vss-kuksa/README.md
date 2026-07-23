@@ -84,32 +84,21 @@ curl -s -XPOST http://127.0.0.1:8080/streams \
   -d '{
     "name": "powertrain_stream",
     "type": "mqtt",
-    "schema": {
-      "type": "dbc",
-      "props": {
-        "schema_path": "/tmp/vehicle_signals.dbc"
-      }
-    },
+    "schema": { "ref": "vehicle_gbf" },
     "props": {
       "broker_url": "tcp://127.0.0.1:1883",
       "topic": "/vehicle/powertrain",
       "qos": 0
     },
     "shared": false,
-    "decoder": {
-      "type": "gbf",
-      "props": {
-        "schema_path": "/tmp/spi_packet.json",
-        "format_type": "can",
-        "format_schema_path": "/tmp/vehicle_signals.dbc"
-      }
-    }
+    "decoder": { "type": "gbf", "props": {} }
   }' | jq .
 ```
 
-By default, DBC-backed stream columns use the simple signal name (`{sig}`), so a DBC signal named
+Create the `vehicle_gbf` complete GBF schema before creating the stream; see the
+[GBF schema documentation](../../../distros/sdv/docs/schema/gbf.md). By default, DBC-backed stream columns use the simple signal name (`{sig}`), so a DBC signal named
 `Mess0_Sig1` becomes a SQL column named `Mess0_Sig1`. If a deployment needs globally qualified
-names, set `signal_name_pattern` in both schema and decoder props, for example
+names, set `signal_name_pattern` in the GBF entry's `format.props`, for example
 `"{bus}__{id}__{sig}"`, and use those generated column names in SQL and VSS mappings.
 
 Describe the stream to confirm the generated columns:

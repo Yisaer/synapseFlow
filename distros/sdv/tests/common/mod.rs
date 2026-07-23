@@ -7,6 +7,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+pub fn write_schema_zip(path: &std::path::Path, files: &[(&str, &[u8])]) {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).expect("create schema zip");
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, content) in files {
+        archive
+            .start_file(*name, options)
+            .expect("start schema zip entry");
+        archive.write_all(content).expect("write schema zip entry");
+    }
+    archive.finish().expect("finish schema zip");
+}
+
 /// Port for integration tests (avoid conflicts with local services)
 const TEST_PORT: u16 = 19082;
 

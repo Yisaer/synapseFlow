@@ -28,7 +28,7 @@ Request body:
   "name": "sensor_schema",
   "type": "proto",
   "props": {
-    "proto_path": "schemas/sensor.proto",
+    "proto_path": "schemas/sensor-schema.zip",
     "message_type": "com.example.Sensor"
   }
 }
@@ -37,7 +37,8 @@ Request body:
 Fields:
 
 - `name: string` (required, non-empty) — Unique identifier for this schema.
-- `type: string` (required) — Schema parser type. Built-in: `json`, `proto`.
+- `type: string` (required) — Schema parser type. Built-in: `json`, `proto`;
+  distributions may add types such as `gbf`.
 - `props: object` (optional, defaults to `{}`) — Parser-specific properties.
   See the corresponding parser documentation for details.
 
@@ -48,6 +49,10 @@ Notes:
   request fails with `400 Bad Request`.
 - Schema names must be unique. Creating a schema whose name already exists
   returns `409 Conflict`.
+- File-backed schema props identify a server-local ZIP package. The ZIP root
+  contains exactly one regular entry file and may contain only its same-stem
+  companion directory. The source package is copied into managed storage and
+  is not used after creation.
 
 Response:
 
@@ -63,7 +68,7 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
     "name": "sensor_schema",
     "type": "proto",
     "props": {
-      "proto_path": "schemas/sensor.proto",
+      "proto_path": "schemas/sensor-schema.zip",
       "message_type": "com.example.Sensor"
     }
   }' | jq .
@@ -131,7 +136,7 @@ curl -s -XDELETE http://127.0.0.1:8080/schemas/sensor_schema
 | Field   | Type     | Required | Description                                 |
 |---------|----------|----------|---------------------------------------------|
 | `name`  | `string` | yes      | Unique schema identifier.                   |
-| `type`  | `string` | yes      | Parser type: `"json"`, `"proto"`, or custom. |
+| `type`  | `string` | yes      | Parser type such as `"json"`, `"proto"`, or distribution-provided `"gbf"`. |
 | `props` | `object` | no       | Parser-specific properties. Default: `{}`.  |
 
 ### Schema `props` by `type`
@@ -160,15 +165,18 @@ Derive schema from a `.proto` file.
 
 | Prop            | Required | Description                                           |
 |-----------------|----------|-------------------------------------------------------|
-| `proto_path`    | yes      | Path to the `.proto` file.                            |
+| `proto_path`    | yes      | Path to the schema ZIP package.                       |
 | `message_type`  | yes      | Fully qualified message name, e.g. `"Sensor"` or `"com.example.Sensor"`. |
-| `include_paths` | no       | Array of additional proto include directories.        |
+
+The ZIP root must contain exactly one `.proto` entry. Imports that are not built
+in must be below the entry's same-stem companion directory. `include_paths` is
+not accepted for installed schemas.
 
 ```json
 {
   "type": "proto",
   "props": {
-    "proto_path": "schemas/sensor.proto",
+    "proto_path": "schemas/sensor-schema.zip",
     "message_type": "com.example.Sensor"
   }
 }
@@ -176,6 +184,16 @@ Derive schema from a `.proto` file.
 
 See `docs/api/schema_registry.md` for the full proto type mapping
 reference.
+
+#### `type == "gbf"` (SDV distribution)
+
+`props.schema_path` identifies a ZIP package to install. The ZIP root contains
+exactly one complete GBF entry file. Private DBC or ARXML members must be below
+the entry's same-stem companion directory, and no other root entries are allowed.
+After creation, VeloFlux runs and restores the schema from
+`<data_dir>/schemas/gbf/<name>/`; the original path is no longer used.
+
+See `distros/sdv/docs/schema/gbf.md` for the entry grammar and ZIP layout.
 
 ## Response Shapes
 
@@ -232,8 +250,9 @@ When `schema.ref` is present:
 - The referenced schema must exist.
 - The stored stream retains the `schema.ref` reference (live reference semantics). Changes to the named schema will be picked up after process restart.
 
-Inline schema definition (`schema.type` + `schema.props`) continues to
-work as before for backwards compatibility.
+Inline schema definition (`schema.type` + `schema.props`) continues to work for
+schemas that do not use file-backed properties. File-backed schemas must be
+installed with `POST /schemas` and referenced by ID.
 
 ## Import / Export
 
@@ -242,6 +261,9 @@ and validated during `/import`. For details, see `user_docs/api/export.md`
 and `user_docs/api/import.md`.
 
 ### Export Resource Shape
+
+Exported file-backed props contain the installed entry filename, not the
+original ZIP path. The export archive carries the installed files separately.
 
 In the `ExportResources` object:
 

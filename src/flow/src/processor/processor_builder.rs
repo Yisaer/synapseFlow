@@ -1487,6 +1487,9 @@ fn create_processor_from_plan_node(
                         )
                     })?;
                 processor.set_merger_schema(schema);
+                if let Some(artifact) = sampler.schema_artifact() {
+                    processor.set_merger_schema_artifact(artifact);
+                }
                 // Share decode state for projection pushdown into fused decode.
                 if let Some(opts) = context.shared_stream() {
                     processor.set_applied_decode_state(Arc::clone(&opts.applied_decode_state));

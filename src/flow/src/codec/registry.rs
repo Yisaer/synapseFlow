@@ -182,9 +182,16 @@ impl EncoderRegistry {
 
 use super::Merger;
 use serde_json::{Map, Value};
+use std::any::Any;
 
 type MergerFactory = Arc<
-    dyn Fn(&Map<String, Value>, Arc<Schema>) -> Result<Box<dyn Merger>, CodecError> + Send + Sync,
+    dyn Fn(
+            &Map<String, Value>,
+            Arc<Schema>,
+            Option<Arc<dyn Any + Send + Sync>>,
+        ) -> Result<Box<dyn Merger>, CodecError>
+        + Send
+        + Sync,
 >;
 
 /// Registry mapping merger identifiers to factories.
@@ -207,7 +214,26 @@ impl MergerRegistry {
             + 'static,
     {
         let mut map = self.factories.write();
-        map.insert(name.into(), Arc::new(factory));
+        map.insert(
+            name.into(),
+            Arc::new(move |props, schema, _| factory(props, schema)),
+        );
+    }
+
+    pub fn register_with_schema_artifact<F>(&self, name: impl Into<String>, factory: F)
+    where
+        F: Fn(
+                &Map<String, Value>,
+                Arc<Schema>,
+                Option<Arc<dyn Any + Send + Sync>>,
+            ) -> Result<Box<dyn Merger>, CodecError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.factories
+            .write()
+            .insert(name.into(), Arc::new(factory));
     }
 
     pub fn instantiate(
@@ -218,12 +244,27 @@ impl MergerRegistry {
     ) -> Result<Box<dyn Merger>, CodecError> {
         let map = self.factories.read();
         if let Some(factory) = map.get(name) {
-            factory(props, schema)
+            factory(props, schema, None)
         } else {
             Err(CodecError::Other(format!(
                 "merger '{}' not registered",
                 name
             )))
+        }
+    }
+
+    pub fn instantiate_with_schema_artifact(
+        &self,
+        name: &str,
+        props: &Map<String, Value>,
+        schema: Arc<Schema>,
+        artifact: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Result<Box<dyn Merger>, CodecError> {
+        let map = self.factories.read();
+        if let Some(factory) = map.get(name) {
+            factory(props, schema, artifact)
+        } else {
+            Err(CodecError::Other(format!("merger '{name}' not registered")))
         }
     }
 }

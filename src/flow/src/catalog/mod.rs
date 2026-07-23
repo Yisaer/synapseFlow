@@ -2,6 +2,7 @@ use crate::processor::SamplerConfig;
 use datatypes::Schema;
 use parking_lot::RwLock;
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -297,6 +298,9 @@ pub struct StreamDecoderConfig {
     /// `"protobuf"` and the schema is proto-based. Multiple streams referencing the same
     /// proto message type share the same `Arc`.
     pub proto_bundle: Option<Arc<crate::codec::ProtoDescriptorBundle>>,
+    /// Parser-specific, immutable schema artifact shared by every stream that
+    /// references the same named schema.
+    pub schema_artifact: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl std::fmt::Debug for StreamDecoderConfig {
@@ -308,6 +312,10 @@ impl std::fmt::Debug for StreamDecoderConfig {
                 "proto_bundle",
                 &self.proto_bundle.as_ref().map(|_| "<bundle>"),
             )
+            .field(
+                "schema_artifact",
+                &self.schema_artifact.as_ref().map(|_| "<artifact>"),
+            )
             .finish()
     }
 }
@@ -318,12 +326,24 @@ impl StreamDecoderConfig {
             decode_type: decode_type.into(),
             props,
             proto_bundle: None,
+            schema_artifact: None,
         }
     }
 
     pub fn with_proto_bundle(mut self, bundle: Arc<crate::codec::ProtoDescriptorBundle>) -> Self {
         self.proto_bundle = Some(bundle);
         self
+    }
+
+    pub fn with_schema_artifact(mut self, artifact: Arc<dyn Any + Send + Sync>) -> Self {
+        self.schema_artifact = Some(artifact);
+        self
+    }
+
+    pub fn schema_artifact<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        Arc::clone(self.schema_artifact.as_ref()?)
+            .downcast::<T>()
+            .ok()
     }
 
     pub fn kind(&self) -> &str {

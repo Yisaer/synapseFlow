@@ -108,11 +108,10 @@ The `packer` strategy accumulates multiple raw payloads and merges them using a 
 The SDV `gbf` merger is a fused decode-capable merger. It parses the GBF outer packet, accumulates supported inner frames, and emits a decoded collection directly. It does not have a bytes-output fallback.
 
 - `merger.type = "gbf"` requires `decoder.type = "gbf"` in stream configuration.
-- The manager copies GBF decoder format props such as `format_type`, `format_schema_path`, `signal_name_pattern`, and `clamp_to_range` into the merger props so users do not need to configure them twice.
-- The registry rejects `gbf` merger construction when `format_schema_path` is missing.
-- The only implemented inner `format_type` is `can`.
+- The merger and normal decoder share the stream's complete `CompiledGbfSchema`; merger props do not repeat packet layout, format paths, naming, CAN ID mapping, or clamping options.
+- The fused merger currently supports GBF schemas whose `format.type` is `can`.
 
-For `format_type = "can"`, the fused merger keeps newest-wins semantics within each sampler interval:
+For a CAN-format GBF schema, the fused merger keeps newest-wins semantics within each sampler interval:
 
 - CAN IDs are represented as `u32` inside the decoder and merger. The GBF schema can still choose a narrower field type, such as `u16be`, when the source format uses one.
 - Frames with CAN IDs that are absent from the DBC are discarded during merge.

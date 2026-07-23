@@ -13,33 +13,7 @@ use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::stream::{named_schema_store, schema_registry};
 use storage::{StorageError, StoredSchema};
 
-/// Schema props keys that may reference a local file path.
-const PROTO_PATH_KEY: &str = "proto_path";
-const DBC_SCHEMA_PATH_KEY: &str = "schema_path";
-
-/// Resolve file-path props through the uploads directory before falling back to
-/// the raw value. For any non-empty value, try `data_dir/uploads/<value>` first;
-/// if that file exists, replace with the full path. Otherwise leave the value
-/// unchanged (backward compatible with local filesystem paths).
-fn resolve_prop_paths(props: &mut serde_json::Map<String, serde_json::Value>, state: &AppState) {
-    let keys: &[&str] = &[PROTO_PATH_KEY, DBC_SCHEMA_PATH_KEY];
-    for key in keys {
-        let Some(val) = props.get(*key).and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let trimmed = val.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let uploads_path = state.storage.uploads_dir().join(trimmed);
-        if uploads_path.exists() {
-            props.insert(
-                (*key).to_string(),
-                serde_json::Value::String(uploads_path.to_string_lossy().into_owned()),
-            );
-        }
-    }
-}
+use super::source::{PreparedSchemaSource, delete_installed_source};
 
 #[derive(Deserialize)]
 pub struct CreateSchemaRequest {
@@ -85,18 +59,38 @@ pub async fn create_schema_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let mut props = req.props.clone();
-    resolve_prop_paths(&mut props, &state);
-
-    let (schema, proto_bundle) = match schema_registry().parse(&req.schema_type, &name, &props) {
-        Ok(s) => s,
-        Err(err) => {
+    match state.storage.get_schema(&name) {
+        Ok(Some(_)) => {
+            let err = format!("schema {name} already exists");
             audit.log_failure(&err);
-            return (StatusCode::BAD_REQUEST, err).into_response();
+            return (StatusCode::CONFLICT, err).into_response();
         }
-    };
+        Ok(None) => {}
+        Err(err) => {
+            let err = format!("failed to check schema {name}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    }
+    let mut source =
+        match PreparedSchemaSource::prepare(&state.storage, &name, &req.schema_type, &req.props) {
+            Ok(source) => source,
+            Err(err) => {
+                audit.log_failure(&err);
+                return (StatusCode::BAD_REQUEST, err).into_response();
+            }
+        };
 
-    let props_json = match serde_json::to_string(&req.props) {
+    let (schema, proto_bundle, artifact) =
+        match schema_registry().parse(&req.schema_type, &name, source.parse_props()) {
+            Ok(s) => s,
+            Err(err) => {
+                audit.log_failure(&err);
+                return (StatusCode::BAD_REQUEST, err).into_response();
+            }
+        };
+
+    let props_json = match serde_json::to_string(source.stored_props()) {
         Ok(s) => s,
         Err(e) => {
             let err = format!("serialize schema props: {e}");
@@ -110,29 +104,32 @@ pub async fn create_schema_handler(
         props_json,
     };
 
+    if let Err(err) = source.commit() {
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
+
     match state.storage.create_schema(stored) {
         Ok(()) => {}
         Err(StorageError::AlreadyExists(_)) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("schema {name} already exists"),
-            )
-                .into_response();
+            let mut err = format!("schema {name} already exists");
+            if let Err(cleanup_err) = source.rollback() {
+                err = format!("{err}; rollback failed: {cleanup_err}");
+            }
+            audit.log_failure(&err);
+            return (StatusCode::CONFLICT, err).into_response();
         }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist schema {name}: {err}"),
-            )
-                .into_response();
+        Err(storage_err) => {
+            let mut err = format!("failed to persist schema {name}: {storage_err}");
+            if let Err(cleanup_err) = source.rollback() {
+                err = format!("{err}; rollback failed: {cleanup_err}");
+            }
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     }
 
-    if let Some(bundle) = proto_bundle {
-        named_schema_store().insert_with_bundle(name, schema, (*bundle).clone());
-    } else {
-        named_schema_store().insert(name, schema);
-    }
+    named_schema_store().insert_resolved(name, schema, proto_bundle, artifact);
     audit.log_success();
     (
         StatusCode::CREATED,
@@ -185,6 +182,16 @@ pub async fn delete_schema_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let audit = ResourceMutationLog::new("schema", "delete", &name, None);
+    let stored_schema = match state.storage.get_schema(&name) {
+        Ok(stored) => stored,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to get schema {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
 
     // Check if any stream references this schema
     let referencing = match find_streams_referencing_schema(&state, &name) {
@@ -205,6 +212,9 @@ pub async fn delete_schema_handler(
 
     match state.storage.delete_schema(&name) {
         Ok(()) => {
+            if let Some(stored) = stored_schema {
+                delete_installed_source(&state.storage, &name, &stored.schema_type);
+            }
             named_schema_store().remove(&name);
             audit.log_success();
             (StatusCode::OK, format!("schema {name} deleted")).into_response()
@@ -391,86 +401,5 @@ mod tests {
             .expect("read response body");
         let message = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(message.contains("schema name"), "got: {message}");
-    }
-
-    #[test]
-    fn resolve_prop_path_replaces_when_upload_exists() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = build_state(&temp_dir);
-        state
-            .storage
-            .save_upload("sensor.proto", b"syntax = \"proto3\";")
-            .unwrap();
-
-        let mut props = serde_json::Map::new();
-        props.insert(
-            "proto_path".to_string(),
-            serde_json::Value::String("sensor.proto".to_string()),
-        );
-        resolve_prop_paths(&mut props, &state);
-
-        let resolved = props["proto_path"].as_str().unwrap();
-        assert!(
-            resolved.contains("uploads/sensor.proto"),
-            "expected path to contain uploads/sensor.proto, got: {resolved}"
-        );
-    }
-
-    #[test]
-    fn resolve_prop_path_keeps_original_when_upload_missing() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = build_state(&temp_dir);
-
-        let mut props = serde_json::Map::new();
-        props.insert(
-            "proto_path".to_string(),
-            serde_json::Value::String("not_uploaded.proto".to_string()),
-        );
-        resolve_prop_paths(&mut props, &state);
-
-        assert_eq!(props["proto_path"].as_str().unwrap(), "not_uploaded.proto");
-    }
-
-    #[test]
-    fn resolve_prop_path_falls_back_when_upload_missing() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = build_state(&temp_dir);
-
-        let mut props = serde_json::Map::new();
-        props.insert(
-            "proto_path".to_string(),
-            serde_json::Value::String("/etc/veloflux/sensor.proto".to_string()),
-        );
-        resolve_prop_paths(&mut props, &state);
-
-        // Neither uploads/etc/veloflux/sensor.proto nor /etc/veloflux/sensor.proto exists,
-        // so the value stays unchanged for the proto parser to try as a local path.
-        assert_eq!(
-            props["proto_path"].as_str().unwrap(),
-            "/etc/veloflux/sensor.proto"
-        );
-    }
-
-    #[test]
-    fn resolve_prop_path_works_with_subdirectory_upload() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = build_state(&temp_dir);
-        state
-            .storage
-            .save_upload("proto/sensor.proto", b"syntax = \"proto3\";")
-            .unwrap();
-
-        let mut props = serde_json::Map::new();
-        props.insert(
-            "proto_path".to_string(),
-            serde_json::Value::String("proto/sensor.proto".to_string()),
-        );
-        resolve_prop_paths(&mut props, &state);
-
-        let resolved = props["proto_path"].as_str().unwrap();
-        assert!(
-            resolved.contains("uploads/proto/sensor.proto"),
-            "expected path to contain uploads/proto/sensor.proto, got: {resolved}"
-        );
     }
 }

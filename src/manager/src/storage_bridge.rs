@@ -1,12 +1,12 @@
 use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
+use crate::schema::source::{reconcile_installed_sources, resolve_installed_props};
 use crate::startup::StartupPhase;
 use crate::stream::{
-    CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    named_schema_store, sampler_with_decoder_format_props, schema_registry,
-    validate_memory_stream_binding, validate_memory_stream_topic, validate_stream_connector_key,
-    validate_stream_decoder_config,
+    CreateStreamRequest, build_stream_decoder, build_stream_props, named_schema_store,
+    resolve_schema_from_request, schema_registry, validate_memory_stream_binding,
+    validate_memory_stream_topic, validate_stream_connector_key, validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -41,17 +41,22 @@ pub fn stream_definition_from_stored(
 ) -> Result<StreamDefinition, String> {
     let req: CreateStreamRequest = serde_json::from_str(&stored.raw_json)
         .map_err(|err| format!("decode stored stream {}: {err}", stored.id))?;
-    let schema = build_schema_from_request(&req)?;
+    let resolved_schema = resolve_schema_from_request(&req)?;
     let props = build_stream_props(&req.stream_type, &req.props)?;
-    let decoder = build_stream_decoder(&req, decoder_registry)?;
-    let mut definition = StreamDefinition::new(req.name.clone(), Arc::new(schema), props, decoder);
+    let decoder = build_stream_decoder(&req, decoder_registry, &resolved_schema)?;
+    let mut definition = StreamDefinition::new(
+        req.name.clone(),
+        Arc::clone(&resolved_schema.logical_schema),
+        props,
+        decoder,
+    );
     if let Some(cfg) = &req.eventtime {
         definition = definition.with_eventtime(EventtimeDefinition::new(
             cfg.column.clone(),
             cfg.eventtime_type.clone(),
         ));
     }
-    if let Some(sampler) = sampler_with_decoder_format_props(&req) {
+    if let Some(sampler) = req.sampler.clone() {
         definition = definition.with_sampler(sampler);
     }
     Ok(definition)
@@ -117,6 +122,7 @@ pub fn stored_mqtt_from_config(cfg: &SharedMqttClientConfig) -> StoredMqttClient
 
 pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<usize, String> {
     let stored_schemas = storage.list_schemas().map_err(|e| e.to_string())?;
+    reconcile_installed_sources(storage, &stored_schemas)?;
     let count = stored_schemas.len();
     for stored in &stored_schemas {
         // Defensive: skip historically-invalid schema names (VF-51 §5.2).
@@ -128,7 +134,7 @@ pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<u
             );
             continue;
         }
-        let props: serde_json::Map<String, serde_json::Value> =
+        let mut props: serde_json::Map<String, serde_json::Value> =
             match serde_json::from_str(&stored.props_json) {
                 Ok(p) => p,
                 Err(err) => {
@@ -140,17 +146,25 @@ pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<u
                     continue;
                 }
             };
+        if let Err(err) =
+            resolve_installed_props(storage, &stored.name, &stored.schema_type, &mut props)
+        {
+            tracing::error!(
+                schema = %stored.name,
+                schema_type = %stored.schema_type,
+                error = %err,
+                "failed to resolve installed schema source; skipping"
+            );
+            continue;
+        }
         match schema_registry().parse(&stored.schema_type, &stored.name, &props) {
-            Ok((schema, proto_bundle)) => {
-                if let Some(bundle) = proto_bundle {
-                    named_schema_store().insert_with_bundle(
-                        stored.name.clone(),
-                        schema,
-                        (*bundle).clone(),
-                    );
-                } else {
-                    named_schema_store().insert(stored.name.clone(), schema);
-                }
+            Ok((schema, proto_bundle, artifact)) => {
+                named_schema_store().insert_resolved(
+                    stored.name.clone(),
+                    schema,
+                    proto_bundle,
+                    artifact,
+                );
             }
             Err(err) => {
                 tracing::error!(

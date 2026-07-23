@@ -43,7 +43,10 @@ pub use instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec, build_in_process_flow_instance,
     find_default_flow_instance_spec, new_default_flow_instance,
 };
-pub use stream::{SchemaParser, named_schema_store, register_schema, schema_registry};
+pub use stream::{
+    ParsedSchema, SchemaArtifact, SchemaParser, named_schema_store, register_schema,
+    schema_registry,
+};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 

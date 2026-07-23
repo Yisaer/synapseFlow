@@ -47,7 +47,7 @@ use flow::{
 use tracing::trace;
 
 use super::payload::{GbfPayloadFrame, PayloadDecoder};
-use crate::schema::dbc::{DbcJson, format_signal_name};
+use crate::schema::dbc::{CompiledDbcSchema, DbcJson, format_signal_name};
 
 /// A parsed CAN frame with timestamp, ID, and payload.
 #[derive(Clone, Debug)]
@@ -98,7 +98,7 @@ impl CanIdMapping {
         }
     }
 
-    /// Parse the `can_id_mapping` decoder property.
+    /// Parse the `can_id_mapping` CAN-format property.
     ///
     /// Accepts either the string `"raw"` or the object
     /// `{ "mode": "bus_shift", "bits": N }` with `1 <= N <= 31`. Absent → [`Raw`].
@@ -447,9 +447,59 @@ impl CanDecoder {
         clamp_to_range: bool,
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
+        let pattern = pattern.as_deref().unwrap_or("{sig}");
+        Self::build(
+            source_name,
+            schema,
+            &dbc,
+            clamp_to_range,
+            mapping,
+            |bus_id, bus_name, message, signal_name| {
+                let _ = bus_id;
+                format_signal_name(
+                    pattern,
+                    bus_name,
+                    &message.frame_id,
+                    &message._name,
+                    signal_name,
+                )
+            },
+        )
+    }
+
+    /// Create a decoder from the DBC artifact shared with logical schema planning.
+    pub fn build_from_compiled(
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        dbc: &DbcJson,
+        compiled: &CompiledDbcSchema,
+        clamp_to_range: bool,
+        mapping: CanIdMapping,
+    ) -> Result<Self, CodecError> {
+        Self::build(
+            source_name,
+            schema,
+            dbc,
+            clamp_to_range,
+            mapping,
+            |bus_id, bus_name, message, signal_name| {
+                compiled.column_name(bus_id, bus_name, message, signal_name)
+            },
+        )
+    }
+
+    fn build<N>(
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        dbc: &DbcJson,
+        clamp_to_range: bool,
+        mapping: CanIdMapping,
+        name_for: N,
+    ) -> Result<Self, CodecError>
+    where
+        N: Fn(u32, &str, &crate::schema::dbc::MessageJson, &str) -> String,
+    {
         let source_name: String = source_name.into();
-        // Default to simple signal name if no pattern provided
-        let pattern_str = pattern.as_deref().unwrap_or("{sig}");
         let keys: Vec<Arc<str>> = schema
             .column_schemas()
             .iter()
@@ -463,9 +513,9 @@ impl CanDecoder {
 
         let mut messages = CanIdMap::default();
         let mut next_msg_index = 0usize;
-        for bus in dbc.buses {
-            let bus_name = bus.name.unwrap_or_else(|| format!("Bus{}", bus.id));
-            for msg in bus.messages {
+        for bus in &dbc.buses {
+            let bus_name = bus.name.clone().unwrap_or_else(|| format!("Bus{}", bus.id));
+            for msg in &bus.messages {
                 // CAN ID lookup key per the configured mapping policy (issue #217).
                 let can_id = mapping.frame_key(bus.id, msg.id);
                 if mapping.overlaps(bus.id, msg.id) {
@@ -478,16 +528,9 @@ impl CanDecoder {
                          use `raw` mapping."
                     );
                 }
-                let frame_id = msg.frame_id.clone();
                 let mut signals = Vec::new();
-                for sig in msg.signals {
-                    let full_name = format_signal_name(
-                        pattern_str,
-                        &bus_name,
-                        &frame_id,
-                        &msg._name,
-                        &sig.name,
-                    );
+                for sig in &msg.signals {
+                    let full_name = name_for(bus.id, &bus_name, msg, &sig.name);
                     let Some(&col_index) = name_to_index.get(full_name.as_str()) else {
                         continue;
                     };
@@ -526,7 +569,7 @@ impl CanDecoder {
                     tracing::warn!(
                         can_id = format!("0x{:04X}", can_id),
                         bus = %bus_name,
-                        frame_id = %frame_id,
+                        frame_id = %msg.frame_id,
                         ?mapping,
                         "Duplicate CAN ID detected, previous signals will be \
                          overwritten. With `raw` mapping, consider `bus_shift` to \

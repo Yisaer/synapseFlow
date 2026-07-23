@@ -17,6 +17,7 @@ pub mod schema;
 pub fn register(instance: &flow::FlowInstance) {
     schema::register_dbc_schema();
     schema::register_arxml_schema();
+    schema::register_gbf_schema();
 
     let encoder_registry = instance.encoder_registry();
     encoder_registry.register_encoder(
@@ -43,25 +44,17 @@ pub fn register(instance: &flow::FlowInstance) {
     decoder::register_gbf_decoder(&decoder_registry);
 
     let merger_registry = instance.merger_registry();
-    merger_registry.register(
+    merger_registry.register_with_schema_artifact(
         "gbf",
-        |props: &Map<String, Value>, schema: Arc<datatypes::Schema>| {
-            let schema_file = props
-                .get("schema")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    flow::codec::CodecError::Other("missing schema property".to_string())
-                })?;
-
-            let format_schema_path = props
-                .get("format_schema_path")
-                .and_then(|v| v.as_str())
+        |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {
+            let artifact = artifact
+                .and_then(|artifact| artifact.downcast::<schema::gbf::CompiledGbfSchema>().ok())
                 .ok_or_else(|| {
                     flow::codec::CodecError::Other(
-                        "gbf packer merger requires `format_schema_path` prop".to_string(),
+                        "gbf packer merger requires a resolved GBF schema".to_string(),
                     )
                 })?;
-            build_fused_gbf_merger(props, schema, schema_file, format_schema_path)
+            build_fused_gbf_merger(schema, &artifact)
         },
     );
 }
@@ -69,42 +62,10 @@ pub fn register(instance: &flow::FlowInstance) {
 /// Build a fused (decode-capable) GBF sampler from merger props + the stream's
 /// output schema. Requires the same CAN format inputs as the `gbf` decoder.
 fn build_fused_gbf_merger(
-    props: &Map<String, Value>,
     schema: Arc<datatypes::Schema>,
-    schema_file: &str,
-    format_schema_path: &str,
+    compiled: &schema::gbf::CompiledGbfSchema,
 ) -> Result<Box<dyn flow::Merger>, flow::codec::CodecError> {
     use flow::codec::CodecError;
-
-    let format_type = props
-        .get("format_type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| CodecError::Other("gbf packer merger requires `format_type` prop".into()))?;
-    if format_type != "can" {
-        return Err(CodecError::Other(format!(
-            "unsupported merger format_type: {format_type}"
-        )));
-    }
-
-    let gbf_schema = schema::gbf::GbfSchema::load(schema_file)
-        .map_err(|e| CodecError::Other(format!("failed to load gbf schema: {e}")))?;
-    let dbc = schema::dbc::load_can_schema(format_schema_path).map_err(|e| {
-        CodecError::Other(format!(
-            "failed to load can schema from {format_schema_path}: {e}"
-        ))
-    })?;
-
-    let pattern = props
-        .get("signal_name_pattern")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let clamp_to_range = props
-        .get("clamp_to_range")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    // CAN ID lookup policy (issue #217). Default `raw`; `bus_shift` reproduces
-    // the historical synthetic packing.
-    let mapping = decoder::CanIdMapping::from_prop(props.get("can_id_mapping"))?;
 
     // The decoded tuple is namespaced by the stream's source name; derive it
     // from the schema so downstream column resolution matches the `gbf` decoder.
@@ -114,14 +75,6 @@ fn build_fused_gbf_merger(
         .map(|col| col.source_name.clone())
         .ok_or_else(|| CodecError::Other("output schema has no columns".to_string()))?;
 
-    let fused = decoder::GbfFusedMerger::new(
-        source_name,
-        schema,
-        gbf_schema,
-        dbc,
-        pattern,
-        clamp_to_range,
-        mapping,
-    )?;
+    let fused = decoder::GbfFusedMerger::from_compiled_gbf(source_name, schema, compiled)?;
     Ok(Box::new(fused) as Box<dyn flow::Merger>)
 }

@@ -45,6 +45,7 @@ pub(crate) fn create_physical_plan_for_shared_stream(
         Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
             config.interval,
             config.strategy,
+            decoder.schema_artifact.clone(),
             vec![sampler_input],
             index_counter.allocate(),
         )))

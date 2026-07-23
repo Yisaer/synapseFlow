@@ -18,7 +18,6 @@ const WKT_TIMESTAMP_FQN: &str = "google.protobuf.Timestamp";
 /// Expected props:
 ///   - `proto_path`: path to the .proto file (required)
 ///   - `message_type`: fully qualified message name, e.g. `"Sensor"` or `"com.example.Sensor"` (required)
-///   - `include_paths`: optional array of additional proto include directories
 ///
 /// Returns both the resolved [`Schema`] and a pre-built [`ProtoDescriptorBundle`]
 /// that the protobuf decoder can use at runtime.
@@ -34,15 +33,11 @@ pub fn parse_proto_schema(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
 
+    let companion_dir = Path::new(&proto_path).with_extension("");
     let mut include_paths: Vec<String> = vec![proto_dir];
-    if let Some(extra) = props.get("include_paths").and_then(|v| v.as_array()) {
-        for item in extra {
-            if let Some(s) = item.as_str() {
-                include_paths.push(s.to_string());
-            }
-        }
+    if companion_dir.is_dir() {
+        include_paths.push(companion_dir.to_string_lossy().into_owned());
     }
-
     let mut compiler = protox::Compiler::new(&include_paths)
         .map_err(|e| format!("failed to create proto compiler: {e}"))?;
     compiler
@@ -875,22 +870,5 @@ mod tests {
         let props = make_props(&path, "Foo");
         let result = parse_proto_schema("test_stream", &props);
         assert!(result.is_err());
-    }
-
-    // ── include_paths test ────────────────────────────────────────────
-
-    #[test]
-    fn parse_with_include_paths() {
-        let path = testdata_path("with_include.proto");
-        let mut props = make_props(&path, "SimpleWithInclude");
-        // Add an include path that doesn't exist – should still work
-        // because the file's own directory is always included.
-        props.insert(
-            "include_paths".to_string(),
-            json!(["/some/nonexistent/path"]),
-        );
-        let (schema, _bundle) = parse_proto_schema("test_stream", &props).expect("parse schema");
-        assert_eq!(schema.column_schemas().len(), 1);
-        assert_column(&schema.column_schemas()[0], "value", "string");
     }
 }

@@ -755,6 +755,11 @@ impl StorageManager {
         self.base_dir.join("uploads")
     }
 
+    /// Returns the private directory containing installed schema sources.
+    pub fn schemas_dir(&self) -> PathBuf {
+        self.base_dir.join("schemas")
+    }
+
     /// Save an uploaded file to the uploads directory. Overwrites if a file with
     /// the same name already exists. Uses a temp-file-and-rename pattern to avoid
     /// partial writes.
@@ -817,6 +822,16 @@ impl StorageManager {
             return Ok(0);
         }
         let dst_dir = self.uploads_dir();
+        fs::create_dir_all(&dst_dir).map_err(StorageError::io)?;
+        copy_uploads_recursive(src_dir, &dst_dir)
+    }
+
+    /// Copy installed schema sources from an extracted backup directory.
+    pub fn copy_schemas_from_dir(&self, src_dir: &Path) -> Result<usize, StorageError> {
+        if !src_dir.exists() || !src_dir.is_dir() {
+            return Ok(0);
+        }
+        let dst_dir = self.schemas_dir();
         fs::create_dir_all(&dst_dir).map_err(StorageError::io)?;
         copy_uploads_recursive(src_dir, &dst_dir)
     }

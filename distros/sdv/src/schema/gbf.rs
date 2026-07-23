@@ -2,7 +2,21 @@
 //!
 //! This module defines the JSON schema format for describing binary packet structures.
 
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use manager::{ParsedSchema, register_schema};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
+
+use crate::decoder::can::CanIdMapping;
+use crate::schema::arxml::{CompiledArxmlSchema, compile_arxml_schema};
+use crate::schema::dbc::{CompiledDbcSchema, compile_dbc_schema};
+
+/// Register the complete GBF schema parser.
+pub fn register_gbf_schema() {
+    register_schema("gbf", Arc::new(parse_gbf_schema));
+}
 
 /// Root schema definition. Contains a single inline `structure` that describes the packet layout.
 /// All sequence item types are defined inline via nested `structure` fields, not a named-type registry.
@@ -11,6 +25,164 @@ pub struct GbfSchema {
     /// Root packet structure definition. Required — serde will produce a clear
     /// 'missing field `structure`' error at load time for malformed schemas.
     pub structure: GbfStructure,
+}
+
+/// File-backed GBF entry containing both packet layout and private format configuration.
+#[derive(Debug, Clone, Deserialize)]
+struct GbfSchemaDocument {
+    structure: GbfStructure,
+    format: GbfFormatDefinition,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GbfFormatDefinition {
+    #[serde(rename = "type")]
+    format_type: String,
+    #[serde(default)]
+    props: JsonMap<String, JsonValue>,
+}
+
+/// Immutable runtime state produced by resolving one complete GBF schema.
+#[derive(Clone)]
+pub struct CompiledGbfSchema {
+    parser: crate::codec::gbf_parser::GbfParser,
+    format: CompiledGbfFormat,
+}
+
+#[derive(Clone)]
+pub enum CompiledGbfFormat {
+    Can {
+        schema: Arc<CompiledDbcSchema>,
+        clamp_to_range: bool,
+        can_id_mapping: CanIdMapping,
+    },
+    SomeIp {
+        schema: Arc<CompiledArxmlSchema>,
+    },
+}
+
+impl CompiledGbfSchema {
+    pub fn can(
+        layout: GbfSchema,
+        schema: Arc<CompiledDbcSchema>,
+        clamp_to_range: bool,
+        can_id_mapping: CanIdMapping,
+    ) -> Result<Self, flow::codec::CodecError> {
+        let parser = crate::codec::gbf_parser::GbfParser::new(layout)?;
+        Ok(Self {
+            parser,
+            format: CompiledGbfFormat::Can {
+                schema,
+                clamp_to_range,
+                can_id_mapping,
+            },
+        })
+    }
+
+    pub fn someip(
+        layout: GbfSchema,
+        schema: Arc<CompiledArxmlSchema>,
+    ) -> Result<Self, flow::codec::CodecError> {
+        let parser = crate::codec::gbf_parser::GbfParser::new(layout)?;
+        Ok(Self {
+            parser,
+            format: CompiledGbfFormat::SomeIp { schema },
+        })
+    }
+
+    pub fn format(&self) -> &CompiledGbfFormat {
+        &self.format
+    }
+
+    pub fn parser(&self) -> crate::codec::gbf_parser::GbfParser {
+        self.parser.clone()
+    }
+}
+
+fn parse_gbf_schema(
+    stream_name: &str,
+    props: &JsonMap<String, JsonValue>,
+) -> Result<ParsedSchema, String> {
+    let entry = props
+        .get("schema_path")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "gbf schema requires `schema_path` prop".to_string())?;
+    let content = std::fs::read_to_string(entry)
+        .map_err(|err| format!("failed to read GBF schema entry `{entry}`: {err}"))?;
+    let document: GbfSchemaDocument = serde_json::from_str(&content)
+        .map_err(|err| format!("failed to parse GBF schema entry `{entry}`: {err}"))?;
+    let member_root = Path::new(entry).with_extension("");
+    let layout = GbfSchema {
+        structure: document.structure,
+    };
+
+    match document.format.format_type.as_str() {
+        "can" | "dbc" => {
+            let dbc_path = required_member_path(&member_root, &document.format.props, "dbc_path")?;
+            let pattern = document
+                .format
+                .props
+                .get("signal_name_pattern")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("{sig}");
+            let clamp_to_range = document
+                .format
+                .props
+                .get("clamp_to_range")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(true);
+            let can_id_mapping =
+                CanIdMapping::from_prop(document.format.props.get("can_id_mapping"))
+                    .map_err(|err| err.to_string())?;
+            let path = path_to_str(&dbc_path)?;
+            let (schema, compiled) = compile_dbc_schema(stream_name, path, pattern)?;
+            let compiled =
+                CompiledGbfSchema::can(layout.clone(), compiled, clamp_to_range, can_id_mapping)
+                    .map_err(|err| err.to_string())?;
+            Ok((schema, None, Some(Arc::new(compiled))))
+        }
+        "someip" | "arxml" => {
+            let arxml_path =
+                required_member_path(&member_root, &document.format.props, "arxml_path")?;
+            let pattern = document
+                .format
+                .props
+                .get("signal_name_pattern")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("{field}");
+            let path = path_to_str(&arxml_path)?;
+            let (schema, compiled) = compile_arxml_schema(stream_name, path, pattern)?;
+            let compiled =
+                CompiledGbfSchema::someip(layout, compiled).map_err(|err| err.to_string())?;
+            Ok((schema, None, Some(Arc::new(compiled))))
+        }
+        other => Err(format!("unsupported GBF format type `{other}`")),
+    }
+}
+
+fn required_member_path(
+    member_root: &Path,
+    props: &JsonMap<String, JsonValue>,
+    key: &str,
+) -> Result<PathBuf, String> {
+    let relative = props
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("GBF format requires `{key}` prop"))?;
+    let path = Path::new(relative);
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(format!("GBF format member `{key}` must be a relative path"));
+    }
+    Ok(member_root.join(path))
+}
+
+fn path_to_str(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("schema member path is not valid UTF-8: {}", path.display()))
 }
 
 /// A structure definition (struct with fields).

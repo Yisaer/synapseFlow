@@ -10,6 +10,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::can::{CanDecoder, CanIdMapping, CanMuxKeyResolver};
+use super::payload::{GbfPayloadFrame, PayloadDecoder};
+use crate::schema::gbf::{CompiledGbfFormat, CompiledGbfSchema, GbfSchema};
 use datatypes::Schema;
 use flow::{
     Merger,
@@ -17,133 +20,19 @@ use flow::{
     model::{Collection, RecordBatch},
     planner::decode_projection::DecodeProjection,
 };
-use serde_json::Value as JsonValue;
-
-use super::can::{CanDecoder, CanIdMapping, CanMuxKeyResolver};
-use super::payload::{GbfPayloadFrame, PayloadDecoder};
-use crate::schema::dbc::load_can_schema;
-use crate::schema::gbf::GbfSchema;
 
 /// Register the `gbf` decoder with the global decoder registry.
 pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
     registry.register_decoder(
         "gbf",
         Arc::new(|config, schema, stream_name| {
-            let schema_path = config
-                .props()
-                .get("schema_path")
-                .and_then(JsonValue::as_str)
+            let compiled = config
+                .schema_artifact::<CompiledGbfSchema>()
                 .ok_or_else(|| {
-                    CodecError::Other("decoder `gbf` requires `schema_path` prop".into())
+                    CodecError::Other("decoder `gbf` requires a resolved GBF schema".into())
                 })?;
-
-            let gbf_schema = GbfSchema::load(schema_path)
-                .map_err(|e| CodecError::Other(format!("failed to load gbf schema: {e}")))?;
-
-            // Get format type (required)
-            let format_type = config
-                .props()
-                .get("format_type")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    CodecError::Other("decoder `gbf` requires `format_type` prop".into())
-                })?;
-
-            // Get format schema path
-            let format_schema_path = config
-                .props()
-                .get("format_schema_path")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    CodecError::Other("decoder `gbf` requires `format_schema_path` prop".into())
-                })?;
-
-            // Validate format type
-            match format_type {
-                "can" => {
-                    let dbc = load_can_schema(format_schema_path).map_err(|e| {
-                        CodecError::Other(format!(
-                            "failed to load can schema from {}: {e}",
-                            format_schema_path
-                        ))
-                    })?;
-
-                    let pattern = config
-                        .props()
-                        .get("signal_name_pattern")
-                        .and_then(JsonValue::as_str)
-                        .map(|s| s.to_string());
-
-                    let clamp_to_range = config
-                        .props()
-                        .get("clamp_to_range")
-                        .and_then(JsonValue::as_bool)
-                        .unwrap_or(true);
-
-                    let mapping = CanIdMapping::from_prop(config.props().get("can_id_mapping"))?;
-
-                    GbfDecoder::new(
-                        stream_name,
-                        schema.clone(),
-                        gbf_schema,
-                        dbc,
-                        pattern,
-                        clamp_to_range,
-                        mapping,
-                    )
-                    .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
-                }
-                "someip" => {
-                    // Load ARXML codec and the schema's column naming policy.
-                    let cached_schema = if let Some(ref_name) = config
-                        .props()
-                        .get("format_schema_ref")
-                        .and_then(JsonValue::as_str)
-                    {
-                        Some(
-                            crate::schema::arxml::get_cached_schema(ref_name).ok_or_else(|| {
-                                CodecError::Other(format!(
-                                    "ARXML codec `{ref_name}` not found in cache; \
-                                     register it first via schema.type=\"arxml\""
-                                ))
-                            })?,
-                        )
-                    } else {
-                        crate::schema::arxml::get_cached_schema(stream_name)
-                    };
-
-                    let (codec, cached_pattern) = if let Some(cached) = cached_schema {
-                        (cached.codec, Some(cached.signal_name_pattern))
-                    } else {
-                        let path = format_schema_path;
-                        (
-                            Arc::new(arxml_converter::ArxmlCodec::load(path).map_err(|e| {
-                                CodecError::Other(format!("failed to load ARXML from {path}: {e}"))
-                            })?),
-                            None,
-                        )
-                    };
-                    let pattern = config
-                        .props()
-                        .get("signal_name_pattern")
-                        .and_then(JsonValue::as_str)
-                        .or(cached_pattern.as_deref());
-
-                    let payload_decoder =
-                        Box::new(crate::decoder::someip::SomeIpPayloadDecoder::new(
-                            stream_name,
-                            schema.clone(),
-                            codec,
-                            pattern,
-                        ));
-
-                    GbfDecoder::with_payload_decoder(gbf_schema, payload_decoder)
-                        .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
-                }
-                other => Err(CodecError::Other(format!(
-                    "unsupported format_type: {other}"
-                ))),
-            }
+            GbfDecoder::from_compiled_gbf(stream_name, schema.clone(), &compiled)
+                .map(|decoder| Arc::new(decoder) as Arc<dyn RecordDecoder>)
         }),
     );
 }
@@ -155,6 +44,47 @@ pub struct GbfDecoder {
 }
 
 impl GbfDecoder {
+    pub fn from_compiled_gbf(
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        compiled: &CompiledGbfSchema,
+    ) -> Result<Self, CodecError> {
+        let source_name = source_name.into();
+        match compiled.format() {
+            CompiledGbfFormat::Can {
+                schema: dbc,
+                clamp_to_range,
+                can_id_mapping,
+            } => {
+                let dbc_json = dbc.dbc();
+                let payload_decoder = Box::new(CanDecoder::build_from_compiled(
+                    source_name,
+                    schema,
+                    &dbc_json,
+                    dbc,
+                    *clamp_to_range,
+                    *can_id_mapping,
+                )?);
+                Ok(Self {
+                    parser: compiled.parser(),
+                    payload_decoder,
+                })
+            }
+            CompiledGbfFormat::SomeIp { schema: arxml } => {
+                let payload_decoder = Box::new(crate::decoder::someip::SomeIpPayloadDecoder::new(
+                    source_name,
+                    schema,
+                    arxml.codec(),
+                    Some(arxml.signal_name_pattern()),
+                ));
+                Ok(Self {
+                    parser: compiled.parser(),
+                    payload_decoder,
+                })
+            }
+        }
+    }
+
     /// Create a new GBF decoder for CAN (DBC JSON).
     pub fn new(
         source_name: impl Into<String>,
@@ -298,6 +228,43 @@ pub struct GbfFusedMerger {
 }
 
 impl GbfFusedMerger {
+    pub fn from_compiled_gbf(
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        compiled: &CompiledGbfSchema,
+    ) -> Result<Self, CodecError> {
+        match compiled.format() {
+            CompiledGbfFormat::Can {
+                schema: dbc,
+                clamp_to_range,
+                can_id_mapping,
+            } => {
+                let dbc_json = dbc.dbc();
+                let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc_json, *can_id_mapping);
+                let payload_decoder = Box::new(CanDecoder::build_from_compiled(
+                    source_name,
+                    schema,
+                    &dbc_json,
+                    dbc,
+                    *clamp_to_range,
+                    *can_id_mapping,
+                )?);
+                Ok(Self {
+                    parser: compiled.parser(),
+                    payload_decoder,
+                    mux_resolver,
+                    payload_buf: Vec::with_capacity(64 * 8),
+                    frames: HashMap::with_capacity(64),
+                    mux_frames: HashMap::with_capacity(16),
+                    last_ts: 0,
+                })
+            }
+            CompiledGbfFormat::SomeIp { .. } => Err(CodecError::Other(
+                "GBF fused merger currently supports only CAN format".into(),
+            )),
+        }
+    }
+
     /// Create a fused merger from the same inputs as [`GbfDecoder::new`].
     pub fn new(
         source_name: impl Into<String>,
@@ -474,8 +441,10 @@ impl Merger for GbfFusedMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::dbc::{load_dbc_json, schema_from_dbc};
+    use crate::schema::dbc::{CompiledDbcSchema, load_dbc_json, schema_from_dbc};
+    use crate::schema::gbf::CompiledGbfSchema;
     use datatypes::Value;
+    use flow::catalog::StreamDecoderConfig;
     use flow::codec::RecordDecoder;
 
     fn get_test_schema() -> GbfSchema {
@@ -564,6 +533,66 @@ mod tests {
             CanIdMapping::BusShift { bits: 12 },
         )
         .expect("build decoder")
+    }
+
+    #[test]
+    fn registry_builds_can_decoder_from_schema_artifact() {
+        let dbc_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
+        let compiled = Arc::new(CompiledDbcSchema::new(
+            load_dbc_json(dbc_path.to_str().unwrap()).unwrap(),
+            "{sig}",
+        ));
+        let schema = Arc::new(compiled.schema("can"));
+        let compiled = Arc::new(
+            CompiledGbfSchema::can(
+                get_test_schema(),
+                compiled,
+                true,
+                CanIdMapping::BusShift { bits: 12 },
+            )
+            .expect("compile GBF schema"),
+        );
+        let config =
+            StreamDecoderConfig::new("gbf", serde_json::Map::new()).with_schema_artifact(compiled);
+        let registry = flow::DecoderRegistry::new();
+        register_gbf_decoder(&registry);
+
+        registry
+            .instantiate(&config, "can", schema)
+            .expect("build CAN-over-GBF from DBC artifact");
+    }
+
+    #[test]
+    fn registry_builds_someip_decoder_from_schema_artifact() {
+        crate::schema::arxml::register_arxml_schema();
+        let arxml_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/baq.arxml");
+        let mut schema_props = serde_json::Map::new();
+        schema_props.insert(
+            "schema_path".into(),
+            serde_json::Value::String(arxml_path.to_string_lossy().into_owned()),
+        );
+        let (schema, _, artifact) = manager::schema_registry()
+            .parse("arxml", "someip", &schema_props)
+            .expect("parse ARXML schema");
+        let arxml = artifact
+            .expect("ARXML artifact")
+            .downcast::<crate::schema::arxml::CompiledArxmlSchema>()
+            .expect("ARXML artifact type");
+        let gbf_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/test_data/someip_packet.json");
+        let layout = GbfSchema::load(gbf_path.to_str().expect("GBF path")).expect("GBF layout");
+        let compiled =
+            Arc::new(CompiledGbfSchema::someip(layout, arxml).expect("compile GBF schema"));
+        let config =
+            StreamDecoderConfig::new("gbf", serde_json::Map::new()).with_schema_artifact(compiled);
+        let registry = flow::DecoderRegistry::new();
+        register_gbf_decoder(&registry);
+
+        registry
+            .instantiate(&config, "someip", Arc::new(schema))
+            .expect("build SOME/IP-over-GBF from ARXML artifact");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use storage::{StorageManager, StoredInitApplyMeta};
 use crate::export::{ExportBundleV1, ExportResources};
 use crate::import::validate_and_build_snapshot_with_existing_streams;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
+use crate::schema::source::PreparedSchemaTree;
 use crate::startup::StartupPhase;
 
 const INIT_JSON_FILE: &str = "init.json";
@@ -106,7 +107,7 @@ where
 }
 
 /// Apply init.tar.gz: unarchive, load metadata.json, apply to storage,
-/// and copy any uploads/ files to the data directory.
+/// and copy any uploads/ and installed schemas/ files to the data directory.
 fn apply_init_tar_gz<F>(
     storage: &StorageManager,
     tar_gz_path: &Path,
@@ -166,9 +167,14 @@ where
         .into_iter()
         .map(|stream| stream.id)
         .collect();
+    let schemas_src = tmp_dir.path().join("schemas");
+    let schema_tree = PreparedSchemaTree::prepare(storage, &schemas_src)
+        .map_err(|err| format!("prepare schemas from init.tar.gz: {err}"))?;
+    let schema_validation_root = schema_tree.staged_root().unwrap_or(&schemas_src);
     let snapshot = validate_and_build_snapshot_with_existing_streams(
         &bundle,
         &existing_stream_names,
+        Some(schema_validation_root),
         is_declared_instance,
     )?;
 
@@ -182,6 +188,12 @@ where
             &storage.wasm_files_dir(),
         )?;
     }
+
+    // Install metadata-referenced schema sources before committing metadata.
+    // If this fails, the init apply marker remains unchanged and startup retries.
+    let schema_file_count = storage
+        .copy_schemas_from_dir(schema_validation_root)
+        .map_err(|e| format!("copy schemas from init.tar.gz: {e}"))?;
 
     // Write metadata snapshot to redb
     let meta = StoredInitApplyMeta {
@@ -212,6 +224,7 @@ where
         applied_pipeline_run_state_count = summary.pipeline_run_states,
         applied_udf_count = udf_count,
         applied_upload_count = upload_count,
+        applied_schema_file_count = schema_file_count,
         "startup phase"
     );
     phase.log_success();
@@ -241,6 +254,7 @@ where
     let snapshot = validate_and_build_snapshot_with_existing_streams(
         &bundle,
         &existing_stream_names,
+        None,
         is_declared_instance,
     )?;
     let meta = StoredInitApplyMeta {
@@ -335,6 +349,85 @@ mod tests {
                 udfs: vec![],
             },
         }
+    }
+
+    fn file_backed_proto_bundle(stream_name: &str, schemas_root: &Path) -> ExportBundleV1 {
+        let schema_dir = schemas_root.join("proto/simple_schema");
+        fs::create_dir_all(&schema_dir).expect("create proto schema directory");
+        fs::write(
+            schema_dir.join("simple.proto"),
+            b"syntax = \"proto3\"; message Simple { int64 value = 1; }",
+        )
+        .expect("write proto schema");
+        let mut bundle = sample_bundle(stream_name);
+        bundle.resources.schemas.push(crate::export::ExportSchema {
+            name: "simple_schema".to_string(),
+            schema_type: "proto".to_string(),
+            props: serde_json::from_value(json!({
+                "proto_path": "simple.proto",
+                "message_type": "Simple"
+            }))
+            .expect("proto props"),
+        });
+        bundle.resources.streams[0].schema =
+            serde_json::from_value(json!({"ref": "simple_schema"})).expect("schema ref");
+        bundle
+    }
+
+    fn write_init_tar_gz_with_schemas(
+        storage: &StorageManager,
+        bundle: &ExportBundleV1,
+        schemas_root: &Path,
+    ) {
+        let tar_gz = crate::export::build_tar_gz(
+            bundle,
+            &[],
+            &storage.wasm_files_dir(),
+            &storage.uploads_dir(),
+            schemas_root,
+        )
+        .expect("build init tar.gz");
+        fs::write(storage.base_dir().join(INIT_TAR_GZ_FILE), tar_gz).expect("write init tar.gz");
+    }
+
+    #[cfg(unix)]
+    fn write_init_tar_gz_with_symlinked_proto(
+        storage: &StorageManager,
+        bundle: &ExportBundleV1,
+        target: &Path,
+    ) {
+        let metadata = serde_json::to_vec(bundle).expect("serialize metadata");
+        let mut tar_gz = Vec::new();
+        {
+            let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
+            let mut builder = tar::Builder::new(gz);
+
+            let mut metadata_header = tar::Header::new_gnu();
+            metadata_header.set_mode(0o600);
+            metadata_header.set_size(metadata.len() as u64);
+            builder
+                .append_data(&mut metadata_header, "metadata.json", metadata.as_slice())
+                .expect("append metadata");
+
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_entry_type(tar::EntryType::Symlink);
+            link_header.set_mode(0o777);
+            link_header.set_size(0);
+            builder
+                .append_link(
+                    &mut link_header,
+                    "schemas/proto/simple_schema/simple.proto",
+                    target,
+                )
+                .expect("append schema symlink");
+
+            builder
+                .into_inner()
+                .expect("finish tar")
+                .finish()
+                .expect("finish gzip");
+        }
+        fs::write(storage.base_dir().join(INIT_TAR_GZ_FILE), tar_gz).expect("write init tar.gz");
     }
 
     fn sample_pipeline_request(
@@ -684,5 +777,89 @@ mod tests {
 
         let data = storage.read_upload("proto/sub/sensor.proto").unwrap();
         assert_eq!(data, b"msg S");
+    }
+
+    #[test]
+    fn init_tar_gz_restores_file_backed_proto_schema() {
+        let target_dir = tempdir().unwrap();
+        let storage = StorageManager::new(target_dir.path()).unwrap();
+        let source_dir = tempdir().unwrap();
+        let schemas_root = source_dir.path().join("schemas");
+        let bundle = file_backed_proto_bundle("stream_1", &schemas_root);
+        write_init_tar_gz_with_schemas(&storage, &bundle, &schemas_root);
+
+        apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap();
+
+        let stored = storage
+            .get_schema("simple_schema")
+            .unwrap()
+            .expect("stored schema");
+        let props: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&stored.props_json).expect("stored props");
+        assert_eq!(
+            props.get("proto_path").and_then(serde_json::Value::as_str),
+            Some("simple.proto")
+        );
+        assert!(
+            storage
+                .schemas_dir()
+                .join("proto/simple_schema/simple.proto")
+                .is_file()
+        );
+        assert!(storage.get_init_apply_meta().unwrap().is_some());
+        storage_bridge::hydrate_schemas_from_storage(&storage).expect("hydrate schemas");
+        assert!(
+            crate::stream::named_schema_store()
+                .get("simple_schema")
+                .is_some()
+        );
+        assert!(storage.get_stream("stream_1").unwrap().is_some());
+    }
+
+    #[test]
+    fn init_tar_gz_schema_copy_failure_does_not_commit_metadata() {
+        let target_dir = tempdir().unwrap();
+        let storage = StorageManager::new(target_dir.path()).unwrap();
+        let source_dir = tempdir().unwrap();
+        let schemas_root = source_dir.path().join("schemas");
+        let bundle = file_backed_proto_bundle("stream_1", &schemas_root);
+        write_init_tar_gz_with_schemas(&storage, &bundle, &schemas_root);
+        fs::write(storage.schemas_dir(), b"blocks schema directory")
+            .expect("block schema destination");
+
+        let err =
+            apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
+
+        assert!(err.contains("copy schemas from init.tar.gz"), "{err}");
+        assert!(storage.list_schemas().unwrap().is_empty());
+        assert!(storage.list_streams().unwrap().is_empty());
+        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_tar_gz_rejects_symlinked_schema_before_parsing() {
+        let target_dir = tempdir().unwrap();
+        let storage = StorageManager::new(target_dir.path()).unwrap();
+        let source_dir = tempdir().unwrap();
+        let schemas_root = source_dir.path().join("schemas");
+        let bundle = file_backed_proto_bundle("stream_1", &schemas_root);
+
+        let external_dir = tempdir().unwrap();
+        let external_proto = external_dir.path().join("external.proto");
+        fs::write(
+            &external_proto,
+            b"syntax = \"proto3\"; message Simple { int64 value = 1; }",
+        )
+        .expect("write external proto");
+        write_init_tar_gz_with_symlinked_proto(&storage, &bundle, &external_proto);
+
+        let err =
+            apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
+
+        assert!(err.contains("is not a regular file or directory"), "{err}");
+        assert!(storage.list_schemas().unwrap().is_empty());
+        assert!(storage.list_streams().unwrap().is_empty());
+        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
     }
 }

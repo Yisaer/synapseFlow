@@ -43,7 +43,7 @@ The schema registry decouples schema definition from stream creation:
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  NamedSchemaStore (in-memory)                                │
-│  { "sensor" → Schema, "user_profile" → Schema, ... }        │
+│  { "sensor" → ResolvedSchema { logical, artifact }, ... }   │
 └──────────────────┬──────────────────────────────────────────┘
                    │
                    │ O(1) Arc::clone
@@ -63,6 +63,7 @@ which parser to use. The following types are built-in:
 |----------|----------------------------------------------------|
 | `json`   | Inline column definitions (existing, unchanged).   |
 | `proto`  | Derive schema from a `.proto` file and a message type name. |
+| `gbf`    | Compile a complete GBF packet layout and private CAN/SOME/IP format. |
 
 Custom types can be added via the `SchemaRegistry::register_schema()` API
 (or through a distribution-specific extension point).
@@ -76,9 +77,12 @@ and maps its fields to veloflux column types.
 
 | Prop             | Required | Description                                                      |
 |------------------|----------|------------------------------------------------------------------|
-| `proto_path`     | yes      | Path to the `.proto` file (relative or absolute).                |
+| `proto_path`     | yes      | ZIP package path used when installing the named schema.          |
 | `message_type`   | yes      | Fully qualified message name, e.g. `"Sensor"` or `"com.example.Sensor"`. |
-| `include_paths`  | no       | Additional proto include directories (analogous to `protoc -I`). The target file's parent directory is always included. |
+
+The ZIP root contains exactly one `.proto` entry. Imports that are not built in
+must be stored below its same-stem companion directory. `include_paths` is not
+accepted by named-schema installation.
 
 ### Type Mapping
 
@@ -130,7 +134,7 @@ the veloflux type system has no direct analogues for them.
 
 ### Example
 
-Given `schemas/sensor.proto`:
+Given a `schemas/sensor-schema.zip` package containing `sensor.proto`:
 
 ```protobuf
 syntax = "proto3";
@@ -153,7 +157,7 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
     "name": "sensor_schema",
     "type": "proto",
     "props": {
-      "proto_path": "schemas/sensor.proto",
+      "proto_path": "schemas/sensor-schema.zip",
       "message_type": "com.example.Sensor"
     }
   }'
@@ -244,14 +248,17 @@ storage          delete       │
               streams: [...])
 ```
 
-- **Persistence:** Schemas are persisted in the metadata store (redb),
-  alongside streams, pipelines, and other resources.
+- **Persistence:** Schema metadata is persisted in redb. File-backed entry and
+  companion files are installed under `<data_dir>/schemas/<type>/<name>/`.
+- **Installation:** File-backed schemas are accepted only as ZIP packages whose
+  root contains one entry file and, optionally, its same-stem companion
+  directory. The installer never scans beside the ZIP or falls back to uploads.
 - **Startup restore:** On process restart, all stored schemas are
   re-parsed and re-inserted into the in-memory `NamedSchemaStore`.
   This happens before streams are restored, so stream references resolve
   correctly.
-- **Export/Import:** Schemas are included in the export bundle
-  (`/storage/export`) and validated during import (`/import`).
+- **Export/Import:** Schema metadata and installed sources are included in the
+  export bundle and restored together during import.
 
 ## Extensibility
 

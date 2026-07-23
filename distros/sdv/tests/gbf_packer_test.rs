@@ -9,12 +9,12 @@
 
 mod common;
 
-use common::{ApiClient, MQTT_PORT, TestEnvironment, get_server};
+use common::{ApiClient, MQTT_PORT, TestEnvironment, get_server, write_schema_zip};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -28,11 +28,34 @@ fn json_schema_path() -> String {
 }
 
 fn gbf_schema_path() -> String {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/tests/spi_packet.json")
-        .to_str()
-        .unwrap()
-        .to_string()
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let source_layout =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/spi_packet.json");
+        let mut document: Value =
+            serde_json::from_slice(&std::fs::read(source_layout).expect("read GBF packet layout"))
+                .expect("parse GBF packet layout");
+        document["format"] = json!({
+            "type": "can",
+            "props": {
+                "dbc_path": "format/sim.json",
+                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
+            }
+        });
+        let entry = serde_json::to_vec_pretty(&document).expect("encode GBF schema");
+        let dbc = std::fs::read(json_schema_path()).expect("read private DBC source");
+        let archive =
+            std::env::temp_dir().join(format!("veloflux-gbf-packer-{}.zip", std::process::id()));
+        write_schema_zip(
+            &archive,
+            &[
+                ("spi_packet.json", &entry),
+                ("spi_packet/format/sim.json", &dbc),
+            ],
+        );
+        archive.to_string_lossy().into_owned()
+    })
+    .clone()
 }
 
 /// Build a GBF packet with given timestamp and frames.
@@ -68,6 +91,7 @@ fn test_gbf_packer_integration() {
 
     // Use unique names to avoid conflicts with other tests
     let stream_name = format!("{}_stream", test_name);
+    let schema_name = format!("{}_schema", test_name);
     let pipeline_id = format!("{}_pipeline", test_name);
     let input_topic = format!("/{}/input", test_name);
     let output_topic = format!("/{}/output", test_name);
@@ -77,33 +101,34 @@ fn test_gbf_packer_integration() {
     thread::sleep(Duration::from_millis(100));
     let _ = client.delete(&format!("/streams/{}", stream_name));
     thread::sleep(Duration::from_millis(100));
+    let _ = client.delete(&format!("/schemas/{}", schema_name));
+
+    let schema_payload = json!({
+        "name": schema_name,
+        "type": "gbf",
+        "props": { "schema_path": gbf_schema_path() }
+    });
+    let resp = client.post_json("/schemas", &schema_payload);
+    assert!(
+        resp.status().is_success(),
+        "create schema failed: {} - {:?}",
+        resp.status(),
+        resp.text()
+    );
 
     // 1. Create stream with gbf decoder and dbc schema (same as gbf_test)
     //    PLUS sampler with packer strategy
     let stream_payload = json!({
         "name": stream_name,
         "type": "mqtt",
-        "schema": {
-            "type": "dbc",
-            "props": {
-                "schema_path": json_schema_path()
-            }
-        },
+        "schema": { "ref": schema_name },
         "props": {
             "broker_url": TestEnvironment::mqtt_addr(),
             "topic": input_topic,
             "qos": 0
         },
         "shared": false,
-        "decoder": {
-            "type": "gbf",
-            "props": {
-                "schema_path": gbf_schema_path(),
-                "format_type": "can",
-                "format_schema_path": json_schema_path(),
-                "can_id_mapping": { "mode": "bus_shift", "bits": 12 }
-            }
-        },
+        "decoder": { "type": "gbf", "props": {} },
         "sampler": {
             "interval": "500ms",
             "strategy": {
@@ -111,9 +136,7 @@ fn test_gbf_packer_integration() {
                 "props": {
                     "merger": {
                         "type": "gbf",
-                        "props": {
-                           "schema": gbf_schema_path()
-                        }
+                        "props": {}
                     }
                 }
             }
@@ -344,4 +367,5 @@ fn test_gbf_packer_integration() {
     // Cleanup
     let _ = client.delete(&format!("/pipelines/{}", pipeline_id));
     let _ = client.delete(&format!("/streams/{}", stream_name));
+    let _ = client.delete(&format!("/schemas/{}", schema_name));
 }

@@ -76,6 +76,7 @@ axum = { version = "0.7", features = ["macros", "json"] }
 tempfile = "3"
 flate2 = "1"
 tar = "0.4"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 proptest = "1"
 rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

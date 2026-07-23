@@ -923,6 +923,7 @@ fn create_physical_data_source_with_builder(
                 Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
                     sampler_config.interval,
                     sampler_config.strategy.clone(),
+                    logical_ds.decoder().schema_artifact.clone(),
                     vec![Arc::clone(&datasource_plan)],
                     sampler_index,
                 )))
@@ -2037,6 +2038,7 @@ mod tests {
         let sampler = PhysicalSampler::new(
             interval,
             crate::processor::SamplingStrategy::Latest,
+            None,
             vec![],
             0,
         );
@@ -2060,10 +2062,29 @@ mod tests {
         let sampler = PhysicalSampler::new(
             interval,
             crate::processor::SamplingStrategy::Latest,
+            None,
             vec![child.clone()],
             1,
         );
         assert_eq!(sampler.base.children().len(), 1);
+    }
+
+    #[test]
+    fn test_physical_sampler_carries_schema_artifact() {
+        let artifact: Arc<dyn std::any::Any + Send + Sync> = Arc::new(42_u32);
+        let sampler = PhysicalSampler::new(
+            Duration::from_millis(100),
+            crate::processor::SamplingStrategy::Latest,
+            Some(Arc::clone(&artifact)),
+            vec![],
+            0,
+        );
+
+        let restored = sampler
+            .schema_artifact()
+            .and_then(|value| value.downcast::<u32>().ok())
+            .expect("sampler schema artifact");
+        assert_eq!(*restored, 42);
     }
 }
 

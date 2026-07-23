@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use can_dbc::{ByteOrder, MultiplexIndicator};
-use flow::{ColumnSchema, ConcreteDatatype, Int64Type, ProtoDescriptorBundle, Schema};
-use manager::register_schema;
+use flow::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+use manager::{ParsedSchema, register_schema};
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -24,16 +24,74 @@ pub fn register_dbc_schema() {
 pub fn parse_dbc_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
-) -> Result<(Schema, Option<Arc<ProtoDescriptorBundle>>), String> {
+) -> Result<ParsedSchema, String> {
     let schema_path = props
         .get("schema_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "schema_path must be provided for dbc schema".to_string())?;
 
-    let pattern = props.get("signal_name_pattern").and_then(|v| v.as_str());
+    let pattern = props
+        .get("signal_name_pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("{sig}");
 
+    let (schema, compiled) = compile_dbc_schema(stream_name, schema_path, pattern)?;
+    Ok((schema, None, Some(compiled)))
+}
+
+/// Compile a DBC source for either a standalone DBC schema or a private GBF format.
+pub fn compile_dbc_schema(
+    stream_name: &str,
+    schema_path: &str,
+    signal_name_pattern: &str,
+) -> Result<(Schema, Arc<CompiledDbcSchema>), String> {
     let dbc_json = load_can_schema(schema_path)?;
-    Ok((schema_from_dbc(stream_name, &dbc_json, pattern), None))
+    let compiled = Arc::new(CompiledDbcSchema::new(dbc_json, signal_name_pattern));
+    let schema = compiled.schema(stream_name);
+    Ok((schema, compiled))
+}
+
+#[derive(Clone)]
+pub struct CompiledDbcSchema {
+    dbc: Arc<DbcJson>,
+    signal_name_pattern: Arc<str>,
+}
+
+impl CompiledDbcSchema {
+    pub fn new(dbc: DbcJson, signal_name_pattern: &str) -> Self {
+        Self {
+            dbc: Arc::new(dbc),
+            signal_name_pattern: Arc::from(signal_name_pattern),
+        }
+    }
+
+    pub fn dbc(&self) -> Arc<DbcJson> {
+        Arc::clone(&self.dbc)
+    }
+
+    pub fn pattern(&self) -> &str {
+        &self.signal_name_pattern
+    }
+
+    pub fn column_name(
+        &self,
+        _bus_id: u32,
+        bus_name: &str,
+        message: &MessageJson,
+        signal_name: &str,
+    ) -> String {
+        format_signal_name(
+            &self.signal_name_pattern,
+            bus_name,
+            &message.frame_id,
+            &message._name,
+            signal_name,
+        )
+    }
+
+    pub fn schema(&self, stream_name: &str) -> Schema {
+        schema_from_dbc(stream_name, &self.dbc, Some(&self.signal_name_pattern))
+    }
 }
 
 /// Root structure containing all CAN buses and their messages/signals.
@@ -433,7 +491,7 @@ mod tests {
 
         let result = parse_dbc_schema("test_stream", &props);
         assert!(result.is_ok());
-        let (schema, _) = result.unwrap();
+        let (schema, _, _) = result.unwrap();
         assert_eq!(schema.column_schemas().len(), 7);
     }
 

@@ -107,15 +107,14 @@ When loading a directory, all `.dbc` files **must** follow the pattern:
 
 ### Output Column Naming
 
-Signals are named using the pattern:
+Set `signal_name_pattern` in DBC schema props. The default is `{sig}`. Supported tokens are:
 
-```
-{BusName}__{FrameIdHex}__{SignalName}
-```
-
-Examples:
-- `Chassis__0x100__FrontLeft`
-- `Powertrain__0x200__EngineRPM`
+| Token | Value |
+|-------|-------|
+| `{bus}` | Bus name |
+| `{id}` | Frame ID |
+| `{msg}` | Message name |
+| `{sig}` | Signal name |
 
 ### Data Types
 
@@ -159,23 +158,23 @@ When `MuxSelector = 0`, only `Speed` is decoded. When `MuxSelector = 1`, only `T
 
 ---
 
-## Decoder Configuration
+## GBF Private Format Configuration
 
-Use DBC schema with the GBF decoder:
+When DBC is used inside GBF, configure it in the complete GBF entry:
 
 ```json
 {
-  "type": "gbf",
-  "props": {
-    "schema_path": "/path/to/packet.json",
-    "format_type": "can",
-    "format_schema_path": "/path/to/signals.dbc",
-    "can_id_mapping": "raw"
+  "format": {
+    "type": "can",
+    "props": {
+      "dbc_path": "format/vehicle.dbc",
+      "can_id_mapping": "raw"
+    }
   }
 }
 ```
 
-The `format_schema_path` accepts `.dbc`, `.json`, or a directory path.
+`dbc_path` is relative to the GBF entry's companion directory. Schema resolution compiles the packet layout and DBC into one artifact, so decoder and merger props do not repeat these values.
 
 ### CAN ID Mapping
 

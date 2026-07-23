@@ -251,11 +251,14 @@ The `sampler` property enables stream-level downsampling. All pipelines consumin
 Derive schema from a `.proto` file. See `docs/api/schema_registry.md` for the full
 proto type mapping and `user_docs/api/schema.md` for the REST API.
 
-`schema.props` must be an object containing:
+File-backed protobuf schemas cannot be defined inline on a stream. Install the
+schema ZIP with `POST /schemas`, then use `schema.ref`. The named schema props are:
 
-- `proto_path: string` (path to the `.proto` file)
+- `proto_path: string` (path to the schema ZIP package)
 - `message_type: string` (fully qualified message name)
-- Optional `include_paths: string[]` (additional proto include directories)
+
+The ZIP root contains one `.proto` entry and may contain its same-stem companion
+directory for imported files.
 
 ### `Column`
 
