@@ -183,12 +183,6 @@
 - These cases validate that both source-side and sink-side shared MQTT connector keys participate in
   the pipeline operation lock, and busy keys fail with `409 Conflict` before run-state mutation.
 
-- Shared MQTT build-context validation is covered by:
-  - `build_pipeline_context_returns_bad_request_when_shared_mqtt_config_is_missing`
-  - `build_pipeline_context_returns_bad_request_when_shared_mqtt_sink_config_is_missing`
-- These cases validate that both source-side and sink-side shared MQTT connector keys are collected
-  during build-context resolution, and missing shared-client metadata fails with `400 Bad Request`.
-
 ### Flow-instance isolation
 
 - Process-local resource isolation is covered by:

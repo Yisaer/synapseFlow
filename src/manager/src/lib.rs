@@ -73,10 +73,6 @@ fn build_app(state: AppState) -> Router {
             get(pipeline::collect_pipeline_stats_handler),
         )
         .route(
-            "/pipelines/:id/buildContext",
-            get(pipeline::build_pipeline_context_handler),
-        )
-        .route(
             "/streams",
             post(stream::create_stream_handler).get(stream::list_streams),
         )

@@ -97,19 +97,6 @@ impl ManagerClient {
             .await
     }
 
-    pub async fn build_pipeline_context(&self, id: &str) -> Result<serde_json::Value, SdkError> {
-        let path = format!("/pipelines/{}/buildContext", urlencoding::encode(id));
-        self.t
-            .expect_json_success::<(), serde_json::Value>(
-                Method::GET,
-                &path,
-                &[],
-                Option::<&()>::None,
-                &[StatusCode::OK],
-            )
-            .await
-    }
-
     pub async fn create_pipeline(
         &self,
         req: &PipelineCreateRequest,

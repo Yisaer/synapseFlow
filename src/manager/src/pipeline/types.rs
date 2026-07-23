@@ -3,7 +3,6 @@ use flow::codec::{
     CompressionCodec, EncryptionAlgorithm, InlineEncryptionKey, SecretEncoding,
     SinkEncryptionConfig,
 };
-use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::{
     SinkRetryConfig, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
 };
@@ -128,21 +127,6 @@ pub struct ScheduleStatus {
     /// Only present when in_window is true and the run was started by the scheduler.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_stop_at: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct BuildPipelineContextResponse {
-    pub pipeline: CreatePipelineRequest,
-    pub streams: BTreeMap<String, crate::stream::CreateStreamRequest>,
-    pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
-    pub memory_topics: Vec<MemoryTopicSpec>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct MemoryTopicSpec {
-    pub topic: String,
-    pub kind: storage::StoredMemoryTopicKind,
-    pub capacity: usize,
 }
 
 #[derive(Deserialize, Serialize, Clone)]

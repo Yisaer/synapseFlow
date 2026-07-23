@@ -2,7 +2,6 @@ mod concurrent_pipeline_lifecycle;
 mod flow_instance_binding;
 mod lifecycle_while_dataflow;
 mod multi_in_process_flow_instances;
-mod pipeline_build_context;
 mod resource_cleanup;
 mod shared_stream_lifecycle;
 mod shared_stream_stats;

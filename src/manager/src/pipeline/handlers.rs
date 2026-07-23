@@ -11,18 +11,15 @@ use std::time::Duration;
 use storage::{StorageError, StoredPipelineDesiredState, StoredPipelineRunState};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
-use super::context::{
-    build_pipeline_context_payload, shared_mqtt_connector_keys_from_pipeline_request,
-};
+use super::context::shared_mqtt_connector_keys_from_pipeline_request;
 use super::spec::{
     build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
     validate_create_request,
 };
 use super::state::AppState;
 use super::types::{
-    BuildPipelineContextResponse, CollectStatsQuery, CreatePipelineQuery, CreatePipelineRequest,
-    CreatePipelineResponse, GetPipelineResponse, ListPipelineItem, StopPipelineQuery,
-    UpsertPipelineRequest,
+    CollectStatsQuery, CreatePipelineQuery, CreatePipelineRequest, CreatePipelineResponse,
+    GetPipelineResponse, ListPipelineItem, StopPipelineQuery, UpsertPipelineRequest,
 };
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 
@@ -676,40 +673,6 @@ pub async fn get_pipeline_handler(
     .into_response()
 }
 
-pub async fn build_pipeline_context_handler(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Some(resp) = pipeline_path_id_error(&id) {
-        return resp;
-    }
-    let (_flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
-    };
-
-    let (streams, shared_mqtt_clients, memory_topics) = match build_pipeline_context_payload(
-        &state.instances,
-        state.storage.as_ref(),
-        &id,
-        &pipeline_req,
-    ) {
-        Ok(payload) => payload,
-        Err(resp) => return *resp,
-    };
-
-    (
-        StatusCode::OK,
-        Json(BuildPipelineContextResponse {
-            pipeline: pipeline_req,
-            streams,
-            shared_mqtt_clients,
-            memory_topics,
-        }),
-    )
-        .into_response()
-}
-
 pub async fn explain_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1096,7 +1059,7 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pipeline_context_handler, create_pipeline_handler, start_pipeline_handler};
+    use super::{create_pipeline_handler, start_pipeline_handler};
     use crate::pipeline::{AppState, CreatePipelineRequest, types};
     use crate::storage_bridge::{
         stored_mqtt_from_config, stored_pipeline_from_request, stored_stream_from_request,
@@ -1327,112 +1290,6 @@ mod tests {
                 .expect("read pipeline run state")
                 .is_none(),
             "busy shared mqtt sink key must reject start before mutating desired state"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_pipeline_context_returns_bad_request_when_shared_mqtt_config_is_missing() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
-        let state = AppState::new(
-            crate::new_default_flow_instance(),
-            storage,
-            vec![default_flow_instance_spec()],
-            0,
-        )
-        .expect("build app state");
-
-        let connector_key = "missing_shared".to_string();
-        let stream_req = mqtt_stream_request("src", &connector_key);
-        state
-            .storage
-            .create_stream(
-                stored_stream_from_request(&stream_req).expect("serialize stored stream request"),
-            )
-            .expect("persist stream");
-
-        let pipeline_req = CreatePipelineRequest {
-            id: "pipe_missing_shared".to_string(),
-            flow_instance_id: Some("default".to_string()),
-            sql: "select * from src".to_string(),
-            sources: Vec::new(),
-            sinks: Vec::new(),
-            options: Default::default(),
-        };
-        state
-            .storage
-            .create_pipeline(
-                stored_pipeline_from_request(&pipeline_req)
-                    .expect("serialize stored pipeline request"),
-            )
-            .expect("persist pipeline");
-
-        let response =
-            build_pipeline_context_handler(State(state), Path("pipe_missing_shared".to_string()))
-                .await
-                .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("read build context body");
-        assert_eq!(
-            String::from_utf8(body.to_vec()).expect("utf8 build context body"),
-            "shared mqtt client config missing_shared missing from storage"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_pipeline_context_returns_bad_request_when_shared_mqtt_sink_config_is_missing() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
-        let state = AppState::new(
-            crate::new_default_flow_instance(),
-            storage,
-            vec![default_flow_instance_spec()],
-            0,
-        )
-        .expect("build app state");
-
-        let stream_req = mqtt_stream_request_without_connector_key("src");
-        state
-            .storage
-            .create_stream(
-                stored_stream_from_request(&stream_req).expect("serialize stored stream request"),
-            )
-            .expect("persist stream");
-
-        let connector_key = "missing_shared_sink".to_string();
-        let pipeline_req = CreatePipelineRequest {
-            id: "pipe_missing_shared_sink".to_string(),
-            flow_instance_id: Some("default".to_string()),
-            sql: "select * from src".to_string(),
-            sources: Vec::new(),
-            sinks: vec![mqtt_sink_request("sink", &connector_key)],
-            options: Default::default(),
-        };
-        state
-            .storage
-            .create_pipeline(
-                stored_pipeline_from_request(&pipeline_req)
-                    .expect("serialize stored pipeline request"),
-            )
-            .expect("persist pipeline");
-
-        let response = build_pipeline_context_handler(
-            State(state),
-            Path("pipe_missing_shared_sink".to_string()),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let body = to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("read build context body");
-        assert_eq!(
-            String::from_utf8(body.to_vec()).expect("utf8 build context body"),
-            "shared mqtt client config missing_shared_sink missing from storage"
         );
     }
 
