@@ -94,7 +94,7 @@ When loading a directory, all `.dbc` files **must** follow the pattern:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `name` | String | Signal name (used in column: `{bus}__{frameId}__{name}`) |
+| `name` | String | Signal name used by the configured output name pattern |
 | `start` | u32 | Start bit position |
 | `length` | u32 | Bit length |
 | `scale` | f64 | Factor: `physical = raw * scale + offset` |
@@ -107,14 +107,21 @@ When loading a directory, all `.dbc` files **must** follow the pattern:
 
 ### Output Column Naming
 
-Set `signal_name_pattern` in DBC schema props. The default is `{sig}`. Supported tokens are:
+Set `signal_name_pattern` in DBC schema props. The default is `{sig_name}`. Supported tokens are:
 
 | Token | Value |
 |-------|-------|
-| `{bus}` | Bus name |
-| `{id}` | Frame ID |
-| `{msg}` | Message name |
-| `{sig}` | Signal name |
+| `{bus_name}` | Bus name |
+| `{bus_id}` | Bus ID in decimal |
+| `{bus_id_hex_lower}` / `{bus_id_hex_upper}` | Bus ID in hexadecimal |
+| `{msg_id}` | Normalized message ID in decimal |
+| `{msg_id_hex_lower}` / `{msg_id_hex_upper}` | Normalized message ID in hexadecimal |
+| `{msg_name}` | Message name |
+| `{sig_name}` | Signal name |
+
+Hex tokens do not add a prefix. Unknown tokens and duplicate generated column
+names are rejected while the schema is compiled. Legacy aliases such as `{id}`
+and `{sig}` are not accepted.
 
 ### Data Types
 

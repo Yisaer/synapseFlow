@@ -12,6 +12,9 @@ use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::decoder::can::classify_signal;
+use crate::schema::name_pattern::{
+    CompiledNamePattern, DbcNameContext, DbcNamePatternMode, NetworkNameContext,
+};
 
 /// Register a schema parser that converts DBC JSON into a Schema.
 pub fn register_dbc_schema() {
@@ -33,7 +36,7 @@ pub fn parse_dbc_schema(
     let pattern = props
         .get("signal_name_pattern")
         .and_then(|v| v.as_str())
-        .unwrap_or("{sig}");
+        .unwrap_or("{sig_name}");
 
     let (schema, compiled) = compile_dbc_schema(stream_name, schema_path, pattern)?;
     Ok((schema, None, Some(compiled)))
@@ -46,7 +49,7 @@ pub fn compile_dbc_schema(
     signal_name_pattern: &str,
 ) -> Result<(Schema, Arc<CompiledDbcSchema>), String> {
     let dbc_json = load_can_schema(schema_path)?;
-    let compiled = Arc::new(CompiledDbcSchema::new(dbc_json, signal_name_pattern));
+    let compiled = Arc::new(CompiledDbcSchema::new(dbc_json, signal_name_pattern)?);
     let schema = compiled.schema(stream_name);
     Ok((schema, compiled))
 }
@@ -55,14 +58,46 @@ pub fn compile_dbc_schema(
 pub struct CompiledDbcSchema {
     dbc: Arc<DbcJson>,
     signal_name_pattern: Arc<str>,
+    compiled_name_pattern: CompiledNamePattern,
+    naming_mode: DbcNamePatternMode,
 }
 
 impl CompiledDbcSchema {
-    pub fn new(dbc: DbcJson, signal_name_pattern: &str) -> Self {
-        Self {
+    pub fn new(dbc: DbcJson, signal_name_pattern: &str) -> Result<Self, String> {
+        Self::build(dbc, signal_name_pattern, DbcNamePatternMode::Standard)
+    }
+
+    pub fn new_busmirror(dbc: DbcJson, signal_name_pattern: &str) -> Result<Self, String> {
+        Self::build(dbc, signal_name_pattern, DbcNamePatternMode::BusMirror)
+    }
+
+    fn build(
+        dbc: DbcJson,
+        signal_name_pattern: &str,
+        naming_mode: DbcNamePatternMode,
+    ) -> Result<Self, String> {
+        let compiled_name_pattern = CompiledNamePattern::compile(signal_name_pattern, naming_mode)?;
+        validate_dbc_signal_ranges(&dbc)?;
+        if naming_mode == DbcNamePatternMode::BusMirror {
+            for bus in &dbc.buses {
+                for message in &bus.messages {
+                    if message.id > 0x1fff_ffff {
+                        return Err(format!(
+                            "BusMirror DBC message `{}` on bus {} has ID 0x{:X} outside the 29-bit CAN identity range",
+                            message.name, bus.id, message.id
+                        ));
+                    }
+                }
+            }
+        }
+        let schema = Self {
             dbc: Arc::new(dbc),
             signal_name_pattern: Arc::from(signal_name_pattern),
-        }
+            compiled_name_pattern,
+            naming_mode,
+        };
+        schema.validate_column_names()?;
+        Ok(schema)
     }
 
     pub fn dbc(&self) -> Arc<DbcJson> {
@@ -75,22 +110,154 @@ impl CompiledDbcSchema {
 
     pub fn column_name(
         &self,
-        _bus_id: u32,
+        bus_id: u32,
         bus_name: &str,
         message: &MessageJson,
         signal_name: &str,
     ) -> String {
-        format_signal_name(
-            &self.signal_name_pattern,
+        let network = match self.naming_mode {
+            DbcNamePatternMode::Standard => None,
+            DbcNamePatternMode::BusMirror => {
+                let network_type_id = (bus_id >> 8) as u8;
+                Some(NetworkNameContext {
+                    network_type: network_type_name(network_type_id),
+                    network_type_id,
+                    network_id: bus_id as u8,
+                })
+            }
+        };
+        self.compiled_name_pattern.render(&DbcNameContext {
             bus_name,
-            &message.frame_id,
-            &message._name,
+            bus_id,
+            message_id: message.id,
+            message_name: &message.name,
             signal_name,
-        )
+            network,
+        })
     }
 
     pub fn schema(&self, stream_name: &str) -> Schema {
-        schema_from_dbc(stream_name, &self.dbc, Some(&self.signal_name_pattern))
+        let mut columns = Vec::new();
+        columns.push(ColumnSchema::new(
+            stream_name.to_string(),
+            "ts".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ));
+        for bus in &self.dbc.buses {
+            let bus_name = bus.name.clone().unwrap_or_else(|| format!("Bus{}", bus.id));
+            for message in &bus.messages {
+                for signal in &message.signals {
+                    columns.push(ColumnSchema::new(
+                        stream_name.to_string(),
+                        self.column_name(bus.id, &bus_name, message, &signal.name),
+                        classify_signal(
+                            signal.length,
+                            signal.is_signed,
+                            signal.scale.unwrap_or(1.0),
+                            signal.offset.unwrap_or(0.0),
+                        )
+                        .datatype(),
+                    ));
+                }
+            }
+        }
+        Schema::new(columns)
+    }
+
+    fn validate_column_names(&self) -> Result<(), String> {
+        let mut names = HashSet::new();
+        names.insert("ts".to_string());
+        for bus in &self.dbc.buses {
+            let bus_name = bus.name.clone().unwrap_or_else(|| format!("Bus{}", bus.id));
+            for message in &bus.messages {
+                for signal in &message.signals {
+                    let name = self.column_name(bus.id, &bus_name, message, &signal.name);
+                    if name.is_empty() {
+                        return Err(format!(
+                            "signal name pattern produced an empty column for bus `{bus_name}`, message `{}`, signal `{}`",
+                            message.name, signal.name
+                        ));
+                    }
+                    if !names.insert(name.clone()) {
+                        return Err(format!(
+                            "signal name pattern produced duplicate column `{name}` for bus `{bus_name}`, message `{}`, signal `{}`",
+                            message.name, signal.name
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn network_type_name(network_type_id: u8) -> &'static str {
+    match network_type_id {
+        1 => "can",
+        2 => "lin",
+        _ => "unknown",
+    }
+}
+
+fn validate_dbc_signal_ranges(dbc: &DbcJson) -> Result<(), String> {
+    for bus in &dbc.buses {
+        for message in &bus.messages {
+            let frame_bits = usize::try_from(message._length)
+                .ok()
+                .and_then(|length| length.checked_mul(8))
+                .ok_or_else(|| {
+                    format!(
+                        "DBC message `{}` on bus {} has an invalid frame length {}",
+                        message.name, bus.id, message._length
+                    )
+                })?;
+            for signal in &message.signals {
+                if signal.length == 0 || signal.length > 64 {
+                    return Err(format!(
+                        "DBC signal `{}` in message `{}` on bus {} has invalid bit length {}",
+                        signal.name, message.name, bus.id, signal.length
+                    ));
+                }
+                let last_bit = dbc_signal_last_bit(signal).ok_or_else(|| {
+                    format!(
+                        "DBC signal `{}` in message `{}` on bus {} has an overflowing bit range",
+                        signal.name, message.name, bus.id
+                    )
+                })?;
+                if last_bit >= frame_bits {
+                    return Err(format!(
+                        "DBC signal `{}` in message `{}` on bus {} exceeds the {}-byte frame: start={}, length={}",
+                        signal.name,
+                        message.name,
+                        bus.id,
+                        message._length,
+                        signal.start,
+                        signal.length
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn dbc_signal_last_bit(signal: &SignalJson) -> Option<usize> {
+    let start = usize::try_from(signal.start).ok()?;
+    let length = usize::try_from(signal.length).ok()?;
+    if signal.is_big_endian {
+        let start_byte = start / 8;
+        let bits_in_start_byte = start % 8 + 1;
+        if length <= bits_in_start_byte {
+            Some(start)
+        } else {
+            let remaining = length - bits_in_start_byte;
+            start_byte
+                .checked_add(remaining.div_ceil(8))?
+                .checked_mul(8)?
+                .checked_add(7)
+        }
+    } else {
+        start.checked_add(length - 1)
     }
 }
 
@@ -116,9 +283,8 @@ pub struct BusJson {
 /// A CAN message containing signals.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MessageJson {
-    /// Message name (for documentation, not used in signal naming).
-    #[serde(rename = "name")]
-    pub _name: String,
+    /// Message name, used in column naming via `{msg_name}` token and in error messages.
+    pub name: String,
     /// CAN message ID (decimal).
     pub id: u32,
     /// Frame ID as hex string (e.g., "0x100"), used in signal column naming.
@@ -195,6 +361,15 @@ fn load_single_dbc(path: &Path) -> Result<DbcJson, String> {
 
     let bus = convert_dbc_to_bus(&dbc, 0, "Bus0".to_string());
     Ok(DbcJson { buses: vec![bus] })
+}
+
+/// Load one DBC file and assign the bus identity supplied by its owning schema.
+pub(crate) fn load_dbc_bus(path: &Path, id: u32, name: String) -> Result<BusJson, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("failed to read dbc at {}: {}", path.display(), e))?;
+    let dbc = can_dbc::Dbc::try_from(content.as_str())
+        .map_err(|e| format!("failed to parse dbc {}: {:?}", path.display(), e))?;
+    Ok(convert_dbc_to_bus(&dbc, id, name))
 }
 
 /// Load a directory of DBC files with strict naming: `{id}_{name}.dbc`.
@@ -339,7 +514,7 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                 .collect();
 
             MessageJson {
-                _name: msg.name().to_string(),
+                name: msg.name().to_string(),
                 id: msg_id,
                 frame_id: format!("0x{:X}", msg_id),
                 _length: *msg.size() as u32,
@@ -361,59 +536,13 @@ pub fn load_dbc_json(path: &str) -> Result<DbcJson, String> {
     serde_json::from_str(&content).map_err(|e| format!("failed to parse dbc json: {e}"))
 }
 
-pub fn schema_from_dbc(stream_name: &str, dbc: &DbcJson, pattern: Option<&str>) -> Schema {
-    // Default to simple signal name if no pattern provided
-    let pattern = pattern.unwrap_or("{sig}");
-    let mut columns = Vec::new();
-    // Include timestamp column for inbound events.
-    columns.push(ColumnSchema::new(
-        stream_name.to_string(),
-        "ts".to_string(),
-        ConcreteDatatype::Int64(Int64Type),
-    ));
-
-    for bus in &dbc.buses {
-        let bus_name = bus
-            .name
-            .as_deref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("Bus{}", bus.id));
-
-        for msg in &bus.messages {
-            let frame_id = msg.frame_id.clone();
-            for signal in &msg.signals {
-                let col_name =
-                    format_signal_name(pattern, &bus_name, &frame_id, &msg._name, &signal.name);
-                let factor = signal.scale.unwrap_or(1.0);
-                let offset = signal.offset.unwrap_or(0.0);
-                let datatype =
-                    classify_signal(signal.length, signal.is_signed, factor, offset).datatype();
-                columns.push(ColumnSchema::new(
-                    stream_name.to_string(),
-                    col_name,
-                    datatype,
-                ));
-            }
-        }
-    }
-
-    Schema::new(columns)
-}
-
-/// Format a signal name based on a pattern.
-/// Supported tokens: {bus}, {id}, {msg}, {sig}
-pub fn format_signal_name(
-    pattern: &str,
-    bus_name: &str,
-    frame_id: &str,
-    msg_name: &str,
-    sig_name: &str,
-) -> String {
-    pattern
-        .replace("{bus}", bus_name)
-        .replace("{id}", frame_id)
-        .replace("{msg}", msg_name)
-        .replace("{sig}", sig_name)
+pub fn schema_from_dbc(
+    stream_name: &str,
+    dbc: &DbcJson,
+    pattern: Option<&str>,
+) -> Result<Schema, String> {
+    let compiled = CompiledDbcSchema::new(dbc.clone(), pattern.unwrap_or("{sig_name}"))?;
+    Ok(compiled.schema(stream_name))
 }
 
 #[cfg(test)]
@@ -426,7 +555,7 @@ mod tests {
     fn parse_sim_json_produces_expected_columns() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
-        let schema = schema_from_dbc("sim_stream", &dbc, None);
+        let schema = schema_from_dbc("sim_stream", &dbc, None).expect("compile DBC schema");
 
         // Expected: ts + 6 signals from two messages.
         assert_eq!(schema.column_schemas().len(), 7);
@@ -502,7 +631,7 @@ mod tests {
                 name: None, // No name, should fallback to "Bus0"
                 id: 0,
                 messages: vec![MessageJson {
-                    _name: "TestMsg".to_string(),
+                    name: "TestMsg".to_string(),
                     id: 1,
                     frame_id: "0x100".to_string(),
                     _length: 8,
@@ -524,7 +653,7 @@ mod tests {
             }],
         };
 
-        let schema = schema_from_dbc("test", &dbc, None);
+        let schema = schema_from_dbc("test", &dbc, None).expect("compile DBC schema");
         // ts + 1 signal
         assert_eq!(schema.column_schemas().len(), 2);
         // Check the signal column name uses Bus0 fallback
@@ -539,7 +668,7 @@ mod tests {
                 name: Some("TestBus".to_string()),
                 id: 1,
                 messages: vec![MessageJson {
-                    _name: "TestMsg".to_string(),
+                    name: "TestMsg".to_string(),
                     id: 1,
                     frame_id: "0x200".to_string(),
                     _length: 8,
@@ -561,7 +690,7 @@ mod tests {
             }],
         };
 
-        let schema = schema_from_dbc("test", &dbc, None);
+        let schema = schema_from_dbc("test", &dbc, None).expect("compile DBC schema");
         let col = schema
             .column_schema_by_name("ScaledSig")
             .expect("column should exist");
@@ -574,7 +703,7 @@ mod tests {
     #[test]
     fn schema_from_dbc_empty_buses() {
         let dbc = DbcJson { buses: vec![] };
-        let schema = schema_from_dbc("test", &dbc, None);
+        let schema = schema_from_dbc("test", &dbc, None).expect("compile DBC schema");
         // Only ts column
         assert_eq!(schema.column_schemas().len(), 1);
     }
@@ -783,12 +912,13 @@ BO_ 100 TestMsg: 8 Vector__XXX
         // Load sim.json
         let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let json_result = load_dbc_json(json_path.to_str().unwrap()).unwrap();
-        let json_schema = schema_from_dbc("test", &json_result, None);
+        let json_schema =
+            schema_from_dbc("test", &json_result, None).expect("compile JSON DBC schema");
 
         // Load dbc directory with 1_PropulsionCAN.dbc
         let dbc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/dbc");
         let dbc_result = load_can_schema(dbc_path.to_str().unwrap()).unwrap();
-        let dbc_schema = schema_from_dbc("test", &dbc_result, None);
+        let dbc_schema = schema_from_dbc("test", &dbc_result, None).expect("compile DBC schema");
 
         // Collect column names
         let json_cols: Vec<&str> = json_schema

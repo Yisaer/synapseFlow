@@ -1,0 +1,23 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 512 WheelSpeed: 8 Vector__XXX
+ SG_ FL : 0|16@1+ (0.01,0) [0|300] "km/h" Vector__XXX,Vector__XXX
+ SG_ FR : 16|16@1+ (0.01,0) [0|300] "km/h" Vector__XXX,Vector__XXX
+ SG_ RL : 32|16@1+ (0.01,0) [0|300] "km/h" Vector__XXX,Vector__XXX
+ SG_ RR : 48|16@1+ (0.01,0) [0|300] "km/h" Vector__XXX,Vector__XXX
+
+BO_ 513 BrakeData: 8 Vector__XXX
+ SG_ BrakePressure : 0|16@1+ (0.01,0) [0|200] "bar" Vector__XXX,Vector__XXX
+ SG_ ABSState : 16|8@1+ (1,0) [0|3] "" Vector__XXX,Vector__XXX
+ SG_ BrakeTemp : 24|16@1+ (0.1,-40) [-40|600] "degC" Vector__XXX,Vector__XXX
+
+BO_ 514 SteeringData: 8 Vector__XXX
+ SG_ SteeringAngle : 0|16@1+ (0.1,-780) [-780|780] "deg" Vector__XXX,Vector__XXX
+ SG_ SteeringTorque : 16|16@1+ (0.01,-10) [-10|10] "Nm" Vector__XXX,Vector__XXX
+ SG_ AirbagState : 32|8@1+ (1,0) [0|2] "" Vector__XXX,Vector__XXX

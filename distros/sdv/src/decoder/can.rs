@@ -8,11 +8,11 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Identity hasher for the `u32` CAN-id message map. CAN ids are already small,
+/// Identity hasher for the normalized frame-identity map. Frame identities are
 /// well-distributed integers, so the default SipHash is pure overhead: it shows
 /// as ~6% (`hash_one`) of the box.home `allcases` decode profile, one lookup per
-/// frame. This mirrors eKuiper's `mapaccess2_fast32`. Keyed exclusively by u32,
-/// so only `write_u32` is exercised; `write` is a defensive fallback.
+/// frame. Keyed exclusively by a transparent `u64` newtype, so `write_u64` is
+/// the normal path; `write` is a defensive fallback.
 #[derive(Default)]
 struct CanIdHasher(u64);
 
@@ -29,6 +29,10 @@ impl Hasher for CanIdHasher {
     fn write_u32(&mut self, i: u32) {
         self.0 = i as u64;
     }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i;
+    }
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 = (self.0 << 8) | b as u64;
@@ -36,24 +40,32 @@ impl Hasher for CanIdHasher {
     }
 }
 
-type CanIdMap<V> = HashMap<u32, V, BuildHasherDefault<CanIdHasher>>;
+type FrameIdentityMap<V> = HashMap<FrameIdentity, V, BuildHasherDefault<CanIdHasher>>;
 
 use datatypes::{Schema, Value};
 use flow::{
     codec::CodecError,
-    model::{Message, Tuple},
+    model::{Message, RecordBatch, Tuple},
     planner::decode_projection::DecodeProjection,
 };
 use tracing::trace;
 
-use super::payload::{GbfPayloadFrame, PayloadDecoder};
-use crate::schema::dbc::{CompiledDbcSchema, DbcJson, format_signal_name};
+use super::payload::{FrameIdentity, GbfPayloadFrame, PayloadDecoder};
+use crate::schema::dbc::{CompiledDbcSchema, DbcJson};
 
 /// A parsed CAN frame with timestamp, ID, and payload.
 #[derive(Clone, Debug)]
 pub struct CanFrame<'a> {
     pub timestamp: u64,
     pub can_id: u32,
+    pub payload: &'a [u8],
+}
+
+/// A frame whose protocol-specific wire identity has already been normalized.
+#[derive(Clone, Debug)]
+pub struct DbcFrame<'a> {
+    pub timestamp: u64,
+    pub identity: FrameIdentity,
     pub payload: &'a [u8],
 }
 
@@ -73,6 +85,22 @@ pub enum CanIdMapping {
     BusShift { bits: u32 },
 }
 
+#[derive(Clone, Copy)]
+enum DbcIdentityMapping {
+    Can(CanIdMapping),
+    BusMirror,
+}
+
+impl DbcIdentityMapping {
+    #[inline]
+    fn frame_identity(self, bus_id: u32, msg_id: u32) -> FrameIdentity {
+        match self {
+            Self::Can(mapping) => mapping.frame_identity(bus_id, msg_id),
+            Self::BusMirror => FrameIdentity::busmirror_bus(bus_id, msg_id),
+        }
+    }
+}
+
 impl CanIdMapping {
     /// Derive the lookup key for a DBC `(bus.id, msg.id)` pair.
     #[inline]
@@ -81,6 +109,11 @@ impl CanIdMapping {
             CanIdMapping::Raw => msg_id,
             CanIdMapping::BusShift { bits } => (bus_id << bits) | msg_id,
         }
+    }
+
+    #[inline]
+    pub fn frame_identity(&self, bus_id: u32, msg_id: u32) -> FrameIdentity {
+        FrameIdentity::gbf(self.frame_key(bus_id, msg_id))
     }
 
     /// True when `bus_id`'s shifted bits would overlap `msg_id` (or overflow the
@@ -252,7 +285,7 @@ struct MuxSignalSpec {
 /// so non-multiplexed traffic can stay on the plain CAN-ID fast path.
 #[derive(Clone)]
 pub struct CanMuxKeyResolver {
-    mux_by_can_id: CanIdMap<MuxSignalSpec>,
+    mux_by_identity: FrameIdentityMap<MuxSignalSpec>,
 }
 
 impl CanMuxKeyResolver {
@@ -262,17 +295,29 @@ impl CanMuxKeyResolver {
     /// `mapping` must match the one passed to [`CanDecoder::new`] so the selector
     /// map and the message map are keyed identically (issue #217).
     pub fn from_dbc(dbc: &DbcJson, mapping: CanIdMapping) -> Option<Self> {
-        let mut mux_by_can_id = CanIdMap::default();
+        Self::from_dbc_with_identity(dbc, |bus_id, msg_id| mapping.frame_identity(bus_id, msg_id))
+    }
+
+    /// Build a resolver for the BusMirror composite identity space.
+    pub fn from_busmirror_dbc(dbc: &DbcJson) -> Option<Self> {
+        Self::from_dbc_with_identity(dbc, FrameIdentity::busmirror_bus)
+    }
+
+    fn from_dbc_with_identity<F>(dbc: &DbcJson, identity_for: F) -> Option<Self>
+    where
+        F: Fn(u32, u32) -> FrameIdentity,
+    {
+        let mut mux_by_identity = FrameIdentityMap::default();
         for bus in &dbc.buses {
             for msg in &bus.messages {
                 let Some(sig) = msg.signals.iter().find(|sig| sig.is_multiplexer) else {
                     continue;
                 };
-                let can_id = mapping.frame_key(bus.id, msg.id);
+                let identity = identity_for(bus.id, msg.id);
                 let factor = sig.scale.unwrap_or(1.0);
                 let offset = sig.offset.unwrap_or(0.0);
-                mux_by_can_id.insert(
-                    can_id,
+                mux_by_identity.insert(
+                    identity,
                     MuxSignalSpec {
                         signal: SignalSpec {
                             col_index: 0,
@@ -291,36 +336,52 @@ impl CanMuxKeyResolver {
             }
         }
 
-        if mux_by_can_id.is_empty() {
+        if mux_by_identity.is_empty() {
             None
         } else {
-            Some(Self { mux_by_can_id })
+            Some(Self { mux_by_identity })
         }
     }
 
     /// Return true only for CAN IDs that have a known multiplexer selector.
     #[inline]
     pub fn is_multiplexed_can_id(&self, can_id: u32) -> bool {
-        self.mux_by_can_id.contains_key(&can_id)
+        self.is_multiplexed_identity(FrameIdentity::gbf(can_id))
+    }
+
+    #[inline]
+    pub fn is_multiplexed_identity(&self, identity: FrameIdentity) -> bool {
+        self.mux_by_identity.contains_key(&identity)
     }
 
     /// Decode the mux selector for a known multiplexed CAN ID.
     pub fn resolve_mux(&self, can_id: u32, payload: &[u8]) -> Result<i64, CodecError> {
-        let spec = self.mux_by_can_id.get(&can_id).ok_or_else(|| {
+        self.resolve_identity_mux(FrameIdentity::gbf(can_id), payload)
+    }
+
+    pub fn resolve_identity_mux(
+        &self,
+        identity: FrameIdentity,
+        payload: &[u8],
+    ) -> Result<i64, CodecError> {
+        let spec = self.mux_by_identity.get(&identity).ok_or_else(|| {
             CodecError::Other(format!(
-                "mux resolver has no selector for CAN ID 0x{can_id:04X}"
+                "mux resolver has no selector for frame identity 0x{:X}",
+                identity.value()
             ))
         })?;
-        ensure_signal_fits_payload(payload, &spec.signal, can_id)?;
+        ensure_signal_fits_payload(payload, &spec.signal, identity)?;
         match decode_signal(payload, &spec.signal) {
             Value::Int64(v) => Ok(v),
             Value::Uint64(v) => i64::try_from(v).map_err(|_| {
                 CodecError::Other(format!(
-                    "mux selector value does not fit i64 for CAN ID 0x{can_id:04X}: {v}"
+                    "mux selector value does not fit i64 for frame identity 0x{:X}: {v}",
+                    identity.value()
                 ))
             }),
             other => Err(CodecError::Other(format!(
-                "mux selector decoded to non-integer value for CAN ID 0x{can_id:04X}: {other:?}"
+                "mux selector decoded to non-integer value for frame identity 0x{:X}: {other:?}",
+                identity.value()
             ))),
         }
     }
@@ -329,21 +390,24 @@ impl CanMuxKeyResolver {
 fn ensure_signal_fits_payload(
     payload: &[u8],
     signal: &SignalSpec,
-    can_id: u32,
+    identity: FrameIdentity,
 ) -> Result<(), CodecError> {
     if signal.length == 0 {
         return Err(CodecError::Other(format!(
-            "mux selector has zero length for CAN ID 0x{can_id:04X}"
+            "mux selector has zero length for frame identity 0x{:X}",
+            identity.value()
         )));
     }
     let last_bit = signal_last_bit(signal).ok_or_else(|| {
         CodecError::Other(format!(
-            "mux selector bit range overflow for CAN ID 0x{can_id:04X}"
+            "mux selector bit range overflow for frame identity 0x{:X}",
+            identity.value()
         ))
     })?;
     if last_bit >= payload.len().saturating_mul(8) {
         return Err(CodecError::Other(format!(
-            "mux selector exceeds payload length for CAN ID 0x{can_id:04X}: start={}, len={}, payload_bytes={}",
+            "mux selector exceeds payload length for frame identity 0x{:X}: start={}, len={}, payload_bytes={}",
+            identity.value(),
             signal.start,
             signal.length,
             payload.len()
@@ -370,6 +434,118 @@ fn signal_last_bit(signal: &SignalSpec) -> Option<usize> {
         }
     } else {
         start.checked_add(len - 1)
+    }
+}
+
+struct WindowFrameSlot {
+    identity: FrameIdentity,
+    start: u32,
+    len: u32,
+}
+
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct WindowMuxKey {
+    identity: FrameIdentity,
+    mux_value: i64,
+}
+
+/// Shared DBC sampling-window state used by GBF and BusMirror mergers.
+pub struct DbcWindowAccumulator {
+    decoder: CanDecoder,
+    mux_resolver: Option<CanMuxKeyResolver>,
+    payload_buf: Vec<u8>,
+    frames: FrameIdentityMap<WindowFrameSlot>,
+    mux_frames: HashMap<WindowMuxKey, WindowFrameSlot>,
+    last_ts: u64,
+}
+
+impl DbcWindowAccumulator {
+    pub fn new(decoder: CanDecoder, mux_resolver: Option<CanMuxKeyResolver>) -> Self {
+        Self {
+            decoder,
+            mux_resolver,
+            payload_buf: Vec::with_capacity(64 * 8),
+            frames: FrameIdentityMap::default(),
+            mux_frames: HashMap::with_capacity(16),
+            last_ts: 0,
+        }
+    }
+
+    /// Merge one already validated frame. Unknown identities and malformed mux
+    /// selectors are ignored, matching the existing GBF fused-merger contract.
+    pub fn merge_frame(&mut self, timestamp: u64, identity: FrameIdentity, payload: &[u8]) {
+        self.last_ts = timestamp;
+        if !self.decoder.contains_identity(identity) {
+            return;
+        }
+        let mux_value = if let Some(resolver) = self.mux_resolver.as_ref() {
+            if resolver.is_multiplexed_identity(identity) {
+                match resolver.resolve_identity_mux(identity, payload) {
+                    Ok(value) => Some(value),
+                    Err(_) => return,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let start = self.payload_buf.len() as u32;
+        self.payload_buf.extend_from_slice(payload);
+        let slot = WindowFrameSlot {
+            identity,
+            start,
+            len: payload.len() as u32,
+        };
+        if let Some(mux_value) = mux_value {
+            self.mux_frames.insert(
+                WindowMuxKey {
+                    identity,
+                    mux_value,
+                },
+                slot,
+            );
+        } else {
+            self.frames.insert(identity, slot);
+        }
+    }
+
+    pub fn observe_timestamp(&mut self, timestamp: u64) {
+        self.last_ts = timestamp;
+    }
+
+    /// Decode the current sampling window and clear it after a successful trigger.
+    pub fn decode_window(
+        &mut self,
+        projection: Option<&DecodeProjection>,
+    ) -> Result<Option<RecordBatch>, CodecError> {
+        if self.frames.is_empty() && self.mux_frames.is_empty() {
+            return Ok(None);
+        }
+
+        let buffer = self.payload_buf.as_slice();
+        let mut frames =
+            Vec::with_capacity(self.frames.len().saturating_add(self.mux_frames.len()));
+        frames.extend(self.frames.values().map(|slot| DbcFrame {
+            timestamp: self.last_ts,
+            identity: slot.identity,
+            payload: &buffer[slot.start as usize..slot.start as usize + slot.len as usize],
+        }));
+        frames.extend(self.mux_frames.values().map(|slot| DbcFrame {
+            timestamp: self.last_ts,
+            identity: slot.identity,
+            payload: &buffer[slot.start as usize..slot.start as usize + slot.len as usize],
+        }));
+
+        let batch = match self.decoder.decode_dbc_frames(frames, projection) {
+            Some(tuple) => Some(RecordBatch::new(vec![tuple])?),
+            None => None,
+        };
+        self.payload_buf.clear();
+        self.frames.clear();
+        self.mux_frames.clear();
+        Ok(batch)
     }
 }
 
@@ -420,7 +596,7 @@ struct ProjectionCache {
 pub struct CanDecoder {
     source_name: Arc<str>,
     keys: Arc<[Arc<str>]>,
-    messages: CanIdMap<MessageSpec>,
+    messages: FrameIdentityMap<MessageSpec>,
     /// Number of distinct `msg_index` values; sizes per-decode scratch tables.
     message_count: usize,
     ts_index: Option<usize>,
@@ -447,22 +623,17 @@ impl CanDecoder {
         clamp_to_range: bool,
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
-        let pattern = pattern.as_deref().unwrap_or("{sig}");
+        let compiled = CompiledDbcSchema::new(dbc, pattern.as_deref().unwrap_or("{sig_name}"))
+            .map_err(CodecError::Other)?;
+        let dbc = compiled.dbc();
         Self::build(
             source_name,
             schema,
             &dbc,
             clamp_to_range,
-            mapping,
+            DbcIdentityMapping::Can(mapping),
             |bus_id, bus_name, message, signal_name| {
-                let _ = bus_id;
-                format_signal_name(
-                    pattern,
-                    bus_name,
-                    &message.frame_id,
-                    &message._name,
-                    signal_name,
-                )
+                compiled.column_name(bus_id, bus_name, message, signal_name)
             },
         )
     }
@@ -481,7 +652,28 @@ impl CanDecoder {
             schema,
             dbc,
             clamp_to_range,
-            mapping,
+            DbcIdentityMapping::Can(mapping),
+            |bus_id, bus_name, message, signal_name| {
+                compiled.column_name(bus_id, bus_name, message, signal_name)
+            },
+        )
+    }
+
+    /// Create a decoder for a BusMirror schema whose DBC bus IDs encode the
+    /// AUTOSAR network type and network ID.
+    pub fn build_from_busmirror(
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        compiled: &CompiledDbcSchema,
+        clamp_to_range: bool,
+    ) -> Result<Self, CodecError> {
+        let dbc = compiled.dbc();
+        Self::build(
+            source_name,
+            schema,
+            &dbc,
+            clamp_to_range,
+            DbcIdentityMapping::BusMirror,
             |bus_id, bus_name, message, signal_name| {
                 compiled.column_name(bus_id, bus_name, message, signal_name)
             },
@@ -493,7 +685,7 @@ impl CanDecoder {
         schema: Arc<Schema>,
         dbc: &DbcJson,
         clamp_to_range: bool,
-        mapping: CanIdMapping,
+        identity_mapping: DbcIdentityMapping,
         name_for: N,
     ) -> Result<Self, CodecError>
     where
@@ -511,14 +703,16 @@ impl CanDecoder {
         }
         let ts_index = name_to_index.get("ts").copied();
 
-        let mut messages = CanIdMap::default();
+        let mut messages = FrameIdentityMap::default();
         let mut next_msg_index = 0usize;
         for bus in &dbc.buses {
             let bus_name = bus.name.clone().unwrap_or_else(|| format!("Bus{}", bus.id));
             for msg in &bus.messages {
                 // CAN ID lookup key per the configured mapping policy (issue #217).
-                let can_id = mapping.frame_key(bus.id, msg.id);
-                if mapping.overlaps(bus.id, msg.id) {
+                let identity = identity_mapping.frame_identity(bus.id, msg.id);
+                if let DbcIdentityMapping::Can(mapping) = identity_mapping
+                    && mapping.overlaps(bus.id, msg.id)
+                {
                     tracing::warn!(
                         bus_id = bus.id,
                         msg_id = msg.id,
@@ -565,15 +759,14 @@ impl CanDecoder {
                 // Warn if duplicate CAN ID found. Under `raw` mapping this happens
                 // when two buses carry the same `msg.id`; `bus_shift` disambiguates
                 // them. The later definition overwrites the earlier one (#217).
-                if messages.contains_key(&can_id) {
+                if messages.contains_key(&identity) {
                     tracing::warn!(
-                        can_id = format!("0x{:04X}", can_id),
+                        frame_identity = format!("0x{:X}", identity.value()),
                         bus = %bus_name,
                         frame_id = %msg.frame_id,
-                        ?mapping,
                         "Duplicate CAN ID detected, previous signals will be \
-                         overwritten. With `raw` mapping, consider `bus_shift` to \
-                         disambiguate buses sharing a msg.id."
+                         overwritten. Ensure the schema assigns a unique identity \
+                         to every bus/message pair."
                     );
                 }
                 // Pre-compute if this message has a multiplexer signal
@@ -581,7 +774,7 @@ impl CanDecoder {
                 let msg_index = next_msg_index;
                 next_msg_index += 1;
                 messages.insert(
-                    can_id,
+                    identity,
                     MessageSpec {
                         signals,
                         has_multiplexer,
@@ -669,7 +862,13 @@ impl CanDecoder {
     /// Return true when this decoder has a DBC message for the CAN ID.
     #[inline]
     pub fn contains_can_id(&self, can_id: u32) -> bool {
-        self.messages.contains_key(&can_id)
+        self.contains_identity(FrameIdentity::gbf(can_id))
+    }
+
+    /// Return true when this decoder has a DBC message for the normalized identity.
+    #[inline]
+    pub fn contains_identity(&self, identity: FrameIdentity) -> bool {
+        self.messages.contains_key(&identity)
     }
 
     /// Decode a list of CAN frames into a Tuple.
@@ -684,6 +883,23 @@ impl CanDecoder {
     pub fn decode_frames(
         &self,
         frames: Vec<CanFrame<'_>>,
+        projection: Option<&DecodeProjection>,
+    ) -> Option<Tuple> {
+        let frames = frames
+            .into_iter()
+            .map(|frame| DbcFrame {
+                timestamp: frame.timestamp,
+                identity: FrameIdentity::gbf(frame.can_id),
+                payload: frame.payload,
+            })
+            .collect();
+        self.decode_dbc_frames(frames, projection)
+    }
+
+    /// Decode frames whose protocol-specific identities have already been normalized.
+    pub fn decode_dbc_frames(
+        &self,
+        frames: Vec<DbcFrame<'_>>,
         projection: Option<&DecodeProjection>,
     ) -> Option<Tuple> {
         if frames.is_empty() {
@@ -728,8 +944,11 @@ impl CanDecoder {
         let mut seen_mux: Vec<(usize, Option<i64>)> = Vec::new();
 
         for frame in frames.iter().rev() {
-            let Some(spec) = self.messages.get(&frame.can_id) else {
-                trace!(can_id = frame.can_id, "frame spec not found for can_id");
+            let Some(spec) = self.messages.get(&frame.identity) else {
+                trace!(
+                    frame_identity = frame.identity.value(),
+                    "frame spec not found for identity"
+                );
                 continue;
             };
 
@@ -831,7 +1050,7 @@ impl CanDecoder {
 
     /// Get the message specifications map.
     #[allow(dead_code)]
-    fn messages(&self) -> &CanIdMap<MessageSpec> {
+    fn messages(&self) -> &FrameIdentityMap<MessageSpec> {
         &self.messages
     }
 
@@ -857,15 +1076,15 @@ impl PayloadDecoder for CanDecoder {
         frames: Vec<GbfPayloadFrame<'_>>,
         projection: Option<&DecodeProjection>,
     ) -> Option<Tuple> {
-        let can_frames: Vec<CanFrame<'_>> = frames
-            .iter()
-            .map(|f| CanFrame {
-                timestamp: f.timestamp,
-                can_id: f.format_id,
-                payload: f.payload,
+        let dbc_frames = frames
+            .into_iter()
+            .map(|frame| DbcFrame {
+                timestamp: frame.timestamp,
+                identity: FrameIdentity::gbf(frame.format_id),
+                payload: frame.payload,
             })
             .collect();
-        CanDecoder::decode_frames(self, can_frames, projection)
+        self.decode_dbc_frames(dbc_frames, projection)
     }
 }
 
@@ -1298,7 +1517,7 @@ mod tests {
     fn can_id_mapping_differential_on_sim_json() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
 
         let shift = CanDecoder::new(
             "can",
@@ -1330,7 +1549,7 @@ mod tests {
                 name: Some(format!("Bus{id}")),
                 id,
                 messages: vec![MessageJson {
-                    _name: "M".into(),
+                    name: "M".into(),
                     id: 100,
                     frame_id: "0x64".into(),
                     _length: 8,
@@ -1354,7 +1573,7 @@ mod tests {
         let dbc = DbcJson {
             buses: vec![bus(1, "SigA"), bus(2, "SigB")],
         };
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
         let dec = CanDecoder::new("can", schema, dbc, None, true, CanIdMapping::Raw)
             .expect("raw decoder builds despite duplicate msg.id");
         // Single key 100; the later bus (SigB) overwrote the earlier one.
@@ -1443,7 +1662,7 @@ mod tests {
                 name: Some("B".into()),
                 id: 0,
                 messages: vec![MessageJson {
-                    _name: "M".into(),
+                    name: "M".into(),
                     id: 1,
                     frame_id: "0x1".into(),
                     _length: 8,
@@ -1455,9 +1674,9 @@ mod tests {
                 }],
             }],
         };
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
         let find = |dec: &CanDecoder, name: &str| -> (Option<f64>, Option<f64>) {
-            let specs = &dec.messages()[&1u32].signals; // raw msg.id = 1 (bus 0)
+            let specs = &dec.messages()[&FrameIdentity::gbf(1)].signals; // raw msg.id = 1 (bus 0)
             let s = specs
                 .iter()
                 .find(|s| dec.keys()[s.col_index].as_ref() == name)
@@ -1487,7 +1706,7 @@ mod tests {
     fn get_test_decoder() -> CanDecoder {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
         // sim.json buses are bus-prefixed (bus.id = 1); the historical fixtures
         // rely on the `(bus_id << 12) | msg_id` packing.
         CanDecoder::new(
@@ -1892,7 +2111,7 @@ mod tests {
     fn get_multiplex_decoder() -> CanDecoder {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
-        let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("mul", &dbc, None).expect("compile DBC schema"));
         // mul.json is bus 0, so raw and bus_shift produce identical keys.
         CanDecoder::new(
             "mul",

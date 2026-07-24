@@ -7,6 +7,40 @@
 use flow::model::Tuple;
 use flow::planner::decode_projection::DecodeProjection;
 
+/// Protocol-normalized DBC frame identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct FrameIdentity(u64);
+
+impl FrameIdentity {
+    /// Promote a GBF/CAN format ID into the shared identity space.
+    #[inline]
+    pub const fn gbf(format_id: u32) -> Self {
+        Self(format_id as u64)
+    }
+
+    /// Build an AUTOSAR BusMirror identity.
+    #[inline]
+    pub const fn busmirror(network_type: u8, network_id: u8, frame_id: u32) -> Self {
+        Self(
+            ((network_type as u64) << 40)
+                | ((network_id as u64) << 32)
+                | ((frame_id & 0x1fff_ffff) as u64),
+        )
+    }
+
+    /// Build a BusMirror identity from the schema compiler's packed bus ID.
+    #[inline]
+    pub const fn busmirror_bus(bus_id: u32, frame_id: u32) -> Self {
+        Self::busmirror((bus_id >> 8) as u8, bus_id as u8, frame_id)
+    }
+
+    #[inline]
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
 /// A decoded frame ready for payload-level decoding.
 #[derive(Debug, Clone)]
 pub struct GbfPayloadFrame<'a> {

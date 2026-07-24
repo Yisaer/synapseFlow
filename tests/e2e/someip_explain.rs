@@ -393,9 +393,9 @@ fn complete_gbf_schema_path(
     let mut document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(packet_path).expect("read GBF packet layout"))
             .expect("parse GBF packet layout");
-    let mut format_props = serde_json::json!({"arxml_path": "format/system.arxml"});
+    let format_props = serde_json::json!({"arxml_path": "format/system.arxml"});
     if let Some(pattern) = signal_name_pattern {
-        format_props["signal_name_pattern"] = serde_json::json!(pattern);
+        document["signal_name_pattern"] = serde_json::json!(pattern);
     }
     document["format"] = serde_json::json!({"type": "someip", "props": format_props});
     let entry = serde_json::to_vec_pretty(&document).expect("encode complete GBF schema");

@@ -78,7 +78,7 @@ fn dbc_path() -> PathBuf {
 
 fn build_fused() -> GbfFusedMerger {
     let dbc = load_dbc_json(dbc_path().to_str().unwrap()).expect("load sim.json");
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+    let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
     // sim.json is bus-prefixed (bus.id = 1).
     GbfFusedMerger::new(
@@ -142,7 +142,7 @@ fn testbus_dbc() -> DbcJson {
 }
 
 fn build_decoder_with(dbc: DbcJson) -> GbfDecoder {
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+    let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
     GbfDecoder::new(
         "can",
@@ -157,7 +157,7 @@ fn build_decoder_with(dbc: DbcJson) -> GbfDecoder {
 }
 
 fn build_fused_with(dbc: DbcJson) -> GbfFusedMerger {
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+    let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
     GbfFusedMerger::new(
         "can",
@@ -316,7 +316,7 @@ fn synth_dbc(num_msgs: u32, sigs_per_msg: u32) -> DbcJson {
 }
 
 fn build_fused_dbc(dbc: DbcJson) -> GbfFusedMerger {
-    let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+    let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
     let gbf_schema: GbfSchema = serde_json::from_str(gbf_schema_json()).expect("gbf schema");
     GbfFusedMerger::new(
         "can",

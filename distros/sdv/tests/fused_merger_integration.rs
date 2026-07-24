@@ -42,7 +42,7 @@ fn registry_builds_fused_gbf_merger_and_decodes() {
 
     // Schema the framework would hand the merger (derived from the DBC).
     let dbc = load_dbc_json(&fixture("src/tests/sim.json")).expect("load dbc json");
-    let compiled = Arc::new(CompiledDbcSchema::new(dbc, "{sig}"));
+    let compiled = Arc::new(CompiledDbcSchema::new(dbc, "{sig_name}").expect("compile DBC schema"));
     let schema = Arc::new(compiled.schema("can"));
 
     // The complete GBF artifact carries both layout and format configuration.
@@ -133,7 +133,7 @@ fn registry_rejects_gbf_merger_without_schema_artifact() {
     veloflux_sdv::register(&instance);
 
     let dbc = load_dbc_json(&fixture("src/tests/sim.json")).expect("load dbc json");
-    let compiled = CompiledDbcSchema::new(dbc, "{sig}");
+    let compiled = CompiledDbcSchema::new(dbc, "{sig_name}").expect("compile DBC schema");
     let schema = Arc::new(compiled.schema("can"));
 
     let props = Map::new();

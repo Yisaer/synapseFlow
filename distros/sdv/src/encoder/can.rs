@@ -254,7 +254,7 @@ mod tests {
                 name: Some("Test".to_string()),
                 id: 0,
                 messages: vec![MessageJson {
-                    _name: "TestMsg".to_string(),
+                    name: "TestMsg".to_string(),
                     id: 0x100,
                     frame_id: "0x100".to_string(),
                     _length: 8,
@@ -398,7 +398,7 @@ mod tests {
         });
 
         let msg = MessageJson {
-            _name: "ComplexMsg".to_string(),
+            name: "ComplexMsg".to_string(),
             id: 0x200,
             frame_id: "0x200".to_string(),
             _length: 8,
@@ -478,7 +478,7 @@ mod tests {
         }];
 
         let msg = MessageJson {
-            _name: "SignedMsg".to_string(),
+            name: "SignedMsg".to_string(),
             id: 0x300,
             frame_id: "0x300".to_string(),
             _length: 8,
@@ -541,7 +541,7 @@ mod tests {
         ];
 
         let msg = MessageJson {
-            _name: "MuxMsg".to_string(),
+            name: "MuxMsg".to_string(),
             id: 0x400,
             frame_id: "0x400".to_string(),
             _length: 8,

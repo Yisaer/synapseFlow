@@ -1652,23 +1652,32 @@ pub(crate) fn validate_stream_decoder_config(
             req.name
         ));
     }
-    if uses_gbf_packer(req) && !decoder.kind().eq_ignore_ascii_case("gbf") {
+    if let Some(merger_type) = dbc_packer_merger_type(req)
+        && !decoder.kind().eq_ignore_ascii_case(merger_type)
+    {
         return Err(format!(
-            "stream `{}` sampler merger type `gbf` requires decoder type `gbf`",
+            "stream `{}` sampler merger type `{merger_type}` requires decoder type `{merger_type}`",
             req.name
         ));
     }
     Ok(())
 }
 
-fn uses_gbf_packer(req: &CreateStreamRequest) -> bool {
+fn dbc_packer_merger_type(req: &CreateStreamRequest) -> Option<&str> {
     let Some(sampler) = &req.sampler else {
-        return false;
+        return None;
     };
     let SamplingStrategy::Packer { props } = &sampler.strategy else {
-        return false;
+        return None;
     };
-    props.merger.merger_type.eq_ignore_ascii_case("gbf")
+    let merger_type = props.merger.merger_type.as_str();
+    if merger_type.eq_ignore_ascii_case("gbf") {
+        Some("gbf")
+    } else if merger_type.eq_ignore_ascii_case("busmirror") {
+        Some("busmirror")
+    } else {
+        None
+    }
 }
 
 /// Validate the shared MQTT `connector_key` reference (if present) against the
@@ -2355,6 +2364,31 @@ mod tests {
         assert_eq!(
             err,
             "stream `stream_test` sampler merger type `gbf` requires decoder type `gbf`"
+        );
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_busmirror_packer_without_busmirror_decoder() {
+        let mut req = base_stream_request("mqtt");
+        req.decoder = DecoderConfigRequest::new("json", JsonMap::new());
+        req.sampler = Some(
+            serde_json::from_value(json!({
+                "interval": "100ms",
+                "strategy": {
+                    "type": "packer",
+                    "props": {
+                        "merger": { "type": "busmirror", "props": {} }
+                    }
+                }
+            }))
+            .expect("sampler"),
+        );
+        let decoder = StreamDecoderConfig::new("json", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "stream `stream_test` sampler merger type `busmirror` requires decoder type `busmirror`"
         );
     }
 

@@ -109,6 +109,7 @@ The SDV `gbf` merger is a fused decode-capable merger. It parses the GBF outer p
 
 - `merger.type = "gbf"` requires `decoder.type = "gbf"` in stream configuration.
 - The merger and normal decoder share the stream's complete `CompiledGbfSchema`; merger props do not repeat packet layout, format paths, naming, CAN ID mapping, or clamping options.
+- `merger.type = "busmirror"` requires `decoder.type = "busmirror"`. Both consume the same complete BusMirror artifact and share the DBC window accumulator used by the GBF CAN merger.
 - The fused merger currently supports GBF schemas whose `format.type` is `can`.
 
 For a CAN-format GBF schema, the fused merger keeps newest-wins semantics within each sampler interval:

@@ -1,0 +1,26 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 256 EngineData: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (1,0) [0|8000] "rpm" Vector__XXX,Vector__XXX
+ SG_ ThrottlePos : 16|8@1+ (0.5,0) [0|100] "%" Vector__XXX,Vector__XXX
+ SG_ CoolantTemp : 24|8@1+ (1,-40) [-40|215] "degC" Vector__XXX,Vector__XXX
+
+BO_ 257 TransmissionData: 8 Vector__XXX
+ SG_ GearPos : 0|8@1+ (1,0) [0|10] "" Vector__XXX,Vector__XXX
+ SG_ OilTemp : 8|16@1+ (0.1,-50) [-50|200] "degC" Vector__XXX,Vector__XXX
+ SG_ Torque : 24|16@1+ (0.1,0) [0|1000] "Nm" Vector__XXX,Vector__XXX
+
+BO_ 258 BatteryData: 8 Vector__XXX
+ SG_ Voltage : 0|16@1+ (0.01,0) [0|60] "V" Vector__XXX,Vector__XXX
+ SG_ Current : 16|16@1+ (0.1,-200) [-200|200] "A" Vector__XXX,Vector__XXX
+ SG_ SOC : 32|8@1+ (1,0) [0|100] "%" Vector__XXX,Vector__XXX
+
+BO_ 2147483907 ExtendedEngineData: 8 Vector__XXX
+ SG_ ExtendedRPM : 0|16@1+ (1,0) [0|8000] "rpm" Vector__XXX,Vector__XXX
+ SG_ ExtendedLoad : 16|8@1+ (1,0) [0|100] "%" Vector__XXX,Vector__XXX

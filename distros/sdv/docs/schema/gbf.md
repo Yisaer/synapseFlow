@@ -26,6 +26,7 @@ No archive entry may exist outside the root entry and companion directory. The p
 
 ```json
 {
+  "signal_name_pattern": "{sig_name}",
   "structure": {
     "type": "struct",
     "fields": [
@@ -56,7 +57,6 @@ No archive entry may exist outside the root entry and companion directory. The p
     "type": "can",
     "props": {
       "dbc_path": "format/vehicle.dbc",
-      "signal_name_pattern": "{sig}",
       "clamp_to_range": true,
       "can_id_mapping": "raw"
     }
@@ -72,17 +72,21 @@ The packet `structure` is defined in the same way. The private format section is
 
 ```json
 {
+  "signal_name_pattern": "{service}.{method}.{field}",
   "format": {
     "type": "someip",
     "props": {
-      "arxml_path": "format/system.arxml",
-      "signal_name_pattern": "{service}.{method}.{field}"
+      "arxml_path": "format/system.arxml"
     }
   }
 }
 ```
 
 The ARXML file belongs only to this GBF resource. It is parsed once while the GBF schema is resolved and is not registered as a nested schema.
+
+`signal_name_pattern` belongs to the complete GBF schema and is therefore an
+entry-level property for every private format. It is not read from
+`format.props`, schema-install props, decoder props, or merger props.
 
 ## Runtime artifact
 

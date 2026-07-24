@@ -64,6 +64,7 @@ which parser to use. The following types are built-in:
 | `json`   | Inline column definitions (existing, unchanged).   |
 | `proto`  | Derive schema from a `.proto` file and a message type name. |
 | `gbf`    | Compile a complete GBF packet layout and private CAN/SOME/IP format. |
+| `busmirror` | Compile an AUTOSAR Bus Mirroring topology and its private DBC files. |
 
 Custom types can be added via the `SchemaRegistry::register_schema()` API
 (or through a distribution-specific extension point).

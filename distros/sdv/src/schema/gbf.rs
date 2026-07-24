@@ -31,6 +31,8 @@ pub struct GbfSchema {
 #[derive(Debug, Clone, Deserialize)]
 struct GbfSchemaDocument {
     structure: GbfStructure,
+    #[serde(default)]
+    signal_name_pattern: Option<String>,
     format: GbfFormatDefinition,
 }
 
@@ -120,11 +122,9 @@ fn parse_gbf_schema(
         "can" | "dbc" => {
             let dbc_path = required_member_path(&member_root, &document.format.props, "dbc_path")?;
             let pattern = document
-                .format
-                .props
-                .get("signal_name_pattern")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("{sig}");
+                .signal_name_pattern
+                .as_deref()
+                .unwrap_or("{sig_name}");
             let clamp_to_range = document
                 .format
                 .props
@@ -144,12 +144,7 @@ fn parse_gbf_schema(
         "someip" | "arxml" => {
             let arxml_path =
                 required_member_path(&member_root, &document.format.props, "arxml_path")?;
-            let pattern = document
-                .format
-                .props
-                .get("signal_name_pattern")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("{field}");
+            let pattern = document.signal_name_pattern.as_deref().unwrap_or("{field}");
             let path = path_to_str(&arxml_path)?;
             let (schema, compiled) = compile_arxml_schema(stream_name, path, pattern)?;
             let compiled =
@@ -242,6 +237,7 @@ impl GbfSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_parse_schema() {
@@ -352,5 +348,54 @@ mod tests {
         let root = &schema.structure;
         let data_field = &root.fields[1];
         assert_eq!(data_field.length_ref.as_ref().unwrap(), "len");
+    }
+
+    #[test]
+    fn complete_gbf_schema_reads_name_pattern_only_from_entry_top_level() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "veloflux-gbf-name-pattern-{}-{unique}",
+            std::process::id()
+        ));
+        let entry = root.join("vehicle.json");
+        let companion = root.join("vehicle");
+        std::fs::create_dir_all(&companion).expect("create companion");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/1_TestBus.dbc"),
+            companion.join("vehicle.dbc"),
+        )
+        .expect("copy DBC");
+        let mut document: JsonValue = serde_json::from_slice(
+            &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/spi_packet.json"))
+                .expect("read GBF layout"),
+        )
+        .expect("parse GBF layout");
+        document["signal_name_pattern"] =
+            JsonValue::String("{bus_name}__{msg_id_hex_upper}__{sig_name}".to_string());
+        document["format"] = serde_json::json!({
+            "type": "can",
+            "props": {
+                "dbc_path": "vehicle.dbc",
+                "signal_name_pattern": "{sig_name}"
+            }
+        });
+        std::fs::write(
+            &entry,
+            serde_json::to_vec_pretty(&document).expect("encode GBF entry"),
+        )
+        .expect("write entry");
+        let props = JsonMap::from_iter([(
+            "schema_path".to_string(),
+            JsonValue::String(entry.to_string_lossy().into_owned()),
+        )]);
+
+        let (schema, _, _) = parse_gbf_schema("vehicle", &props).expect("compile GBF schema");
+
+        assert!(schema.contains_column("Bus0__100__StandardUnsigned"));
+        assert!(!schema.contains_column("StandardUnsigned"));
+        std::fs::remove_dir_all(root).expect("remove test source");
     }
 }

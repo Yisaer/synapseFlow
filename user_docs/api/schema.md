@@ -38,7 +38,7 @@ Fields:
 
 - `name: string` (required, non-empty) — Unique identifier for this schema.
 - `type: string` (required) — Schema parser type. Built-in: `json`, `proto`;
-  distributions may add types such as `gbf`.
+  distributions may add types such as `gbf` and `busmirror`.
 - `props: object` (optional, defaults to `{}`) — Parser-specific properties.
   See the corresponding parser documentation for details.
 
@@ -194,6 +194,16 @@ After creation, VeloFlux runs and restores the schema from
 `<data_dir>/schemas/gbf/<name>/`; the original path is no longer used.
 
 See `distros/sdv/docs/schema/gbf.md` for the entry grammar and ZIP layout.
+
+#### `type == "busmirror"` (SDV distribution)
+
+`props.schema_path` identifies a ZIP package to install. The ZIP root contains
+exactly one complete BusMirror entry file. Private DBC members must be below
+the entry's same-stem companion directory, and no other root entries are allowed.
+After creation, VeloFlux runs and restores the schema from
+`<data_dir>/schemas/busmirror/<name>/`; the original path is no longer used.
+
+See `distros/sdv/docs/schema/busmirror.md` for the entry grammar and ZIP layout.
 
 ## Response Shapes
 

@@ -7,11 +7,10 @@
 //! - Nested struct types
 //! - DBC payload format for CAN signal decoding
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::can::{CanDecoder, CanIdMapping, CanMuxKeyResolver};
-use super::payload::{GbfPayloadFrame, PayloadDecoder};
+use super::can::{CanDecoder, CanIdMapping, CanMuxKeyResolver, DbcWindowAccumulator};
+use super::payload::{FrameIdentity, GbfPayloadFrame, PayloadDecoder};
 use crate::schema::gbf::{CompiledGbfFormat, CompiledGbfSchema, GbfSchema};
 use datatypes::Schema;
 use flow::{
@@ -192,19 +191,6 @@ impl RecordDecoder for GbfDecoder {
     }
 }
 
-/// A frame slot referencing a `[start, start+len)` range in `payload_buf`.
-struct FrameSlot {
-    can_id: u32,
-    start: u32,
-    len: u32,
-}
-
-#[derive(Debug, Eq, Hash, PartialEq)]
-struct MuxFrameKey {
-    can_id: u32,
-    mux_value: i64,
-}
-
 /// Fused GBF merger: accumulates raw GBF packets and decodes them directly to a
 /// [`RecordBatch`] on trigger.
 ///
@@ -214,17 +200,7 @@ struct MuxFrameKey {
 /// The sampler calls this type through the generic [`Merger`] trait.
 pub struct GbfFusedMerger {
     parser: crate::codec::gbf_parser::GbfParser,
-    payload_decoder: Box<dyn PayloadDecoder>,
-    mux_resolver: Option<CanMuxKeyResolver>,
-    /// All frame payloads for the current interval, concatenated into one
-    /// reusable buffer to avoid a per-frame allocation.
-    payload_buf: Vec<u8>,
-    /// Non-multiplexed frame accumulator: CAN ID -> newest payload slot.
-    frames: HashMap<u32, FrameSlot>,
-    /// Multiplexed frame accumulator: (CAN ID, mux value) -> newest payload slot.
-    mux_frames: HashMap<MuxFrameKey, FrameSlot>,
-    /// Timestamp of the most recent packet merged this interval.
-    last_ts: u64,
+    accumulator: DbcWindowAccumulator,
 }
 
 impl GbfFusedMerger {
@@ -241,22 +217,17 @@ impl GbfFusedMerger {
             } => {
                 let dbc_json = dbc.dbc();
                 let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc_json, *can_id_mapping);
-                let payload_decoder = Box::new(CanDecoder::build_from_compiled(
+                let decoder = CanDecoder::build_from_compiled(
                     source_name,
                     schema,
                     &dbc_json,
                     dbc,
                     *clamp_to_range,
                     *can_id_mapping,
-                )?);
+                )?;
                 Ok(Self {
                     parser: compiled.parser(),
-                    payload_decoder,
-                    mux_resolver,
-                    payload_buf: Vec::with_capacity(64 * 8),
-                    frames: HashMap::with_capacity(64),
-                    mux_frames: HashMap::with_capacity(16),
-                    last_ts: 0,
+                    accumulator: DbcWindowAccumulator::new(decoder, mux_resolver),
                 })
             }
             CompiledGbfFormat::SomeIp { .. } => Err(CodecError::Other(
@@ -276,23 +247,12 @@ impl GbfFusedMerger {
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
         let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc, mapping);
-        let can_decoder = Box::new(CanDecoder::new(
-            source_name,
-            schema,
-            dbc,
-            pattern,
-            clamp_to_range,
-            mapping,
-        )?);
+        let can_decoder =
+            CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range, mapping)?;
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
         Ok(Self {
             parser,
-            payload_decoder: can_decoder,
-            mux_resolver,
-            payload_buf: Vec::with_capacity(64 * 8),
-            frames: HashMap::with_capacity(64),
-            mux_frames: HashMap::with_capacity(16),
-            last_ts: 0,
+            accumulator: DbcWindowAccumulator::new(can_decoder, mux_resolver),
         })
     }
 
@@ -303,116 +263,21 @@ impl GbfFusedMerger {
         &mut self,
         projection: Option<&DecodeProjection>,
     ) -> Result<Option<RecordBatch>, CodecError> {
-        if self.frames.is_empty() && self.mux_frames.is_empty() {
-            return Ok(None);
-        }
-
-        let ts = self.last_ts;
-        let buf = self.payload_buf.as_slice();
-        let mut payload_frames: Vec<GbfPayloadFrame<'_>> =
-            Vec::with_capacity(self.frames.len().saturating_add(self.mux_frames.len()));
-        payload_frames.extend(self.frames.values().map(|slot| GbfPayloadFrame {
-            timestamp: ts,
-            format_id: slot.can_id,
-            payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
-        }));
-        payload_frames.extend(self.mux_frames.values().map(|slot| GbfPayloadFrame {
-            timestamp: ts,
-            format_id: slot.can_id,
-            payload: &buf[slot.start as usize..slot.start as usize + slot.len as usize],
-        }));
-
-        let batch = match self
-            .payload_decoder
-            .decode_frames(payload_frames, projection)
-        {
-            Some(tuple) => Some(RecordBatch::new(vec![tuple])?),
-            None => None,
-        };
-
-        // Retain capacity across intervals to avoid re-allocating the buffers.
-        self.payload_buf.clear();
-        self.frames.clear();
-        self.mux_frames.clear();
-        Ok(batch)
+        self.accumulator.decode_window(projection)
     }
 }
 
 impl Merger for GbfFusedMerger {
     fn merge(&mut self, data: &[u8]) -> Result<(), CodecError> {
-        if self.mux_resolver.is_none() {
-            let Self {
-                parser,
-                payload_decoder,
-                payload_buf,
-                frames,
-                last_ts,
-                ..
-            } = self;
-            for packet in parser.split_packets(data) {
-                let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
-                    if !payload_decoder.contains_format_id(can_id) {
-                        return;
-                    }
-                    let start = payload_buf.len() as u32;
-                    payload_buf.extend_from_slice(payload);
-                    frames.insert(
-                        can_id,
-                        FrameSlot {
-                            can_id,
-                            start,
-                            len: payload.len() as u32,
-                        },
-                    );
-                })?;
-                *last_ts = timestamp;
-            }
-            return Ok(());
-        }
-
-        // Split borrows so the parse callback can append into the arena while
-        // `parser` is borrowed immutably.
         let Self {
             parser,
-            payload_decoder,
-            mux_resolver,
-            payload_buf,
-            frames,
-            mux_frames,
-            last_ts,
+            accumulator,
         } = self;
         for packet in parser.split_packets(data) {
             let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
-                if !payload_decoder.contains_format_id(can_id) {
-                    return;
-                }
-                let mux_value = if let Some(resolver) = mux_resolver.as_ref() {
-                    if resolver.is_multiplexed_can_id(can_id) {
-                        match resolver.resolve_mux(can_id, payload) {
-                            Ok(mux_value) => Some(mux_value),
-                            Err(_) => return,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let start = payload_buf.len() as u32;
-                payload_buf.extend_from_slice(payload);
-                let slot = FrameSlot {
-                    can_id,
-                    start,
-                    len: payload.len() as u32,
-                };
-                if let Some(mux_value) = mux_value {
-                    let key = MuxFrameKey { can_id, mux_value };
-                    mux_frames.insert(key, slot);
-                } else {
-                    frames.insert(can_id, slot);
-                }
+                accumulator.merge_frame(0, FrameIdentity::gbf(can_id), payload);
             })?;
-            *last_ts = timestamp;
+            accumulator.observe_timestamp(timestamp);
         }
         Ok(())
     }
@@ -520,7 +385,7 @@ mod tests {
     fn get_test_decoder() -> GbfDecoder {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
         let gbf_schema = get_test_schema();
         // sim.json is bus-prefixed (bus.id = 1) -> historical bus_shift packing.
         GbfDecoder::new(
@@ -539,10 +404,13 @@ mod tests {
     fn registry_builds_can_decoder_from_schema_artifact() {
         let dbc_path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
-        let compiled = Arc::new(CompiledDbcSchema::new(
-            load_dbc_json(dbc_path.to_str().unwrap()).unwrap(),
-            "{sig}",
-        ));
+        let compiled = Arc::new(
+            CompiledDbcSchema::new(
+                load_dbc_json(dbc_path.to_str().unwrap()).unwrap(),
+                "{sig_name}",
+            )
+            .expect("compile DBC schema"),
+        );
         let schema = Arc::new(compiled.schema("can"));
         let compiled = Arc::new(
             CompiledGbfSchema::can(
@@ -628,7 +496,7 @@ mod tests {
     fn test_gbf_decoder_raw_mapping_uses_bare_msg_id() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
         let decoder = GbfDecoder::new(
             "can",
             schema,
@@ -665,7 +533,7 @@ mod tests {
     fn get_test_fused() -> GbfFusedMerger {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
-        let schema = Arc::new(schema_from_dbc("can", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("can", &dbc, None).expect("compile DBC schema"));
         let gbf_schema = get_test_schema();
         GbfFusedMerger::new(
             "can",
@@ -778,7 +646,7 @@ mod tests {
 
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
-        let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("mul", &dbc, None).expect("compile DBC schema"));
         // mul.json is bus 0 -> raw and bus_shift keys coincide.
         let mut fused = GbfFusedMerger::new(
             "mul",
@@ -885,7 +753,7 @@ mod tests {
             "#,
         )
         .expect("parse wide can dbc");
-        let schema = Arc::new(schema_from_dbc("wide", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("wide", &dbc, None).expect("compile DBC schema"));
         let mut fused = GbfFusedMerger::new(
             "wide",
             schema,
@@ -950,7 +818,7 @@ mod tests {
             }}"#
         ))
         .expect("parse extended can dbc");
-        let schema = Arc::new(schema_from_dbc("ext", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("ext", &dbc, None).expect("compile DBC schema"));
 
         // Packet: ts(8) + total_len(2) + one frame [magic, u32be id, len, payload].
         let mut packet = Vec::new();
@@ -1008,7 +876,7 @@ mod tests {
 
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
-        let schema = Arc::new(schema_from_dbc("mul", &dbc, None));
+        let schema = Arc::new(schema_from_dbc("mul", &dbc, None).expect("compile DBC schema"));
         // mul.json is bus 0 -> raw and bus_shift keys coincide.
         let mut fused = GbfFusedMerger::new(
             "mul",

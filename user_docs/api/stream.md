@@ -60,7 +60,7 @@ Notes:
 - `schema.type` selects the schema declaration format. Built-in: `json`, `proto`.
 - `schema.props` is schema-format specific.
 - Alternatively, use `schema.ref` to reference a pre-defined named schema (see `user_docs/api/schema.md`). When `schema.ref` is set, `schema.type` and `schema.props` are ignored.
-- `decoder.type` must be registered in the runtime decoder registry (builtin: `json`).
+- `decoder.type` must be registered in the runtime decoder registry (builtin: `json`; the SDV distribution additionally provides `gbf`, `busmirror`, and others).
 - `eventtime.type` must be registered in the runtime event-time registry (builtin: `unixtimestamp_s`, `unixtimestamp_ms`).
 
 Response:
@@ -238,7 +238,7 @@ The `sampler` property enables stream-level downsampling. All pipelines consumin
 }
 ```
 
-> **Note**: The `packer` strategy requires a Merger registered in the runtime. `can_merger` is a placeholder example; check your specific VeloFlux distribution for available mergers.
+> **Note**: The `packer` strategy requires a Merger registered in the runtime. `can_merger` is a placeholder example; check your specific VeloFlux distribution for available mergers. The SDV distribution provides `gbf` and `busmirror` mergers, each requiring a matching decoder type.
 
 ### Schema JSON format (`schema.type == "json"`)
 

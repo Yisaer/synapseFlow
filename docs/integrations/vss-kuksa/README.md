@@ -96,10 +96,10 @@ curl -s -XPOST http://127.0.0.1:8080/streams \
 ```
 
 Create the `vehicle_gbf` complete GBF schema before creating the stream; see the
-[GBF schema documentation](../../../distros/sdv/docs/schema/gbf.md). By default, DBC-backed stream columns use the simple signal name (`{sig}`), so a DBC signal named
+[GBF schema documentation](../../../distros/sdv/docs/schema/gbf.md). By default, DBC-backed stream columns use the simple signal name (`{sig_name}`), so a DBC signal named
 `Mess0_Sig1` becomes a SQL column named `Mess0_Sig1`. If a deployment needs globally qualified
-names, set `signal_name_pattern` in the GBF entry's `format.props`, for example
-`"{bus}__{id}__{sig}"`, and use those generated column names in SQL and VSS mappings.
+names, set top-level `signal_name_pattern` in the GBF entry, for example
+`"{bus_name}__{msg_id_hex_lower}__{sig_name}"`, and use those generated column names in SQL and VSS mappings.
 
 Describe the stream to confirm the generated columns:
 

@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "signal_name_pattern": "{network_type}{network_id}__{msg_id_hex_lower}__{sig_name}",
+  "format": {
+    "type": "can",
+    "props": {}
+  },
+  "buses": [
+    {
+      "network_type": "can",
+      "network_id": 1,
+      "name": "PropulsionCAN",
+      "dbc": "propulsion.dbc"
+    },
+    {
+      "network_type": "can",
+      "network_id": 2,
+      "name": "ChassisCAN",
+      "dbc": "chassis.dbc"
+    }
+  ]
+}

@@ -17,6 +17,7 @@ pub mod schema;
 pub fn register(instance: &flow::FlowInstance) {
     schema::register_dbc_schema();
     schema::register_arxml_schema();
+    schema::register_busmirror_schema();
     schema::register_gbf_schema();
 
     let encoder_registry = instance.encoder_registry();
@@ -41,9 +42,27 @@ pub fn register(instance: &flow::FlowInstance) {
     );
 
     let decoder_registry = instance.decoder_registry();
+    decoder::register_busmirror_decoder(&decoder_registry);
     decoder::register_gbf_decoder(&decoder_registry);
 
     let merger_registry = instance.merger_registry();
+    merger_registry.register_with_schema_artifact(
+        "busmirror",
+        |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {
+            let artifact = artifact
+                .and_then(|artifact| {
+                    artifact
+                        .downcast::<schema::busmirror::CompiledBusMirrorSchema>()
+                        .ok()
+                })
+                .ok_or_else(|| {
+                    flow::codec::CodecError::Other(
+                        "busmirror packer merger requires a resolved BusMirror schema".to_string(),
+                    )
+                })?;
+            build_fused_busmirror_merger(schema, &artifact)
+        },
+    );
     merger_registry.register_with_schema_artifact(
         "gbf",
         |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {
@@ -57,6 +76,21 @@ pub fn register(instance: &flow::FlowInstance) {
             build_fused_gbf_merger(schema, &artifact)
         },
     );
+}
+
+fn build_fused_busmirror_merger(
+    schema: Arc<datatypes::Schema>,
+    compiled: &schema::busmirror::CompiledBusMirrorSchema,
+) -> Result<Box<dyn flow::Merger>, flow::codec::CodecError> {
+    use flow::codec::CodecError;
+
+    let source_name = schema
+        .column_schemas()
+        .first()
+        .map(|column| column.source_name.clone())
+        .ok_or_else(|| CodecError::Other("output schema has no columns".to_string()))?;
+    let fused = decoder::BusMirrorFusedMerger::from_compiled(source_name, schema, compiled)?;
+    Ok(Box::new(fused) as Box<dyn flow::Merger>)
 }
 
 /// Build a fused (decode-capable) GBF sampler from merger props + the stream's
