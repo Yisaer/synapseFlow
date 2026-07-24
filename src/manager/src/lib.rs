@@ -99,7 +99,12 @@ fn build_app(state: AppState) -> Router {
             "/capabilities/syntax",
             axum::routing::get(capabilities::get_syntax_capabilities_handler),
         )
-        .route("/import", post(import::import_storage_handler))
+        .route(
+            "/import",
+            post(import::import_storage_handler).layer(axum::extract::DefaultBodyLimit::max(
+                import::MAX_ARCHIVE_BODY_SIZE,
+            )),
+        )
         .route("/storage/export", get(export::export_storage_handler))
         .route(
             "/streams/:name",

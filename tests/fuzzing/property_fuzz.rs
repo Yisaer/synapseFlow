@@ -2,6 +2,7 @@ use proptest::prelude::*;
 use reqwest::StatusCode;
 use sdk::{ManagerClient, SdkError, StreamCreateRequest};
 use serde_json::{json, Value as JsonValue};
+use std::io::{Cursor, Read, Write};
 use std::net::SocketAddr;
 
 use super::{
@@ -254,44 +255,45 @@ async fn export_bundle(h: &TestHarness) -> JsonValue {
     let body = resp.bytes().await.expect("export body");
     assert_eq!(status, reqwest::StatusCode::OK, "export failed");
 
-    let gz = flate2::read::GzDecoder::new(body.as_ref());
-    let mut archive = tar::Archive::new(gz);
-    for entry in archive.entries().expect("tar entries") {
-        let mut entry = entry.expect("tar entry");
-        if entry.path().expect("entry path").to_string_lossy() == "metadata.json" {
-            return serde_json::from_reader(&mut entry).expect("parse metadata.json");
+    let mut archive = zip::ZipArchive::new(Cursor::new(body.as_ref())).expect("open export ZIP");
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).expect("ZIP entry");
+        if entry.name() == "metadata.json" {
+            let mut metadata = Vec::new();
+            entry
+                .read_to_end(&mut metadata)
+                .expect("read metadata.json");
+            return serde_json::from_slice(&metadata).expect("parse metadata.json");
         }
     }
     panic!("metadata.json not found in archive");
 }
 
-fn build_import_tar_gz(bundle: &JsonValue) -> Vec<u8> {
+fn build_import_zip(bundle: &JsonValue) -> Vec<u8> {
     let metadata_json = serde_json::to_vec(bundle).expect("serialize");
-    let mut tar_gz = Vec::new();
-    {
-        let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
-        let mut tar = tar::Builder::new(gz);
-        let mut header = tar::Header::new_gnu();
-        header.set_size(metadata_json.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
-            .expect("write tar");
-        let gz = tar.into_inner().expect("finish tar");
-        gz.finish().expect("finish gzip");
-    }
-    tar_gz
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    archive
+        .start_file(
+            "metadata.json",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .expect("start metadata.json");
+    archive
+        .write_all(&metadata_json)
+        .expect("write metadata.json");
+    archive.finish().expect("finish ZIP").into_inner()
 }
 
 async fn import_bundle(
     h: &TestHarness,
     bundle: JsonValue,
 ) -> (StatusCode, String, Option<JsonValue>) {
-    let body = build_import_tar_gz(&bundle);
+    let body = build_import_zip(&bundle);
     let resp = h
         .http
         .post(format!("{}/import", h.base()))
-        .header("content-type", "application/gzip")
+        .header("content-type", "application/zip")
         .body(body)
         .send()
         .await
@@ -346,17 +348,20 @@ fn bundle_with_resources(
     pipelines: Vec<JsonValue>,
     run_states: Vec<JsonValue>,
 ) -> JsonValue {
-    json!({
+    let mut bundle = json!({
         "exported_at": 0,
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
             "streams": streams,
             "pipelines": pipelines,
-            "pipeline_run_states": run_states,
             "udfs": []
         }
-    })
+    });
+    if !run_states.is_empty() {
+        bundle["resources"]["pipeline_run_states"] = JsonValue::Array(run_states);
+    }
+    bundle
 }
 
 #[test]

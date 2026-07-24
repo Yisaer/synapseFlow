@@ -4,6 +4,7 @@ use super::{
 };
 use reqwest::StatusCode;
 use serde_json::{json, Value as JsonValue};
+use std::io::{Cursor, Read, Write};
 use std::net::SocketAddr;
 
 struct ImportExportHarness {
@@ -68,7 +69,6 @@ fn bundle_empty() -> JsonValue {
             "shared_mqtt_clients": [],
             "streams": [],
             "pipelines": [],
-            "pipeline_run_states": [],
             "udfs": []
         }
     })
@@ -101,15 +101,10 @@ fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> Js
                 {
                     "id": pipeline_id,
                     "sql": format!("SELECT value FROM {stream_name}"),
+                    "run_state": "Stopped",
                     "sinks": [
                         { "type": "nop" }
                     ]
-                }
-            ],
-            "pipeline_run_states": [
-                {
-                    "pipeline_id": pipeline_id,
-                    "desired_state": "Stopped"
                 }
             ],
             "udfs": []
@@ -126,43 +121,45 @@ async fn export_bundle(http: &reqwest::Client, base: &str) -> JsonValue {
     let status = resp.status();
     let body = resp.bytes().await.unwrap_or_default();
     assert_eq!(status, StatusCode::OK, "export failed");
-    metadata_json_from_tar_gz(&body).expect("decode export tar.gz")
+    metadata_json_from_zip(&body).expect("decode export ZIP")
 }
 
-fn metadata_json_from_tar_gz(data: &[u8]) -> Result<JsonValue, String> {
-    let gz = flate2::read::GzDecoder::new(data);
-    let mut archive = tar::Archive::new(gz);
-    for entry in archive.entries().map_err(|e| format!("tar: {e}"))? {
-        let mut entry = entry.map_err(|e| format!("entry: {e}"))?;
-        if entry
-            .path()
-            .map_err(|e| format!("path: {e}"))?
-            .to_string_lossy()
-            == "metadata.json"
-        {
-            return serde_json::from_reader(&mut entry)
+fn metadata_json_from_zip(data: &[u8]) -> Result<JsonValue, String> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("open ZIP: {e}"))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("read ZIP entry: {e}"))?;
+        if entry.name() == "metadata.json" {
+            let mut metadata = Vec::new();
+            entry
+                .read_to_end(&mut metadata)
+                .map_err(|e| format!("read metadata.json: {e}"))?;
+            return serde_json::from_slice(&metadata)
                 .map_err(|e| format!("parse metadata.json: {e}"));
         }
     }
     Err("metadata.json not found in archive".to_string())
 }
 
-fn build_tar_gz_from_metadata(bundle: &JsonValue) -> Result<Vec<u8>, String> {
+fn build_zip_from_metadata(bundle: &JsonValue) -> Result<Vec<u8>, String> {
     let metadata_json = serde_json::to_vec(bundle).map_err(|e| format!("serialize: {e}"))?;
-    let mut tar_gz = Vec::new();
-    {
-        let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
-        let mut tar = tar::Builder::new(gz);
-        let mut header = tar::Header::new_gnu();
-        header.set_size(metadata_json.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
-            .map_err(|e| format!("write tar: {e}"))?;
-        let gz = tar.into_inner().map_err(|e| format!("finish tar: {e}"))?;
-        gz.finish().map_err(|e| format!("finish gzip: {e}"))?;
-    }
-    Ok(tar_gz)
+    let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    archive
+        .start_file(
+            "metadata.json",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .map_err(|e| format!("start metadata.json: {e}"))?;
+    archive
+        .write_all(&metadata_json)
+        .map_err(|e| format!("write metadata.json: {e}"))?;
+    archive
+        .finish()
+        .map(Cursor::into_inner)
+        .map_err(|e| format!("finish ZIP: {e}"))
 }
 
 async fn import_bundle(
@@ -170,11 +167,11 @@ async fn import_bundle(
     base: &str,
     bundle: &JsonValue,
 ) -> (StatusCode, String) {
-    let tar_gz = build_tar_gz_from_metadata(bundle).expect("build tar.gz");
+    let zip_bytes = build_zip_from_metadata(bundle).expect("build ZIP");
     let resp = http
         .post(format!("{base}/import"))
-        .header("content-type", "application/gzip")
-        .body(tar_gz)
+        .header("content-type", "application/zip")
+        .body(zip_bytes)
         .send()
         .await
         .expect("import request");
@@ -280,7 +277,6 @@ async fn import_rejects_duplicate_identifiers() {
                     "sinks": [{ "type": "nop" }]
                 }
             ],
-            "pipeline_run_states": [],
             "udfs": []
         }
     });
@@ -314,7 +310,6 @@ async fn import_rejects_invalid_resources() {
                 }
             ],
             "pipelines": [],
-            "pipeline_run_states": [],
             "udfs": []
         }
     });
@@ -342,7 +337,6 @@ async fn import_rejects_empty_name_and_zero_capacity() {
             "shared_mqtt_clients": [],
             "streams": [],
             "pipelines": [],
-            "pipeline_run_states": [],
             "udfs": []
         }
     });
@@ -352,7 +346,7 @@ async fn import_rejects_empty_name_and_zero_capacity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn import_rejects_dangling_pipeline_run_state_reference() {
+async fn import_rejects_legacy_pipeline_run_states() {
     let Some(h) = ImportExportHarness::new().await else {
         return;
     };
@@ -376,6 +370,10 @@ async fn import_rejects_dangling_pipeline_run_state_reference() {
 
     let (status, body) = import_bundle(&h.http, &h.base(), &bundle).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body.contains("unknown field `pipeline_run_states`"),
+        "body: {body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -405,7 +403,7 @@ async fn import_empty_bundle_replaces_existing_snapshot() {
     let after = export_bundle(&h.http, &h.base()).await;
     assert_eq!(after["resources"]["streams"], json!([]));
     assert_eq!(after["resources"]["pipelines"], json!([]));
-    assert_eq!(after["resources"]["pipeline_run_states"], json!([]));
+    assert!(after["resources"].get("pipeline_run_states").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -428,7 +426,6 @@ async fn import_full_replace_removes_missing_resources() {
             "shared_mqtt_clients": [],
             "streams": [],
             "pipelines": [],
-            "pipeline_run_states": [],
             "udfs": []
         }
     });
@@ -475,7 +472,6 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
                 }
             ],
             "pipelines": [],
-            "pipeline_run_states": [],
             "udfs": []
         }
     });
@@ -537,7 +533,7 @@ async fn export_empty_storage_returns_empty_bundle() {
     let bundle = export_bundle(&h.http, &h.base()).await;
     assert_eq!(bundle["resources"]["streams"], json!([]));
     assert_eq!(bundle["resources"]["pipelines"], json!([]));
-    assert_eq!(bundle["resources"]["pipeline_run_states"], json!([]));
+    assert!(bundle["resources"].get("pipeline_run_states").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -634,17 +630,15 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
                 {
                     "id": "z_pipe",
                     "sql": "SELECT value FROM z_stream",
+                    "run_state": "Stopped",
                     "sinks": [{ "type": "nop" }]
                 },
                 {
                     "id": "a_pipe",
                     "sql": "SELECT value FROM a_stream",
+                    "run_state": "Stopped",
                     "sinks": [{ "type": "nop" }]
                 }
-            ],
-            "pipeline_run_states": [
-                { "pipeline_id": "z_pipe", "desired_state": "Stopped" },
-                { "pipeline_id": "a_pipe", "desired_state": "Stopped" }
             ],
             "udfs": []
         }
@@ -661,14 +655,8 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
     let pipelines = exported["resources"]["pipelines"]
         .as_array()
         .expect("pipelines array");
-    let run_states = exported["resources"]["pipeline_run_states"]
-        .as_array()
-        .expect("run states array");
-
     assert_eq!(sorted_ids(streams, "name"), vec!["a_stream", "z_stream"]);
     assert_eq!(sorted_ids(pipelines, "id"), vec!["a_pipe", "z_pipe"]);
-    assert_eq!(
-        sorted_ids(run_states, "pipeline_id"),
-        vec!["a_pipe", "z_pipe"]
-    );
+    assert_eq!(pipelines[0]["run_state"], "Stopped");
+    assert_eq!(pipelines[1]["run_state"], "Stopped");
 }

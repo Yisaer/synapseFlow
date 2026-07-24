@@ -203,17 +203,17 @@ work; for now, only persist a new pipeline if you intend to keep the UDF.
 
 ### Integration with import/export
 
-Export produces a **tar.gz archive** containing:
+Export produces a **ZIP archive** containing:
 
 ```
-veloflux-export-<timestamp>.tar.gz
+veloflux-export-<timestamp>.zip
 ├── metadata.json          # ExportBundleV1 (streams, pipelines, mqtt, memory_topics, udfs)
 └── wasm_files/            # WASM UDF binaries (one .wasm per function)
     ├── <sha256_1>.wasm
     └── <sha256_2>.wasm
 ```
 
-**Why tar.gz instead of base64-inline JSON?**
+**Why an archive instead of base64-inline JSON?**
 
 - Large WASM binaries don't bloat the JSON payload.
 - The archive is a single file, easy to transfer and archive.
@@ -226,11 +226,11 @@ veloflux-export-<timestamp>.tar.gz
    `ExportUdf` records with `name` and `wasm_sha256` (not the binary).
 2. Copy referenced `.wasm` files from `<base_dir>/wasm_files/` into the archive's
    `wasm_files/` directory.
-3. Return as `application/gzip` with `Content-Disposition: attachment`.
+3. Return as `application/zip` with `Content-Disposition: attachment`.
 
 **Import flow**
 
-1. Unpack the tar.gz to a temporary directory.
+1. Safely extract the ZIP to a temporary directory.
 2. Parse and validate `metadata.json` (streams, pipelines, etc.).
 3. For each UDF in the `udfs` list:
    - Require `<sha256>.wasm` to exist in the archive.
@@ -244,8 +244,8 @@ veloflux-export-<timestamp>.tar.gz
 
 | Method | Path              | Content-Type       |
 |--------|-------------------|--------------------|
-| `GET`  | `/storage/export` | `application/gzip` |
-| `POST` | `/import`         | `application/gzip` |
+| `GET`  | `/storage/export` | `application/zip` |
+| `POST` | `/import`         | `application/zip` |
 
 The previous JSON-only format is no longer supported.
 

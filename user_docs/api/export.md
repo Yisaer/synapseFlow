@@ -15,7 +15,8 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 `GET /storage/export`
 
-Exports the current persisted metadata as a downloadable JSON bundle.
+Exports the current persisted metadata as a downloadable ZIP bundle. The ZIP contains
+`metadata.json`, referenced WASM files, installed schema sources, and uploads.
 
 The export is a storage-level metadata snapshot. It does **not** include runtime-only state such as:
 
@@ -26,8 +27,8 @@ The export is a storage-level metadata snapshot. It does **not** include runtime
 
 Response:
 
-- `200 OK` with `Content-Type: application/json`
-- `200 OK` includes `Content-Disposition: attachment; filename="veloflux-metadata-export-<unix_secs>.json"`
+- `200 OK` with `Content-Type: application/zip`
+- `200 OK` includes `Content-Disposition: attachment; filename="veloflux-export-<unix_secs>.zip"`
 - `409 Conflict` if another import/export command is in progress
 - `500 Internal Server Error` if export snapshot building fails
 
@@ -49,8 +50,7 @@ curl -sOJ http://127.0.0.1:8080/storage/export
 - `memory_topics: ExportMemoryTopic[]`
 - `shared_mqtt_clients: SharedMqttClientConfig[]`
 - `streams: CreateStreamRequest[]`
-- `pipelines: CreatePipelineRequest[]`
-- `pipeline_run_states: ExportPipelineRunState[]`
+- `pipelines: ExportPipeline[]`
 
 ### `ExportMemoryTopic`
 
@@ -66,14 +66,17 @@ curl -sOJ http://127.0.0.1:8080/storage/export
 - `client_id: string`
 - `qos: number`
 
-### `ExportPipelineRunState`
+### `ExportPipeline`
 
-- `pipeline_id: string`
-- `desired_state: string` (`Running` or `Stopped`)
+- all fields from `CreatePipelineRequest`
+- `run_state: StoredPipelineDesiredState`
+  - `Stopped`
+  - `Running`
+  - `{ "RunningScheduled": <unix_timestamp_ms> }`
 
 ## Notes
 
 - `streams` are exported using the same shape as `CreateStreamRequest`.
-- `pipelines` are exported using the same shape as `CreatePipelineRequest`.
+- `pipelines` use the `CreatePipelineRequest` shape with inline `run_state`.
 - The exported arrays are sorted by stable identifiers to make the output easier to diff.
 - The bundle is intended for future import / migration workflows, not for runtime checkpoint recovery.

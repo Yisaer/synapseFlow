@@ -306,7 +306,7 @@ impl ApplySummary {
             shared_mqtt_clients: resources.shared_mqtt_clients.len(),
             streams: resources.streams.len(),
             pipelines: resources.pipelines.len(),
-            pipeline_run_states: resources.pipeline_run_states.len(),
+            pipeline_run_states: resources.pipelines.len(),
         }
     }
 }
@@ -314,7 +314,9 @@ impl ApplySummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::ExportPipeline;
     use crate::storage_bridge;
+    use storage::StoredPipelineDesiredState;
     use tempfile::tempdir;
 
     use crate::pipeline::CreatePipelineRequest;
@@ -345,7 +347,6 @@ mod tests {
                 schemas: vec![],
                 streams: vec![sample_stream_request(stream_name)],
                 pipelines: Vec::new(),
-                pipeline_run_states: Vec::new(),
                 udfs: vec![],
             },
         }
@@ -528,10 +529,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
         let mut bundle = sample_bundle("stream_1");
-        bundle
-            .resources
-            .pipelines
-            .push(sample_pipeline_request("pipe_1", "stream_1", "worker_a"));
+        bundle.resources.pipelines.push(ExportPipeline {
+            definition: sample_pipeline_request("pipe_1", "stream_1", "worker_a"),
+            run_state: StoredPipelineDesiredState::Stopped,
+        });
         write_init_json(dir.path(), &bundle);
 
         let err =
@@ -557,11 +558,10 @@ mod tests {
 
         let mut bundle = sample_bundle("stream_2");
         bundle.resources.streams.clear();
-        bundle.resources.pipelines.push(sample_pipeline_request(
-            "pipe_1",
-            "stream_1",
-            DEFAULT_FLOW_INSTANCE_ID,
-        ));
+        bundle.resources.pipelines.push(ExportPipeline {
+            definition: sample_pipeline_request("pipe_1", "stream_1", DEFAULT_FLOW_INSTANCE_ID),
+            run_state: StoredPipelineDesiredState::Stopped,
+        });
 
         write_init_json(dir.path(), &bundle);
 
@@ -675,11 +675,14 @@ mod tests {
 
         let mut bundle = sample_bundle("stream_unused");
         bundle.resources.streams.clear();
-        bundle.resources.pipelines.push(sample_pipeline_request(
-            "pipe_1",
-            "missing_stream",
-            DEFAULT_FLOW_INSTANCE_ID,
-        ));
+        bundle.resources.pipelines.push(ExportPipeline {
+            definition: sample_pipeline_request(
+                "pipe_1",
+                "missing_stream",
+                DEFAULT_FLOW_INSTANCE_ID,
+            ),
+            run_state: StoredPipelineDesiredState::Stopped,
+        });
 
         write_init_json(dir.path(), &bundle);
 

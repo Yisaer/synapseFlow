@@ -13,7 +13,7 @@ with the existing export/import and bootstrap (`init.json` / `init.tar.gz`) mech
 
 - Provide a REST API for uploading, listing, downloading, and deleting files.
 - Store uploaded files under `data_dir/uploads/` as plain files on the filesystem.
-- Integrate with the export tar.gz archive and the `init.tar.gz` bootstrap format.
+- Integrate with the export ZIP archive and the `init.tar.gz` bootstrap format.
 - Keep the implementation minimal: no redb metadata table, filesystem is the single source of truth.
 
 ## Non-Goals
@@ -71,11 +71,11 @@ Connectors resolve these paths by joining `{data_dir}/{relative_path}` at runtim
 
 ## Export / Import Integration
 
-The export tar.gz archive (`GET /storage/export`) includes an `uploads/` directory alongside
+The export ZIP archive (`GET /storage/export`) includes an `uploads/` directory alongside
 `metadata.json` and `wasm_files/`. The archive layout:
 
 ```
-veloflux-export-<timestamp>.tar.gz
+veloflux-export-<timestamp>.zip
   metadata.json
   wasm_files/
     <sha256>.wasm

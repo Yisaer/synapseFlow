@@ -37,7 +37,7 @@ The current bundle contains:
 - streams
 - named schemas
 - pipelines
-- pipeline desired-state records
+- pipeline definitions with inline desired run state
 - WASM UDFs (metadata + `.wasm` binaries)
 
 This scope is intentionally broader than pipelines alone. A pipeline snapshot is incomplete without
@@ -51,11 +51,10 @@ The exported payload is versioned as `ExportBundleV1` and includes:
 - `resources.memory_topics`
 - `resources.shared_mqtt_clients`
 - `resources.streams`
-- `resources.pipelines`
-- `resources.pipeline_run_states`
+- `resources.pipelines`, with an optional inline `run_state` that defaults to `Stopped`
 - `resources.udfs`
 
-Export is delivered as a **tar.gz archive** containing `metadata.json`, a `wasm_files/`
+Export is delivered as a **ZIP archive** containing `metadata.json`, a `wasm_files/`
 directory with one `.wasm` binary per UDF keyed by SHA-256, and the installed source tree for
 file-backed schemas under `schemas/<type>/<name>/`. The previous JSON-only format is no longer
 supported.
@@ -72,8 +71,6 @@ Import validates the bundle before touching storage. Current checks include:
 - duplicate shared MQTT client keys
 - duplicate stream names
 - duplicate pipeline ids
-- duplicate pipeline run-state entries
-- each pipeline run-state entry must reference a pipeline in the same bundle
 - each pipeline must reference a declared `flow_instance_id`
 - normalized pipeline requests must still pass normal pipeline request validation
 - duplicate UDF names (lowercase)
@@ -91,10 +88,16 @@ Import validates the bundle before touching storage. Current checks include:
 Validation is whole-bundle and strict. There is no best-effort acceptance of a partially valid
 bundle.
 
-Import accepts a tar.gz body (`application/gzip`). The archive is unpacked to a temporary
+Import accepts a ZIP body (`application/zip`). Archive extraction rejects unsafe paths, duplicate
+paths, symlinks, special files, excessive entry counts, oversized individual files, and excessive
+total uncompressed size. The archive is unpacked to a temporary
 directory, schema sources are copied to a sanitized staging tree, `metadata.json` and staged
 schema sources are parsed and validated, and `.wasm` files are copied to the shared
 `wasm_files/` directory after validation.
+
+Legacy bundles containing a top-level `resources.pipeline_run_states` collection are rejected.
+Pipeline run state is serialized using the existing `StoredPipelineDesiredState` representation;
+the only format change is moving that value onto its owning pipeline as `run_state`.
 
 ## Replace Semantics
 
@@ -184,7 +187,8 @@ not just because operators may want timestamps.
 - Verify export includes every resource collection needed to rebuild pipeline context.
 - Verify export ordering is stable across repeated reads of the same storage snapshot.
 - Verify import rejects duplicate resource identities within the bundle.
-- Verify import rejects pipeline run-state entries that reference missing pipelines.
+- Verify omitted inline pipeline run state defaults to `Stopped`.
+- Verify legacy top-level pipeline run-state collections are rejected.
 - Verify import rejects pipelines bound to undeclared flow instances.
 - Verify import rejects UDFs with duplicate names.
 - Verify import rejects UDFs whose `.wasm` file is missing from the archive or has a SHA-256

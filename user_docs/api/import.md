@@ -21,7 +21,8 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 Imports a full metadata bundle and atomically replaces the current persisted metadata snapshot in
 storage.
 
-The request body uses the same JSON shape as the export API response (`ExportBundleV1`).
+The request body is the ZIP returned by the export API. Its `metadata.json` uses the
+`ExportBundleV1` shape.
 
 Important behavior:
 
@@ -46,8 +47,8 @@ not a runtime checkpoint restore mechanism.
 - `memory_topics: ExportMemoryTopic[]`
 - `shared_mqtt_clients: SharedMqttClientConfig[]`
 - `streams: CreateStreamRequest[]`
-- `pipelines: CreatePipelineRequest[]`
-- `pipeline_run_states: ExportPipelineRunState[]`
+- `pipelines: ExportPipeline[]`, where each pipeline has an optional inline `run_state`
+  that defaults to `Stopped`
 
 ## Validation
 
@@ -57,7 +58,9 @@ The import request is rejected with `400 Bad Request` if:
 - a memory topic has an empty name or zero capacity
 - a stream has an empty name
 - a pipeline fails basic request validation
-- a pipeline run state references a pipeline that is not included in the bundle
+- the archive contains an unsafe path, duplicate path, symlink, special file, too many entries,
+  an oversized file, or excessive total uncompressed data
+- the legacy top-level `pipeline_run_states` resource is present
 
 ## Response
 
@@ -73,7 +76,7 @@ The import request is rejected with `400 Bad Request` if:
 - `imported_resource_counts: ImportResourceCounts`
 - `previous_bundle: ExportBundleV1`
   - the full persisted metadata snapshot captured before the import transaction
-  - this can be saved and sent back to `POST /import` later to rollback the persisted metadata
+  - this is metadata only; it is not a complete import ZIP
 
 ### `ImportResourceCounts`
 
@@ -81,20 +84,19 @@ The import request is rejected with `400 Bad Request` if:
 - `shared_mqtt_clients: number`
 - `streams: number`
 - `pipelines: number`
-- `pipeline_run_states: number`
 
 ## Example
 
 ```bash
 curl -X POST \
-  -H 'Content-Type: application/json' \
-  --data @veloflux-metadata-export.json \
+  -H 'Content-Type: application/zip' \
+  --data-binary @veloflux-export.zip \
   http://127.0.0.1:8080/import
 ```
 
 ## Notes
 
 - The import API is defined as **full replace**, not partial upsert.
-- `previous_bundle` is intended to be used as the rollback payload for a later full replace import.
+- Use `GET /storage/export` before import when a complete restorable backup is required.
 - Because runtime reconciliation is out of scope for this endpoint, a restart or a separate runtime
   apply workflow may still be required after import.

@@ -1,23 +1,28 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::io::{Cursor, Read};
 use std::path::Path;
 use storage::{
     MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
     StoredSchema, StoredUdf,
 };
 use tokio::sync::TryAcquireError;
+use zip::ZipArchive;
 
 use crate::audit::ResourceMutationLog;
-use crate::export::{
-    ExportBundleV1, ExportMemoryTopic, ExportPipelineRunState, ExportUdf, build_export_bundle,
-};
+use crate::export::{ExportBundleV1, ExportMemoryTopic, ExportUdf, build_export_bundle};
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 use crate::schema::source::{PreparedSchemaTree, resolve_props_from_root};
 use crate::storage_bridge;
 use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
+
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_ARCHIVE_FILE_SIZE: u64 = 512 * 1024 * 1024;
+const MAX_ARCHIVE_TOTAL_SIZE: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_BODY_SIZE: usize = 512 * 1024 * 1024;
 
 /// Reload all schemas from persistent storage into the in-memory `NamedSchemaStore`.
 fn reload_schemas_from_storage(storage: &storage::StorageManager) {
@@ -39,16 +44,15 @@ pub struct ImportResourceCounts {
     pub schemas: usize,
     pub streams: usize,
     pub pipelines: usize,
-    pub pipeline_run_states: usize,
     pub udfs: usize,
 }
 
-/// Accept a tar.gz body via `axum::body::Bytes`.
+/// Accept a ZIP body via `axum::body::Bytes`.
 pub async fn import_storage_handler(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let audit = ResourceMutationLog::new("storage", "import", "tar_gz_bundle", None);
+    let audit = ResourceMutationLog::new("storage", "import", "zip_bundle", None);
     let _import_export_permit = match state.try_acquire_import_export_op() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return import_export_busy_response(),
@@ -59,7 +63,6 @@ pub async fn import_storage_handler(
         }
     };
 
-    // Unpack the tar.gz and extract metadata.json + wasm_files/
     let tmp = match tempfile::tempdir() {
         Ok(d) => d,
         Err(e) => {
@@ -69,7 +72,7 @@ pub async fn import_storage_handler(
         }
     };
 
-    if let Err(err) = extract_tar_gz(&body, tmp.path()) {
+    if let Err(err) = extract_zip(&body, tmp.path()) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -156,7 +159,6 @@ pub async fn import_storage_handler(
         schemas: snapshot.schemas.len(),
         streams: snapshot.streams.len(),
         pipelines: snapshot.pipelines.len(),
-        pipeline_run_states: snapshot.pipeline_run_states.len(),
         udfs: udf_count,
     };
 
@@ -185,12 +187,166 @@ pub async fn import_storage_handler(
         .into_response()
 }
 
-fn extract_tar_gz(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
-    let gz = flate2::read::GzDecoder::new(data);
-    let mut archive = tar::Archive::new(gz);
-    archive
-        .unpack(dest)
-        .map_err(|e| format!("unpack tar.gz: {e}"))
+fn extract_zip(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
+    extract_zip_with_limits(
+        data,
+        dest,
+        MAX_ARCHIVE_ENTRIES,
+        MAX_ARCHIVE_FILE_SIZE,
+        MAX_ARCHIVE_TOTAL_SIZE,
+    )
+}
+
+fn extract_zip_with_limits(
+    data: &[u8],
+    dest: &std::path::Path,
+    max_entries: usize,
+    max_file_size: u64,
+    max_total_size: u64,
+) -> Result<(), String> {
+    let mut archive =
+        ZipArchive::new(Cursor::new(data)).map_err(|e| format!("open import ZIP: {e}"))?;
+    let declared_entries = declared_zip_entry_count(data)?;
+    if declared_entries != archive.len() {
+        return Err(
+            "import ZIP contains duplicate entries or an inconsistent central directory"
+                .to_string(),
+        );
+    }
+    if archive.len() > max_entries {
+        return Err(format!(
+            "import ZIP has too many entries: {} > {max_entries}",
+            archive.len()
+        ));
+    }
+
+    let mut paths = HashSet::with_capacity(archive.len());
+    let mut total_size = 0u64;
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|e| format!("read import ZIP entry {index}: {e}"))?;
+        let name = file.name();
+        if name.contains('\\') {
+            return Err(format!("import ZIP entry `{name}` contains a backslash"));
+        }
+        let path = file
+            .enclosed_name()
+            .ok_or_else(|| format!("import ZIP entry `{name}` has an unsafe path"))?;
+        if path.as_os_str().is_empty() {
+            return Err("import ZIP contains an empty entry path".to_string());
+        }
+        if !paths.insert(path.clone()) {
+            return Err(format!(
+                "import ZIP contains duplicate entry `{}`",
+                path.display()
+            ));
+        }
+        if file.is_symlink() {
+            return Err(format!(
+                "import ZIP entry `{}` is not a regular file or directory",
+                path.display()
+            ));
+        }
+        if let Some(mode) = file.unix_mode()
+            && mode & 0o170000 != 0
+            && mode & 0o170000 != 0o040000
+            && mode & 0o170000 != 0o100000
+        {
+            return Err(format!(
+                "import ZIP entry `{}` is not a regular file or directory",
+                path.display()
+            ));
+        }
+        if !file.is_dir() {
+            if file.size() > max_file_size {
+                return Err(format!(
+                    "import ZIP entry `{}` exceeds {max_file_size} bytes",
+                    path.display()
+                ));
+            }
+            total_size = total_size
+                .checked_add(file.size())
+                .ok_or_else(|| "import ZIP uncompressed size overflow".to_string())?;
+            if total_size > max_total_size {
+                return Err(format!(
+                    "import ZIP uncompressed size exceeds {max_total_size} bytes"
+                ));
+            }
+        }
+    }
+
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| format!("read import ZIP entry {index}: {e}"))?;
+        let path = file
+            .enclosed_name()
+            .ok_or_else(|| format!("import ZIP entry `{}` has an unsafe path", file.name()))?;
+        let target = dest.join(&path);
+        if file.is_dir() {
+            std::fs::create_dir_all(&target).map_err(|e| {
+                format!(
+                    "create directory for import ZIP entry `{}`: {e}",
+                    path.display()
+                )
+            })?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "create parent for import ZIP entry `{}`: {e}",
+                    path.display()
+                )
+            })?;
+        }
+        let mut output = std::fs::File::create(&target)
+            .map_err(|e| format!("create import ZIP entry `{}`: {e}", path.display()))?;
+        let copied = std::io::copy(&mut file.by_ref().take(max_file_size + 1), &mut output)
+            .map_err(|e| format!("extract import ZIP entry `{}`: {e}", path.display()))?;
+        if copied != file.size() || copied > max_file_size {
+            return Err(format!(
+                "import ZIP entry `{}` size changed while extracting",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn declared_zip_entry_count(data: &[u8]) -> Result<usize, String> {
+    const EOCD_LEN: usize = 22;
+    const MAX_COMMENT_LEN: usize = u16::MAX as usize;
+    if data.len() < EOCD_LEN {
+        return Err("import ZIP is missing its end-of-central-directory record".to_string());
+    }
+
+    let search_start = data.len().saturating_sub(EOCD_LEN + MAX_COMMENT_LEN);
+    for offset in (search_start..=data.len() - EOCD_LEN).rev() {
+        if data[offset..offset + 4] != *b"PK\x05\x06" {
+            continue;
+        }
+        let read_u16 = |relative: usize| {
+            u16::from_le_bytes([data[offset + relative], data[offset + relative + 1]])
+        };
+        let comment_len = usize::from(read_u16(20));
+        if offset + EOCD_LEN + comment_len != data.len() {
+            continue;
+        }
+        let disk_number = read_u16(4);
+        let central_directory_disk = read_u16(6);
+        let entries_on_disk = read_u16(8);
+        let total_entries = read_u16(10);
+        if disk_number != 0 || central_directory_disk != 0 || entries_on_disk != total_entries {
+            return Err("multi-disk import ZIP archives are not supported".to_string());
+        }
+        if total_entries == u16::MAX {
+            return Err("ZIP64 import archives are not supported".to_string());
+        }
+        return Ok(usize::from(total_entries));
+    }
+    Err("import ZIP has an invalid end-of-central-directory record".to_string())
 }
 
 fn validate_pipeline_stream_references(
@@ -307,9 +463,10 @@ where
     }
 
     let mut pipelines = Vec::with_capacity(bundle.resources.pipelines.len());
+    let mut pipeline_run_states = Vec::with_capacity(bundle.resources.pipelines.len());
     let mut pipeline_ids = BTreeSet::new();
-    for req in &bundle.resources.pipelines {
-        let normalized = normalize_pipeline_request(req)?;
+    for pipeline in &bundle.resources.pipelines {
+        let normalized = normalize_pipeline_request(&pipeline.definition)?;
         validate_pipeline_stream_references(&normalized, &available_stream_names)?;
 
         let flow_instance_id = normalized
@@ -324,15 +481,9 @@ where
         }
 
         pipelines.push(storage_bridge::stored_pipeline_from_request(&normalized)?);
-    }
-
-    let mut pipeline_run_states = Vec::with_capacity(bundle.resources.pipeline_run_states.len());
-    let mut state_ids = BTreeSet::new();
-    for run_state in &bundle.resources.pipeline_run_states {
-        validate_pipeline_run_state(run_state, &pipeline_ids, &mut state_ids)?;
         pipeline_run_states.push(StoredPipelineRunState {
-            pipeline_id: run_state.pipeline_id.clone(),
-            desired_state: run_state.desired_state.clone(),
+            pipeline_id: id,
+            desired_state: pipeline.run_state.clone(),
         });
     }
 
@@ -551,27 +702,6 @@ where
     Ok(())
 }
 
-fn validate_pipeline_run_state(
-    run_state: &ExportPipelineRunState,
-    pipeline_ids: &BTreeSet<String>,
-    state_ids: &mut BTreeSet<String>,
-) -> Result<(), String> {
-    validate_resource_id(ResourceIdKind::PipelineId, &run_state.pipeline_id)?;
-    if !state_ids.insert(run_state.pipeline_id.clone()) {
-        return Err(format!(
-            "duplicate pipeline_run_state entry in bundle: {}",
-            run_state.pipeline_id
-        ));
-    }
-    if !pipeline_ids.contains(&run_state.pipeline_id) {
-        return Err(format!(
-            "pipeline_run_state references missing pipeline: {}",
-            run_state.pipeline_id
-        ));
-    }
-    Ok(())
-}
-
 fn import_export_busy_response() -> axum::response::Response {
     (
         StatusCode::CONFLICT,
@@ -583,11 +713,15 @@ fn import_export_busy_response() -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::ExportPipeline;
     use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use serde_json::Value as JsonValue;
-    use storage::{StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
+    use std::io::{Cursor, Write};
+    use storage::{
+        StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState, StoredPipelineRunState,
+    };
     use tempfile::tempdir;
 
     fn sample_default_instance_spec() -> FlowInstanceSpec {
@@ -675,10 +809,9 @@ mod tests {
                 }],
                 schemas: vec![],
                 streams: vec![sample_stream_request(stream_name)],
-                pipelines: vec![sample_pipeline_request(pipeline_id, stream_name)],
-                pipeline_run_states: vec![ExportPipelineRunState {
-                    pipeline_id: pipeline_id.to_string(),
-                    desired_state: StoredPipelineDesiredState::Stopped,
+                pipelines: vec![ExportPipeline {
+                    definition: sample_pipeline_request(pipeline_id, stream_name),
+                    run_state: StoredPipelineDesiredState::Stopped,
                 }],
                 udfs: vec![],
             },
@@ -707,7 +840,7 @@ mod tests {
                 .expect("schema ref");
     }
 
-    fn build_tar_gz_for_test(
+    fn build_zip_for_test(
         bundle: &ExportBundleV1,
         wasm_dir: &std::path::Path,
         uploads_dir: &std::path::Path,
@@ -719,51 +852,189 @@ mod tests {
             .iter()
             .map(|u| u.wasm_sha256.clone())
             .collect();
-        crate::export::build_tar_gz(bundle, &udf_shas, wasm_dir, uploads_dir, schemas_dir)
+        crate::export::build_zip(bundle, &udf_shas, wasm_dir, uploads_dir, schemas_dir)
             .expect("build test export")
     }
 
+    fn build_zip_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut seen = std::collections::HashSet::new();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, data) in entries {
+            if !seen.insert(*name) {
+                continue;
+            }
+            writer.start_file(name, options).expect("start ZIP entry");
+            writer.write_all(data).expect("write ZIP entry");
+        }
+        writer.finish().expect("finish ZIP").into_inner()
+    }
+
+    fn build_raw_zip_with_duplicate_entry() -> Vec<u8> {
+        use std::io::Write;
+
+        let name = b"duplicate";
+        let data = b"x";
+        let crc = 0x8cdc1683u32;
+
+        let mut buf = Vec::new();
+
+        // Local file header 1 (offset 0)
+        buf.write_all(b"PK\x03\x04").unwrap();
+        buf.write_all(&20u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&crc.to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(name.len() as u16).to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(name).unwrap();
+        buf.write_all(data).unwrap();
+
+        // Local file header 2
+        let local_offset2 = buf.len() as u32;
+        buf.write_all(b"PK\x03\x04").unwrap();
+        buf.write_all(&20u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&crc.to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(name.len() as u16).to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(name).unwrap();
+        buf.write_all(data).unwrap();
+
+        let cd_offset = buf.len() as u32;
+
+        // Central directory entry 1
+        buf.write_all(b"PK\x01\x02").unwrap();
+        buf.write_all(&20u16.to_le_bytes()).unwrap();
+        buf.write_all(&20u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&crc.to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(name.len() as u16).to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u32.to_le_bytes()).unwrap();
+        buf.write_all(&0u32.to_le_bytes()).unwrap();
+        buf.write_all(name).unwrap();
+
+        // Central directory entry 2
+        buf.write_all(b"PK\x01\x02").unwrap();
+        buf.write_all(&20u16.to_le_bytes()).unwrap();
+        buf.write_all(&20u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&crc.to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(data.len() as u32).to_le_bytes()).unwrap();
+        buf.write_all(&(name.len() as u16).to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u32.to_le_bytes()).unwrap();
+        buf.write_all(&local_offset2.to_le_bytes()).unwrap();
+        buf.write_all(name).unwrap();
+
+        let cd_size = buf.len() as u32 - cd_offset;
+
+        // End of central directory
+        buf.write_all(b"PK\x05\x06").unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+        buf.write_all(&2u16.to_le_bytes()).unwrap();
+        buf.write_all(&2u16.to_le_bytes()).unwrap();
+        buf.write_all(&cd_size.to_le_bytes()).unwrap();
+        buf.write_all(&cd_offset.to_le_bytes()).unwrap();
+        buf.write_all(&0u16.to_le_bytes()).unwrap();
+
+        buf
+    }
+
     #[cfg(unix)]
-    fn build_tar_gz_with_symlinked_proto(
+    fn build_zip_with_symlinked_proto(
         bundle: &ExportBundleV1,
         target: &std::path::Path,
     ) -> Vec<u8> {
         let metadata = serde_json::to_vec(bundle).expect("serialize metadata");
-        let mut tar_gz = Vec::new();
-        {
-            let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
-            let mut builder = tar::Builder::new(gz);
-
-            let mut metadata_header = tar::Header::new_gnu();
-            metadata_header.set_mode(0o600);
-            metadata_header.set_size(metadata.len() as u64);
-            builder
-                .append_data(&mut metadata_header, "metadata.json", metadata.as_slice())
-                .expect("append metadata");
-
-            let mut link_header = tar::Header::new_gnu();
-            link_header.set_entry_type(tar::EntryType::Symlink);
-            link_header.set_mode(0o777);
-            link_header.set_size(0);
-            builder
-                .append_link(
-                    &mut link_header,
-                    "schemas/proto/simple_schema/simple.proto",
-                    target,
-                )
-                .expect("append schema symlink");
-
-            builder
-                .into_inner()
-                .expect("finish tar")
-                .finish()
-                .expect("finish gzip");
-        }
-        tar_gz
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("metadata.json", options)
+            .expect("start metadata");
+        writer.write_all(&metadata).expect("write metadata");
+        writer
+            .add_symlink(
+                "schemas/proto/simple_schema/simple.proto",
+                target.to_string_lossy(),
+                options,
+            )
+            .expect("add schema symlink");
+        writer.finish().expect("finish ZIP").into_inner()
     }
 
     fn is_default_instance(id: &str) -> bool {
         id == DEFAULT_FLOW_INSTANCE_ID
+    }
+
+    #[test]
+    fn extract_zip_rejects_non_zip_body() {
+        let dir = tempdir().expect("create tempdir");
+        let err = extract_zip(b"not a ZIP archive", dir.path()).expect_err("reject non-ZIP body");
+        assert!(err.contains("open import ZIP"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn extract_zip_rejects_unsafe_path() {
+        let dir = tempdir().expect("create tempdir");
+        let zip = build_zip_entries(&[("../outside", b"data")]);
+        let err = extract_zip(&zip, dir.path()).expect_err("reject unsafe path");
+        assert!(err.contains("unsafe path"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn extract_zip_rejects_duplicate_path() {
+        let dir = tempdir().expect("create tempdir");
+        let zip = build_raw_zip_with_duplicate_entry();
+        let err = extract_zip(&zip, dir.path()).expect_err("reject duplicate path");
+        assert!(err.contains("duplicate"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn extract_zip_enforces_entry_and_size_limits() {
+        let dir = tempdir().expect("create tempdir");
+        let zip = build_zip_entries(&[("one", b"1234"), ("two", b"5678")]);
+
+        let err = extract_zip_with_limits(&zip, dir.path(), 1, 8, 16)
+            .expect_err("reject excessive entry count");
+        assert!(err.contains("too many entries"), "unexpected error: {err}");
+
+        let err =
+            extract_zip_with_limits(&zip, dir.path(), 2, 3, 16).expect_err("reject oversized file");
+        assert!(err.contains("exceeds 3 bytes"), "unexpected error: {err}");
+
+        let err = extract_zip_with_limits(&zip, dir.path(), 2, 8, 7)
+            .expect_err("reject excessive total size");
+        assert!(
+            err.contains("uncompressed size exceeds 7 bytes"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -805,43 +1076,51 @@ mod tests {
     #[test]
     fn validate_snapshot_rejects_duplicate_pipeline_ids() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle
-            .resources
-            .pipelines
-            .push(sample_pipeline_request("pipe_a", "stream_a"));
+        bundle.resources.pipelines.push(ExportPipeline {
+            definition: sample_pipeline_request("pipe_a", "stream_a"),
+            run_state: StoredPipelineDesiredState::Stopped,
+        });
 
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "duplicate pipeline id in bundle: pipe_a");
     }
 
     #[test]
-    fn validate_snapshot_rejects_duplicate_pipeline_run_state_entries() {
-        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle
-            .resources
-            .pipeline_run_states
-            .push(bundle.resources.pipeline_run_states[0].clone());
-
-        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
-        assert_eq!(err, "duplicate pipeline_run_state entry in bundle: pipe_a");
+    fn deserialize_pipeline_without_run_state_defaults_to_stopped() {
+        let mut value =
+            serde_json::to_value(sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a"))
+                .expect("serialize bundle");
+        value["resources"]["pipelines"][0]
+            .as_object_mut()
+            .expect("pipeline object")
+            .remove("run_state");
+        let bundle: ExportBundleV1 = serde_json::from_value(value).expect("deserialize bundle");
+        assert_eq!(
+            bundle.resources.pipelines[0].run_state,
+            StoredPipelineDesiredState::Stopped
+        );
     }
 
     #[test]
-    fn validate_snapshot_rejects_pipeline_run_state_for_missing_pipeline() {
+    fn validate_snapshot_preserves_inline_pipeline_run_state() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.pipeline_run_states[0].pipeline_id = "pipe_missing".to_string();
+        bundle.resources.pipelines[0].run_state = StoredPipelineDesiredState::RunningScheduled(123);
 
-        let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
+        let snapshot = validate_and_build_snapshot(&bundle, None, &is_default_instance)
+            .expect("build snapshot");
         assert_eq!(
-            err,
-            "pipeline_run_state references missing pipeline: pipe_missing"
+            snapshot.pipeline_run_states,
+            vec![StoredPipelineRunState {
+                pipeline_id: "pipe_a".to_string(),
+                desired_state: StoredPipelineDesiredState::RunningScheduled(123),
+            }]
         );
     }
 
     #[test]
     fn validate_snapshot_rejects_undeclared_flow_instance() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.pipelines[0].flow_instance_id = Some("unknown".to_string());
+        bundle.resources.pipelines[0].definition.flow_instance_id = Some("unknown".to_string());
 
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(err, "flow instance unknown is not declared by config");
@@ -850,7 +1129,7 @@ mod tests {
     #[test]
     fn validate_snapshot_normalizes_missing_flow_instance_id_to_default() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.pipelines[0].flow_instance_id = None;
+        bundle.resources.pipelines[0].definition.flow_instance_id = None;
 
         let snapshot = validate_and_build_snapshot(&bundle, None, &is_default_instance)
             .expect("build snapshot");
@@ -904,13 +1183,13 @@ mod tests {
         )
         .expect("create app state");
 
-        let tar_gz = build_tar_gz_for_test(
+        let zip_bytes = build_zip_for_test(
             &new_bundle,
             &dir.path().join("wasm_files"),
             &dir.path().join("uploads"),
             &dir.path().join("schemas"),
         );
-        let body = axum::body::Bytes::from(tar_gz);
+        let body = axum::body::Bytes::from(zip_bytes);
 
         let response = import_storage_handler(State(state.clone()), body)
             .await
@@ -957,13 +1236,13 @@ mod tests {
         )
         .expect("create app state");
 
-        let tar_gz = build_tar_gz_for_test(
+        let zip_bytes = build_zip_for_test(
             &invalid_bundle,
             &dir.path().join("wasm_files"),
             &dir.path().join("uploads"),
             &dir.path().join("schemas"),
         );
-        let body = axum::body::Bytes::from(tar_gz);
+        let body = axum::body::Bytes::from(zip_bytes);
 
         let response = import_storage_handler(State(state.clone()), body)
             .await
@@ -991,7 +1270,7 @@ mod tests {
     #[test]
     fn validate_snapshot_rejects_invalid_pipeline_id() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.pipelines[0].id = "bad.pipe".to_string();
+        bundle.resources.pipelines[0].definition.id = "bad.pipe".to_string();
 
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("pipeline id"), "unexpected error: {err}");
@@ -1003,7 +1282,7 @@ mod tests {
         // Use a syntactically invalid id (hyphen): grammar must reject it before
         // the declared-instance lookup runs, so the error is about the grammar,
         // not "not declared by config".
-        bundle.resources.pipelines[0].flow_instance_id = Some("bad-fi".to_string());
+        bundle.resources.pipelines[0].definition.flow_instance_id = Some("bad-fi".to_string());
 
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(err.contains("flow_instance_id"), "unexpected error: {err}");
@@ -1070,7 +1349,8 @@ mod tests {
     #[test]
     fn validate_snapshot_rejects_pipeline_referencing_missing_stream() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.pipelines[0] = sample_pipeline_request("pipe_a", "missing_stream");
+        bundle.resources.pipelines[0].definition =
+            sample_pipeline_request("pipe_a", "missing_stream");
 
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(
@@ -1083,7 +1363,7 @@ mod tests {
     fn validate_and_build_snapshot_with_existing_streams_allows_existing_stream_reference() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.streams.clear();
-        bundle.resources.pipelines[0].sql = "SELECT * FROM stream_a".to_string();
+        bundle.resources.pipelines[0].definition.sql = "SELECT * FROM stream_a".to_string();
 
         let existing_stream_names = BTreeSet::from(["stream_a".to_string()]);
         let snapshot = validate_and_build_snapshot_with_existing_streams(
@@ -1115,9 +1395,9 @@ mod tests {
             .save_upload("ca-cert.pem", b"certificate data")
             .unwrap();
 
-        // Build tar.gz (same as export handler)
+        // Build a ZIP with the same path used by the export handler.
         let exported_bundle = crate::export::build_export_bundle(&storage).unwrap();
-        let tar_gz = build_tar_gz_for_test(
+        let zip_bytes = build_zip_for_test(
             &exported_bundle,
             &storage.wasm_files_dir(),
             &storage.uploads_dir(),
@@ -1135,7 +1415,7 @@ mod tests {
         )
         .unwrap();
 
-        let body = axum::body::Bytes::from(tar_gz);
+        let body = axum::body::Bytes::from(zip_bytes);
         let response = import_storage_handler(State(state.clone()), body)
             .await
             .into_response();
@@ -1173,7 +1453,7 @@ mod tests {
             .unwrap();
 
         let exported_bundle = crate::export::build_export_bundle(&storage).unwrap();
-        let tar_gz = build_tar_gz_for_test(
+        let zip_bytes = build_zip_for_test(
             &exported_bundle,
             &storage.wasm_files_dir(),
             &storage.uploads_dir(),
@@ -1190,7 +1470,7 @@ mod tests {
         )
         .unwrap();
 
-        let body = axum::body::Bytes::from(tar_gz);
+        let body = axum::body::Bytes::from(zip_bytes);
         let response = import_storage_handler(State(state.clone()), body)
             .await
             .into_response();
@@ -1231,7 +1511,7 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("simple.proto")
         );
-        let tar_gz = build_tar_gz_for_test(
+        let zip_bytes = build_zip_for_test(
             &exported_bundle,
             &source_storage.wasm_files_dir(),
             &source_storage.uploads_dir(),
@@ -1249,7 +1529,7 @@ mod tests {
         .unwrap();
 
         let response =
-            import_storage_handler(State(state.clone()), axum::body::Bytes::from(tar_gz))
+            import_storage_handler(State(state.clone()), axum::body::Bytes::from(zip_bytes))
                 .await
                 .into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1291,7 +1571,7 @@ mod tests {
             b"syntax = \"proto3\"; message Simple { int64 value = 1; }",
         )
         .expect("write external proto");
-        let tar_gz = build_tar_gz_with_symlinked_proto(&bundle, &external_proto);
+        let zip_bytes = build_zip_with_symlinked_proto(&bundle, &external_proto);
 
         let target_dir = tempdir().unwrap();
         let target_storage = StorageManager::new(target_dir.path()).unwrap();
@@ -1304,7 +1584,7 @@ mod tests {
         .unwrap();
 
         let response =
-            import_storage_handler(State(state.clone()), axum::body::Bytes::from(tar_gz))
+            import_storage_handler(State(state.clone()), axum::body::Bytes::from(zip_bytes))
                 .await
                 .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
