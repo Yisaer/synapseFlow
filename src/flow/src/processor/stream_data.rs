@@ -361,11 +361,16 @@ impl StreamData {
 
 /// Convenience methods for common control signals
 impl StreamData {
+    /// Create stream end signal with an explicit barrier id.
+    pub fn stream_graceful_end(barrier_id: u64) -> Self {
+        StreamData::control(ControlSignal::Barrier(
+            BarrierControlSignal::StreamGracefulEnd { barrier_id },
+        ))
+    }
+
     /// Create stream end signal
     pub fn stream_end() -> Self {
-        StreamData::control(ControlSignal::Barrier(
-            BarrierControlSignal::StreamGracefulEnd { barrier_id: 0 },
-        ))
+        Self::stream_graceful_end(0)
     }
 
     /// Create quick stream end signal

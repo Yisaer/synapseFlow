@@ -226,9 +226,6 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
     match plan.as_ref() {
         LogicalPlan::DataSource(ds) => {
             info.push(format!("source={}", ds.source_name));
-            if let Some(alias) = &ds.alias {
-                info.push(format!("alias={}", alias));
-            }
             info.push(format!("decoder={}", ds.decoder().kind()));
             if let Some(required) = ds.shared_required_schema() {
                 info.push(format!("schema=[{}]", required.join(", ")));
@@ -252,6 +249,15 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     .map(|cols| cols.join(", "))
                     .unwrap_or_else(|| "ALL".to_string());
                 info.push(format!("input.columns=[{}]", columns));
+            }
+        }
+        LogicalPlan::TableScan(scan) => {
+            info.push(format!("table={}", scan.table_name));
+            info.push(format!("type={:?}", scan.table_type));
+            info.push(format!("decoder={}", scan.decoder.kind()));
+            info.push(format_schema(scan.schema.as_ref()));
+            if let Some(batch_size) = scan.request.batch_size {
+                info.push(format!("batch_size={batch_size}"));
             }
         }
         LogicalPlan::StatefulFunction(stateful) => {
@@ -708,13 +714,19 @@ fn build_physical_node_with_prefix(
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
             info.push(format!("source={}", ds.source_name()));
-            if let Some(alias) = ds.alias() {
-                info.push(format!("alias={}", alias));
-            }
             info.push(format_schema_with_decode_projection(
                 ds.schema().as_ref(),
                 ds.decode_projection(),
             ));
+        }
+        PhysicalPlan::TableScan(scan) => {
+            info.push(format!("table={}", scan.table_name()));
+            info.push(format!("type={:?}", scan.table_type()));
+            info.push(format!("decoder={}", scan.decoder().kind()));
+            info.push(format_schema(scan.schema().as_ref()));
+            if let Some(batch_size) = scan.request().batch_size {
+                info.push(format!("batch_size={batch_size}"));
+            }
         }
         PhysicalPlan::Decoder(decoder) => {
             info.push(format!("decoder={}", decoder.decoder().kind()));
@@ -738,9 +750,6 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::SharedStream(ds) => {
             info.push(format!("source={}", ds.stream_name()));
-            if let Some(alias) = ds.alias() {
-                info.push(format!("alias={}", alias));
-            }
             info.push(format!("schema=[{}]", ds.required_columns().join(", ")));
         }
         PhysicalPlan::SourceChangeGate(gate) => {
@@ -1333,7 +1342,6 @@ mod tests {
 
         let plan = Arc::new(PhysicalPlan::SharedStream(PhysicalSharedStream::new(
             stream_name.to_string(),
-            None,
             Arc::clone(&schema),
             PhysicalSharedStreamRequirement::new(vec!["a".to_string()], 0),
             StreamDecoderConfig::json(),

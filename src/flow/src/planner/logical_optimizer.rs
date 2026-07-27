@@ -148,7 +148,7 @@ fn eliminate_video_sink_identity_project(plan: Arc<LogicalPlan>) -> Arc<LogicalP
             new.base.children = rewrite_logical_children(&window.base.children);
             Arc::new(LogicalPlan::Window(new))
         }
-        LogicalPlan::DataSource(_) => plan,
+        LogicalPlan::DataSource(_) | LogicalPlan::TableScan(_) => plan,
     }
 }
 
@@ -489,6 +489,7 @@ fn apply_cse_with_cache(
 
     let updated = match plan.as_ref() {
         LogicalPlan::DataSource(ds) => Arc::new(LogicalPlan::DataSource(ds.clone())),
+        LogicalPlan::TableScan(scan) => Arc::new(LogicalPlan::TableScan(scan.clone())),
         LogicalPlan::StatefulFunction(stateful) => {
             let new_children = stateful
                 .base
@@ -1441,6 +1442,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                     }
                 }
             }
+            LogicalPlan::TableScan(_) => {}
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
@@ -1664,6 +1666,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
                     | crate::expr::sql_conversion::SourceBindingKind::MemoryCollection
+                    | crate::expr::sql_conversion::SourceBindingKind::TableScan
             ) || self.prune_disabled.contains(&entry.source_name)
                 || !self.used_columns.contains_key(&entry.source_name);
 
@@ -1683,7 +1686,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
 
             entries.push(SchemaBindingEntry {
                 source_name: entry.source_name.clone(),
-                alias: entry.alias.clone(),
+                alias: None,
                 schema,
                 kind: entry.kind.clone(),
             });
@@ -1876,6 +1879,7 @@ impl<'a> StructFieldUsageCollector<'a> {
                     }
                 }
             }
+            LogicalPlan::TableScan(_) => {}
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
@@ -2059,6 +2063,7 @@ impl<'a> StructFieldUsageCollector<'a> {
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
                     | crate::expr::sql_conversion::SourceBindingKind::MemoryCollection
+                    | crate::expr::sql_conversion::SourceBindingKind::TableScan
             ) || self.prune_disabled.contains(&entry.source_name)
                 || !self.used_columns.contains_key(&entry.source_name);
 
@@ -2080,7 +2085,7 @@ impl<'a> StructFieldUsageCollector<'a> {
 
             entries.push(SchemaBindingEntry {
                 source_name: entry.source_name.clone(),
-                alias: entry.alias.clone(),
+                alias: None,
                 schema,
                 kind: entry.kind.clone(),
             });
@@ -2152,6 +2157,7 @@ impl<'a> ListElementUsageCollector<'a> {
                 }
             }
             LogicalPlan::DataSource(_) => {}
+            LogicalPlan::TableScan(_) => {}
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
@@ -2326,6 +2332,7 @@ impl<'a> ListElementUsageCollector<'a> {
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
                     | crate::expr::sql_conversion::SourceBindingKind::MemoryCollection
+                    | crate::expr::sql_conversion::SourceBindingKind::TableScan
             ) || self.prune_disabled.contains(&entry.source_name);
 
             if should_keep_full {
@@ -2613,6 +2620,7 @@ fn apply_pruned_with_cache(
 fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> Arc<LogicalPlan> {
     match plan {
         LogicalPlan::DataSource(ds) => Arc::new(LogicalPlan::DataSource(ds.clone())),
+        LogicalPlan::TableScan(scan) => Arc::new(LogicalPlan::TableScan(scan.clone())),
         LogicalPlan::StatefulFunction(stateful) => {
             let mut new = stateful.clone();
             new.base.children = children;

@@ -120,7 +120,7 @@ mod tests {
         let sampler_config = SamplerConfig::new(Duration::from_millis(100));
         let ds = DataSource::new(
             "test_stream".to_string(),
-            Some("alias".to_string()),
+            None,
             create_test_decoder(),
             0,
             create_test_schema(),
@@ -128,7 +128,7 @@ mod tests {
             Some(sampler_config.clone()),
         );
         assert_eq!(ds.source_name, "test_stream");
-        assert_eq!(ds.alias, Some("alias".to_string()));
+        assert!(ds.alias.is_none());
         let retrieved = ds.sampler().expect("sampler should be present");
         assert_eq!(retrieved.interval, Duration::from_millis(100));
     }
@@ -153,7 +153,7 @@ mod tests {
     fn test_datasource_other_accessors() {
         let ds = DataSource::new(
             "my_stream".to_string(),
-            Some("my_alias".to_string()),
+            None,
             create_test_decoder(),
             42,
             create_test_schema(),

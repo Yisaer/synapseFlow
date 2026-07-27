@@ -58,7 +58,7 @@ fn explain_json(sink: PipelineSink) -> serde_json::Value {
     let select_stmt = parse_sql(sql).expect("parse sql");
     let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
         source_name: "stream".to_string(),
-        alias: select_stmt.source_infos[0].alias.clone(),
+        alias: None,
         schema: Arc::clone(&schema),
         kind: SourceBindingKind::Regular,
     }]);

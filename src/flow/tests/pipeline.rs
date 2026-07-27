@@ -33,3 +33,6 @@ mod sink_encrypt_tests;
 
 #[path = "pipeline/column_filter_tests.rs"]
 mod column_filter_tests;
+
+#[path = "pipeline/table_scan_tests.rs"]
+mod table_scan_tests;

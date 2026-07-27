@@ -22,15 +22,17 @@ mod runtime;
 pub mod secret;
 pub mod shared_stream;
 pub mod stateful;
+pub mod table;
 pub mod test_proto;
 #[cfg(test)]
 mod test_support;
 
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
-    Catalog, CatalogError, EventtimeDefinition, MqttStreamProps, NngPubSubStreamProps,
-    StreamDecoderConfig, StreamDefinition, StreamProps, StreamType, VideoReconnectConfig,
-    VideoRtspTransport, VideoStreamProps,
+    Catalog, CatalogError, CatalogRelation, EventtimeDefinition, HistoryTableProps,
+    MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
+    StreamType, TableCapabilities, TableDefinition, TableProps, TableScanCapability, TableType,
+    VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };
 pub use codec::{
     AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec, CsvEncoder,
@@ -70,7 +72,8 @@ pub use pipeline::{
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};
 pub use planner::logical::{
-    BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project,
+    BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project, TableScan,
+    TableScanRequest,
 };
 pub use planner::optimize_logical_plan;
 pub use planner::optimize_physical_plan;
@@ -100,7 +103,7 @@ pub fn collect_flow_instance_cpu_metrics_once() {
 
 use connector::{ConnectorRegistry, MqttClientManager};
 use explain_shared_stream::shared_stream_decode_applied_snapshot;
-use planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
+use planner::logical::create_logical_plan_with_table_defs_and_source_inputs;
 use processor::processor_builder::{
     create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,
     ProcessorPipelineOptions,
@@ -112,6 +115,7 @@ use std::sync::Arc;
 type SchemaBindingResult = (
     crate::expr::sql_conversion::SchemaBinding,
     HashMap<String, Arc<StreamDefinition>>,
+    HashMap<String, Arc<TableDefinition>>,
 );
 
 /// Bundle of registries required for building pipelines.
@@ -215,9 +219,15 @@ fn build_physical_plan_from_sql(
         registries.aggregate_registry(),
         registries.stateful_registry(),
     )?;
-    let (schema_binding, stream_defs) =
+    let (schema_binding, stream_defs, table_defs) =
         build_schema_binding(&select_stmt, catalog, Some(shared_stream_registry))?;
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        sinks,
+        &stream_defs,
+        &table_defs,
+        &HashMap::new(),
+    )?;
     let (logical_plan, pruned_binding) =
         optimize_logical_plan(Arc::clone(&logical_plan), &schema_binding);
     let physical_plan =
@@ -241,35 +251,55 @@ fn build_schema_binding(
     catalog: &Catalog,
     shared_stream_registry: Option<&SharedStreamRegistry>,
 ) -> Result<SchemaBindingResult, Box<dyn std::error::Error>> {
+    use crate::catalog::CatalogRelation;
     use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
     let mut entries = Vec::new();
-    let mut definitions = HashMap::new();
+    let mut stream_definitions = HashMap::new();
+    let mut table_definitions = HashMap::new();
     for source in &select_stmt.source_infos {
-        let definition = catalog
-            .get(&source.name)
-            .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
-        let schema = definition.schema();
-        let is_shared = shared_stream_registry
-            .is_some_and(|registry| registry.is_registered_sync(&source.name));
-        let kind = if is_shared {
-            SourceBindingKind::Shared
-        } else if definition.stream_type() == crate::catalog::StreamType::Memory
-            && definition.decoder().kind() == "none"
-        {
-            // Memory collection sources must preserve the full schema for ByIndex correctness.
-            SourceBindingKind::MemoryCollection
-        } else {
-            SourceBindingKind::Regular
-        };
-        entries.push(SchemaBindingEntry {
-            source_name: source.name.clone(),
-            alias: source.alias.clone(),
-            schema,
-            kind,
-        });
-        definitions.insert(source.name.clone(), definition);
+        let relation = catalog
+            .resolve_relation(&source.name)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| format!("relation '{}' not found in catalog", source.name))?;
+        match relation {
+            CatalogRelation::Stream(definition) => {
+                let schema = definition.schema();
+                let is_shared = shared_stream_registry
+                    .is_some_and(|registry| registry.is_registered_sync(&source.name));
+                let kind = if is_shared {
+                    SourceBindingKind::Shared
+                } else if definition.stream_type() == crate::catalog::StreamType::Memory
+                    && definition.decoder().kind() == "none"
+                {
+                    // Memory collection sources must preserve the full schema for ByIndex correctness.
+                    SourceBindingKind::MemoryCollection
+                } else {
+                    SourceBindingKind::Regular
+                };
+                entries.push(SchemaBindingEntry {
+                    source_name: source.name.clone(),
+                    alias: None,
+                    schema,
+                    kind,
+                });
+                stream_definitions.insert(source.name.clone(), definition);
+            }
+            CatalogRelation::Table(definition) => {
+                entries.push(SchemaBindingEntry {
+                    source_name: source.name.clone(),
+                    alias: None,
+                    schema: definition.schema(),
+                    kind: SourceBindingKind::TableScan,
+                });
+                table_definitions.insert(source.name.clone(), definition);
+            }
+        }
     }
-    Ok((SchemaBinding::new(entries), definitions))
+    Ok((
+        SchemaBinding::new(entries),
+        stream_definitions,
+        table_definitions,
+    ))
 }
 
 /// Create a processor pipeline from SQL, wiring it to the provided sink descriptors.
@@ -447,9 +477,15 @@ pub fn explain_pipeline_with_options(
         registries.aggregate_registry(),
         registries.stateful_registry(),
     )?;
-    let (schema_binding, stream_defs) =
+    let (schema_binding, stream_defs, table_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        sinks,
+        &stream_defs,
+        &table_defs,
+        &HashMap::new(),
+    )?;
     let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
         Arc::clone(&logical_plan),
         &schema_binding,
@@ -483,15 +519,20 @@ pub(crate) fn explain_pipeline_definition_with_options(
         registries.aggregate_registry(),
         registries.stateful_registry(),
     )?;
-    let (schema_binding, stream_defs) =
+    let (schema_binding, stream_defs, table_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let source_inputs = definition
         .sources()
         .iter()
         .map(|source| (source.stream.clone(), source.input.clone()))
         .collect::<HashMap<_, _>>();
-    let logical_plan =
-        create_logical_plan_with_source_inputs(select_stmt, sinks, &stream_defs, &source_inputs)?;
+    let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        sinks,
+        &stream_defs,
+        &table_defs,
+        &source_inputs,
+    )?;
     let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
         Arc::clone(&logical_plan),
         &schema_binding,

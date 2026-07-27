@@ -11,7 +11,6 @@ use std::sync::Arc;
 pub struct PhysicalDataSource {
     pub base: BasePhysicalPlan,
     pub source_name: String,
-    pub alias: Option<String>,
     pub schema: Arc<Schema>,
     decode_projection: Option<DecodeProjection>,
 }
@@ -20,7 +19,6 @@ impl PhysicalDataSource {
     /// Create a new PhysicalDataSource
     pub fn new(
         source_name: String,
-        alias: Option<String>,
         schema: Arc<Schema>,
         decode_projection: Option<DecodeProjection>,
         index: i64,
@@ -29,7 +27,6 @@ impl PhysicalDataSource {
         Self {
             base,
             source_name,
-            alias,
             schema,
             decode_projection,
         }
@@ -37,10 +34,6 @@ impl PhysicalDataSource {
 
     pub fn source_name(&self) -> &str {
         &self.source_name
-    }
-
-    pub fn alias(&self) -> Option<&str> {
-        self.alias.as_deref()
     }
 
     pub fn schema(&self) -> Arc<Schema> {

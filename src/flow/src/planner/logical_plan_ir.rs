@@ -808,6 +808,9 @@ fn build_logical_ir(
             stream: plan.source_name.clone(),
             alias: plan.alias.clone(),
         },
+        LogicalPlan::TableScan(_) => LogicalPlanNodeKindIR::Opaque {
+            plan_type: "TableScan".to_string(),
+        },
         LogicalPlan::StatefulFunction(plan) => {
             let calls = plan
                 .calls

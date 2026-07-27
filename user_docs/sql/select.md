@@ -8,7 +8,7 @@ veloFlux currently accepts exactly one SQL statement, and it must be a `SELECT`.
 
 ```text
 SELECT <projection>
-FROM <stream_name>
+FROM <source_name>
 [WHERE <expr>]
 [GROUP BY <expr> [, <expr> ...]]
 ```
@@ -17,6 +17,7 @@ Notes:
 
 - Window declarations are written inside `GROUP BY` (see `user_docs/sql/window.md`).
 - `HAVING` is intentionally not documented here (not currently supported).
+- `<source_name>` can be a stream or a registered table.
 
 ## Projection
 
@@ -38,15 +39,34 @@ SELECT t.* FROM t
 
 ## FROM
 
-`FROM <stream_name>`
+`FROM <source_name>`
 
-The stream name must match a stream exposed by the Manager stream catalog.
+The source name must match a stream or table exposed by the runtime catalog.
 
 Example:
 
 ```sql
 SELECT * FROM source_stream
+SELECT * FROM history_table
 ```
+
+### Table Sources
+
+Table sources are finite scan sources. A table scan reads the available table data once and then ends
+the pipeline's data path.
+
+Currently supported table query forms:
+
+```sql
+SELECT * FROM history_table
+SELECT speed + 1 AS next_speed FROM history_table WHERE ts > 1
+```
+
+Current limitations for table sources:
+
+- table aliases are not supported
+- stream-table joins are not supported
+- aggregate functions over table scans are not supported
 
 ## WHERE
 
@@ -78,6 +98,7 @@ SELECT * FROM s GROUP BY tumblingwindow('ss', 10), device_id
 ## Validation workflow
 
 - Fetch schema: `GET /streams/describe/:name`
+- For table sources, ensure the table has been registered in the runtime catalog before pipeline
+  creation.
 - Create pipeline with SQL: `POST /pipelines`
 - Validate lowering/execution plan: `GET /pipelines/:id/explain`
-

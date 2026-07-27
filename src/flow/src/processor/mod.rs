@@ -41,6 +41,7 @@ pub mod stateful_function_processor;
 pub mod stats;
 pub mod stream_data;
 pub mod streaming_aggregation_processor;
+pub mod table_scan_processor;
 pub mod tumbling_window_processor;
 pub mod watermark_processor;
 
@@ -89,5 +90,6 @@ pub use streaming_aggregation_processor::{
     StreamingAggregationProcessor, StreamingCountAggregationProcessor,
     StreamingTumblingAggregationProcessor,
 };
+pub use table_scan_processor::TableScanProcessor;
 pub use tumbling_window_processor::TumblingWindowProcessor;
 pub use watermark_processor::WatermarkProcessor;

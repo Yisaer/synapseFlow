@@ -9,6 +9,7 @@ use crate::planner::logical::{
     order::Order as LogicalOrder, DataSinkPlan, DataSource as LogicalDataSource,
     Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec,
     Project as LogicalProject, StatefulFunctionPlan as LogicalStatefulFunction,
+    TableScan as LogicalTableScan,
 };
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
@@ -20,7 +21,7 @@ use crate::planner::physical::{
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
     PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
     PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
-    StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalTableScan, PhysicalTableScanSpec, StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -182,7 +183,7 @@ pub fn apply_shared_stream_slot_schemas(
 
         new_entries.push(SchemaBindingEntry {
             source_name: entry.source_name.clone(),
-            alias: entry.alias.clone(),
+            alias: None,
             schema: slice_schema,
             kind: entry.kind.clone(),
         });
@@ -210,7 +211,7 @@ pub fn read_shared_stream_slot_schemas(
         slot_versions.insert(entry.source_name.clone(), version);
         new_entries.push(SchemaBindingEntry {
             source_name: entry.source_name.clone(),
-            alias: entry.alias.clone(),
+            alias: None,
             schema: slice_schema,
             kind: entry.kind.clone(),
         });
@@ -471,6 +472,10 @@ fn create_physical_plan_with_builder_cached_with_options(
                 options,
                 builder,
             )?
+        }
+        LogicalPlan::TableScan(logical_table_scan) => {
+            let index = builder.allocate_index();
+            create_physical_table_scan(logical_table_scan, index)
         }
         LogicalPlan::StatefulFunction(logical_stateful) => {
             create_physical_stateful_function_with_builder(
@@ -867,6 +872,20 @@ fn create_physical_aggregation_with_builder(
     Ok(Arc::new(PhysicalPlan::Aggregation(physical)))
 }
 
+fn create_physical_table_scan(logical_scan: &LogicalTableScan, index: i64) -> Arc<PhysicalPlan> {
+    Arc::new(PhysicalPlan::TableScan(PhysicalTableScan::new(
+        PhysicalTableScanSpec {
+            table_name: logical_scan.table_name.clone(),
+            table_type: logical_scan.table_type,
+            decoder: logical_scan.decoder.clone(),
+            schema: logical_scan.schema(),
+            props: logical_scan.props.clone(),
+            request: logical_scan.request.clone(),
+        },
+        index,
+    )))
+}
+
 /// Create a PhysicalDataSource from a LogicalDataSource using centralized index management
 fn create_physical_data_source_with_builder(
     logical_ds: &LogicalDataSource,
@@ -912,7 +931,6 @@ fn create_physical_data_source_with_builder(
         SourceBindingKind::Regular | SourceBindingKind::MemoryCollection => {
             let physical_ds = PhysicalDataSource::new(
                 logical_ds.source_name.clone(),
-                logical_ds.alias.clone(),
                 Arc::clone(&schema),
                 logical_ds.decode_projection.clone(),
                 index,
@@ -982,7 +1000,6 @@ fn create_physical_data_source_with_builder(
             );
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
-                logical_ds.alias.clone(),
                 Arc::clone(&schema),
                 PhysicalSharedStreamRequirement::new(
                     required_columns,
@@ -1003,6 +1020,10 @@ fn create_physical_data_source_with_builder(
                 builder,
             )
         }
+        SourceBindingKind::TableScan => Err(format!(
+            "table scan binding `{}` cannot build a stream datasource",
+            logical_ds.source_name
+        )),
     }
 }
 
@@ -1971,15 +1992,6 @@ fn find_binding_entry<'a>(
     logical_ds: &LogicalDataSource,
     bindings: &'a SchemaBinding,
 ) -> Result<&'a SchemaBindingEntry, String> {
-    if let Some(alias) = logical_ds.alias.as_deref() {
-        if let Some(entry) = bindings
-            .entries()
-            .iter()
-            .find(|entry| entry.alias.as_ref().map(|a| a == alias).unwrap_or(false))
-        {
-            return Ok(entry);
-        }
-    }
     bindings
         .entries()
         .iter()
@@ -2052,7 +2064,6 @@ mod tests {
         // Create a dummy physical plan child
         let dummy_ds = crate::planner::physical::PhysicalDataSource::new(
             "test_stream".to_string(),
-            None,
             Arc::new(datatypes::Schema::new(vec![])),
             None,
             0,

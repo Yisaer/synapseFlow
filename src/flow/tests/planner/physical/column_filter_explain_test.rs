@@ -134,7 +134,7 @@ fn bindings_for_select(
         if let Some(def) = streams.get(&source.name) {
             entries.push(SchemaBindingEntry {
                 source_name: source.name.clone(),
-                alias: source.alias.clone(),
+                alias: None,
                 schema: Arc::clone(&def.schema()),
                 kind: SourceBindingKind::Regular,
             });

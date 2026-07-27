@@ -26,7 +26,7 @@ use crate::processor::{
     SamplerProcessor, SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor,
     SinkEncryptProcessor, SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor,
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
-    TumblingWindowProcessor, WatermarkProcessor,
+    TableScanProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -60,6 +60,8 @@ pub(crate) enum PlanProcessor {
     Aggregation(AggregationProcessor),
     /// DataSourceProcessor created from PhysicalDatasource
     DataSource(DataSourceProcessor),
+    /// TableScanProcessor created from PhysicalTableScan
+    TableScan(TableScanProcessor),
     /// DecoderProcessor created from PhysicalDecoder
     Decoder(DecoderProcessor),
     /// CollectionLayoutNormalizeProcessor inserted for collection sources that must preserve full schema.
@@ -310,6 +312,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.id(),
             PlanProcessor::DataSource(p) => p.id(),
+            PlanProcessor::TableScan(p) => p.id(),
             PlanProcessor::Decoder(p) => p.id(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.id(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.id(),
@@ -342,6 +345,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(_) => "aggregation",
             PlanProcessor::DataSource(_) => "datasource",
+            PlanProcessor::TableScan(_) => "table_scan",
             PlanProcessor::Decoder(_) => "decoder",
             PlanProcessor::CollectionLayoutNormalize(_) => "collection_layout_normalize",
             PlanProcessor::MemoryCollectionMaterialize(_) => "memory_collection_materialize",
@@ -380,6 +384,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.set_stats(stats),
             PlanProcessor::DataSource(p) => p.set_stats(stats),
+            PlanProcessor::TableScan(p) => p.set_stats(stats),
             PlanProcessor::Decoder(p) => p.set_stats(stats),
             PlanProcessor::CollectionLayoutNormalize(p) => p.set_stats(stats),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.set_stats(stats),
@@ -413,6 +418,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.start(spawner),
             PlanProcessor::DataSource(p) => p.start(spawner),
+            PlanProcessor::TableScan(p) => p.start(spawner),
             PlanProcessor::Decoder(p) => p.start(spawner),
             PlanProcessor::CollectionLayoutNormalize(p) => p.start(spawner),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.start(spawner),
@@ -446,6 +452,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.subscribe_output(),
             PlanProcessor::DataSource(p) => p.subscribe_output(),
+            PlanProcessor::TableScan(p) => p.subscribe_output(),
             PlanProcessor::Decoder(p) => p.subscribe_output(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_output(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_output(),
@@ -479,6 +486,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.subscribe_control_output(),
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
+            PlanProcessor::TableScan(p) => p.subscribe_control_output(),
             PlanProcessor::Decoder(p) => p.subscribe_control_output(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_control_output(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_control_output(),
@@ -512,6 +520,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.add_input(receiver),
             PlanProcessor::DataSource(p) => p.add_input(receiver),
+            PlanProcessor::TableScan(p) => p.add_input(receiver),
             PlanProcessor::Decoder(p) => p.add_input(receiver),
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_input(receiver),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.add_input(receiver),
@@ -548,6 +557,7 @@ impl PlanProcessor {
         match self {
             PlanProcessor::Aggregation(p) => p.add_control_input(receiver),
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
+            PlanProcessor::TableScan(p) => p.add_control_input(receiver),
             PlanProcessor::Decoder(p) => p.add_control_input(receiver),
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_control_input(receiver),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.add_control_input(receiver),
@@ -730,7 +740,10 @@ impl ProcessorPipeline {
 
         let len = self.middle_processors.len();
         for idx in (0..len).rev() {
-            if !matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
+            if !matches!(
+                self.middle_processors[idx],
+                PlanProcessor::DataSource(_) | PlanProcessor::TableScan(_)
+            ) {
                 let processor_id = self.middle_processors[idx].id().to_string();
                 let processor_kind = self.middle_processors[idx].kind();
                 let start = self.middle_processors[idx].start(&self.spawner);
@@ -746,7 +759,10 @@ impl ProcessorPipeline {
         }
 
         for idx in (0..len).rev() {
-            if matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
+            if matches!(
+                self.middle_processors[idx],
+                PlanProcessor::DataSource(_) | PlanProcessor::TableScan(_)
+            ) {
                 let processor_id = self.middle_processors[idx].id().to_string();
                 let processor_kind = self.middle_processors[idx].kind();
                 let start = self.middle_processors[idx].start(&self.spawner);
@@ -1046,6 +1062,23 @@ fn create_processor_from_plan_node(
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::DataSource(processor),
+            ))
+        }
+        PhysicalPlan::TableScan(scan) => {
+            let crate::catalog::TableProps::History(props) = scan.props().clone();
+            let decoder = context
+                .decoder_registry()?
+                .instantiate(scan.decoder(), scan.table_name(), scan.schema())
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let processor = TableScanProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                scan.table_name().to_string(),
+                props,
+                decoder,
+                channel_capacities,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::TableScan(processor),
             ))
         }
         PhysicalPlan::Decoder(decoder_plan) => {
@@ -1510,6 +1543,7 @@ fn create_processor_from_plan_node(
 fn sampler_input_schema(plan: &Arc<PhysicalPlan>) -> Option<Arc<datatypes::Schema>> {
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => Some(ds.schema()),
+        PhysicalPlan::TableScan(scan) => Some(scan.schema()),
         PhysicalPlan::Decoder(dec) => Some(dec.schema()),
         PhysicalPlan::SharedStream(ss) => Some(ss.schema()),
         _ => None,
@@ -2046,7 +2080,6 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![]));
         let data_source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
             "test_source".to_string(),
-            None,
             Arc::clone(&schema),
             None,
             0,
@@ -2128,7 +2161,6 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![]));
         let data_source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
             "test_source".to_string(),
-            None,
             Arc::clone(&schema),
             None,
             0,
@@ -2160,7 +2192,6 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![]));
         let shared = Arc::new(PhysicalPlan::SharedStream(PhysicalSharedStream::new(
             "shared_source".to_string(),
-            None,
             Arc::clone(&schema),
             PhysicalSharedStreamRequirement::new(Vec::new(), 0),
             StreamDecoderConfig::json(),

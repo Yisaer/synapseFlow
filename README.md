@@ -94,6 +94,7 @@ List and remove resources:
 
 REST API docs:
 - Streams: `user_docs/api/stream.md`
+- Tables: `user_docs/api/table.md` (runtime catalog; manager REST endpoints pending)
 - Pipelines: `user_docs/api/pipeline.md`
 - Export: `user_docs/api/export.md`
 

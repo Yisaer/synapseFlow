@@ -128,6 +128,7 @@ the ZIP to the import API instead.
 ## Notes
 
 - `streams` are exported using the same shape as `CreateStreamRequest`.
+- Table definitions are not exported yet.
 - `pipelines` use the `CreatePipelineRequest` shape with inline `run_state`.
 - The exported arrays are sorted by stable identifiers to make the output easier to diff.
 - The bundle is intended for future import / migration workflows, not for runtime checkpoint recovery.

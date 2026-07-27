@@ -30,6 +30,8 @@ pub struct SchemaBindingEntry {
 pub enum SourceBindingKind {
     Regular,
     Shared,
+    /// A bounded table scan source. Keep the full schema until table scan supports decode projection.
+    TableScan,
     /// A memory stream consumed in collection mode (decoder.type = "none").
     ///
     /// This kind must preserve the full schema to keep `ColumnRef::ByIndex` semantics stable.

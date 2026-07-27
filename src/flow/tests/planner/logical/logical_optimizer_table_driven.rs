@@ -259,7 +259,7 @@ fn bindings_for_select_with_shared_sources(
                 };
                 SchemaBindingEntry {
                     source_name: source.name.clone(),
-                    alias: source.alias.clone(),
+                    alias: None,
                     schema: def.schema(),
                     kind,
                 }
@@ -666,12 +666,6 @@ fn create_logical_plan_table_driven() {
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"Window"}],"id":"Project_2","info":["fields=[*]"],"operator":"Project"}"##,
         },
         Case {
-            name: "test_create_logical_plan_with_alias",
-            sql: "SELECT a, b FROM users AS u WHERE a > 10",
-            covers: &[],
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","alias=u","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
-        },
-        Case {
             name: "test_create_logical_plan_with_func_field",
             sql: "SELECT a, concat(b), c AS custom_name FROM users",
             covers: &[],
@@ -830,6 +824,11 @@ fn create_logical_plan_error_table_driven() {
             name: "test_rejects_unknown_list_struct_field_during_logical_planning",
             sql: "SELECT a, items[0]->b FROM stream_3",
             expected_contains: &["field `b` not found"],
+        },
+        ErrorCase {
+            name: "test_reject_relation_alias",
+            sql: "SELECT a FROM users AS u",
+            expected_contains: &["relation alias `u` for `users` is not supported yet"],
         },
     ];
 

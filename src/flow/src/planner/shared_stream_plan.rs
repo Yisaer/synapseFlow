@@ -34,7 +34,6 @@ pub(crate) fn create_physical_plan_for_shared_stream(
 
     let datasource_plan = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
         stream_name.to_string(),
-        None,
         Arc::clone(&schema),
         None,
         index_counter.allocate(),

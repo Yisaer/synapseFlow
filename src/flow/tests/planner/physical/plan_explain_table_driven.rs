@@ -12,7 +12,10 @@ use flow::connector::sink::video::{
 };
 use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
 use flow::expr::func::EvalError;
-use flow::planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
+use flow::planner::logical::{
+    create_logical_plan, create_logical_plan_with_source_inputs,
+    create_logical_plan_with_table_defs_and_source_inputs,
+};
 use flow::planner::sink::{CustomSinkConnectorConfig, SinkRetryConfig};
 use flow::planner::{
     create_physical_plan_with_build_options, optimize_logical_plan_with_options,
@@ -28,6 +31,7 @@ use flow::{
     SinkConnectorConfig, SinkEncoderConfig, SinkOutputConfig, StreamDecoderConfig,
     StreamDefinition, StreamProps,
 };
+use flow::{HistoryTableProps, TableDefinition, TableProps};
 use parser::parse_sql;
 use serde_json::json;
 use std::collections::HashMap;
@@ -291,6 +295,39 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs
 }
 
+fn setup_tables() -> HashMap<String, Arc<TableDefinition>> {
+    let table_name = "history_table";
+    let table_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            table_name.to_string(),
+            "ts".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            table_name.to_string(),
+            "vehicle_id".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            table_name.to_string(),
+            "speed".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let table_def = TableDefinition::new(
+        table_name,
+        Arc::clone(&table_schema),
+        TableProps::History(
+            HistoryTableProps::new("/tmp/veloflux-history", "vehicle").with_batch_size(128),
+        ),
+        StreamDecoderConfig::json(),
+    );
+
+    let mut table_defs = HashMap::new();
+    table_defs.insert(table_name.to_string(), Arc::new(table_def));
+    table_defs
+}
+
 fn setup_catalog_with_eventtime_stream_config(
     column: &'static str,
     type_key: &'static str,
@@ -370,9 +407,51 @@ fn bindings_for_select(
                 };
                 SchemaBindingEntry {
                     source_name: source.name.clone(),
-                    alias: source.alias.clone(),
+                    alias: None,
                     schema: def.schema(),
                     kind,
+                }
+            })
+            .collect(),
+    )
+}
+
+fn bindings_for_select_with_tables(
+    select_stmt: &parser::SelectStmt,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    table_defs: &HashMap<String, Arc<TableDefinition>>,
+) -> SchemaBinding {
+    SchemaBinding::new(
+        select_stmt
+            .source_infos
+            .iter()
+            .map(|source| {
+                if let Some(def) = stream_defs.get(&source.name) {
+                    let kind = if def.stream_type() == flow::StreamType::Memory
+                        && def.decoder().kind() == "none"
+                    {
+                        SourceBindingKind::MemoryCollection
+                    } else if source.name == "shared_stream_sampler" {
+                        SourceBindingKind::Shared
+                    } else {
+                        SourceBindingKind::Regular
+                    };
+                    return SchemaBindingEntry {
+                        source_name: source.name.clone(),
+                        alias: None,
+                        schema: def.schema(),
+                        kind,
+                    };
+                }
+
+                let def = table_defs
+                    .get(&source.name)
+                    .unwrap_or_else(|| panic!("missing relation definition: {}", source.name));
+                SchemaBindingEntry {
+                    source_name: source.name.clone(),
+                    alias: None,
+                    schema: def.schema(),
+                    kind: SourceBindingKind::TableScan,
                 }
             })
             .collect(),
@@ -592,6 +671,42 @@ fn explain_json_result(sql: &str, sinks: Vec<PipelineSink>) -> Result<String, St
     Ok(explain.to_json().to_string())
 }
 
+fn explain_json_result_with_tables(sql: &str, sinks: Vec<PipelineSink>) -> Result<String, String> {
+    let registries = PipelineRegistries::new_with_builtin();
+    let stream_defs = setup_streams();
+    let table_defs = setup_tables();
+
+    let select_stmt = parse_sql(sql).map_err(|err| err.to_string())?;
+
+    let bindings = bindings_for_select_with_tables(&select_stmt, &stream_defs, &table_defs);
+    let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        sinks,
+        &stream_defs,
+        &table_defs,
+        &HashMap::new(),
+    )?;
+
+    let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+
+    let physical_plan =
+        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)?;
+
+    let physical_plan = flow::optimize_physical_plan(
+        physical_plan,
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+    let explain = PipelineExplain::new(
+        logical_plan,
+        physical_plan,
+        PipelineExplainConfig::default(),
+    );
+    println!("{sql}");
+    println!("{}", explain.to_pretty_string());
+    Ok(explain.to_json().to_string())
+}
+
 fn explain_json_with_source_inputs(
     sql: &str,
     sinks: Vec<PipelineSink>,
@@ -630,6 +745,46 @@ fn explain_json_with_source_inputs(
 
 fn explain_json_string(sql: &str) -> String {
     explain_json(sql, vec![])
+}
+
+#[test]
+fn plan_explain_table_scan_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "select wildcard from history table",
+            sql: "SELECT * FROM history_table",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalProject_1","info":["fields=[*]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "select expression from filtered history table",
+            sql: "SELECT speed + 1 AS next_speed FROM history_table WHERE ts > 0",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Filter_1","info":["predicate=ts > 0"],"operator":"Filter"}],"id":"Project_2","info":["fields=[speed + 1 as next_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalFilter_1","info":["predicate=ts > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_2","info":["fields=[speed + 1 as next_speed]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let actual = explain_json_result_with_tables(case.sql, vec![])
+            .unwrap_or_else(|err| panic!("case `{}` failed: {err}", case.name));
+        assert_eq!(actual, case.expected, "case `{}`", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_table_scan_rejects_aggregates() {
+    let sql = "SELECT vehicle_id, avg(speed) AS avg_speed FROM history_table GROUP BY vehicle_id";
+    let err = explain_json_result_with_tables(sql, vec![]).expect_err("table agg should fail");
+    println!("{sql}");
+    println!("{err}");
+    assert!(
+        err.contains("aggregate functions over table scans are not supported yet"),
+        "expected table scan aggregate rejection, got: {err}"
+    );
 }
 
 #[test]
@@ -1723,7 +1878,7 @@ fn explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive()
     let select_stmt = parse_sql("SELECT a FROM stream_eventtime").expect("parse sql");
     let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
         source_name: stream_name.to_string(),
-        alias: select_stmt.source_infos[0].alias.clone(),
+        alias: None,
         schema,
         kind: SourceBindingKind::Regular,
     }]);

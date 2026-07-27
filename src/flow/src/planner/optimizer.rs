@@ -387,6 +387,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::DataSource(new))
         }
+        PhysicalPlan::TableScan(scan) => {
+            let mut new = scan.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::TableScan(new))
+        }
         PhysicalPlan::Decoder(decoder) => {
             let mut new = decoder.clone();
             new.base.children = children;

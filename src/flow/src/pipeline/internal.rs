@@ -1,5 +1,5 @@
 use super::*;
-use crate::catalog::{Catalog, StreamDefinition, StreamProps};
+use crate::catalog::{Catalog, CatalogRelation, StreamDefinition, StreamProps};
 use crate::connector::sink::file::{
     FileRetentionConfig as FileSinkRetentionConfig, FileSinkConfig,
 };
@@ -18,7 +18,7 @@ use crate::connector::{
 #[cfg(feature = "nng_pubsub")]
 use crate::connector::{NngPubSubSinkConfig, NngPubSubSourceConnector};
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
-use crate::planner::logical::create_logical_plan_with_source_inputs;
+use crate::planner::logical::create_logical_plan_with_table_defs_and_source_inputs;
 use crate::planner::sink::SinkEncoderKind;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::EventtimePipelineContext;
@@ -438,16 +438,21 @@ fn build_pipeline_runtime(
 
         let shared_stream_registry = context.shared_stream_registry();
         let mqtt_client_manager = context.mqtt_client_manager();
-        let (stream_definitions, binding_entries) = build_log.run_phase("resolve_streams", || {
+        let (stream_definitions, table_definitions, binding_entries) =
+            build_log.run_phase("resolve_relations", || {
             let mut stream_definitions = HashMap::new();
+            let mut table_definitions = HashMap::new();
             let mut binding_entries = Vec::new();
 
             for source in &select_stmt.source_infos {
-                let definition = catalog
-                    .get(&source.name)
-                    .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
+                let relation = catalog
+                    .resolve_relation(&source.name)
+                    .map_err(|err| err.to_string())?
+                    .ok_or_else(|| format!("relation '{}' not found in catalog", source.name))?;
 
-                if definition.stream_type() == crate::catalog::StreamType::Memory {
+                match relation {
+                    CatalogRelation::Stream(definition) => {
+                        if definition.stream_type() == crate::catalog::StreamType::Memory {
                     let StreamProps::Memory(props) = definition.props() else {
                         return Err(format!(
                             "stream '{}' expected memory props but received {:?}",
@@ -490,26 +495,38 @@ fn build_pipeline_runtime(
                     }
                 }
 
-                let schema = definition.schema();
-                let kind = if shared_stream_registry.is_registered_sync(&source.name) {
-                    SourceBindingKind::Shared
-                } else if definition.stream_type() == crate::catalog::StreamType::Memory
-                    && definition.decoder().kind() == "none"
-                {
-                    SourceBindingKind::MemoryCollection
-                } else {
-                    SourceBindingKind::Regular
-                };
-                binding_entries.push(SchemaBindingEntry {
-                    source_name: source.name.clone(),
-                    alias: source.alias.clone(),
-                    schema: Arc::clone(&schema),
-                    kind,
-                });
-                stream_definitions.insert(source.name.clone(), definition);
+                        let schema = definition.schema();
+                        let kind = if shared_stream_registry.is_registered_sync(&source.name) {
+                            SourceBindingKind::Shared
+                        } else if definition.stream_type() == crate::catalog::StreamType::Memory
+                            && definition.decoder().kind() == "none"
+                        {
+                            SourceBindingKind::MemoryCollection
+                        } else {
+                            SourceBindingKind::Regular
+                        };
+                        binding_entries.push(SchemaBindingEntry {
+                            source_name: source.name.clone(),
+                            alias: None,
+                            schema: Arc::clone(&schema),
+                            kind,
+                        });
+                        stream_definitions.insert(source.name.clone(), definition);
+                    }
+                    CatalogRelation::Table(definition) => {
+                        let schema = definition.schema();
+                        binding_entries.push(SchemaBindingEntry {
+                            source_name: source.name.clone(),
+                            alias: None,
+                            schema,
+                            kind: SourceBindingKind::TableScan,
+                        });
+                        table_definitions.insert(source.name.clone(), definition);
+                    }
+                }
             }
 
-            Ok((stream_definitions, binding_entries))
+            Ok((stream_definitions, table_definitions, binding_entries))
         })?;
 
         let sinks =
@@ -521,10 +538,11 @@ fn build_pipeline_runtime(
             .collect();
         let schema_binding = SchemaBinding::new(binding_entries);
         let (logical_plan, pruned_binding) = build_log.run_phase("build_logical_plan", || {
-            let logical_plan = create_logical_plan_with_source_inputs(
+            let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
                 select_stmt,
                 sinks,
                 &stream_definitions,
+                &table_definitions,
                 &source_inputs,
             )?;
             Ok::<_, String>(crate::planner::optimize_logical_plan_with_options(
@@ -1182,7 +1200,7 @@ pub(super) fn attach_sources_from_catalog(
         }
     }
 
-    if has_source_processor {
+    if has_source_processor || stream_defs.is_empty() {
         Ok(())
     } else {
         Err("no datasource processors available to attach connectors".into())

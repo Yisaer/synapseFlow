@@ -1,4 +1,4 @@
-use crate::catalog::StreamDefinition;
+use crate::catalog::{StreamDefinition, TableDefinition, TableProps};
 use crate::pipeline::SourceInputConfig;
 use parser::window as parser_window;
 use parser::SelectStmt;
@@ -15,6 +15,7 @@ pub mod order;
 pub mod project;
 pub mod sink;
 pub mod stateful_function;
+pub mod table_scan;
 pub mod tail;
 pub mod window;
 
@@ -27,6 +28,7 @@ pub use order::{Order, OrderItem};
 pub use project::Project;
 pub use sink::DataSinkPlan;
 pub use stateful_function::{LogicalStatefulCall, StatefulFunctionPlan};
+pub use table_scan::{TableScan, TableScanRequest, TableScanSpec};
 pub use tail::TailPlan;
 pub use window::{LogicalWindow, LogicalWindowSpec, TimeUnit};
 
@@ -53,6 +55,7 @@ impl BaseLogicalPlan {
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     DataSource(DataSource),
+    TableScan(TableScan),
     StatefulFunction(StatefulFunctionPlan),
     Filter(Filter),
     Aggregation(Aggregation),
@@ -68,6 +71,7 @@ impl LogicalPlan {
     pub fn children(&self) -> &[Arc<LogicalPlan>] {
         match self {
             LogicalPlan::DataSource(plan) => plan.base.children(),
+            LogicalPlan::TableScan(plan) => plan.base.children(),
             LogicalPlan::StatefulFunction(plan) => plan.base.children(),
             LogicalPlan::Filter(plan) => plan.base.children(),
             LogicalPlan::Aggregation(plan) => plan.base.children(),
@@ -83,6 +87,7 @@ impl LogicalPlan {
     pub fn get_plan_type(&self) -> &str {
         match self {
             LogicalPlan::DataSource(_) => "DataSource",
+            LogicalPlan::TableScan(_) => "TableScan",
             LogicalPlan::StatefulFunction(_) => "StatefulFunction",
             LogicalPlan::Filter(_) => "Filter",
             LogicalPlan::Aggregation(_) => "Aggregation",
@@ -98,6 +103,7 @@ impl LogicalPlan {
     pub fn get_plan_index(&self) -> i64 {
         match self {
             LogicalPlan::DataSource(plan) => plan.base.index(),
+            LogicalPlan::TableScan(plan) => plan.base.index(),
             LogicalPlan::StatefulFunction(plan) => plan.base.index(),
             LogicalPlan::Filter(plan) => plan.base.index(),
             LogicalPlan::Aggregation(plan) => plan.base.index(),
@@ -155,7 +161,13 @@ pub fn create_logical_plan(
     sinks: Vec<PipelineSink>,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
-    create_logical_plan_with_source_inputs(select_stmt, sinks, stream_defs, &HashMap::new())
+    create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        sinks,
+        stream_defs,
+        &HashMap::new(),
+        &HashMap::new(),
+    )
 }
 
 pub fn create_logical_plan_with_source_inputs(
@@ -164,15 +176,32 @@ pub fn create_logical_plan_with_source_inputs(
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
     source_inputs: &HashMap<String, SourceInputConfig>,
 ) -> Result<Arc<LogicalPlan>, String> {
+    create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        sinks,
+        stream_defs,
+        &HashMap::new(),
+        source_inputs,
+    )
+}
+
+pub fn create_logical_plan_with_table_defs_and_source_inputs(
+    select_stmt: SelectStmt,
+    sinks: Vec<PipelineSink>,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    table_defs: &HashMap<String, Arc<TableDefinition>>,
+    source_inputs: &HashMap<String, SourceInputConfig>,
+) -> Result<Arc<LogicalPlan>, String> {
     let mut select_stmt = select_stmt;
 
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
-    validate_select_alias_names(&select_stmt, stream_defs)?;
+    validate_relation_aliases_unsupported(&select_stmt)?;
+    validate_select_alias_names(&select_stmt, stream_defs, table_defs)?;
     resolve_select_aliases(&mut select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
     validate_order_by_constraints(&select_stmt)?;
-    validate_expression_types(&select_stmt, stream_defs)?;
+    validate_expression_types(&select_stmt, stream_defs, table_defs)?;
 
     let start_index = 0i64;
     let mut current_index = start_index;
@@ -183,31 +212,74 @@ pub fn create_logical_plan_with_source_inputs(
     }
 
     let mut current_plans: Vec<Arc<LogicalPlan>> = Vec::new();
-    for source_info in &select_stmt.source_infos {
-        let definition = stream_defs.get(&source_info.name).ok_or_else(|| {
+    let table_sources = select_stmt
+        .source_infos
+        .iter()
+        .filter(|source| table_defs.contains_key(&source.name))
+        .count();
+    if table_sources > 0 {
+        if select_stmt.source_infos.len() != 1 {
+            return Err("table scan currently supports exactly one relation".to_string());
+        }
+        if select_stmt.window.is_some() {
+            return Err("windowed table scans are not supported yet".to_string());
+        }
+        if !select_stmt.aggregate_mappings.is_empty() {
+            return Err("aggregate functions over table scans are not supported yet".to_string());
+        }
+        let source_info = &select_stmt.source_infos[0];
+        let definition = table_defs.get(&source_info.name).ok_or_else(|| {
             format!(
-                "stream {} missing catalog definition for logical planning",
+                "table {} missing catalog definition for logical planning",
                 source_info.name
             )
         })?;
-        let schema = definition.schema();
-        let datasource = DataSource::new(
-            source_info.name.clone(),
-            source_info.alias.clone(),
-            definition.decoder().clone(),
+        let request = TableScanRequest {
+            batch_size: match definition.props() {
+                TableProps::History(props) => props.batch_size,
+            },
+        };
+        let table_scan = TableScan::new(
+            TableScanSpec {
+                table_name: source_info.name.clone(),
+                table_type: definition.table_type(),
+                alias: None,
+                decoder: definition.decoder().clone(),
+                schema: definition.schema(),
+                props: definition.props().clone(),
+                request,
+            },
             current_index,
-            schema,
-            definition.eventtime().cloned(),
-            definition.sampler().cloned(),
-        )
-        .with_stream_type(definition.stream_type());
-        let mut datasource = datasource;
-        datasource.source_input = source_inputs
-            .get(&source_info.name)
-            .cloned()
-            .unwrap_or_default();
-        current_plans.push(Arc::new(LogicalPlan::DataSource(datasource)));
+        );
+        current_plans.push(Arc::new(LogicalPlan::TableScan(table_scan)));
         current_index += 1;
+    } else {
+        for source_info in &select_stmt.source_infos {
+            let definition = stream_defs.get(&source_info.name).ok_or_else(|| {
+                format!(
+                    "stream {} missing catalog definition for logical planning",
+                    source_info.name
+                )
+            })?;
+            let schema = definition.schema();
+            let datasource = DataSource::new(
+                source_info.name.clone(),
+                None,
+                definition.decoder().clone(),
+                current_index,
+                schema,
+                definition.eventtime().cloned(),
+                definition.sampler().cloned(),
+            )
+            .with_stream_type(definition.stream_type());
+            let mut datasource = datasource;
+            datasource.source_input = source_inputs
+                .get(&source_info.name)
+                .cloned()
+                .unwrap_or_default();
+            current_plans.push(Arc::new(LogicalPlan::DataSource(datasource)));
+            current_index += 1;
+        }
     }
 
     // 2. Create StatefulFunctionPlan if stateful mappings exist.
@@ -363,20 +435,19 @@ pub fn verify_logical_plan(plan: &LogicalPlan) -> Result<(), String> {
 #[derive(Debug, Clone)]
 struct SourceSchemaEntry {
     source_name: String,
-    alias: Option<String>,
     column_lookup: HashMap<String, ConcreteDatatype>,
 }
 
 fn validate_expression_types(
     select_stmt: &SelectStmt,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    table_defs: &HashMap<String, Arc<TableDefinition>>,
 ) -> Result<(), String> {
     let mut sources = Vec::new();
     for source_info in &select_stmt.source_infos {
-        let Some(definition) = stream_defs.get(&source_info.name) else {
+        let Some(schema) = relation_schema(&source_info.name, stream_defs, table_defs) else {
             continue;
         };
-        let schema = definition.schema();
         let mut column_lookup = HashMap::with_capacity(schema.column_schemas().len());
         for col in schema.column_schemas() {
             column_lookup.insert(col.name.clone(), col.data_type.clone());
@@ -384,7 +455,6 @@ fn validate_expression_types(
 
         sources.push(SourceSchemaEntry {
             source_name: source_info.name.clone(),
-            alias: source_info.alias.clone(),
             column_lookup,
         });
     }
@@ -411,6 +481,7 @@ fn validate_expression_types(
 fn validate_select_alias_names(
     select_stmt: &SelectStmt,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    table_defs: &HashMap<String, Arc<TableDefinition>>,
 ) -> Result<(), String> {
     use crate::expr::internal_columns::is_reserved_user_name;
     use std::collections::HashSet;
@@ -418,8 +489,8 @@ fn validate_select_alias_names(
     // Collect all source schemas to keep them alive.
     let mut schemas = Vec::with_capacity(select_stmt.source_infos.len());
     for source_info in &select_stmt.source_infos {
-        if let Some(definition) = stream_defs.get(&source_info.name) {
-            schemas.push(definition.schema());
+        if let Some(schema) = relation_schema(&source_info.name, stream_defs, table_defs) {
+            schemas.push(schema);
         }
     }
 
@@ -454,6 +525,29 @@ fn validate_select_alias_names(
     }
 
     Ok(())
+}
+
+fn validate_relation_aliases_unsupported(select_stmt: &SelectStmt) -> Result<(), String> {
+    for source_info in &select_stmt.source_infos {
+        if let Some(alias) = source_info.alias.as_ref() {
+            return Err(format!(
+                "relation alias `{alias}` for `{}` is not supported yet",
+                source_info.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn relation_schema(
+    name: &str,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    table_defs: &HashMap<String, Arc<TableDefinition>>,
+) -> Option<Arc<datatypes::Schema>> {
+    stream_defs
+        .get(name)
+        .map(|definition| definition.schema())
+        .or_else(|| table_defs.get(name).map(|definition| definition.schema()))
 }
 
 fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
@@ -1114,7 +1208,7 @@ fn resolve_column_datatype(
     let matches: Vec<_> = sources
         .iter()
         .filter(|src| match qualifier {
-            Some(q) => src.source_name == q || src.alias.as_deref() == Some(q),
+            Some(q) => src.source_name == q,
             None => true,
         })
         .filter_map(|src| src.column_lookup.get(column_name).cloned())

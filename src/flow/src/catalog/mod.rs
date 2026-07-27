@@ -22,6 +22,12 @@ pub enum CatalogError {
     AlreadyExists(String),
     #[error("stream not found: {0}")]
     NotFound(String),
+    #[error("table already exists: {0}")]
+    TableAlreadyExists(String),
+    #[error("table not found: {0}")]
+    TableNotFound(String),
+    #[error("relation name is ambiguous between stream and table: {0}")]
+    AmbiguousRelation(String),
 }
 
 /// Additional metadata associated with a stream definition.
@@ -56,6 +62,68 @@ pub enum StreamType {
     Memory,
     /// Stream backed by an NNG pub/sub source.
     NngPubSub,
+}
+
+/// Additional metadata associated with a table definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableProps {
+    /// Table backed by historical Parquet files.
+    History(HistoryTableProps),
+}
+
+/// Supported table types recognized by the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableType {
+    /// Table backed by historical Parquet files.
+    History,
+}
+
+/// Capabilities advertised by a table provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCapabilities {
+    pub scan: Option<TableScanCapability>,
+}
+
+impl TableCapabilities {
+    pub fn history() -> Self {
+        Self {
+            scan: Some(TableScanCapability {}),
+        }
+    }
+}
+
+/// Scan capability metadata for a table provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableScanCapability {}
+
+/// Properties for history-backed tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTableProps {
+    pub datasource: String,
+    pub topic: String,
+    pub time_column: String,
+    pub batch_size: Option<usize>,
+}
+
+impl HistoryTableProps {
+    pub fn new(datasource: impl Into<String>, topic: impl Into<String>) -> Self {
+        Self {
+            datasource: datasource.into(),
+            topic: topic.into(),
+            time_column: "ts".to_string(),
+            batch_size: None,
+        }
+    }
+
+    pub fn with_time_column(mut self, time_column: impl Into<String>) -> Self {
+        self.time_column = time_column.into();
+        self
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
 }
 
 /// Properties for MQTT-backed streams.
@@ -200,6 +268,17 @@ pub struct StreamDefinition {
     sampler: Option<SamplerConfig>,
 }
 
+/// Complete definition for a table tracked by the catalog.
+#[derive(Debug, Clone)]
+pub struct TableDefinition {
+    id: String,
+    table_type: TableType,
+    schema: Arc<Schema>,
+    props: TableProps,
+    decoder: StreamDecoderConfig,
+    capabilities: TableCapabilities,
+}
+
 /// Event-time configuration for a stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventtimeDefinition {
@@ -289,6 +368,54 @@ impl StreamDefinition {
     }
 }
 
+impl TableDefinition {
+    pub fn new(
+        id: impl Into<String>,
+        schema: Arc<Schema>,
+        props: TableProps,
+        decoder: StreamDecoderConfig,
+    ) -> Self {
+        let table_type = match props {
+            TableProps::History(_) => TableType::History,
+        };
+        let capabilities = match table_type {
+            TableType::History => TableCapabilities::history(),
+        };
+        Self {
+            id: id.into(),
+            table_type,
+            schema,
+            props,
+            decoder,
+            capabilities,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn table_type(&self) -> TableType {
+        self.table_type
+    }
+
+    pub fn schema(&self) -> Arc<Schema> {
+        Arc::clone(&self.schema)
+    }
+
+    pub fn props(&self) -> &TableProps {
+        &self.props
+    }
+
+    pub fn decoder(&self) -> &StreamDecoderConfig {
+        &self.decoder
+    }
+
+    pub fn capabilities(&self) -> &TableCapabilities {
+        &self.capabilities
+    }
+}
+
 /// Configuration describing which decoder should be used for a stream's payloads.
 #[derive(Clone)]
 pub struct StreamDecoderConfig {
@@ -366,12 +493,20 @@ impl StreamDecoderConfig {
 #[derive(Default)]
 pub struct Catalog {
     streams: RwLock<HashMap<String, Arc<StreamDefinition>>>,
+    tables: RwLock<HashMap<String, Arc<TableDefinition>>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CatalogRelation {
+    Stream(Arc<StreamDefinition>),
+    Table(Arc<TableDefinition>),
 }
 
 impl Catalog {
     pub fn new() -> Self {
         Self {
             streams: RwLock::new(HashMap::new()),
+            tables: RwLock::new(HashMap::new()),
         }
     }
 
@@ -413,5 +548,56 @@ impl Catalog {
             .remove(stream_id)
             .map(|_| ())
             .ok_or_else(|| CatalogError::NotFound(stream_id.to_string()))
+    }
+
+    pub fn get_table(&self, table_id: &str) -> Option<Arc<TableDefinition>> {
+        let guard = self.tables.read();
+        guard.get(table_id).cloned()
+    }
+
+    pub fn list_tables(&self) -> Vec<Arc<TableDefinition>> {
+        let guard = self.tables.read();
+        guard.values().cloned().collect()
+    }
+
+    pub fn insert_table(
+        &self,
+        definition: TableDefinition,
+    ) -> Result<Arc<TableDefinition>, CatalogError> {
+        let mut guard = self.tables.write();
+        let table_id = definition.id().to_string();
+        if guard.contains_key(&table_id) {
+            return Err(CatalogError::TableAlreadyExists(table_id));
+        }
+        let definition = Arc::new(definition);
+        guard.insert(table_id, definition.clone());
+        Ok(definition)
+    }
+
+    pub fn upsert_table(&self, definition: TableDefinition) -> Arc<TableDefinition> {
+        let mut guard = self.tables.write();
+        let table_id = definition.id().to_string();
+        let definition = Arc::new(definition);
+        guard.insert(table_id, definition.clone());
+        definition
+    }
+
+    pub fn remove_table(&self, table_id: &str) -> Result<(), CatalogError> {
+        let mut guard = self.tables.write();
+        guard
+            .remove(table_id)
+            .map(|_| ())
+            .ok_or_else(|| CatalogError::TableNotFound(table_id.to_string()))
+    }
+
+    pub fn resolve_relation(&self, name: &str) -> Result<Option<CatalogRelation>, CatalogError> {
+        let stream = self.get(name);
+        let table = self.get_table(name);
+        match (stream, table) {
+            (Some(_), Some(_)) => Err(CatalogError::AmbiguousRelation(name.to_string())),
+            (Some(stream), None) => Ok(Some(CatalogRelation::Stream(stream))),
+            (None, Some(table)) => Ok(Some(CatalogRelation::Table(table))),
+            (None, None) => Ok(None),
+        }
     }
 }

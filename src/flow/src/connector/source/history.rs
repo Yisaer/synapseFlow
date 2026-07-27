@@ -1,11 +1,12 @@
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
-use arrow::array::{Array, BinaryArray, Int64Array, UInt64Array};
+use crate::table::history::{
+    discover_history_files, extract_history_payloads, prune_history_files,
+    read_history_parquet_file, DEFAULT_HISTORY_BATCH_SIZE,
+};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -28,7 +29,7 @@ impl HistorySourceConfig {
             topic: topic.into(),
             start: None,
             end: None,
-            batch_size: 100,
+            batch_size: DEFAULT_HISTORY_BATCH_SIZE,
             send_interval: None,
         }
     }
@@ -80,7 +81,7 @@ impl SourceConnector for HistorySourceConnector {
             info!(connector_id = %connector_id, "starting history replay");
 
             // 1. Discover and Sort Files
-            let mut files = match discover_files(&config.datasource, &config.topic) {
+            let mut files = match discover_history_files(&config.datasource, &config.topic) {
                 Ok(f) => f,
                 Err(e) => {
                     error!(connector_id = %connector_id, error = %e, "failed to discover files");
@@ -92,14 +93,7 @@ impl SourceConnector for HistorySourceConnector {
             files.sort_by_key(|f| f.seq);
 
             // 2. Filter Files
-            let filtered_files: Vec<_> = files
-                .into_iter()
-                .filter(|f| {
-                    let start_ok = config.end.map(|end| f.start_ts <= end).unwrap_or(true);
-                    let end_ok = config.start.map(|start| f.end_ts >= start).unwrap_or(true);
-                    start_ok && end_ok
-                })
-                .collect();
+            let filtered_files = prune_history_files(files, config.start, config.end);
 
             if filtered_files.is_empty() {
                 info!(connector_id = %connector_id, "no matching files found");
@@ -124,7 +118,7 @@ impl SourceConnector for HistorySourceConnector {
 
                 // Blocking reading via instance-scoped spawn_blocking.
                 let result = spawner
-                    .spawn_blocking(move || read_parquet_file(path, batch_size))
+                    .spawn_blocking(move || read_history_parquet_file(path, batch_size))
                     .await;
 
                 match result {
@@ -173,153 +167,17 @@ impl SourceConnector for HistorySourceConnector {
     }
 }
 
-struct FileInfo {
-    path: PathBuf,
-    start_ts: i64,
-    end_ts: i64,
-    seq: u64,
-}
-
-fn discover_files(datasource: &Path, topic: &str) -> std::io::Result<Vec<FileInfo>> {
-    let mut files = Vec::new();
-    let prefix = format!("nanomq_{}-", topic);
-
-    for entry in fs::read_dir(datasource)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("parquet") {
-            continue;
-        }
-
-        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
-            if !filename.starts_with(&prefix) {
-                continue;
-            }
-
-            // Parse: nanomq_{topic}-{start}~{end}_{seq}_{hash}.parquet
-            // Remove prefix
-            let rest = &filename[prefix.len()..];
-            // Find ~
-            let Some(tilde_pos) = rest.find('~') else {
-                continue;
-            };
-            let start_ts_str = &rest[..tilde_pos];
-
-            let rest = &rest[tilde_pos + 1..];
-            // Find _
-            let Some(underscore_pos) = rest.find('_') else {
-                continue;
-            };
-            let end_ts_str = &rest[..underscore_pos];
-
-            let rest = &rest[underscore_pos + 1..];
-            // Find next _
-            let Some(underscore_pos2) = rest.find('_') else {
-                continue;
-            };
-            let seq_str = &rest[..underscore_pos2];
-
-            if let (Ok(start), Ok(end), Ok(seq)) = (
-                start_ts_str.parse::<i64>(),
-                end_ts_str.parse::<i64>(),
-                seq_str.parse::<u64>(),
-            ) {
-                files.push(FileInfo {
-                    path,
-                    start_ts: start,
-                    end_ts: end,
-                    seq,
-                });
-            }
-        }
-    }
-    Ok(files)
-}
-
-fn read_parquet_file(path: PathBuf, batch_size: usize) -> Result<Vec<RecordBatch>, String> {
-    let file = fs::File::open(&path).map_err(|e| e.to_string())?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| e.to_string())?;
-    let reader = builder
-        .with_batch_size(batch_size)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let mut batches = Vec::new();
-    for batch in reader {
-        batches.push(batch.map_err(|e| e.to_string())?);
-    }
-    Ok(batches)
-}
-
 async fn process_batch(
     batch: RecordBatch,
     start_ts: Option<i64>,
     end_ts: Option<i64>,
     sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
 ) -> Result<(), ()> {
-    let ts_col = batch
-        .column_by_name("ts")
-        .or_else(|| {
-            // Log actual column names for debugging
-            let col_names: Vec<String> = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect();
-            tracing::warn!(available_columns = ?col_names, "ts column not found");
-            None
-        })
-        .ok_or(())?;
-    let data_col = batch
-        .column_by_name("data")
-        .or_else(|| {
-            let col_names: Vec<String> = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect();
-            tracing::warn!(available_columns = ?col_names, "data column not found");
-            None
-        })
-        .ok_or(())?;
+    let payloads = extract_history_payloads(&batch, "ts", start_ts, end_ts).map_err(|err| {
+        tracing::warn!(error = %err, "failed to extract history payloads");
+    })?;
 
-    // Support both Int64 and UInt64 timestamp columns
-    let ts_values: Vec<i64> = if let Some(ts_array) = ts_col.as_any().downcast_ref::<Int64Array>() {
-        ts_array.iter().map(|v| v.unwrap_or(0)).collect()
-    } else if let Some(ts_array) = ts_col.as_any().downcast_ref::<UInt64Array>() {
-        ts_array
-            .iter()
-            .map(|v| v.map(|u| u as i64).unwrap_or(0))
-            .collect()
-    } else {
-        tracing::warn!(data_type = ?ts_col.data_type(), "ts column type mismatch");
-        return Err(());
-    };
-
-    let data_array = data_col
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .ok_or_else(|| {
-            tracing::warn!(data_type = ?data_col.data_type(), "data column type mismatch");
-        })?;
-
-    // tracing::debug!(num_rows = batch.num_rows(), "processing batch");
-    for (i, &ts) in ts_values.iter().enumerate() {
-        if let Some(start) = start_ts {
-            if ts < start {
-                continue;
-            }
-        }
-        if let Some(end) = end_ts {
-            if ts > end {
-                continue;
-            }
-        }
-        let data = data_array.value(i);
-        let payload = data.to_vec();
-
+    for payload in payloads {
         if sender
             .send(Ok(ConnectorEvent::Payload(payload)))
             .await
@@ -395,7 +253,7 @@ mod tests {
         let file4 = path.join("nanomq_test-100~200_4_hash4.txt");
         File::create(&file4).unwrap();
 
-        let mut files = discover_files(path, "test").unwrap();
+        let mut files = discover_history_files(path, "test").unwrap();
         files.sort_by_key(|f| f.seq);
 
         assert_eq!(files.len(), 2);
@@ -577,7 +435,7 @@ mod tests {
         // Valid: different sequence
         File::create(path.join("nanomq_t-200~300_0_h.parquet")).unwrap(); // seq 0
 
-        let mut files = discover_files(path, "t").unwrap();
+        let mut files = discover_history_files(path, "t").unwrap();
         files.sort_by_key(|f| f.seq);
 
         assert_eq!(files.len(), 2);

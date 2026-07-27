@@ -26,6 +26,7 @@ mod mqtt;
 mod pipelines;
 mod registries;
 mod streams;
+mod tables;
 
 use cpu_metrics::{
     build_flow_instance_cpu_metrics_state, register_flow_instance_cpu_metrics_state,

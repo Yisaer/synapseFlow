@@ -29,6 +29,7 @@ pub mod physical_sink_encrypt;
 pub mod physical_source_change_gate;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
+pub mod physical_table_scan;
 pub mod physical_watermark;
 pub mod physical_window;
 
@@ -61,6 +62,7 @@ pub use physical_sink_encrypt::PhysicalSinkEncrypt;
 pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
+pub use physical_table_scan::{PhysicalTableScan, PhysicalTableScanSpec};
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
 pub use physical_window::{
     PhysicalCountWindow, PhysicalSlidingWindow, PhysicalStateWindow, PhysicalTumblingWindow,
@@ -71,6 +73,7 @@ pub use physical_window::{
 #[derive(Debug, Clone)]
 pub enum PhysicalPlan {
     DataSource(PhysicalDataSource),
+    TableScan(PhysicalTableScan),
     Decoder(PhysicalDecoder),
     CollectionLayoutNormalize(PhysicalCollectionLayoutNormalize),
     MemoryCollectionMaterialize(PhysicalMemoryCollectionMaterialize),
@@ -116,6 +119,7 @@ impl PhysicalPlan {
     pub fn children(&self) -> &[Arc<PhysicalPlan>] {
         match self {
             PhysicalPlan::DataSource(plan) => plan.base.children(),
+            PhysicalPlan::TableScan(plan) => plan.base.children(),
             PhysicalPlan::Decoder(plan) => plan.base.children(),
             PhysicalPlan::CollectionLayoutNormalize(plan) => plan.base.children(),
             PhysicalPlan::MemoryCollectionMaterialize(plan) => plan.base.children(),
@@ -158,6 +162,7 @@ impl PhysicalPlan {
     pub fn get_plan_type(&self) -> &str {
         match self {
             PhysicalPlan::DataSource(_) => "PhysicalDataSource",
+            PhysicalPlan::TableScan(_) => "PhysicalTableScan",
             PhysicalPlan::Decoder(_) => "PhysicalDecoder",
             PhysicalPlan::CollectionLayoutNormalize(_) => "PhysicalCollectionLayoutNormalize",
             PhysicalPlan::MemoryCollectionMaterialize(_) => "PhysicalMemoryCollectionMaterialize",
@@ -199,6 +204,7 @@ impl PhysicalPlan {
     pub fn get_plan_index(&self) -> i64 {
         match self {
             PhysicalPlan::DataSource(plan) => plan.base.index(),
+            PhysicalPlan::TableScan(plan) => plan.base.index(),
             PhysicalPlan::Decoder(plan) => plan.base.index(),
             PhysicalPlan::CollectionLayoutNormalize(plan) => plan.base.index(),
             PhysicalPlan::MemoryCollectionMaterialize(plan) => plan.base.index(),
@@ -258,6 +264,7 @@ impl PhysicalPlan {
     fn children_mut(&mut self) -> &mut Vec<Arc<PhysicalPlan>> {
         match self {
             PhysicalPlan::DataSource(plan) => &mut plan.base.children,
+            PhysicalPlan::TableScan(plan) => &mut plan.base.children,
             PhysicalPlan::Decoder(plan) => &mut plan.base.children,
             PhysicalPlan::CollectionLayoutNormalize(plan) => &mut plan.base.children,
             PhysicalPlan::MemoryCollectionMaterialize(plan) => &mut plan.base.children,

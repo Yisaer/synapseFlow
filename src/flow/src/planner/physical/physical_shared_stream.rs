@@ -31,7 +31,6 @@ impl PhysicalSharedStreamRequirement {
 pub struct PhysicalSharedStream {
     pub base: BasePhysicalPlan,
     stream_name: String,
-    alias: Option<String>,
     schema: Arc<Schema>,
     requirement: PhysicalSharedStreamRequirement,
     decoder: StreamDecoderConfig,
@@ -41,7 +40,6 @@ pub struct PhysicalSharedStream {
 impl PhysicalSharedStream {
     pub fn new(
         stream_name: String,
-        alias: Option<String>,
         schema: Arc<Schema>,
         requirement: PhysicalSharedStreamRequirement,
         decoder: StreamDecoderConfig,
@@ -52,7 +50,6 @@ impl PhysicalSharedStream {
         Self {
             base,
             stream_name,
-            alias,
             schema,
             requirement,
             decoder,
@@ -62,10 +59,6 @@ impl PhysicalSharedStream {
 
     pub fn stream_name(&self) -> &str {
         &self.stream_name
-    }
-
-    pub fn alias(&self) -> Option<&str> {
-        self.alias.as_deref()
     }
 
     pub fn schema(&self) -> Arc<Schema> {

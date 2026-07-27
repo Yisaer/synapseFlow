@@ -116,21 +116,22 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(plan) => layout_from_schema(
                 plan.schema.as_ref(),
-                plan.alias().unwrap_or(plan.source_name()),
+                plan.source_name(),
                 plan.decode_projection()
                     .and_then(|projection| projection.output_slots()),
             ),
+            PhysicalPlan::TableScan(plan) => {
+                layout_from_schema(plan.schema().as_ref(), plan.table_name(), None)
+            }
             PhysicalPlan::Decoder(plan) => layout_from_schema(
                 plan.schema().as_ref(),
                 plan.source_name(),
                 plan.decode_projection()
                     .and_then(|projection| projection.output_slots()),
             ),
-            PhysicalPlan::SharedStream(plan) => layout_from_schema(
-                plan.schema().as_ref(),
-                plan.alias().unwrap_or(plan.stream_name()),
-                None,
-            ),
+            PhysicalPlan::SharedStream(plan) => {
+                layout_from_schema(plan.schema().as_ref(), plan.stream_name(), None)
+            }
             PhysicalPlan::CollectionLayoutNormalize(plan) => {
                 layout_from_schema(plan.schema.as_ref(), plan.output_source_name(), None)
             }
@@ -660,7 +661,6 @@ mod tests {
     fn project_inherits_direct_refs_and_assigns_expression_affiliate_refs() {
         let source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
             "stream".to_string(),
-            None,
             test_schema(),
             None,
             0,
@@ -758,7 +758,6 @@ mod tests {
     fn row_diff_uses_captured_materialized_layout_after_filter_removal() {
         let source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
             "stream".to_string(),
-            None,
             test_schema(),
             None,
             0,
@@ -798,7 +797,6 @@ mod tests {
     fn sink_encoder_prefers_attached_layout_after_filter_removal() {
         let source = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
             "stream".to_string(),
-            None,
             test_schema(),
             None,
             0,
