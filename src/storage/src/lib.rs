@@ -21,7 +21,7 @@ const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
 const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_topics");
 const INIT_APPLY_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("init_apply_meta");
-const INIT_APPLY_META_KEY: &str = "init.json";
+const INIT_APPLY_META_KEY: &str = "resource_directory";
 const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +120,8 @@ pub struct StoredMemoryTopic {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredInitApplyMeta {
-    pub last_applied_at_ms: u64,
-    pub last_init_json_modified_at_ms: u64,
+    pub bundle_version: String,
+    pub applied_at_ms: u64,
 }
 
 /// Persisted record for a WASM UDF.
@@ -826,16 +826,6 @@ impl StorageManager {
         copy_uploads_recursive(src_dir, &dst_dir)
     }
 
-    /// Copy installed schema sources from an extracted backup directory.
-    pub fn copy_schemas_from_dir(&self, src_dir: &Path) -> Result<usize, StorageError> {
-        if !src_dir.exists() || !src_dir.is_dir() {
-            return Ok(0);
-        }
-        let dst_dir = self.schemas_dir();
-        fs::create_dir_all(&dst_dir).map_err(StorageError::io)?;
-        copy_uploads_recursive(src_dir, &dst_dir)
-    }
-
     pub fn create_stream(&self, stream: StoredStream) -> Result<(), StorageError> {
         self.metadata.create_stream(stream)
     }
@@ -1041,8 +1031,8 @@ mod tests {
 
     fn sample_init_apply_meta() -> StoredInitApplyMeta {
         StoredInitApplyMeta {
-            last_applied_at_ms: 1234,
-            last_init_json_modified_at_ms: 5678,
+            bundle_version: "test-bundle-1".to_string(),
+            applied_at_ms: 1234,
         }
     }
 

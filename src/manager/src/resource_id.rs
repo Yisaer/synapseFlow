@@ -8,7 +8,7 @@
 //! pollute logs, exports, and SQL references.
 //!
 //! This module is the single source of truth for the resource-id grammar so
-//! every entry point — REST handlers, import bundles, `init.json`, and config
+//! every entry point — REST handlers, resource directories, and config
 //! `flow_instances[].id` — agrees on what a valid id is.
 //!
 //! Grammar (v1):

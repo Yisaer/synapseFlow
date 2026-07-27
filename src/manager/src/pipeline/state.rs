@@ -5,6 +5,7 @@ use crate::instances::{
 };
 use crate::startup::StartupPhase;
 use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use storage::StorageManager;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub instances: FlowInstances,
     pub storage: Arc<StorageManager>,
     pub declared_instances: Arc<HashMap<String, ()>>,
+    init_dir: Option<Arc<PathBuf>>,
     import_export_op_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     stream_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
@@ -27,11 +29,28 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn new(
         instance: flow::FlowInstance,
         storage: StorageManager,
         flow_instances: Vec<FlowInstanceSpec>,
         patrol_interval_secs: u64,
+    ) -> Result<Self, String> {
+        Self::new_with_init_dir(
+            instance,
+            storage,
+            flow_instances,
+            patrol_interval_secs,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_init_dir(
+        instance: flow::FlowInstance,
+        storage: StorageManager,
+        flow_instances: Vec<FlowInstanceSpec>,
+        patrol_interval_secs: u64,
+        init_dir: Option<PathBuf>,
     ) -> Result<Self, String> {
         let instances = FlowInstances::new(instance);
         let storage = Arc::new(storage);
@@ -40,6 +59,7 @@ impl AppState {
             instances,
             storage,
             declared_instances: Arc::new(HashMap::new()),
+            init_dir: init_dir.map(Arc::new),
             import_export_op_lock: Arc::new(Semaphore::new(1)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
             stream_op_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -107,9 +127,11 @@ impl AppState {
     }
 
     pub async fn bootstrap_from_storage(&self) -> Result<(), String> {
-        crate::init_process::apply_init_json_if_needed(self.storage.as_ref(), &|id| {
-            self.is_declared_instance(id)
-        })?;
+        crate::init_process::apply_init_directory_if_needed(
+            self.storage.as_ref(),
+            self.init_dir.as_deref().map(AsRef::as_ref),
+            &|id| self.is_declared_instance(id),
+        )?;
         let phase = StartupPhase::new("manager", DEFAULT_FLOW_INSTANCE_ID, "storage_hydrate");
         if let Err(err) = crate::storage_bridge::hydrate_runtime_from_storage(
             self.storage.as_ref(),

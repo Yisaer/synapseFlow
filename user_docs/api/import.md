@@ -10,7 +10,7 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 > the same grammar enforced by the REST API. Import cannot bypass these rules: a
 > bundle containing any invalid id is rejected as a whole with `400 Bad Request`,
 > naming the first offending field. The same validation is applied to
-> `init.json` at startup.
+> startup resource directory.
 
 ## Endpoint
 
@@ -21,8 +21,10 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 Imports a full metadata bundle and atomically replaces the current persisted metadata snapshot in
 storage.
 
-The request body is the ZIP returned by the export API. Its `metadata.json` uses the
-`ExportBundleV1` shape.
+The request body is the ZIP returned by the export API. Its `manifest.json`
+uses the same `ResourceManifestV1` shape accepted from a startup resource
+directory. The ZIP is only the HTTP envelope; `--init-dir` reads its extracted
+contents directly.
 
 Important behavior:
 
@@ -37,18 +39,21 @@ not a runtime checkpoint restore mechanism.
 
 ## Request Shape
 
-### `ExportBundleV1`
+### `ResourceManifestV1`
 
-- `exported_at: number` (Unix seconds from the exported bundle; accepted but not used for storage)
+- `format_version: number` (currently `1`)
+- `bundle_version: string` (validated but not written to startup apply state)
 - `resources: ExportResources`
 
 ### `ExportResources`
 
 - `memory_topics: ExportMemoryTopic[]`
 - `shared_mqtt_clients: SharedMqttClientConfig[]`
+- `schemas: ExportSchema[]`
 - `streams: CreateStreamRequest[]`
 - `pipelines: ExportPipeline[]`, where each pipeline has an optional inline `run_state`
   that defaults to `Stopped`
+- `udfs: ExportUdf[]`
 
 ## Validation
 
@@ -74,9 +79,9 @@ The import request is rejected with `400 Bad Request` if:
 - `applied_to_runtime: boolean`
   - currently always `false`
 - `imported_resource_counts: ImportResourceCounts`
-- `previous_bundle: ExportBundleV1`
-  - the full persisted metadata snapshot captured before the import transaction
-  - this is metadata only; it is not a complete import ZIP
+- `previous_resources: ExportResources`
+  - the metadata snapshot captured before the import transaction
+  - this is not a complete import ZIP and has no `bundle_version`
 
 ### `ImportResourceCounts`
 
@@ -97,6 +102,7 @@ curl -X POST \
 ## Notes
 
 - The import API is defined as **full replace**, not partial upsert.
-- Use `GET /storage/export` before import when a complete restorable backup is required.
+- Use `GET /storage/export?bundle_version=<version>` before import when a complete
+  restorable backup is required.
 - Because runtime reconciliation is out of scope for this endpoint, a restart or a separate runtime
   apply workflow may still be required after import.

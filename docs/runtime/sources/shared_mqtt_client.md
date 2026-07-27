@@ -70,7 +70,7 @@ MQTT authentication is configured with two fields, kept separate from `broker_ur
     password lands in scannable config, so prefer `store:NAME`.
 
 Embedding credentials in the URL (`mqtt://user:pass@host`) is **rejected** as invalid config: the
-userinfo would otherwise land in `init.json` / redb, which static scanners read.
+userinfo would otherwise land in the startup resource manifest / redb, which static scanners read.
 
 ### Configuring the store and referring to it
 
@@ -182,7 +182,7 @@ Current consistency model:
 - `GET`/`LIST` read from storage
 - create persists storage first, then installs the client into every local runtime instance
 - startup hydration restores shared clients from storage before restoring streams
-- import/export and `init.json` include shared client configs in the metadata bundle
+- import/export and the startup resource manifest include shared client configs in the metadata bundle
 
 Create is idempotent when the existing config matches exactly. A mismatched config is a conflict,
 both in storage and in any already-installed runtime instance.

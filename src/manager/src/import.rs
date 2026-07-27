@@ -12,7 +12,10 @@ use tokio::sync::TryAcquireError;
 use zip::ZipArchive;
 
 use crate::audit::ResourceMutationLog;
-use crate::export::{ExportBundleV1, ExportMemoryTopic, ExportUdf, build_export_bundle};
+use crate::export::{
+    ExportMemoryTopic, ExportResources, ExportUdf, ResourceManifestV1, build_export_resources,
+    validate_resource_manifest,
+};
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 use crate::schema::source::{PreparedSchemaTree, resolve_props_from_root};
@@ -34,7 +37,7 @@ fn reload_schemas_from_storage(storage: &storage::StorageManager) {
 pub struct ImportStorageResponse {
     pub applied_to_runtime: bool,
     pub imported_resource_counts: ImportResourceCounts,
-    pub previous_bundle: ExportBundleV1,
+    pub previous_resources: ExportResources,
 }
 
 #[derive(Serialize)]
@@ -77,24 +80,28 @@ pub async fn import_storage_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let metadata_path = tmp.path().join("metadata.json");
-    let metadata_bytes = match std::fs::read(&metadata_path) {
+    let manifest_path = tmp.path().join("manifest.json");
+    let manifest_bytes = match std::fs::read(&manifest_path) {
         Ok(b) => b,
         Err(e) => {
-            let err = format!("read metadata.json from archive: {e}");
+            let err = format!("read manifest.json from archive: {e}");
             audit.log_failure(&err);
             return (StatusCode::BAD_REQUEST, err).into_response();
         }
     };
 
-    let bundle: ExportBundleV1 = match serde_json::from_slice(&metadata_bytes) {
+    let manifest: ResourceManifestV1 = match serde_json::from_slice(&manifest_bytes) {
         Ok(b) => b,
         Err(e) => {
-            let err = format!("parse metadata.json: {e}");
+            let err = format!("parse manifest.json: {e}");
             audit.log_failure(&err);
             return (StatusCode::BAD_REQUEST, err).into_response();
         }
     };
+    if let Err(err) = validate_resource_manifest(&manifest) {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
 
     let schemas_src = tmp.path().join("schemas");
     let mut schema_tree = match PreparedSchemaTree::prepare(&state.storage, &schemas_src) {
@@ -105,48 +112,54 @@ pub async fn import_storage_handler(
         }
     };
     let schema_validation_root = schema_tree.staged_root().unwrap_or(&schemas_src);
-    let snapshot = match validate_and_build_snapshot(&bundle, Some(schema_validation_root), &|id| {
-        state.is_declared_instance(id)
-    }) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            audit.log_failure(&err);
-            return (StatusCode::BAD_REQUEST, err).into_response();
-        }
-    };
+    let snapshot =
+        match validate_and_build_snapshot(&manifest, Some(schema_validation_root), &|id| {
+            state.is_declared_instance(id)
+        }) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                audit.log_failure(&err);
+                return (StatusCode::BAD_REQUEST, err).into_response();
+            }
+        };
 
-    // Validate and copy UDF wasm files from the archive
+    // Validate UDF modules into import staging before installing managed files.
     let udf_count = snapshot.udfs.len();
+    let validated_wasm_dir = tmp.path().join(".validated-wasm");
+    if let Err(err) = std::fs::create_dir(&validated_wasm_dir) {
+        let err = format!("create validated WASM staging directory: {err}");
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
     if udf_count > 0 {
         let wasm_src = tmp.path().join("wasm_files");
-        if let Err(err) = validate_and_copy_udfs_for_import(
-            &snapshot.udfs,
-            &wasm_src,
-            &state.storage.wasm_files_dir(),
-        ) {
+        if let Err(err) =
+            validate_and_copy_udfs_for_import(&snapshot.udfs, &wasm_src, &validated_wasm_dir)
+        {
             audit.log_failure(&err);
             return (StatusCode::BAD_REQUEST, err).into_response();
         }
     }
 
-    // Copy upload files from the archive. This is best-effort: if the archive
-    // has no uploads/ directory, no files are affected.
-    let uploads_src = tmp.path().join("uploads");
-    if let Err(err) = state.storage.copy_uploads_from_dir(&uploads_src) {
-        audit.log_failure(&format!("copy uploads from archive: {err}"));
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to copy uploaded files: {err}"),
-        )
-            .into_response();
-    }
     if let Err(err) = schema_tree.activate() {
         audit.log_failure(&err);
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
+    let installed_wasm =
+        match install_validated_wasm(&validated_wasm_dir, &state.storage.wasm_files_dir()) {
+            Ok(paths) => paths,
+            Err(err) => {
+                let mut err = err;
+                if let Err(rollback_err) = schema_tree.rollback() {
+                    err = format!("{err}; rollback schema sources: {rollback_err}");
+                }
+                audit.log_failure(&err);
+                return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+            }
+        };
 
-    let previous_bundle = match build_export_bundle(state.storage.as_ref()) {
-        Ok(bundle) => bundle,
+    let previous_resources = match build_export_resources(state.storage.as_ref()) {
+        Ok(resources) => resources,
         Err(err) => {
             audit.log_failure(&err);
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
@@ -161,9 +174,17 @@ pub async fn import_storage_handler(
         pipelines: snapshot.pipelines.len(),
         udfs: udf_count,
     };
+    let referenced_wasm = snapshot
+        .udfs
+        .iter()
+        .map(|udf| format!("{}.wasm", udf.wasm_sha256))
+        .collect::<BTreeSet<_>>();
 
     if let Err(err) = state.storage.replace_metadata_snapshot(snapshot) {
         let mut err = format!("replace metadata snapshot in storage: {err}");
+        for path in &installed_wasm {
+            let _ = std::fs::remove_file(path);
+        }
         if let Err(rollback_err) = schema_tree.rollback() {
             err = format!("{err}; rollback schema sources: {rollback_err}");
         }
@@ -171,6 +192,9 @@ pub async fn import_storage_handler(
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
     schema_tree.finish();
+    if let Err(err) = cleanup_unreferenced_wasm(&state.storage.wasm_files_dir(), &referenced_wasm) {
+        tracing::warn!(error = %err, "failed to clean unreferenced imported WASM files");
+    }
 
     // Re-hydrate NamedSchemaStore from the newly imported storage
     reload_schemas_from_storage(state.storage.as_ref());
@@ -181,10 +205,53 @@ pub async fn import_storage_handler(
         axum::Json(ImportStorageResponse {
             applied_to_runtime: false,
             imported_resource_counts,
-            previous_bundle,
+            previous_resources,
         }),
     )
         .into_response()
+}
+
+fn install_validated_wasm(
+    source: &Path,
+    destination: &Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut installed = Vec::new();
+    for entry in std::fs::read_dir(source)
+        .map_err(|err| format!("read validated WASM staging directory: {err}"))?
+    {
+        let entry = entry.map_err(|err| format!("read validated WASM entry: {err}"))?;
+        let target = destination.join(entry.file_name());
+        if !target.exists() {
+            if let Err(err) = std::fs::rename(entry.path(), &target) {
+                for installed_path in &installed {
+                    let _ = std::fs::remove_file(installed_path);
+                }
+                return Err(format!(
+                    "install validated WASM `{}`: {err}",
+                    target.display()
+                ));
+            }
+            installed.push(target);
+        }
+    }
+    Ok(installed)
+}
+
+fn cleanup_unreferenced_wasm(wasm_dir: &Path, referenced: &BTreeSet<String>) -> Result<(), String> {
+    for entry in
+        std::fs::read_dir(wasm_dir).map_err(|err| format!("read managed WASM directory: {err}"))?
+    {
+        let entry = entry.map_err(|err| format!("read managed WASM entry: {err}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|err| format!("inspect managed WASM entry: {err}"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if file_type.is_file() && name.ends_with(".wasm") && !referenced.contains(&name) {
+            std::fs::remove_file(entry.path())
+                .map_err(|err| format!("remove unreferenced WASM `{name}`: {err}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn extract_zip(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
@@ -373,7 +440,7 @@ fn validate_pipeline_stream_references(
 }
 
 fn validate_and_build_snapshot_inner<F>(
-    bundle: &ExportBundleV1,
+    bundle: &ResourceManifestV1,
     existing_stream_names: &BTreeSet<String>,
     schema_source_root: Option<&Path>,
     is_declared_instance: &F,
@@ -615,7 +682,7 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 pub(crate) fn validate_and_build_snapshot<F>(
-    bundle: &ExportBundleV1,
+    bundle: &ResourceManifestV1,
     schema_source_root: Option<&Path>,
     is_declared_instance: &F,
 ) -> Result<MetadataExportSnapshot, String>
@@ -625,23 +692,6 @@ where
     validate_and_build_snapshot_inner(
         bundle,
         &BTreeSet::new(),
-        schema_source_root,
-        is_declared_instance,
-    )
-}
-
-pub(crate) fn validate_and_build_snapshot_with_existing_streams<F>(
-    bundle: &ExportBundleV1,
-    existing_stream_names: &BTreeSet<String>,
-    schema_source_root: Option<&Path>,
-    is_declared_instance: &F,
-) -> Result<MetadataExportSnapshot, String>
-where
-    F: Fn(&str) -> bool,
-{
-    validate_and_build_snapshot_inner(
-        bundle,
-        existing_stream_names,
         schema_source_root,
         is_declared_instance,
     )
@@ -713,7 +763,9 @@ fn import_export_busy_response() -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::ExportPipeline;
+    use crate::export::{
+        ExportPipeline, RESOURCE_DIRECTORY_FORMAT_VERSION, build_resource_manifest,
+    };
     use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
@@ -787,9 +839,10 @@ mod tests {
         pipeline_id: &str,
         mqtt_key: &str,
         topic_name: &str,
-    ) -> ExportBundleV1 {
-        ExportBundleV1 {
-            exported_at: 1_700_000_000,
+    ) -> ResourceManifestV1 {
+        ResourceManifestV1 {
+            format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
+            bundle_version: "test-bundle-1".to_string(),
             resources: crate::export::ExportResources {
                 memory_topics: vec![ExportMemoryTopic {
                     topic: topic_name.to_string(),
@@ -818,7 +871,10 @@ mod tests {
         }
     }
 
-    fn add_file_backed_proto_schema(bundle: &mut ExportBundleV1, schemas_root: &std::path::Path) {
+    fn add_file_backed_proto_schema(
+        bundle: &mut ResourceManifestV1,
+        schemas_root: &std::path::Path,
+    ) {
         let schema_dir = schemas_root.join("proto/simple_schema");
         std::fs::create_dir_all(&schema_dir).expect("create proto schema directory");
         std::fs::write(
@@ -841,9 +897,9 @@ mod tests {
     }
 
     fn build_zip_for_test(
-        bundle: &ExportBundleV1,
+        bundle: &ResourceManifestV1,
         wasm_dir: &std::path::Path,
-        uploads_dir: &std::path::Path,
+        _uploads_dir: &std::path::Path,
         schemas_dir: &std::path::Path,
     ) -> Vec<u8> {
         let udf_shas: Vec<String> = bundle
@@ -852,7 +908,7 @@ mod tests {
             .iter()
             .map(|u| u.wasm_sha256.clone())
             .collect();
-        crate::export::build_zip(bundle, &udf_shas, wasm_dir, uploads_dir, schemas_dir)
+        crate::export::build_zip(bundle, &udf_shas, wasm_dir, schemas_dir)
             .expect("build test export")
     }
 
@@ -969,14 +1025,14 @@ mod tests {
 
     #[cfg(unix)]
     fn build_zip_with_symlinked_proto(
-        bundle: &ExportBundleV1,
+        bundle: &ResourceManifestV1,
         target: &std::path::Path,
     ) -> Vec<u8> {
         let metadata = serde_json::to_vec(bundle).expect("serialize metadata");
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
         writer
-            .start_file("metadata.json", options)
+            .start_file("manifest.json", options)
             .expect("start metadata");
         writer.write_all(&metadata).expect("write metadata");
         writer
@@ -1094,7 +1150,7 @@ mod tests {
             .as_object_mut()
             .expect("pipeline object")
             .remove("run_state");
-        let bundle: ExportBundleV1 = serde_json::from_value(value).expect("deserialize bundle");
+        let bundle: ResourceManifestV1 = serde_json::from_value(value).expect("deserialize bundle");
         assert_eq!(
             bundle.resources.pipelines[0].run_state,
             StoredPipelineDesiredState::Stopped
@@ -1162,7 +1218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_storage_handler_replaces_snapshot_and_returns_previous_bundle() {
+    async fn import_storage_handler_replaces_snapshot_and_returns_previous_resources() {
         let dir = tempdir().expect("create tempdir");
         let storage = StorageManager::new(dir.path()).expect("create storage");
         let old_bundle = sample_bundle("stream_old", "pipe_old", "mqtt_old", "topic_old");
@@ -1204,7 +1260,7 @@ mod tests {
         assert_eq!(json["applied_to_runtime"], false);
         assert_eq!(json["imported_resource_counts"]["memory_topics"], 1);
         assert_eq!(json["imported_resource_counts"]["udfs"], 0);
-        assert!(json["previous_bundle"]["exported_at"].as_u64().unwrap() > 0);
+        assert!(json["previous_resources"]["streams"].is_array());
 
         assert!(state.storage.get_stream("stream_new").unwrap().is_some());
         assert!(state.storage.get_pipeline("pipe_new").unwrap().is_some());
@@ -1250,7 +1306,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         // Verify storage was not mutated
-        let bundle_after = build_export_bundle(state.storage.as_ref()).expect("export");
+        let bundle_after =
+            build_resource_manifest(state.storage.as_ref(), "test-bundle-1".to_string())
+                .expect("export");
         assert_eq!(
             serde_json::to_value(&bundle_after.resources).unwrap(),
             serde_json::to_value(&old_bundle.resources).unwrap()
@@ -1359,133 +1417,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_and_build_snapshot_with_existing_streams_allows_existing_stream_reference() {
-        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.streams.clear();
-        bundle.resources.pipelines[0].definition.sql = "SELECT * FROM stream_a".to_string();
-
-        let existing_stream_names = BTreeSet::from(["stream_a".to_string()]);
-        let snapshot = validate_and_build_snapshot_with_existing_streams(
-            &bundle,
-            &existing_stream_names,
-            None,
-            &is_default_instance,
-        )
-        .expect("should allow reference to existing stream");
-
-        assert!(snapshot.streams.is_empty());
-        assert_eq!(snapshot.pipelines.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn export_import_uploads_roundtrip() {
-        let dir = tempdir().unwrap();
-        let storage = StorageManager::new(dir.path()).unwrap();
-
-        // Seed storage with a stream and an upload file
-        let bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
-        storage
-            .replace_metadata_snapshot(
-                validate_and_build_snapshot(&bundle, None, &is_default_instance)
-                    .expect("build snapshot"),
-            )
-            .expect("seed snapshot");
-        storage
-            .save_upload("ca-cert.pem", b"certificate data")
-            .unwrap();
-
-        // Build a ZIP with the same path used by the export handler.
-        let exported_bundle = crate::export::build_export_bundle(&storage).unwrap();
-        let zip_bytes = build_zip_for_test(
-            &exported_bundle,
-            &storage.wasm_files_dir(),
-            &storage.uploads_dir(),
-            &storage.schemas_dir(),
-        );
-
-        // Create fresh storage and import
-        let dir2 = tempdir().unwrap();
-        let storage2 = StorageManager::new(dir2.path()).unwrap();
-        let state = AppState::new(
-            crate::new_default_flow_instance(),
-            storage2,
-            vec![sample_default_instance_spec()],
-            0,
-        )
-        .unwrap();
-
-        let body = axum::body::Bytes::from(zip_bytes);
-        let response = import_storage_handler(State(state.clone()), body)
-            .await
-            .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Verify upload file survived
-        let list = state.storage.list_uploads().unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name, "ca-cert.pem");
-        assert_eq!(list[0].size_bytes, 16);
-        let data = state.storage.read_upload("ca-cert.pem").unwrap();
-        assert_eq!(data, b"certificate data");
-
-        // Verify stream also survived
-        assert!(state.storage.get_stream("stream_1").unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn export_import_nested_uploads_roundtrip() {
-        let dir = tempdir().unwrap();
-        let storage = StorageManager::new(dir.path()).unwrap();
-
-        let bundle = sample_bundle("stream_1", "pipe_1", "mqtt_1", "topic_1");
-        storage
-            .replace_metadata_snapshot(
-                validate_and_build_snapshot(&bundle, None, &is_default_instance)
-                    .expect("build snapshot"),
-            )
-            .expect("seed snapshot");
-        storage
-            .save_upload("proto/sensor.proto", b"message Sensor {}")
-            .unwrap();
-        storage
-            .save_upload("proto/common/types.proto", b"message T {}")
-            .unwrap();
-
-        let exported_bundle = crate::export::build_export_bundle(&storage).unwrap();
-        let zip_bytes = build_zip_for_test(
-            &exported_bundle,
-            &storage.wasm_files_dir(),
-            &storage.uploads_dir(),
-            &storage.schemas_dir(),
-        );
-
-        let dir2 = tempdir().unwrap();
-        let storage2 = StorageManager::new(dir2.path()).unwrap();
-        let state = AppState::new(
-            crate::new_default_flow_instance(),
-            storage2,
-            vec![sample_default_instance_spec()],
-            0,
-        )
-        .unwrap();
-
-        let body = axum::body::Bytes::from(zip_bytes);
-        let response = import_storage_handler(State(state.clone()), body)
-            .await
-            .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let list = state.storage.list_uploads().unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "proto/common/types.proto");
-        assert_eq!(list[1].name, "proto/sensor.proto");
-        assert_eq!(
-            state.storage.read_upload("proto/sensor.proto").unwrap(),
-            b"message Sensor {}"
-        );
-    }
-
     #[tokio::test]
     async fn export_import_file_backed_proto_schema_roundtrip() {
         let source_dir = tempdir().unwrap();
@@ -1503,7 +1434,9 @@ mod tests {
             )
             .expect("seed source snapshot");
 
-        let exported_bundle = crate::export::build_export_bundle(&source_storage).unwrap();
+        let exported_bundle =
+            crate::export::build_resource_manifest(&source_storage, "test-bundle-1".to_string())
+                .unwrap();
         assert_eq!(
             exported_bundle.resources.schemas[0]
                 .props

@@ -35,12 +35,14 @@ pub struct BootstrapResult {
 struct CliFlags {
     data_dir: Option<String>,
     config_path: Option<String>,
+    init_dir: Option<String>,
 }
 
 impl CliFlags {
     fn parse() -> Self {
         let mut data_dir = None;
         let mut config_path = None;
+        let mut init_dir = None;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -54,12 +56,18 @@ impl CliFlags {
                         config_path = Some(val);
                     }
                 }
+                "--init-dir" => {
+                    if let Some(val) = args.next() {
+                        init_dir = Some(val);
+                    }
+                }
                 _ => {}
             }
         }
         Self {
             data_dir,
             config_path,
+            init_dir,
         }
     }
 }
@@ -82,6 +90,7 @@ fn init_options_from_loaded_config(
     config: AppConfig,
     loaded_config_path: Option<String>,
     data_dir: Option<&str>,
+    init_dir: Option<&str>,
     logging_context: &LoggingContext,
 ) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
     let logging_guard =
@@ -104,6 +113,9 @@ fn init_options_from_loaded_config(
     let mut options = config.to_server_options();
     if let Some(dir) = data_dir {
         options.data_dir = Some(dir.to_string());
+    }
+    if let Some(dir) = init_dir {
+        options.init_dir = Some(dir.to_string());
     }
     tracing::info!(
         mode = bootstrap_phase.mode(),
@@ -136,7 +148,7 @@ pub fn init_options_from_config_path_with_logging_context(
     logging_context: &LoggingContext,
 ) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
     let (config, loaded_config_path) = load_config_with_path(Some(config_path))?;
-    init_options_from_loaded_config(config, loaded_config_path, None, logging_context)
+    init_options_from_loaded_config(config, loaded_config_path, None, None, logging_context)
 }
 
 /// Parse CLI/config and initialize logging/options without preparing FlowInstance.
@@ -148,6 +160,7 @@ pub fn default_init_options(
         config,
         loaded_config_path,
         cli_flags.data_dir.as_deref(),
+        cli_flags.init_dir.as_deref(),
         &LoggingContext::manager(),
     )
 }

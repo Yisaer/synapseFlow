@@ -207,7 +207,7 @@ Export produces a **ZIP archive** containing:
 
 ```
 veloflux-export-<timestamp>.zip
-├── metadata.json          # ExportBundleV1 (streams, pipelines, mqtt, memory_topics, udfs)
+├── manifest.json          # ResourceManifestV1 (streams, pipelines, mqtt, memory_topics, udfs)
 └── wasm_files/            # WASM UDF binaries (one .wasm per function)
     ├── <sha256_1>.wasm
     └── <sha256_2>.wasm
@@ -222,7 +222,7 @@ veloflux-export-<timestamp>.zip
 
 **Export flow**
 
-1. Serialize `ExportBundleV1` to `metadata.json`. The `udfs` field contains
+1. Serialize `ResourceManifestV1` to `manifest.json`. The `udfs` field contains
    `ExportUdf` records with `name` and `wasm_sha256` (not the binary).
 2. Copy referenced `.wasm` files from `<base_dir>/wasm_files/` into the archive's
    `wasm_files/` directory.
@@ -231,7 +231,7 @@ veloflux-export-<timestamp>.zip
 **Import flow**
 
 1. Safely extract the ZIP to a temporary directory.
-2. Parse and validate `metadata.json` (streams, pipelines, etc.).
+2. Parse and validate `manifest.json` (streams, pipelines, etc.).
 3. For each UDF in the `udfs` list:
    - Require `<sha256>.wasm` to exist in the archive.
    - Recomputed SHA-256 and compare to declared value.
@@ -244,7 +244,7 @@ veloflux-export-<timestamp>.zip
 
 | Method | Path              | Content-Type       |
 |--------|-------------------|--------------------|
-| `GET`  | `/storage/export` | `application/zip` |
+| `GET`  | `/storage/export?bundle_version=<version>` | `application/zip` |
 | `POST` | `/import`         | `application/zip` |
 
 The previous JSON-only format is no longer supported.
@@ -579,6 +579,6 @@ network access for UDFs that need it, with explicit opt-in and capability contro
 - `CustomFuncRegistry`: adding `register_wasm` does not affect existing built-in functions.
 - Storage: new `udfs` table is additive. Existing storage instances don't need migration.
 - Export/import: the `udfs` field in `ExportResources` is required. Old JSON-only export
-  bundles (without `resources.udfs`) are not compatible with the current tar.gz format
+  bundles (without `resources.udfs`) are not compatible with the canonical resource directory format
   and must be migrated by adding `"udfs": []` to the resources object and wrapping the
-  metadata in the tar.gz layout. The previous JSON body format is no longer supported.
+  metadata in the resource directory layout. The previous JSON body format is no longer supported.

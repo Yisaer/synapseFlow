@@ -1,113 +1,55 @@
-# Init Process
+# Startup Resource Directory
 
-## Background
+VeloFlux can apply an optional resource directory before runtime hydration:
 
-veloFlux may load an optional `init.json` file from the configured data directory during process
-startup.
+```shell
+veloflux --config ./config.yaml --data-dir ./data --init-dir ./init
+```
 
-This mechanism is intended for bootstrap-time metadata initialization. Its responsibility is limited
-to writing resources into storage before the normal runtime hydration flow starts.
+The directory contains `manifest.json`, optional installed schema sources under
+`schemas/`, and referenced WASM modules under `wasm_files/`. It must not be
+inside `data_dir`. There is no startup archive and no fallback file under
+`data_dir`.
 
-## Goals
+This is the same canonical resource directory used by HTTP export and import.
+Export and import wrap the directory in a ZIP file; startup reads the extracted
+directory directly. See `metadata_bundle.md` for the export, edit, and
+initialize workflow.
 
-- Allow operators to place an `init.json` file in the data directory for startup-time bootstrap.
-- Avoid re-applying the same file when it has not changed.
-- Fail fast when the bootstrap file conflicts with existing stored resources.
+The manifest format is:
 
-## Non-Goals
+```json
+{
+  "format_version": 1,
+  "bundle_version": "2026.07.24-1",
+  "resources": {
+    "schemas": [],
+    "streams": [],
+    "pipelines": [],
+    "memory_topics": [],
+    "shared_mqtt_clients": [],
+    "udfs": []
+  }
+}
+```
 
-- Runtime hot reload of `init.json`.
-- Partial apply with best-effort error recovery.
-- Silent overwrite of existing resources with the same name.
+`bundle_version` is an opaque user-provided identity. VeloFlux only tests it for
+equality with the last successfully applied version; it does not order versions.
+The version is normally selected when exporting the artifact. A later revision
+intended for a target that already applied that version requires a new value.
 
-## Startup Behavior
+Startup uses add-only Apply semantics. Missing resources are created, resources
+with the same kind and ID retain the live `data_dir` value, and live resources
+absent from the manifest are retained. The selected live and incoming resources
+form one candidate and are validated together before any metadata is committed.
 
-On startup, after storage is opened and before runtime resources are hydrated from storage, veloFlux
-checks whether `<data_dir>/init.json` exists.
+Referenced files are validated and prepared under
+`<data_dir>/.init-staging/`. Files are installed before metadata, while all new
+metadata and the apply state are committed in one redb transaction. Failures
+before commit do not advance `bundle_version`; stale staging work directories
+from an interrupted apply are cleaned during startup.
 
-If the file does not exist:
-
-- skip the init process
-- continue normal startup
-
-If the file exists:
-
-1. Read the file's last modified time from the filesystem.
-2. Read the persisted init-apply metadata from storage.
-3. Compare the current file modified time with the stored metadata.
-
-If the current file modified time is not newer than the stored metadata:
-
-- skip the init process
-- continue normal startup
-
-If the current file modified time is newer than the stored metadata:
-
-- execute the init apply flow once during this startup
-
-## Apply Semantics
-
-The init process is a storage write flow.
-
-It does not introduce a separate runtime-only resource model. After the init apply succeeds, the
-normal storage hydration flow is responsible for loading the stored resources into the runtime.
-
-Before writing any resource from `init.json`, veloFlux performs a duplicate-name check against the
-existing storage state.
-
-If any resource in `init.json` has the same identity as an existing stored resource of the same
-kind, startup must fail immediately.
-
-Examples include:
-
-- a stream with the same name
-- a pipeline with the same id
-- a shared MQTT client config with the same key
-- a memory topic with the same topic name
-
-The init process does not overwrite or merge existing resources.
-
-## Apply Metadata
-
-After a successful init apply, veloFlux persists init-apply metadata in storage.
-
-The metadata includes at least:
-
-- `last_applied_at`
-- `last_init_json_modified_time`
-
-`last_init_json_modified_time` is the field used for the startup skip/apply decision.
-
-`last_applied_at` is retained for observability and troubleshooting.
-
-## Failure Semantics
-
-The init process is strict.
-
-If `init.json` is selected for apply and any step fails, veloFlux startup must fail.
-
-Examples include:
-
-- the file cannot be read
-- the file content is invalid
-- duplicate-name conflicts are detected before apply
-- a storage write fails
-
-When apply fails:
-
-- the init-apply metadata must not be advanced
-- the process exits instead of continuing with partial bootstrap state
-
-## Update Behavior
-
-The init process is driven by file modification time.
-
-If `init.json` is updated before the next veloFlux startup, and its modified time becomes newer
-than `last_init_json_modified_time`, veloFlux attempts the init apply flow again during that
-startup.
-
-If `init.json` is unchanged, veloFlux skips the init apply flow.
-
-Because duplicate-name conflicts are fatal, updating `init.json` does not imply in-place update of
-existing resources with the same identity. Such a file still fails the duplicate-name check and
-causes startup failure.
+A missing, unreadable, non-directory init path or missing/unparseable/unsupported
+manifest is logged as a warning and skipped. A parsed manifest with an invalid
+`bundle_version`, an unsafe source, invalid resources, broken dependencies, or
+failed compilation aborts startup.

@@ -20,7 +20,7 @@ fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), Strin
         ));
     }
     // Reject credentials embedded in the URL (VF-51 §7.3): they would otherwise
-    // land in init.json/redb, a scannable surface. Use `username`/`password`.
+    // land in resource manifests/redb, a scannable surface. Use `username`/`password`.
     if flow::connector::url_has_userinfo(cfg.broker_url.trim()) {
         return Err(format!(
             "shared mqtt client {} broker_url must not embed credentials; use `username`/`password`",

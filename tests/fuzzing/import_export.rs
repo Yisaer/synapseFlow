@@ -63,7 +63,8 @@ impl Drop for ImportExportHarness {
 
 fn bundle_empty() -> JsonValue {
     json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -76,7 +77,8 @@ fn bundle_empty() -> JsonValue {
 
 fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> JsonValue {
     json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -114,7 +116,9 @@ fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> Js
 
 async fn export_bundle(http: &reqwest::Client, base: &str) -> JsonValue {
     let resp = http
-        .get(format!("{base}/storage/export"))
+        .get(format!(
+            "{base}/storage/export?bundle_version=test-bundle-1"
+        ))
         .send()
         .await
         .expect("export request");
@@ -131,16 +135,16 @@ fn metadata_json_from_zip(data: &[u8]) -> Result<JsonValue, String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|e| format!("read ZIP entry: {e}"))?;
-        if entry.name() == "metadata.json" {
+        if entry.name() == "manifest.json" {
             let mut metadata = Vec::new();
             entry
                 .read_to_end(&mut metadata)
-                .map_err(|e| format!("read metadata.json: {e}"))?;
+                .map_err(|e| format!("read manifest.json: {e}"))?;
             return serde_json::from_slice(&metadata)
-                .map_err(|e| format!("parse metadata.json: {e}"));
+                .map_err(|e| format!("parse manifest.json: {e}"));
         }
     }
-    Err("metadata.json not found in archive".to_string())
+    Err("manifest.json not found in archive".to_string())
 }
 
 fn build_zip_from_metadata(bundle: &JsonValue) -> Result<Vec<u8>, String> {
@@ -148,14 +152,14 @@ fn build_zip_from_metadata(bundle: &JsonValue) -> Result<Vec<u8>, String> {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     archive
         .start_file(
-            "metadata.json",
+            "manifest.json",
             zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated),
         )
-        .map_err(|e| format!("start metadata.json: {e}"))?;
+        .map_err(|e| format!("start manifest.json: {e}"))?;
     archive
         .write_all(&metadata_json)
-        .map_err(|e| format!("write metadata.json: {e}"))?;
+        .map_err(|e| format!("write manifest.json: {e}"))?;
     archive
         .finish()
         .map(Cursor::into_inner)
@@ -203,7 +207,8 @@ async fn import_rejects_missing_resources() {
         &h.http,
         &h.base(),
         &json!({
-            "exported_at": 0
+            "format_version": 1,
+        "bundle_version": "test-bundle-1",
         }),
     )
     .await;
@@ -242,7 +247,8 @@ async fn import_rejects_duplicate_identifiers() {
     let pipeline_id = format!("dup_pipe_{}", random_suffix());
 
     let bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -292,7 +298,8 @@ async fn import_rejects_invalid_resources() {
     };
 
     let bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -325,7 +332,8 @@ async fn import_rejects_empty_name_and_zero_capacity() {
     };
 
     let bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [
                 {
@@ -352,7 +360,8 @@ async fn import_rejects_legacy_pipeline_run_states() {
     };
 
     let bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -420,7 +429,8 @@ async fn import_full_replace_removes_missing_resources() {
     assert!(status1.is_success(), "body: {body1}");
 
     let reduced_bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -454,7 +464,8 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
     let before = export_bundle(&h.http, &h.base()).await;
 
     let bad_bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -479,10 +490,8 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
     let (status2, body2) = import_bundle(&h.http, &h.base(), &bad_bundle).await;
     assert_eq!(status2, StatusCode::BAD_REQUEST, "body: {body2}");
 
-    let mut after = export_bundle(&h.http, &h.base()).await;
-    let mut expected = before;
-    after["exported_at"] = serde_json::json!(0);
-    expected["exported_at"] = serde_json::json!(0);
+    let after = export_bundle(&h.http, &h.base()).await;
+    let expected = before;
     assert_eq!(
         after, expected,
         "invalid import must preserve previous snapshot"
@@ -490,7 +499,7 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reimport_previous_bundle_restores_prior_snapshot() {
+async fn reimport_exported_snapshot_restores_prior_snapshot() {
     let Some(h) = ImportExportHarness::new().await else {
         return;
     };
@@ -517,10 +526,8 @@ async fn reimport_previous_bundle_restores_prior_snapshot() {
     let (status3, body3) = import_bundle(&h.http, &h.base(), &snapshot_a).await;
     assert!(status3.is_success(), "body: {body3}");
 
-    let mut restored = export_bundle(&h.http, &h.base()).await;
-    let mut expected = snapshot_a;
-    restored["exported_at"] = serde_json::json!(0);
-    expected["exported_at"] = serde_json::json!(0);
+    let restored = export_bundle(&h.http, &h.base()).await;
+    let expected = snapshot_a;
     assert_eq!(restored, expected, "reimport should restore prior snapshot");
 }
 
@@ -581,10 +588,8 @@ async fn export_repeated_without_changes_is_identical() {
     let (status, body) = import_bundle(&h.http, &h.base(), &bundle).await;
     assert!(status.is_success(), "body: {body}");
 
-    let mut export1 = export_bundle(&h.http, &h.base()).await;
-    let mut export2 = export_bundle(&h.http, &h.base()).await;
-    export1["exported_at"] = serde_json::json!(0);
-    export2["exported_at"] = serde_json::json!(0);
+    let export1 = export_bundle(&h.http, &h.base()).await;
+    let export2 = export_bundle(&h.http, &h.base()).await;
     assert_eq!(
         export1, export2,
         "repeated export should be byte-equivalent in JSON value form"
@@ -598,7 +603,8 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
     };
 
     let bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],

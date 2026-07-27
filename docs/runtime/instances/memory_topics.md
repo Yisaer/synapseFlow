@@ -128,7 +128,7 @@ They are included in:
 
 - storage export
 - storage import
-- startup-time `init.json`
+- startup `--init-dir` resource manifest
 - startup hydration from storage
 
 Hydration declares memory topics before streams and pipelines that may reference them. This order
@@ -145,8 +145,8 @@ Import treats memory topics as part of the full metadata snapshot:
 - the imported snapshot fully replaces the stored topic set
 - import does not reconcile live runtime resources immediately
 
-`init.json` uses the same bundle shape but add-only startup semantics. A memory topic in
-`init.json` conflicts with an already stored topic of the same name and fails startup.
+the startup resource manifest uses the same bundle shape but add-only startup semantics. A memory topic in
+the startup resource manifest conflicts with an already stored topic of the same name and fails startup.
 
 ## Testing Guidance
 

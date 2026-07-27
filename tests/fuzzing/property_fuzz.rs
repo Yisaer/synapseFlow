@@ -247,7 +247,10 @@ async fn post_pipeline_raw(h: &TestHarness, body: JsonValue) -> (StatusCode, Str
 async fn export_bundle(h: &TestHarness) -> JsonValue {
     let resp = h
         .http
-        .get(format!("{}/storage/export", h.base()))
+        .get(format!(
+            "{}/storage/export?bundle_version=test-bundle-1",
+            h.base()
+        ))
         .send()
         .await
         .expect("export request");
@@ -258,15 +261,15 @@ async fn export_bundle(h: &TestHarness) -> JsonValue {
     let mut archive = zip::ZipArchive::new(Cursor::new(body.as_ref())).expect("open export ZIP");
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).expect("ZIP entry");
-        if entry.name() == "metadata.json" {
+        if entry.name() == "manifest.json" {
             let mut metadata = Vec::new();
             entry
                 .read_to_end(&mut metadata)
-                .expect("read metadata.json");
-            return serde_json::from_slice(&metadata).expect("parse metadata.json");
+                .expect("read manifest.json");
+            return serde_json::from_slice(&metadata).expect("parse manifest.json");
         }
     }
-    panic!("metadata.json not found in archive");
+    panic!("manifest.json not found in archive");
 }
 
 fn build_import_zip(bundle: &JsonValue) -> Vec<u8> {
@@ -274,14 +277,14 @@ fn build_import_zip(bundle: &JsonValue) -> Vec<u8> {
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     archive
         .start_file(
-            "metadata.json",
+            "manifest.json",
             zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated),
         )
-        .expect("start metadata.json");
+        .expect("start manifest.json");
     archive
         .write_all(&metadata_json)
-        .expect("write metadata.json");
+        .expect("write manifest.json");
     archive.finish().expect("finish ZIP").into_inner()
 }
 
@@ -349,7 +352,8 @@ fn bundle_with_resources(
     run_states: Vec<JsonValue>,
 ) -> JsonValue {
     let mut bundle = json!({
-        "exported_at": 0,
+        "format_version": 1,
+        "bundle_version": "test-bundle-1",
         "resources": {
             "memory_topics": [],
             "shared_mqtt_clients": [],
@@ -788,55 +792,6 @@ fn full_replace_removes_resources_missing_from_new_bundle() {
         assert!(
             !names.contains(&remove.as_str()),
             "remove stream should be removed by full replace: {after}"
-        );
-    });
-}
-
-#[test]
-fn previous_bundle_round_trip_restores_prior_state() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("build tokio runtime");
-
-    let Some(h) = rt.block_on(TestHarness::new()) else {
-        return;
-    };
-
-    rt.block_on(async {
-        h.client
-            .create_stream(&valid_mock_stream_req("rollback_before".to_string()))
-            .await
-            .expect("create rollback baseline");
-
-        let before = export_bundle(&h).await;
-
-        let replacement =
-            bundle_with_resources(vec![stream_resource("rollback_after")], vec![], vec![]);
-
-        let (status, body, response_json) = import_bundle(&h, replacement).await;
-        assert_eq!(status.as_u16(), 200, "import body={body}");
-
-        let previous_bundle = response_json
-            .as_ref()
-            .and_then(|v| v.get("previous_bundle"))
-            .cloned()
-            .expect("import response should contain previous_bundle");
-
-        let (rollback_status, rollback_body, _rollback_json) =
-            import_bundle(&h, previous_bundle).await;
-
-        assert_eq!(
-            rollback_status.as_u16(),
-            200,
-            "rollback import body={rollback_body}"
-        );
-
-        let after = export_bundle(&h).await;
-        assert_eq!(
-            before["resources"], after["resources"],
-            "previous_bundle rollback should restore state"
         );
     });
 }

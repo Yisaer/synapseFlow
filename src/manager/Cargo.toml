@@ -17,8 +17,6 @@ udf = { path = "../udf", optional = true }
 build_info = { path = "../build_info" }
 parking_lot = "0.12"
 sha2 = "0.10"
-flate2 = "1"
-tar = "0.4"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

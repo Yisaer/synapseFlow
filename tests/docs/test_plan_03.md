@@ -7,7 +7,7 @@ current test tree:
 
 - manager REST handlers
 - storage snapshot import/export
-- startup-time `init.json`
+- startup `--init-dir` resource manifest
 - metadata bundle semantics
 - shared MQTT client control-plane behavior
 - memory topic control-plane behavior
@@ -344,7 +344,7 @@ I recommend implementing this plan mostly in:
   - response field `applied_to_runtime` remains `false`
   - runtime objects are not silently created during import
 
-### E. Startup / init.json / plan cache semantics
+### E. Startup / startup resource directory / plan cache semantics
 
 #### 40. `init_json_apply_is_atomic_for_resources_and_metadata`
 
@@ -423,7 +423,7 @@ Reason:
 
 Reason:
 
-- metadata bundle and `init.json` semantics are easy to regress and already documented clearly
+- metadata bundle and the startup resource manifest semantics are easy to regress and already documented clearly
 
 ### Batch 3
 

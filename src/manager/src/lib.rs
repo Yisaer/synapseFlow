@@ -34,6 +34,7 @@ use prometheus::{Encoder, TextEncoder};
 use startup::StartupPhase;
 use std::future::{Future, pending};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 use storage::StorageManager;
 use tokio::net::TcpListener;
@@ -49,6 +50,11 @@ pub use stream::{
 };
 
 pub(crate) static MQTT_QOS: u8 = 0;
+
+pub struct ManagerStartupOptions {
+    pub patrol_interval_secs: u64,
+    pub init_dir: Option<PathBuf>,
+}
 
 fn build_app(state: AppState) -> Router {
     let app = Router::new()
@@ -189,18 +195,24 @@ async fn serve_manager_with_listener<F>(
     flow_instances: Vec<FlowInstanceSpec>,
     shutdown: F,
     startup_tx: Option<SyncSender<Result<(), String>>>,
-    patrol_interval_secs: u64,
+    options: ManagerStartupOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let state =
-        AppState::new(instance, storage, flow_instances, patrol_interval_secs).map_err(|err| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid config: {err}"),
-            )
-        })?;
+    let state = AppState::new_with_init_dir(
+        instance,
+        storage,
+        flow_instances,
+        options.patrol_interval_secs,
+        options.init_dir,
+    )
+    .map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid config: {err}"),
+        )
+    })?;
     if let Err(err) = state.bootstrap_from_storage().await {
         let err = format!("failed to bootstrap from storage: {err}");
         if let Some(tx) = startup_tx {
@@ -232,7 +244,10 @@ pub async fn start_server_with_listener(
         pending(),
         None,
         listener,
-        DEFAULT_PATROL_INTERVAL_SECS,
+        ManagerStartupOptions {
+            patrol_interval_secs: DEFAULT_PATROL_INTERVAL_SECS,
+            init_dir: None,
+        },
     )
     .await
 }
@@ -244,7 +259,7 @@ pub async fn start_server_with_listener_and_shutdown<F>(
     shutdown: F,
     startup_tx: Option<SyncSender<Result<(), String>>>,
     listener: TcpListener,
-    patrol_interval_secs: u64,
+    options: ManagerStartupOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -256,7 +271,7 @@ where
         flow_instances,
         shutdown,
         startup_tx,
-        patrol_interval_secs,
+        options,
     )
     .await
 }
@@ -295,7 +310,7 @@ pub async fn start_server_with_shutdown<F>(
     flow_instances: Vec<FlowInstanceSpec>,
     shutdown: F,
     startup_tx: Option<SyncSender<Result<(), String>>>,
-    patrol_interval_secs: u64,
+    options: ManagerStartupOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -328,7 +343,7 @@ where
         shutdown,
         startup_tx,
         listener,
-        patrol_interval_secs,
+        options,
     )
     .await
 }

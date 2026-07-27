@@ -9,7 +9,7 @@
   - selected planner/runtime boundary tests
 - Thin HTTP/body-shape rejection checks are included only as REST smoke coverage and are not counted as core semantic fuzz coverage.
 - This is a covered-cases inventory, not a gap analysis. Byte-level fuzzing and parser-hardening work are excluded.
-- Startup `init.json` semantics are out of scope; this plan focuses on import/export replacement behavior.
+- Startup the startup resource manifest semantics are out of scope; this plan focuses on import/export replacement behavior.
 
 ---
 
@@ -105,7 +105,7 @@
   - `import_empty_bundle_replaces_existing_snapshot`
   - `import_full_replace_removes_missing_resources`
   - `import_invalid_bundle_after_valid_import_preserves_previous_state`
-  - `reimport_previous_bundle_restores_prior_snapshot`
+  - `export_then_reimport_restores_prior_snapshot`
 
 - Export:
   - `export_empty_storage_returns_empty_bundle`
@@ -315,7 +315,7 @@
 - Extended by:
   - `proptest_invalid_import_never_mutates_existing_storage`
   - `proptest_full_replace_removes_resources_missing_from_new_bundle`
-  - `proptest_previous_bundle_round_trip_restores_prior_state`
+  - `proptest_export_round_trip_restores_prior_state`
   - `proptest_import_rejects_partially_valid_resource_bundles_atomically`
   - `proptest_export_is_deterministic_under_repeated_reads`
   - `proptest_export_arrays_remain_sorted_under_randomized_insert_order`
@@ -360,5 +360,5 @@
 
 ## Out of Scope
 
-- Startup `init.json` semantics (add-only / mtime behavior)
+- Startup the startup resource manifest semantics (add-only / mtime behavior)
 - Parser-level fuzzing beyond planner contract boundaries

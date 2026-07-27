@@ -148,7 +148,9 @@ async fn export_import_restores_file_backed_gbf_schema_artifact() {
     create_gbf_stream(&http, &source_base, "vehicle_stream", schema_name).await;
 
     let response = http
-        .get(format!("{source_base}/storage/export"))
+        .get(format!(
+            "{source_base}/storage/export?bundle_version=test-bundle-1"
+        ))
         .send()
         .await
         .expect("export storage");

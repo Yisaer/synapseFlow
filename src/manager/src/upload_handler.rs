@@ -376,7 +376,7 @@ mod tests {
     async fn delete_file_with_nested_path() {
         let state = test_state();
         let body = multipart_body(&[("name", b"a/b/c.txt"), ("file", b"deep")]);
-        upload_file_handler(State(state.clone()), multipart_from_body(&body).await)
+        let _ = upload_file_handler(State(state.clone()), multipart_from_body(&body).await)
             .await
             .into_response();
 

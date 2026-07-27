@@ -544,7 +544,7 @@ fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, Co
     let normalized = normalize_broker_url(&config.broker_url);
     // Credentials must live in `username`/`password`, never in the URL. A
     // userinfo-bearing broker_url is rejected as invalid config (VF-51 §7.3) so
-    // it cannot land in init.json / redb in the first place.
+    // it cannot land in a resource manifest / redb in the first place.
     if url_has_userinfo(&normalized) {
         return Err(ConnectorError::Connection(format!(
             "broker URL `{}` must not embed credentials; use the `username`/`password` fields",

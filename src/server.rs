@@ -114,6 +114,8 @@ pub struct ServerOptions {
     pub profiling_enabled: Option<bool>,
     /// Custom data directory for storage; if None, uses DEFAULT_DATA_DIR.
     pub data_dir: Option<String>,
+    /// Optional startup resource directory supplied by `--init-dir`.
+    pub init_dir: Option<String>,
     /// Manager listen address; if None, uses default.
     pub manager_addr: Option<String>,
     /// Profiling server bind address (feature-gated); if None, uses default.
@@ -133,6 +135,7 @@ pub struct ServerOptions {
 pub struct ServerContext {
     instance: FlowInstance,
     storage: StorageManager,
+    init_dir: Option<String>,
     manager_addr: String,
     flow_instances: Vec<manager::FlowInstanceSpec>,
     pipeline_patrol_interval_secs: u64,
@@ -192,6 +195,7 @@ pub async fn init(
     let data_dir = opts
         .data_dir
         .unwrap_or_else(|| DEFAULT_DATA_DIR.to_string());
+    let init_dir = opts.init_dir;
 
     let storage = match StorageManager::new(&data_dir) {
         Ok(storage) => storage,
@@ -229,6 +233,7 @@ pub async fn init(
     Ok(ServerContext {
         instance,
         storage,
+        init_dir,
         manager_addr,
         flow_instances: opts.flow_instances,
         pipeline_patrol_interval_secs,
@@ -267,6 +272,7 @@ where
     let flow_instances = ctx.flow_instances;
     let instance = ctx.instance;
     let storage = ctx.storage;
+    let init_dir = ctx.init_dir.map(std::path::PathBuf::from);
     let manager_addr = ctx.manager_addr;
     let patrol_interval_secs = ctx.pipeline_patrol_interval_secs;
 
@@ -281,7 +287,10 @@ where
             let _ = manager_shutdown_rx.await;
         },
         startup_tx,
-        patrol_interval_secs,
+        manager::ManagerStartupOptions {
+            patrol_interval_secs,
+            init_dir,
+        },
     );
     tokio::pin!(manager_future);
     tokio::pin!(shutdown);

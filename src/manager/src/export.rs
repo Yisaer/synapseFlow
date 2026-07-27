@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
 };
@@ -7,7 +7,6 @@ use flow::connector::SharedMqttClientConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
 use tokio::sync::TryAcquireError;
 use zip::write::SimpleFileOptions;
@@ -16,10 +15,19 @@ use crate::pipeline::{AppState, CreatePipelineRequest};
 use crate::storage_bridge;
 use crate::stream::CreateStreamRequest;
 
+pub(crate) const RESOURCE_DIRECTORY_FORMAT_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Clone)]
-pub struct ExportBundleV1 {
-    pub exported_at: u64,
+#[serde(deny_unknown_fields)]
+pub struct ResourceManifestV1 {
+    pub format_version: u32,
+    pub bundle_version: String,
     pub resources: ExportResources,
+}
+
+#[derive(Deserialize)]
+pub struct ExportStorageQuery {
+    bundle_version: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -53,8 +61,8 @@ fn default_pipeline_run_state() -> StoredPipelineDesiredState {
     StoredPipelineDesiredState::Stopped
 }
 
-/// UDF metadata included in the export bundle. The actual `.wasm` binary is
-/// stored alongside `metadata.json` in the ZIP archive, keyed by SHA-256.
+/// UDF metadata included in the resource manifest. The actual `.wasm` binary is
+/// stored under `wasm_files/` in the resource directory, keyed by SHA-256.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ExportUdf {
     pub name: String,
@@ -70,7 +78,10 @@ pub struct ExportSchema {
     pub props: serde_json::Map<String, serde_json::Value>,
 }
 
-pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn export_storage_handler(
+    State(state): State<AppState>,
+    Query(query): Query<ExportStorageQuery>,
+) -> impl IntoResponse {
     let _import_export_permit = match state.try_acquire_import_export_op() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => {
@@ -89,32 +100,37 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
         }
     };
 
-    let bundle = match build_export_bundle(state.storage.as_ref()) {
+    if let Err(err) = validate_bundle_version(&query.bundle_version) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
+    let manifest = match build_resource_manifest(
+        state.storage.as_ref(),
+        query.bundle_version.trim().to_string(),
+    ) {
         Ok(bundle) => bundle,
         Err(err) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     };
 
-    let exported_at = bundle.exported_at;
-    let udf_shas: Vec<String> = bundle
+    let udf_shas: Vec<String> = manifest
         .resources
         .udfs
         .iter()
         .map(|u| u.wasm_sha256.clone())
         .collect();
     let wasm_dir = state.storage.wasm_files_dir();
-    let uploads_dir = state.storage.uploads_dir();
     let schemas_dir = state.storage.schemas_dir();
 
-    let zip = match build_zip(&bundle, &udf_shas, &wasm_dir, &uploads_dir, &schemas_dir) {
+    let zip = match build_zip(&manifest, &udf_shas, &wasm_dir, &schemas_dir) {
         Ok(data) => data,
         Err(err) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     };
 
-    let filename = format!("veloflux-export-{exported_at}.zip");
+    let filename = "veloflux-export.zip";
     let disposition = format!("attachment; filename=\"{filename}\"");
     let disposition = match HeaderValue::from_str(&disposition) {
         Ok(value) => value,
@@ -148,11 +164,15 @@ fn add_directory_to_zip<W: Write + std::io::Seek>(
     if !dir.exists() {
         return Ok(());
     }
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read uploads dir: {e}"))? {
-        let entry = entry.map_err(|e| format!("read upload entry: {e}"))?;
+    let mut entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("read resource directory: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read resource entry: {e}"))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
         let file_type = entry
             .file_type()
-            .map_err(|e| format!("stat upload file: {e}"))?;
+            .map_err(|e| format!("stat resource file: {e}"))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') && name.ends_with(".tmp") {
             continue;
@@ -162,7 +182,7 @@ fn add_directory_to_zip<W: Write + std::io::Seek>(
             add_directory_to_zip(zip, &entry.path(), &entry_name)?;
         } else if file_type.is_file() {
             let data = std::fs::read(entry.path())
-                .map_err(|e| format!("read upload file {}: {e}", entry.path().display()))?;
+                .map_err(|e| format!("read resource file {}: {e}", entry.path().display()))?;
             zip.start_file(
                 &entry_name,
                 SimpleFileOptions::default()
@@ -183,23 +203,22 @@ fn add_directory_to_zip<W: Write + std::io::Seek>(
 }
 
 pub(crate) fn build_zip(
-    bundle: &ExportBundleV1,
+    manifest: &ResourceManifestV1,
     udf_shas: &[String],
     wasm_dir: &std::path::Path,
-    uploads_dir: &std::path::Path,
     schemas_dir: &std::path::Path,
 ) -> Result<Vec<u8>, String> {
-    let metadata_json =
-        serde_json::to_vec(bundle).map_err(|e| format!("serialize export bundle: {e}"))?;
+    let manifest_json =
+        serde_json::to_vec(manifest).map_err(|e| format!("serialize resource manifest: {e}"))?;
 
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
-    zip.start_file("metadata.json", options)
-        .map_err(|e| format!("start metadata.json in ZIP: {e}"))?;
-    zip.write_all(&metadata_json)
-        .map_err(|e| format!("write metadata.json to ZIP: {e}"))?;
+    zip.start_file("manifest.json", options)
+        .map_err(|e| format!("start manifest.json in ZIP: {e}"))?;
+    zip.write_all(&manifest_json)
+        .map_err(|e| format!("write manifest.json to ZIP: {e}"))?;
 
     for sha in udf_shas {
         let wasm_path = wasm_dir.join(format!("{sha}.wasm"));
@@ -213,89 +232,22 @@ pub(crate) fn build_zip(
             .map_err(|e| format!("write {entry_name} to ZIP: {e}"))?;
     }
 
-    add_directory_to_zip(&mut zip, uploads_dir, "uploads")
-        .map_err(|e| format!("write uploads to ZIP: {e}"))?;
-    add_directory_to_zip(&mut zip, schemas_dir, "schemas")
-        .map_err(|e| format!("write schemas to ZIP: {e}"))?;
+    for schema in &manifest.resources.schemas {
+        let schema_type = schema.schema_type.trim().to_ascii_lowercase();
+        add_directory_to_zip(
+            &mut zip,
+            &schemas_dir.join(&schema_type).join(&schema.name),
+            &format!("schemas/{schema_type}/{}", schema.name),
+        )
+        .map_err(|e| format!("write schema {} to ZIP: {e}", schema.name))?;
+    }
 
     zip.finish()
         .map(Cursor::into_inner)
         .map_err(|e| format!("finish ZIP: {e}"))
 }
 
-#[cfg(test)]
-fn add_directory_to_tar<W: Write>(
-    tar: &mut tar::Builder<W>,
-    dir: &std::path::Path,
-    tar_prefix: &str,
-) -> Result<(), String> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read archive dir: {e}"))? {
-        let entry = entry.map_err(|e| format!("read archive entry: {e}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("stat archive file: {e}"))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let entry_name = format!("{tar_prefix}/{name}");
-        if file_type.is_dir() {
-            add_directory_to_tar(tar, &entry.path(), &entry_name)?;
-        } else if file_type.is_file() {
-            let data = std::fs::read(entry.path())
-                .map_err(|e| format!("read archive file {}: {e}", entry.path().display()))?;
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append_data(&mut header, &entry_name, data.as_slice())
-                .map_err(|e| format!("write {entry_name} to tar: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn build_tar_gz(
-    bundle: &ExportBundleV1,
-    udf_shas: &[String],
-    wasm_dir: &std::path::Path,
-    uploads_dir: &std::path::Path,
-    schemas_dir: &std::path::Path,
-) -> Result<Vec<u8>, String> {
-    let metadata_json =
-        serde_json::to_vec(bundle).map_err(|e| format!("serialize export bundle: {e}"))?;
-    let mut tar_gz = Vec::new();
-    {
-        let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
-        let mut tar = tar::Builder::new(gz);
-        let mut header = tar::Header::new_gnu();
-        header.set_size(metadata_json.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
-            .map_err(|e| format!("write metadata.json to tar: {e}"))?;
-        for sha in udf_shas {
-            let wasm_path = wasm_dir.join(format!("{sha}.wasm"));
-            let wasm_bytes = std::fs::read(&wasm_path)
-                .map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
-            let entry_name = format!("wasm_files/{sha}.wasm");
-            let mut header = tar::Header::new_gnu();
-            header.set_size(wasm_bytes.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append_data(&mut header, &entry_name, wasm_bytes.as_slice())
-                .map_err(|e| format!("write {entry_name} to tar: {e}"))?;
-        }
-        add_directory_to_tar(&mut tar, uploads_dir, "uploads")?;
-        add_directory_to_tar(&mut tar, schemas_dir, "schemas")?;
-        let gz = tar.into_inner().map_err(|e| format!("finish tar: {e}"))?;
-        gz.finish().map_err(|e| format!("finish gzip: {e}"))?;
-    }
-    Ok(tar_gz)
-}
-
-pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBundleV1, String> {
+pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportResources, String> {
     let snapshot = storage
         .export_metadata_snapshot()
         .map_err(|err| format!("read export snapshot from storage: {err}"))?;
@@ -396,22 +348,50 @@ pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBund
         .collect();
     udfs.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let exported_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| format!("compute export timestamp: {err}"))?
-        .as_secs();
-
-    Ok(ExportBundleV1 {
-        exported_at,
-        resources: ExportResources {
-            memory_topics,
-            shared_mqtt_clients,
-            schemas,
-            streams,
-            pipelines,
-            udfs,
-        },
+    Ok(ExportResources {
+        memory_topics,
+        shared_mqtt_clients,
+        schemas,
+        streams,
+        pipelines,
+        udfs,
     })
+}
+
+pub(crate) fn build_resource_manifest(
+    storage: &StorageManager,
+    bundle_version: String,
+) -> Result<ResourceManifestV1, String> {
+    validate_bundle_version(&bundle_version)?;
+    Ok(ResourceManifestV1 {
+        format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
+        bundle_version,
+        resources: build_export_resources(storage)?,
+    })
+}
+
+pub(crate) fn validate_resource_manifest(manifest: &ResourceManifestV1) -> Result<(), String> {
+    if manifest.format_version != RESOURCE_DIRECTORY_FORMAT_VERSION {
+        return Err(format!(
+            "unsupported resource directory format_version: {}",
+            manifest.format_version
+        ));
+    }
+    validate_bundle_version(&manifest.bundle_version)
+}
+
+pub(crate) fn validate_bundle_version(bundle_version: &str) -> Result<(), String> {
+    let version = bundle_version.trim();
+    if version.is_empty() {
+        return Err("bundle_version must not be empty".to_string());
+    }
+    if version.len() > 128 {
+        return Err("bundle_version must not exceed 128 bytes".to_string());
+    }
+    if version.chars().any(char::is_control) {
+        return Err("bundle_version must not contain control characters".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -563,7 +543,14 @@ mod tests {
         )
         .unwrap();
 
-        let response = export_storage_handler(State(state)).await.into_response();
+        let response = export_storage_handler(
+            State(state),
+            Query(ExportStorageQuery {
+                bundle_version: "test-bundle-1".to_string(),
+            }),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let disposition = response
@@ -572,14 +559,7 @@ mod tests {
             .expect("content disposition header")
             .to_str()
             .expect("header as str");
-        assert!(
-            disposition.starts_with("attachment; filename=\"veloflux-export-"),
-            "disposition: {disposition}"
-        );
-        assert!(
-            disposition.ends_with(".zip\""),
-            "disposition: {disposition}"
-        );
+        assert_eq!(disposition, "attachment; filename=\"veloflux-export.zip\"");
 
         let content_type = response
             .headers()
@@ -602,7 +582,7 @@ mod tests {
             let mut entry = archive.by_index(index).expect("ZIP entry");
             let path = entry.name().to_string();
             entries.push(path.clone());
-            if path == "metadata.json" {
+            if path == "manifest.json" {
                 let mut buf = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut buf).expect("read entry");
                 metadata_bytes = Some(buf);
@@ -611,8 +591,8 @@ mod tests {
 
         entries.sort();
         assert!(
-            entries.contains(&"metadata.json".to_string()),
-            "ZIP should contain metadata.json, got: {entries:?}"
+            entries.contains(&"manifest.json".to_string()),
+            "ZIP should contain manifest.json, got: {entries:?}"
         );
         assert!(
             entries.contains(&format!("wasm_files/{wasm_sha}.wasm")),
@@ -620,7 +600,7 @@ mod tests {
         );
 
         let metadata: JsonValue =
-            serde_json::from_slice(&metadata_bytes.expect("metadata.json")).expect("parse json");
+            serde_json::from_slice(&metadata_bytes.expect("manifest.json")).expect("parse json");
         assert_eq!(metadata["resources"]["streams"][0]["name"], "stream_1");
         assert_eq!(
             metadata["resources"]["pipelines"][0]["run_state"],
@@ -632,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn build_export_bundle_sorts_resource_collections_stably() {
+    fn build_resource_manifest_sorts_resource_collections_stably() {
         let dir = tempdir().expect("create tempdir");
         let storage = StorageManager::new(dir.path()).expect("create storage");
 
@@ -723,8 +703,10 @@ mod tests {
             .create_udf(sample_stored_udf("udf_a", "sha_a"))
             .expect("create udf a");
 
-        let first_bundle = build_export_bundle(&storage).expect("build first export bundle");
-        let second_bundle = build_export_bundle(&storage).expect("build second export bundle");
+        let first_bundle =
+            build_resource_manifest(&storage, "test-bundle-1".to_string()).expect("first bundle");
+        let second_bundle =
+            build_resource_manifest(&storage, "test-bundle-1".to_string()).expect("second bundle");
 
         assert_eq!(
             first_bundle
