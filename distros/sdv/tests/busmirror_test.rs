@@ -227,7 +227,8 @@ fn wait_for_sampler_stats(client: &ApiClient, pipeline_id: &str) {
                     let records_out = processor
                         .pointer("/stats/records_out")
                         .and_then(Value::as_u64);
-                    is_sampler && records_in == Some(11) && records_out == Some(1)
+                    // 12 in (1 probe + 11 burst), 2 out (probe window + packed window).
+                    is_sampler && records_in == Some(12) && records_out == Some(2)
                 })
             });
             if matched {
@@ -237,7 +238,7 @@ fn wait_for_sampler_stats(client: &ApiClient, pipeline_id: &str) {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("sampler did not reach records_in=11, records_out=1; last stats: {last_stats:?}");
+    panic!("sampler did not reach records_in=12, records_out=2; last stats: {last_stats:?}");
 }
 
 #[test]
@@ -337,6 +338,15 @@ fn decodes_and_packs_busmirror_end_to_end() {
             {"ts": 1_000_000, "can1__103__ExtendedRPM": 6100}
         ])
     );
+
+    // Probe: publish one frame and wait for the sampler to emit its window. The
+    // emitted window proves a sampler tick just fired and the DBC window
+    // accumulator is now empty, so the real burst below lands entirely within
+    // one tick window instead of straddling a tick boundary. Without this
+    // alignment the 1s tick could fire mid-burst and split the window, which
+    // made this test flaky.
+    publisher.publish(&packer_input, frames[0].clone());
+    let _probe_window = packer_subscriber.recv("sampler probe window");
 
     for frame in frames {
         publisher.publish(&packer_input, frame);
