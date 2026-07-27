@@ -8,8 +8,10 @@ use crate::stream::{
     resolve_schema_from_request, schema_registry, validate_memory_stream_binding,
     validate_memory_stream_topic, validate_stream_connector_key, validate_stream_decoder_config,
 };
+use crate::table::CreateTableRequest;
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
+use flow::catalog::TableDefinition;
 use flow::connector::SharedMqttClientConfig;
 #[cfg(feature = "wasm_udf")]
 use flow::expr::custom_func::CustomFuncRegistry;
@@ -18,6 +20,7 @@ use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
 use storage::{
     StorageManager, StoredMemoryTopicKind, StoredMqttClientConfig, StoredPipeline, StoredStream,
+    StoredTable,
 };
 #[cfg(feature = "wasm_udf")]
 use udf::WasmEngine;
@@ -29,6 +32,16 @@ pub fn stored_stream_from_request(req: &CreateStreamRequest) -> Result<StoredStr
     let raw_json =
         serde_json::to_string(&req).map_err(|err| format!("serialize stream request: {err}"))?;
     Ok(StoredStream {
+        id: req.name.clone(),
+        raw_json,
+    })
+}
+
+/// Serialize a create-table request for storage.
+pub fn stored_table_from_request(req: &CreateTableRequest) -> Result<StoredTable, String> {
+    let raw_json =
+        serde_json::to_string(req).map_err(|err| format!("serialize table request: {err}"))?;
+    Ok(StoredTable {
         id: req.name.clone(),
         raw_json,
     })
@@ -60,6 +73,39 @@ pub fn stream_definition_from_stored(
         definition = definition.with_sampler(sampler);
     }
     Ok(definition)
+}
+
+/// Rebuild a TableDefinition from stored raw JSON.
+pub fn table_definition_from_stored(
+    stored: &StoredTable,
+    decoder_registry: &DecoderRegistry,
+) -> Result<TableDefinition, String> {
+    use crate::table::{build_table_decoder, build_table_props};
+
+    let req: CreateTableRequest = serde_json::from_str(&stored.raw_json)
+        .map_err(|err| format!("decode stored table {}: {err}", stored.id))?;
+    let resolved_schema = {
+        if let Some(ref_name) = &req.schema.r#ref {
+            validate_resource_id(ResourceIdKind::SchemaName, ref_name)
+                .map_err(|err| format!("invalid schema ref: {err}"))?;
+            named_schema_store()
+                .get_resolved(ref_name)
+                .ok_or_else(|| format!("referenced schema '{}' not found", ref_name))?
+        } else {
+            let (schema, bundle, artifact) = schema_registry()
+                .parse(&req.schema.schema_type, &req.name, &req.schema.props)
+                .map_err(|err| format!("parse schema for table {}: {err}", stored.id))?;
+            crate::stream::ResolvedSchema::new(schema, bundle, artifact)
+        }
+    };
+    let props = build_table_props(&req.table_type, &req.props)?;
+    let decoder = build_table_decoder(&req, decoder_registry, &resolved_schema)?;
+    Ok(TableDefinition::new(
+        req.name.clone(),
+        Arc::clone(&resolved_schema.logical_schema),
+        props,
+        decoder,
+    ))
 }
 
 /// Serialize a create-pipeline request for storage.
@@ -183,6 +229,7 @@ struct InstanceGlobalsHydrationSummary {
     memory_topic_failures: usize,
     shared_mqtt_failures: usize,
     stream_failures: usize,
+    table_failures: usize,
 }
 
 /// Load persisted resources into the running FlowInstance.
@@ -194,6 +241,7 @@ async fn hydrate_instance_globals_from_storage(
         memory_topic_failures: 0,
         shared_mqtt_failures: 0,
         stream_failures: 0,
+        table_failures: 0,
     };
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
         // Defensive: skip historically-invalid topic ids (VF-51 §5.2).
@@ -234,7 +282,26 @@ async fn hydrate_instance_globals_from_storage(
             tracing::error!(stream_id = %stream.id, error = %err, "failed to restore stream");
         }
     }
+
+    for table in storage.list_tables().map_err(|e| e.to_string())? {
+        if let Err(err) = restore_table(table.clone(), instance).await {
+            summary.table_failures += 1;
+            tracing::error!(table_id = %table.id, error = %err, "failed to restore table");
+        }
+    }
     Ok(summary)
+}
+
+async fn restore_table(stored: StoredTable, instance: &flow::FlowInstance) -> Result<(), String> {
+    // Defensive: skip historically-invalid ids (VF-51 §5.2).
+    validate_resource_id(ResourceIdKind::StreamName, &stored.id)?;
+    let decoder_registry = instance.decoder_registry();
+    let def = table_definition_from_stored(&stored, decoder_registry.as_ref())?;
+    instance
+        .create_table(def)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 async fn hydrate_pipelines_into_instances_from_storage(
@@ -373,6 +440,7 @@ pub(crate) async fn hydrate_runtime_from_storage(
     let mqtt_configs = storage.list_mqtt_configs().map_err(|e| e.to_string())?;
     let streams = storage.list_streams().map_err(|e| e.to_string())?;
     let pipelines = storage.list_pipelines().map_err(|e| e.to_string())?;
+    let tables = storage.list_tables().map_err(|e| e.to_string())?;
 
     // Hydrate named schemas first — streams may reference them.
     let schema_count = hydrate_schemas_from_storage(storage)?;
@@ -389,6 +457,7 @@ pub(crate) async fn hydrate_runtime_from_storage(
         persisted_schema_count = schema_count,
         persisted_stream_count = streams.len(),
         persisted_pipeline_count = pipelines.len(),
+        persisted_table_count = tables.len(),
         instance_count = instances_snapshot.len(),
         "storage hydrate discovered persisted resources"
     );
@@ -396,6 +465,7 @@ pub(crate) async fn hydrate_runtime_from_storage(
     let mut memory_topic_restore_failures = 0usize;
     let mut shared_mqtt_restore_failures = 0usize;
     let mut stream_restore_failures = 0usize;
+    let mut table_restore_failures = 0usize;
     let udf_count = storage.list_udfs().map_err(|e| e.to_string())?.len();
 
     for (_, instance) in instances_snapshot {
@@ -403,6 +473,7 @@ pub(crate) async fn hydrate_runtime_from_storage(
         memory_topic_restore_failures += summary.memory_topic_failures;
         shared_mqtt_restore_failures += summary.shared_mqtt_failures;
         stream_restore_failures += summary.stream_failures;
+        table_restore_failures += summary.table_failures;
     }
 
     #[cfg(feature = "wasm_udf")]
@@ -449,9 +520,11 @@ pub(crate) async fn hydrate_runtime_from_storage(
         persisted_schema_count = schema_count,
         persisted_stream_count = streams.len(),
         persisted_pipeline_count = pipelines.len(),
+        persisted_table_count = tables.len(),
         memory_topic_restore_failures,
         shared_mqtt_restore_failures,
         stream_restore_failures,
+        table_restore_failures,
         pipeline_restore_failures,
         wasm_udf_restore_failures = udf_failures,
         persisted_udf_count = udf_count,

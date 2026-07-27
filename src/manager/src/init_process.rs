@@ -285,6 +285,7 @@ fn build_apply_candidate(
         streams: Vec::new(),
         pipelines: Vec::new(),
         udfs: Vec::new(),
+        tables: Vec::new(),
     };
     let mut kept = 0;
     macro_rules! merge {
@@ -327,6 +328,10 @@ fn build_apply_candidate(
     merge!(udfs, |item: &crate::export::ExportUdf| item
         .name
         .to_ascii_lowercase());
+    merge!(tables, |item: &crate::export::ExportTable| item
+        .definition
+        .name
+        .clone());
     (live, pending, kept)
 }
 
@@ -371,7 +376,14 @@ fn validate_incoming_identities(resources: &ExportResources) -> Result<(), Strin
             .iter()
             .map(|item| item.definition.id.as_str()),
     )?;
-    unique("UDF", resources.udfs.iter().map(|item| item.name.as_str()))
+    unique("UDF", resources.udfs.iter().map(|item| item.name.as_str()))?;
+    unique(
+        "table",
+        resources
+            .tables
+            .iter()
+            .map(|item| item.definition.name.as_str()),
+    )
 }
 
 fn filter_pending_snapshot(
@@ -408,6 +420,11 @@ fn filter_pending_snapshot(
         .iter()
         .map(|v| v.name.as_str())
         .collect::<BTreeSet<_>>();
+    let table_ids = pending
+        .tables
+        .iter()
+        .map(|v| v.definition.name.as_str())
+        .collect::<BTreeSet<_>>();
     MetadataExportSnapshot {
         streams: candidate
             .streams
@@ -443,6 +460,11 @@ fn filter_pending_snapshot(
             .udfs
             .into_iter()
             .filter(|v| udf_ids.contains(v.name.as_str()))
+            .collect(),
+        tables: candidate
+            .tables
+            .into_iter()
+            .filter(|v| table_ids.contains(v.id.as_str()))
             .collect(),
     }
 }
@@ -644,6 +666,7 @@ fn count_resources(resources: &ExportResources) -> usize {
         + resources.streams.len()
         + resources.pipelines.len()
         + resources.udfs.len()
+        + resources.tables.len()
 }
 
 fn unix_time_ms(value: SystemTime) -> Result<u64, String> {
@@ -685,6 +708,7 @@ mod tests {
                 streams: Vec::new(),
                 pipelines: Vec::new(),
                 udfs: Vec::new(),
+                tables: Vec::new(),
             },
         }
     }

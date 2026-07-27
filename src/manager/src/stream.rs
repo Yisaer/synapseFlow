@@ -254,12 +254,12 @@ pub struct NamedSchemaStore {
 #[derive(Clone)]
 pub(crate) struct ResolvedSchema {
     pub(crate) logical_schema: Arc<Schema>,
-    proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
-    artifact: Option<SchemaArtifact>,
+    pub(crate) proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
+    pub(crate) artifact: Option<SchemaArtifact>,
 }
 
 impl ResolvedSchema {
-    fn new(
+    pub(crate) fn new(
         schema: Schema,
         proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
         artifact: Option<SchemaArtifact>,
@@ -1335,7 +1335,7 @@ fn video_props_value(video: &VideoStreamProps) -> JsonValue {
     JsonValue::Object(map)
 }
 
-fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnInfo {
+pub(crate) fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnInfo {
     let mut info = StreamColumnInfo {
         name: name.to_string(),
         data_type: datatype_name(datatype),

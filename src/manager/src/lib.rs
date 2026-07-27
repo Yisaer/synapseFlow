@@ -20,6 +20,7 @@ mod startup;
 mod status;
 pub mod storage_bridge;
 mod stream;
+mod table;
 #[cfg(feature = "wasm_udf")]
 #[cfg(feature = "wasm_udf")]
 mod udf_handler;
@@ -145,6 +146,11 @@ fn build_app(state: AppState) -> Router {
             "/files/:name",
             get(upload_handler::get_file_handler).delete(upload_handler::delete_file_handler),
         )
+        .route(
+            "/tables",
+            post(table::create_table_handler).get(table::list_tables),
+        )
+        .route("/tables/:name", delete(table::delete_table_handler))
         .route("/metrics", get(metrics_handler))
         .route("/status", get(status::status_handler))
         .layer(CorsLayer::permissive());

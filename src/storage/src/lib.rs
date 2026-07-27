@@ -23,6 +23,7 @@ const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("
 const INIT_APPLY_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("init_apply_meta");
 const INIT_APPLY_META_KEY: &str = "resource_directory";
 const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
+const TABLES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("tables");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageNamespace {
@@ -124,6 +125,14 @@ pub struct StoredInitApplyMeta {
     pub applied_at_ms: u64,
 }
 
+/// Persisted record for a table (history-backed scan source).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredTable {
+    pub id: String,
+    /// Original create-table request serialized as JSON.
+    pub raw_json: String,
+}
+
 /// Persisted record for a WASM UDF.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredUdf {
@@ -144,6 +153,7 @@ pub struct MetadataExportSnapshot {
     pub mqtt_configs: Vec<StoredMqttClientConfig>,
     pub memory_topics: Vec<StoredMemoryTopic>,
     pub udfs: Vec<StoredUdf>,
+    pub tables: Vec<StoredTable>,
 }
 
 /// Information about an uploaded file returned by the list API.
@@ -337,6 +347,22 @@ impl MetadataStorage {
         self.delete_entry(UDFS_TABLE, name)
     }
 
+    pub fn create_table(&self, table: StoredTable) -> Result<(), StorageError> {
+        self.insert_if_absent(TABLES_TABLE, &table.id, &table)
+    }
+
+    pub fn get_table(&self, id: &str) -> Result<Option<StoredTable>, StorageError> {
+        self.get_entry(TABLES_TABLE, id)
+    }
+
+    pub fn list_tables(&self) -> Result<Vec<StoredTable>, StorageError> {
+        self.list_entries(TABLES_TABLE)
+    }
+
+    pub fn delete_table(&self, id: &str) -> Result<(), StorageError> {
+        self.delete_entry(TABLES_TABLE, id)
+    }
+
     pub fn export_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
         Ok(MetadataExportSnapshot {
@@ -347,6 +373,7 @@ impl MetadataStorage {
             mqtt_configs: Self::list_entries_in_read_txn(&txn, SHARED_MQTT_CONFIGS_TABLE)?,
             memory_topics: Self::list_entries_in_read_txn(&txn, MEMORY_TOPICS_TABLE)?,
             udfs: Self::list_entries_in_read_txn(&txn, UDFS_TABLE)?,
+            tables: Self::list_entries_in_read_txn(&txn, TABLES_TABLE)?,
         })
     }
 
@@ -380,6 +407,9 @@ impl MetadataStorage {
             |topic| topic.topic.as_str(),
         )?;
         Self::replace_table_entries(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
+        Self::replace_table_entries(&txn, TABLES_TABLE, &snapshot.tables, |table| {
+            table.id.as_str()
+        })?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
@@ -426,6 +456,9 @@ impl MetadataStorage {
             |topic| topic.topic.as_str(),
         )?;
         Self::ensure_entries_absent(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
+        Self::ensure_entries_absent(&txn, TABLES_TABLE, &snapshot.tables, |table| {
+            table.id.as_str()
+        })?;
 
         Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
@@ -455,6 +488,9 @@ impl MetadataStorage {
             |topic| topic.topic.as_str(),
         )?;
         Self::insert_entries(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
+        Self::insert_entries(&txn, TABLES_TABLE, &snapshot.tables, |table| {
+            table.id.as_str()
+        })?;
         Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -479,6 +515,8 @@ impl MetadataStorage {
         txn.open_table(INIT_APPLY_META_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(UDFS_TABLE).map_err(StorageError::backend)?;
+        txn.open_table(TABLES_TABLE)
+            .map_err(StorageError::backend)?;
         txn.open_table(SCHEMAS_TABLE)
             .map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
@@ -943,6 +981,22 @@ impl StorageManager {
         self.metadata.delete_udf(name)
     }
 
+    pub fn create_table(&self, table: StoredTable) -> Result<(), StorageError> {
+        self.metadata.create_table(table)
+    }
+
+    pub fn get_table(&self, id: &str) -> Result<Option<StoredTable>, StorageError> {
+        self.metadata.get_table(id)
+    }
+
+    pub fn list_tables(&self) -> Result<Vec<StoredTable>, StorageError> {
+        self.metadata.list_tables()
+    }
+
+    pub fn delete_table(&self, id: &str) -> Result<(), StorageError> {
+        self.metadata.delete_table(id)
+    }
+
     pub fn export_metadata_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         self.metadata.export_snapshot()
     }
@@ -1077,6 +1131,43 @@ mod tests {
         }
     }
 
+    fn sample_table() -> StoredTable {
+        StoredTable {
+            id: "table_1".to_string(),
+            raw_json: r#"{"name":"table_1","table_type":"history","schema":{"columns":[]},"props":{"datasource":"ds1","topic":"t1"}}"#.to_string(),
+        }
+    }
+
+    #[test]
+    fn table_roundtrip() {
+        let dir = tempdir().unwrap();
+        let storage = MetadataStorage::open(dir.path()).unwrap();
+
+        let table = sample_table();
+        storage.create_table(table.clone()).unwrap();
+        assert_eq!(storage.get_table("table_1").unwrap(), Some(table.clone()));
+
+        let all = storage.list_tables().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "table_1");
+
+        storage.delete_table("table_1").unwrap();
+        assert!(storage.get_table("table_1").unwrap().is_none());
+    }
+
+    #[test]
+    fn table_create_fails_on_duplicate() {
+        let dir = tempdir().unwrap();
+        let storage = MetadataStorage::open(dir.path()).unwrap();
+
+        let table = sample_table();
+        storage.create_table(table.clone()).unwrap();
+        match storage.create_table(table) {
+            Err(StorageError::AlreadyExists(name)) => assert_eq!(name, "table_1"),
+            other => panic!("expected AlreadyExists, got {other:?}"),
+        }
+    }
+
     #[test]
     fn stream_pipeline_mqtt_roundtrip() {
         let dir = tempdir().unwrap();
@@ -1197,6 +1288,7 @@ mod tests {
             mqtt_configs: vec![sample_mqtt_config()],
             memory_topics: vec![sample_memory_topic()],
             udfs: vec![],
+            tables: vec![],
         };
 
         let result = storage.apply_init_snapshot(snapshot, sample_init_apply_meta());
@@ -1239,6 +1331,7 @@ mod tests {
             mqtt_configs: vec![mqtt.clone()],
             memory_topics: vec![memory_topic.clone()],
             udfs: vec![],
+            tables: vec![],
         };
 
         storage.apply_init_snapshot(snapshot, meta.clone()).unwrap();

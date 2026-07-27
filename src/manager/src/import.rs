@@ -48,6 +48,7 @@ pub struct ImportResourceCounts {
     pub streams: usize,
     pub pipelines: usize,
     pub udfs: usize,
+    pub tables: usize,
 }
 
 /// Accept a ZIP body via `axum::body::Bytes`.
@@ -173,6 +174,7 @@ pub async fn import_storage_handler(
         streams: snapshot.streams.len(),
         pipelines: snapshot.pipelines.len(),
         udfs: udf_count,
+        tables: snapshot.tables.len(),
     };
     let referenced_wasm = snapshot
         .udfs
@@ -556,6 +558,32 @@ where
 
     let udfs: Vec<StoredUdf> = validate_import_udfs(&bundle.resources.udfs)?;
 
+    let mut tables = Vec::with_capacity(bundle.resources.tables.len());
+    let mut table_ids = BTreeSet::new();
+    for table in &bundle.resources.tables {
+        let req = &table.definition;
+        validate_resource_id(ResourceIdKind::StreamName, &req.name)?;
+        let id = req.name.clone();
+        if !table_ids.insert(id.clone()) {
+            return Err(format!("duplicate table name in bundle: {id}"));
+        }
+        // Validate that the table type is supported by parsing the props
+        use crate::table::build_table_props;
+        build_table_props(&req.table_type, &req.props)?;
+        if let Some(ref_name) = &req.schema.r#ref {
+            let trimmed = ref_name.trim();
+            if !available_schema_names.contains(trimmed) {
+                return Err(format!(
+                    "table {} references schema '{}' which is not present in the import bundle",
+                    req.name, trimmed
+                ));
+            }
+        }
+        let raw_json = serde_json::to_string(req)
+            .map_err(|err| format!("serialize table {}: {err}", req.name))?;
+        tables.push(storage::StoredTable { id, raw_json });
+    }
+
     Ok(MetadataExportSnapshot {
         streams,
         schemas,
@@ -564,6 +592,7 @@ where
         mqtt_configs,
         memory_topics,
         udfs,
+        tables,
     })
 }
 
@@ -867,6 +896,7 @@ mod tests {
                     run_state: StoredPipelineDesiredState::Stopped,
                 }],
                 udfs: vec![],
+                tables: vec![],
             },
         }
     }

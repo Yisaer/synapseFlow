@@ -15,6 +15,23 @@ impl FlowInstance {
             .map_err(FlowInstanceError::from)
     }
 
+    pub async fn get_table(
+        &self,
+        table_id: &str,
+    ) -> Result<Option<Arc<TableDefinition>>, FlowInstanceError> {
+        Ok(self.catalog.get_table(table_id))
+    }
+
+    pub async fn list_tables(&self) -> Result<Vec<Arc<TableDefinition>>, FlowInstanceError> {
+        Ok(self.catalog.list_tables())
+    }
+
+    pub async fn delete_table(&self, table_id: &str) -> Result<(), FlowInstanceError> {
+        self.catalog
+            .remove_table(table_id)
+            .map_err(FlowInstanceError::from)
+    }
+
     fn validate_table_definition(
         &self,
         definition: &TableDefinition,

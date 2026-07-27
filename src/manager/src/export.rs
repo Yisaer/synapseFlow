@@ -14,6 +14,7 @@ use zip::write::SimpleFileOptions;
 use crate::pipeline::{AppState, CreatePipelineRequest};
 use crate::storage_bridge;
 use crate::stream::CreateStreamRequest;
+use crate::table::CreateTableRequest;
 
 pub(crate) const RESOURCE_DIRECTORY_FORMAT_VERSION: u32 = 1;
 
@@ -40,6 +41,8 @@ pub struct ExportResources {
     pub streams: Vec<CreateStreamRequest>,
     pub pipelines: Vec<ExportPipeline>,
     pub udfs: Vec<ExportUdf>,
+    #[serde(default)]
+    pub tables: Vec<ExportTable>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -67,6 +70,13 @@ fn default_pipeline_run_state() -> StoredPipelineDesiredState {
 pub struct ExportUdf {
     pub name: String,
     pub wasm_sha256: String,
+}
+
+/// Table metadata included in the export bundle.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExportTable {
+    #[serde(flatten)]
+    pub definition: CreateTableRequest,
 }
 
 /// Schema metadata included in the export bundle.
@@ -348,6 +358,20 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
         .collect();
     udfs.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let mut tables = Vec::with_capacity(snapshot.tables.len());
+    for stored in snapshot.tables {
+        let req: CreateTableRequest = serde_json::from_str(&stored.raw_json)
+            .map_err(|err| format!("decode stored table {}: {err}", stored.id))?;
+        if req.name != stored.id {
+            return Err(format!(
+                "stored table {} name mismatch in raw_json: {}",
+                stored.id, req.name
+            ));
+        }
+        tables.push(ExportTable { definition: req });
+    }
+    tables.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
+
     Ok(ExportResources {
         memory_topics,
         shared_mqtt_clients,
@@ -355,6 +379,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
         streams,
         pipelines,
         udfs,
+        tables,
     })
 }
 

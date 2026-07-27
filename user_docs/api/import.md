@@ -54,6 +54,7 @@ not a runtime checkpoint restore mechanism.
 - `pipelines: ExportPipeline[]`, where each pipeline has an optional inline `run_state`
   that defaults to `Stopped`
 - `udfs: ExportUdf[]`
+- `tables: ExportTable[]`
 
 ## Validation
 
@@ -63,6 +64,7 @@ The import request is rejected with `400 Bad Request` if:
 - a memory topic has an empty name or zero capacity
 - a stream has an empty name
 - a pipeline fails basic request validation
+- a table has a duplicate name, an unsupported table type, or an invalid schema ref
 - the archive contains an unsafe path, duplicate path, symlink, special file, too many entries,
   an oversized file, or excessive total uncompressed data
 - the legacy top-level `pipeline_run_states` resource is present
@@ -87,8 +89,11 @@ The import request is rejected with `400 Bad Request` if:
 
 - `memory_topics: number`
 - `shared_mqtt_clients: number`
+- `schemas: number`
 - `streams: number`
 - `pipelines: number`
+- `udfs: number`
+- `tables: number`
 
 ## Example
 
