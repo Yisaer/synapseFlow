@@ -157,7 +157,7 @@ fn create_stream(client: &ApiClient, name: &str, schema_name: &str, topic: &str,
     });
     if packer {
         body["sampler"] = json!({
-            "interval": "1s",
+            "interval": "1h",
             "strategy": {
                 "type": "packer",
                 "props": {
@@ -173,7 +173,7 @@ fn create_pipeline(
     client: &ApiClient,
     id: &str,
     stream_name: &str,
-    output_topic: &str,
+    sink: PipelineSink<'_>,
     include_extended: bool,
 ) {
     let mut columns = vec![
@@ -186,21 +186,39 @@ fn create_pipeline(
     if include_extended {
         columns.insert(3, "`can1__103__ExtendedRPM`");
     }
-    let body = json!({
-        "id": id,
-        "sql": format!("SELECT {} FROM {stream_name}", columns.join(", ")),
-        "sinks": [{
+    let sink = match sink {
+        PipelineSink::Mqtt(topic) => json!({
             "id": format!("{id}_sink"),
             "type": "mqtt",
             "props": {
                 "broker_url": TestEnvironment::mqtt_addr(),
-                "topic": output_topic,
+                "topic": topic,
                 "qos": 1
             },
             "encoder": { "type": "json", "props": {} }
-        }]
+        }),
+        PipelineSink::File(path) => json!({
+            "id": format!("{id}_sink"),
+            "type": "file",
+            "props": {
+                "path": path,
+                "filename_prefix": "packed_",
+                "filename_suffix": ".json"
+            },
+            "encoder": { "type": "json", "props": {} }
+        }),
+    };
+    let body = json!({
+        "id": id,
+        "sql": format!("SELECT {} FROM {stream_name}", columns.join(", ")),
+        "sinks": [sink]
     });
     assert_success(client.post_json("/pipelines", &body), "create pipeline");
+}
+
+enum PipelineSink<'a> {
+    Mqtt(&'a str),
+    File(&'a Path),
 }
 
 fn start_pipeline(client: &ApiClient, id: &str) {
@@ -210,7 +228,7 @@ fn start_pipeline(client: &ApiClient, id: &str) {
     );
 }
 
-fn wait_for_sampler_stats(client: &ApiClient, pipeline_id: &str) {
+fn wait_for_buffered_sampler_input(client: &ApiClient, pipeline_id: &str) {
     let deadline = Instant::now() + TEST_TIMEOUT;
     let mut last_stats = None;
     while Instant::now() < deadline {
@@ -227,8 +245,7 @@ fn wait_for_sampler_stats(client: &ApiClient, pipeline_id: &str) {
                     let records_out = processor
                         .pointer("/stats/records_out")
                         .and_then(Value::as_u64);
-                    // 12 in (1 probe + 11 burst), 2 out (probe window + packed window).
-                    is_sampler && records_in == Some(12) && records_out == Some(2)
+                    is_sampler && records_in == Some(11) && records_out == Some(0)
                 })
             });
             if matched {
@@ -238,7 +255,7 @@ fn wait_for_sampler_stats(client: &ApiClient, pipeline_id: &str) {
         }
         thread::sleep(Duration::from_millis(50));
     }
-    panic!("sampler did not reach records_in=12, records_out=2; last stats: {last_stats:?}");
+    panic!("sampler did not buffer 11 inputs without emitting; last stats: {last_stats:?}");
 }
 
 #[test]
@@ -261,8 +278,9 @@ fn decodes_and_packs_busmirror_end_to_end() {
     let direct_input = format!("/{suffix}/busmirror/direct/input");
     let packer_input = format!("/{suffix}/busmirror/packer/input");
     let direct_output = format!("/{suffix}/busmirror/direct/output");
-    let packer_output = format!("/{suffix}/busmirror/packer/output");
+    let packer_output = std::env::temp_dir().join(format!("veloflux-busmirror-{suffix}"));
     let archive = schema_archive(&suffix);
+    std::fs::create_dir(&packer_output).expect("create BusMirror packer output directory");
 
     assert_success(
         client.post_json(
@@ -281,21 +299,19 @@ fn decodes_and_packs_busmirror_end_to_end() {
         &client,
         &direct_pipeline,
         &direct_stream,
-        &direct_output,
+        PipelineSink::Mqtt(&direct_output),
         true,
     );
     create_pipeline(
         &client,
         &packer_pipeline,
         &packer_stream,
-        &packer_output,
+        PipelineSink::File(&packer_output),
         false,
     );
 
     let direct_subscriber =
         JsonSubscriber::connect(&format!("busmirror_direct_sub_{suffix}"), &direct_output);
-    let packer_subscriber =
-        JsonSubscriber::connect(&format!("busmirror_packer_sub_{suffix}"), &packer_output);
     start_pipeline(&client, &direct_pipeline);
     start_pipeline(&client, &packer_pipeline);
     thread::sleep(Duration::from_millis(500));
@@ -339,20 +355,34 @@ fn decodes_and_packs_busmirror_end_to_end() {
         ])
     );
 
-    // Probe: publish one frame and wait for the sampler to emit its window. The
-    // emitted window proves a sampler tick just fired and the DBC window
-    // accumulator is now empty, so the real burst below lands entirely within
-    // one tick window instead of straddling a tick boundary. Without this
-    // alignment the 1s tick could fire mid-burst and split the window, which
-    // made this test flaky.
-    publisher.publish(&packer_input, frames[0].clone());
-    let _probe_window = packer_subscriber.recv("sampler probe window");
-
     for frame in frames {
         publisher.publish(&packer_input, frame);
     }
+    // Use sampler stats as a delivery barrier before triggering a graceful
+    // stop. The long interval prevents a wall-clock tick from splitting the
+    // MQTT burst, while records_in=11 proves that all separate messages have
+    // reached the same packer window. Graceful stop then exercises the
+    // sampler's terminal flush path deterministically. Periodic tick emission
+    // is covered by the flow-level sampler tests.
+    wait_for_buffered_sampler_input(&client, &packer_pipeline);
+    assert_success(
+        client.post_json(
+            &format!("/pipelines/{packer_pipeline}/stop?mode=graceful&timeout_ms=5000"),
+            &json!({}),
+        ),
+        "gracefully stop packer pipeline",
+    );
+    let packed_files = std::fs::read_dir(&packer_output)
+        .expect("read BusMirror packer output directory")
+        .map(|entry| entry.expect("read BusMirror packer output entry").path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(packed_files.len(), 1, "unexpected packed output files");
     assert_eq!(
-        packer_subscriber.recv("packed BusMirror window"),
+        serde_json::from_slice::<Value>(
+            &std::fs::read(&packed_files[0]).expect("read packed BusMirror output")
+        )
+        .expect("decode packed BusMirror output"),
         json!([{
             "ts": 1_000_000,
             "can1__100__RPM": 5000,
@@ -361,7 +391,6 @@ fn decodes_and_packs_busmirror_end_to_end() {
             "can2__201__BrakePressure": 30.0
         }])
     );
-    wait_for_sampler_stats(&client, &packer_pipeline);
     client.verify_pipeline_stats(&direct_pipeline);
 
     let _ = client.delete(&format!("/pipelines/{direct_pipeline}"));
@@ -370,4 +399,5 @@ fn decodes_and_packs_busmirror_end_to_end() {
     let _ = client.delete(&format!("/streams/{packer_stream}"));
     let _ = client.delete(&format!("/schemas/{schema_name}"));
     let _ = std::fs::remove_file(archive);
+    let _ = std::fs::remove_dir_all(packer_output);
 }
