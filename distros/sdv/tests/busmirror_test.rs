@@ -74,6 +74,7 @@ impl MqttPublisher {
     fn connect(client_id: &str) -> Self {
         let mut options = MqttOptions::new(client_id, "127.0.0.1", MQTT_PORT);
         options.set_keep_alive(Duration::from_secs(5));
+        options.set_inflight(1);
         let (client, mut connection) = Client::new(options, 32);
         let (ready_tx, ready_rx) = mpsc::channel();
         thread::spawn(move || {
