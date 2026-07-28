@@ -92,7 +92,7 @@ pub async fn export_storage_handler(
     State(state): State<AppState>,
     Query(query): Query<ExportStorageQuery>,
 ) -> impl IntoResponse {
-    let _import_export_permit = match state.try_acquire_import_export_op() {
+    let _import_export_permit = match state.try_acquire_storage_operation() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => {
             return (

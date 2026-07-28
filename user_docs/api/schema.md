@@ -74,6 +74,39 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
   }' | jq .
 ```
 
+### Upload and Create Schema
+
+`POST /schemas/:type/:name/upload`
+
+Creates a file-backed named Schema from a multipart ZIP upload. This endpoint is
+create-only: an existing name returns `409 Conflict`.
+
+Multipart fields:
+
+- `file` (required, exactly once) — a non-empty `.zip` package.
+- `props` (optional) — a JSON object serialized as a string.
+- `name` (optional) — when present, must exactly match the path `:name`.
+
+The server injects the temporary package path into `proto_path` for `proto`, or
+`schema_path` for other registered file-backed types. Clients must not provide
+either managed path property. Inline `json` schemas are not supported by this
+endpoint.
+
+```bash
+curl -X POST \
+  -F 'props={"message_type":"com.example.Sensor"}' \
+  -F 'file=@sensor-schema.zip' \
+  http://127.0.0.1:8080/schemas/proto/sensor_schema/upload
+```
+
+Response:
+
+- `201 Created` with `{ "name": "...", "type": "..." }`.
+- `400 Bad Request` for invalid fields, props, type, ZIP name or package.
+- `409 Conflict` if the Schema already exists or a storage operation is active.
+- `413 Content Too Large` if the ZIP exceeds 512 MiB.
+- `415 Unsupported Media Type` if the request is not multipart.
+
 ### List Schemas
 
 `GET /schemas`
@@ -113,15 +146,15 @@ curl -s http://127.0.0.1:8080/schemas/sensor_schema | jq .
 
 Deletes a named schema from the in-memory store and persistent storage.
 
-A schema cannot be deleted if any existing stream references it (via
-`schema.ref`). The list of referencing streams is returned in the error
-message.
+A schema cannot be deleted if any existing stream or table references it (via
+`schema.ref`). The referencing resources are returned in the error message.
 
 Response:
 
 - `200 OK` with a plain text message.
 - `404 Not Found` if the schema does not exist.
-- `409 Conflict` if any stream still references the schema.
+- `409 Conflict` if any stream or table still references the schema, or another
+  storage operation is active.
 
 Example:
 

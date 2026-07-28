@@ -245,7 +245,7 @@ veloflux-export-<timestamp>.zip
 | Method | Path              | Content-Type       |
 |--------|-------------------|--------------------|
 | `GET`  | `/storage/export?bundle_version=<version>` | `application/zip` |
-| `POST` | `/import`         | `application/zip` |
+| `POST` | `/import`         | `multipart/form-data` with a ZIP `file` field |
 
 The previous JSON-only format is no longer supported.
 

@@ -59,7 +59,7 @@ Notes:
 Response:
 
 - `201 Created` with `{ "name": "...", "spec_version": 1 }`.
-- `409 Conflict` if the table already exists.
+- `409 Conflict` if the table already exists or another storage operation is active.
 
 Example:
 
@@ -95,6 +95,7 @@ Response:
 
 - `200 OK` with a plain text message.
 - `404 Not Found` if the table does not exist.
+- `409 Conflict` if another storage operation is active.
 
 Example:
 

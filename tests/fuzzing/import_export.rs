@@ -174,8 +174,15 @@ async fn import_bundle(
     let zip_bytes = build_zip_from_metadata(bundle).expect("build ZIP");
     let resp = http
         .post(format!("{base}/import"))
-        .header("content-type", "application/zip")
-        .body(zip_bytes)
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(zip_bytes)
+                    .file_name("bundle.zip")
+                    .mime_str("application/zip")
+                    .expect("valid ZIP MIME type"),
+            ),
+        )
         .send()
         .await
         .expect("import request");
@@ -226,8 +233,15 @@ async fn import_rejects_invalid_json_shape() {
     let resp = h
         .http
         .post(format!("{}/import", h.base()))
-        .body("{ definitely invalid json")
-        .header("content-type", "application/json")
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(b"{ definitely invalid json".to_vec())
+                    .file_name("invalid.zip")
+                    .mime_str("application/zip")
+                    .expect("valid ZIP MIME type"),
+            ),
+        )
         .send()
         .await
         .expect("import request");

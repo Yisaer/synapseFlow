@@ -22,6 +22,11 @@ The schema registry decouples schema definition from stream creation:
 - **Stream reference** — when creating a stream, the `schema` field can
   reference a named schema by name instead of inline-defining columns.
 
+File-backed named schemas can also be created from a ZIP package with
+`POST /schemas/:type/:name/upload`. The multipart endpoint is create-only and
+feeds its temporary package path into the same `PreparedSchemaSource` and
+Schema parser flow used by `POST /schemas`.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    POST /schemas                             │

@@ -688,18 +688,29 @@ impl MetadataStorage {
 
 /// Recursively copy upload files from src to dst. Returns the count of copied files.
 fn copy_uploads_recursive(src: &Path, dst: &Path) -> Result<usize, StorageError> {
+    copy_uploads_recursive_inner(src, dst, true)
+}
+
+fn copy_uploads_recursive_inner(
+    src: &Path,
+    dst: &Path,
+    is_root: bool,
+) -> Result<usize, StorageError> {
     let mut copied = 0usize;
     for entry in std::fs::read_dir(src).map_err(StorageError::io)? {
         let entry = entry.map_err(StorageError::io)?;
         let file_type = entry.file_type().map_err(StorageError::io)?;
         let raw_name = entry.file_name().to_string_lossy().into_owned();
+        if is_root && raw_name == "tmp" {
+            continue;
+        }
         if raw_name.starts_with('.') && raw_name.ends_with(".tmp") {
             continue;
         }
         if file_type.is_dir() {
             let sub_dst = dst.join(&raw_name);
             std::fs::create_dir_all(&sub_dst).map_err(StorageError::io)?;
-            copied += copy_uploads_recursive(&entry.path(), &sub_dst)?;
+            copied += copy_uploads_recursive_inner(&entry.path(), &sub_dst, false)?;
         } else if file_type.is_file() {
             let target = dst.join(&raw_name);
             std::fs::copy(entry.path(), &target).map_err(StorageError::io)?;
@@ -725,6 +736,9 @@ fn collect_upload_entries(
         let entry = entry.map_err(StorageError::io)?;
         let file_type = entry.file_type().map_err(StorageError::io)?;
         let raw_name = entry.file_name().to_string_lossy().into_owned();
+        if prefix.is_empty() && raw_name == "tmp" {
+            continue;
+        }
         if raw_name.starts_with('.') && raw_name.ends_with(".tmp") {
             continue;
         }
@@ -772,7 +786,9 @@ impl StorageManager {
         let metadata = MetadataStorage::open(base_dir.join("metadata"))?;
         let wasm_dir = base_dir.join("wasm_files");
         fs::create_dir_all(&wasm_dir).map_err(StorageError::io)?;
-        Ok(Self { metadata, base_dir })
+        let storage = Self { metadata, base_dir };
+        storage.prepare_uploads_tmp_dir()?;
+        Ok(storage)
     }
 
     pub fn metadata(&self) -> &MetadataStorage {
@@ -791,6 +807,11 @@ impl StorageManager {
     /// Returns the directory where uploaded user files are persisted.
     pub fn uploads_dir(&self) -> PathBuf {
         self.base_dir.join("uploads")
+    }
+
+    /// Returns the reserved directory for request-scoped temporary uploads.
+    pub fn uploads_tmp_dir(&self) -> PathBuf {
+        self.uploads_dir().join("tmp")
     }
 
     /// Returns the private directory containing installed schema sources.
@@ -850,6 +871,21 @@ impl StorageManager {
         collect_upload_entries(&uploads_dir, "", &mut files)?;
         files.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(files)
+    }
+
+    fn prepare_uploads_tmp_dir(&self) -> Result<(), StorageError> {
+        let tmp_dir = self.uploads_tmp_dir();
+        match fs::symlink_metadata(&tmp_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                fs::remove_dir_all(&tmp_dir).map_err(StorageError::io)?;
+            }
+            Ok(_) => {
+                fs::remove_file(&tmp_dir).map_err(StorageError::io)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(StorageError::io(err)),
+        }
+        fs::create_dir_all(&tmp_dir).map_err(StorageError::io)
     }
 
     /// Copy files from a source uploads directory into the data-dir uploads
@@ -1413,6 +1449,35 @@ mod tests {
         assert_eq!(list[0].name, "dbc/can.dbc");
         assert_eq!(list[1].name, "proto/common/types.proto");
         assert_eq!(list[2].name, "proto/sensor.proto");
+    }
+
+    #[test]
+    fn upload_list_hides_reserved_tmp_directory() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        std::fs::write(
+            storage.uploads_tmp_dir().join(".upload-stale.zip"),
+            b"stale",
+        )
+        .unwrap();
+        storage.save_upload("visible.txt", b"visible").unwrap();
+
+        let list = storage.list_uploads().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "visible.txt");
+    }
+
+    #[test]
+    fn startup_clears_reserved_tmp_directory() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let stale = storage.uploads_tmp_dir().join(".upload-stale.zip");
+        std::fs::write(&stale, b"stale").unwrap();
+        drop(storage);
+
+        let storage = StorageManager::new(dir.path()).unwrap();
+        assert!(storage.uploads_tmp_dir().is_dir());
+        assert!(!stale.exists());
     }
 
     #[test]

@@ -296,8 +296,15 @@ async fn import_bundle(
     let resp = h
         .http
         .post(format!("{}/import", h.base()))
-        .header("content-type", "application/zip")
-        .body(body)
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(body)
+                    .file_name("bundle.zip")
+                    .mime_str("application/zip")
+                    .expect("valid ZIP MIME type"),
+            ),
+        )
         .send()
         .await
         .expect("import request");

@@ -21,10 +21,21 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 Imports a full metadata bundle and atomically replaces the current persisted metadata snapshot in
 storage.
 
-The request body is the ZIP returned by the export API. Its `manifest.json`
+The multipart `file` field contains the ZIP returned by the export API. Its `manifest.json`
 uses the same `ResourceManifestV1` shape accepted from a startup resource
 directory. The ZIP is only the HTTP envelope; `--init-dir` reads its extracted
 contents directly.
+
+Request:
+
+```text
+Content-Type: multipart/form-data
+file: required ZIP file, exactly once
+```
+
+The file must be non-empty, its filename must end in `.zip`, and its compressed
+size must not exceed 512 MiB. The former raw `application/zip` request body is
+not supported.
 
 Important behavior:
 
@@ -73,6 +84,8 @@ The import request is rejected with `400 Bad Request` if:
 
 - `200 OK` with `Content-Type: application/json`
 - `400 Bad Request` if request validation fails
+- `413 Content Too Large` if the uploaded ZIP exceeds 512 MiB
+- `415 Unsupported Media Type` if the request is not multipart
 - `409 Conflict` if another import/export command is in progress
 - `500 Internal Server Error` if reading or replacing the storage snapshot fails
 
@@ -99,8 +112,7 @@ The import request is rejected with `400 Bad Request` if:
 
 ```bash
 curl -X POST \
-  -H 'Content-Type: application/zip' \
-  --data-binary @veloflux-export.zip \
+  -F 'file=@veloflux-export.zip' \
   http://127.0.0.1:8080/import
 ```
 

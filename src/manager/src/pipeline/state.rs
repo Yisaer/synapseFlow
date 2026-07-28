@@ -22,7 +22,7 @@ pub struct AppState {
     pub storage: Arc<StorageManager>,
     pub declared_instances: Arc<HashMap<String, ()>>,
     init_dir: Option<Arc<PathBuf>>,
-    import_export_op_lock: Arc<Semaphore>,
+    storage_operation_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     stream_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     shared_mqtt_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
@@ -60,7 +60,7 @@ impl AppState {
             storage,
             declared_instances: Arc::new(HashMap::new()),
             init_dir: init_dir.map(Arc::new),
-            import_export_op_lock: Arc::new(Semaphore::new(1)),
+            storage_operation_lock: Arc::new(Semaphore::new(1)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
             stream_op_locks: Arc::new(Mutex::new(HashMap::new())),
             shared_mqtt_op_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -213,8 +213,8 @@ impl AppState {
         Ok(permits)
     }
 
-    pub fn try_acquire_import_export_op(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
-        self.import_export_op_lock.clone().try_acquire_owned()
+    pub fn try_acquire_storage_operation(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        self.storage_operation_lock.clone().try_acquire_owned()
     }
 
     pub async fn try_acquire_shared_mqtt_ops<I, S>(

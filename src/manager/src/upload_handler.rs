@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::pipeline::AppState;
 use crate::resource_id::validate_upload_file_name;
+use crate::streaming_upload::{TemporaryUpload, read_text_field};
 
 #[derive(Serialize)]
 pub struct UploadFileResponse {
@@ -26,31 +27,42 @@ pub async fn upload_file_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let _permit = match state.try_acquire_import_export_op() {
-        Ok(permit) => permit,
-        Err(tokio::sync::TryAcquireError::NoPermits) => {
-            return (
-                StatusCode::CONFLICT,
-                "another import/export/upload operation is in progress",
-            )
-                .into_response();
-        }
-        Err(tokio::sync::TryAcquireError::Closed) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "operation guard closed").into_response();
-        }
-    };
-
     let mut name: Option<String> = None;
-    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut upload: Option<TemporaryUpload> = None;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => {
+                let err = crate::streaming_upload::UploadFailure::multipart(
+                    "read multipart request",
+                    err,
+                );
+                return (err.status, err.message).into_response();
+            }
+        };
         let field_name = field.name().unwrap_or("").to_string();
         match field_name.as_str() {
             "name" => {
-                name = field.text().await.ok();
+                if name.is_some() {
+                    return (StatusCode::BAD_REQUEST, "field 'name' must not be repeated")
+                        .into_response();
+                }
+                name = match read_text_field(field, "name").await {
+                    Ok(value) => Some(value),
+                    Err(err) => return (err.status, err.message).into_response(),
+                };
             }
             "file" => {
-                file_bytes = field.bytes().await.ok().map(|b| b.to_vec());
+                if upload.is_some() {
+                    return (StatusCode::BAD_REQUEST, "field 'file' must not be repeated")
+                        .into_response();
+                }
+                upload = match TemporaryUpload::receive(&state.storage, field, None).await {
+                    Ok(upload) => Some(upload),
+                    Err(err) => return (err.status, err.message).into_response(),
+                };
             }
             _ => {}
         }
@@ -65,8 +77,8 @@ pub async fn upload_file_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let file_bytes = match file_bytes {
-        Some(b) if !b.is_empty() => b,
+    let upload = match upload {
+        Some(upload) => upload,
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -76,18 +88,24 @@ pub async fn upload_file_handler(
         }
     };
 
-    let size_bytes = file_bytes.len() as u64;
-
-    match state.storage.save_upload(&name, &file_bytes) {
-        Ok(()) => {}
-        Err(e) => {
+    let _permit = match state.try_acquire_storage_operation() {
+        Ok(permit) => permit,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to save uploaded file: {e}"),
+                StatusCode::CONFLICT,
+                "another import/export/upload operation is in progress",
             )
                 .into_response();
         }
-    }
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "operation guard closed").into_response();
+        }
+    };
+
+    let size_bytes = match upload.persist_as(&state.storage, &name).await {
+        Ok(size) => size,
+        Err(err) => return (err.status, err.message).into_response(),
+    };
 
     (
         StatusCode::OK,
@@ -156,7 +174,7 @@ pub async fn delete_file_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let _permit = match state.try_acquire_import_export_op() {
+    let _permit = match state.try_acquire_storage_operation() {
         Ok(permit) => permit,
         Err(tokio::sync::TryAcquireError::NoPermits) => {
             return (

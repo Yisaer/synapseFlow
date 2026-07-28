@@ -145,7 +145,24 @@ pub async fn create_table_handler(
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let _permit = match state.try_acquire_stream_op(&req.name).await {
+    let _storage_permit = match state.try_acquire_storage_operation() {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => {
+            return (
+                StatusCode::CONFLICT,
+                "another storage operation is in progress",
+            )
+                .into_response();
+        }
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage operation guard closed",
+            )
+                .into_response();
+        }
+    };
+    let _table_permit = match state.try_acquire_stream_op(&req.name).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return table_busy_response(&req.name),
         Err(TryAcquireError::Closed) => {
@@ -290,7 +307,24 @@ pub async fn delete_table_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let audit = ResourceMutationLog::new("table", "delete", name.as_str(), None);
-    let _permit = match state.try_acquire_stream_op(&name).await {
+    let _storage_permit = match state.try_acquire_storage_operation() {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => {
+            return (
+                StatusCode::CONFLICT,
+                "another storage operation is in progress",
+            )
+                .into_response();
+        }
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage operation guard closed",
+            )
+                .into_response();
+        }
+    };
+    let _table_permit = match state.try_acquire_stream_op(&name).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return table_busy_response(&name),
         Err(TryAcquireError::Closed) => {
@@ -474,6 +508,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn table_mutations_reject_active_storage_operation() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+        let existing = history_table_request("existing_table");
+        let response = create_table_handler(State(state.clone()), Json(existing))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let _storage_permit = state
+            .try_acquire_storage_operation()
+            .expect("acquire storage operation");
+
+        let create_response = create_table_handler(
+            State(state.clone()),
+            Json(history_table_request("blocked_table")),
+        )
+        .await
+        .into_response();
+        assert_eq!(create_response.status(), StatusCode::CONFLICT);
+
+        let delete_response =
+            delete_table_handler(State(state.clone()), Path("existing_table".to_string()))
+                .await
+                .into_response();
+        assert_eq!(delete_response.status(), StatusCode::CONFLICT);
+        assert!(
+            state
+                .storage
+                .get_table("existing_table")
+                .expect("read existing table")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn list_tables_returns_created_tables() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
@@ -481,10 +551,10 @@ mod tests {
         let req_a = history_table_request("table_a");
         let req_b = history_table_request("table_b");
 
-        create_table_handler(State(state.clone()), Json(req_a))
+        let _ = create_table_handler(State(state.clone()), Json(req_a))
             .await
             .into_response();
-        create_table_handler(State(state.clone()), Json(req_b))
+        let _ = create_table_handler(State(state.clone()), Json(req_b))
             .await
             .into_response();
 
@@ -506,7 +576,7 @@ mod tests {
         let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
         let req = history_table_request("table_to_delete");
 
-        create_table_handler(State(state.clone()), Json(req))
+        let _ = create_table_handler(State(state.clone()), Json(req))
             .await
             .into_response();
 

@@ -6,8 +6,9 @@ and deleting user files.
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 > **File names.** File names are validated against `` `[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}` ``.
-> Slashes, backslashes, dots as the first character, and path traversal sequences
-> (`..`) are rejected.
+> Forward slashes may separate validated path segments. Backslashes, dots as the
+> first character, path traversal sequences (`..`), and the reserved top-level
+> `tmp/` directory are rejected.
 
 ## Endpoints
 
@@ -24,7 +25,7 @@ using the relative path `uploads/{name}`.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | text | yes | Target file name (validated against the name grammar) |
-| `file` | binary | yes | File contents |
+| `file` | binary | yes | File contents, streamed to disk; maximum 512 MiB |
 
 **Responses:**
 
@@ -179,3 +180,6 @@ Examples:
 - The upload endpoint is serialized with import/export operations.
   Concurrent `POST /files/upload` and `POST /import` requests will receive
   `409 Conflict`.
+- Request data is streamed through the reserved `<data_dir>/uploads/tmp/`
+  directory and atomically moved to its final name. Startup clears temporary
+  files left by an unclean process exit.

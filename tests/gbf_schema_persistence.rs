@@ -165,8 +165,15 @@ async fn export_import_restores_file_backed_gbf_schema_artifact() {
     let (target_base, target_server) = start_manager(target_storage).await;
     let response = http
         .post(format!("{target_base}/import"))
-        .header(reqwest::header::CONTENT_TYPE, "application/zip")
-        .body(archive)
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(archive.to_vec())
+                    .file_name("veloflux-export.zip")
+                    .mime_str("application/zip")
+                    .expect("valid ZIP MIME type"),
+            ),
+        )
         .send()
         .await
         .expect("import storage");

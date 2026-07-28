@@ -20,6 +20,7 @@ mod startup;
 mod status;
 pub mod storage_bridge;
 mod stream;
+mod streaming_upload;
 mod table;
 #[cfg(feature = "wasm_udf")]
 #[cfg(feature = "wasm_udf")]
@@ -109,7 +110,7 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/import",
             post(import::import_storage_handler).layer(axum::extract::DefaultBodyLimit::max(
-                import::MAX_ARCHIVE_BODY_SIZE,
+                streaming_upload::MAX_MULTIPART_BODY_SIZE,
             )),
         )
         .route("/storage/export", get(export::export_storage_handler))
@@ -126,6 +127,12 @@ fn build_app(state: AppState) -> Router {
             get(schema::handler::get_schema_handler).delete(schema::handler::delete_schema_handler),
         )
         .route(
+            "/schemas/:type/:name/upload",
+            post(schema::handler::upload_create_schema_handler).layer(
+                axum::extract::DefaultBodyLimit::max(streaming_upload::MAX_MULTIPART_BODY_SIZE),
+            ),
+        )
+        .route(
             "/memory/topics",
             post(memory_topic::create_memory_topic_handler)
                 .get(memory_topic::list_memory_topics_handler),
@@ -140,7 +147,12 @@ fn build_app(state: AppState) -> Router {
             get(mqtt_client::get_shared_mqtt_client_handler)
                 .delete(mqtt_client::delete_shared_mqtt_client_handler),
         )
-        .route("/files/upload", post(upload_handler::upload_file_handler))
+        .route(
+            "/files/upload",
+            post(upload_handler::upload_file_handler).layer(axum::extract::DefaultBodyLimit::max(
+                streaming_upload::MAX_MULTIPART_BODY_SIZE,
+            )),
+        )
         .route("/files", get(upload_handler::list_files_handler))
         .route(
             "/files/:name",

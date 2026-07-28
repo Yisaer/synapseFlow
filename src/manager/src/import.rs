@@ -1,8 +1,12 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    extract::{Multipart, State, multipart::MultipartRejection},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeSet, HashSet};
-use std::io::{Cursor, Read};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use storage::{
     MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
@@ -21,12 +25,11 @@ use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_re
 use crate::schema::source::{PreparedSchemaTree, resolve_props_from_root};
 use crate::storage_bridge;
 use crate::stream::{CreateStreamRequest, named_schema_store, schema_registry};
+use crate::streaming_upload::{TemporaryUpload, is_zip_filename, required_multipart};
 
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_ARCHIVE_FILE_SIZE: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_TOTAL_SIZE: u64 = 512 * 1024 * 1024;
-pub(crate) const MAX_ARCHIVE_BODY_SIZE: usize = 512 * 1024 * 1024;
-
 /// Reload all schemas from persistent storage into the in-memory `NamedSchemaStore`.
 fn reload_schemas_from_storage(storage: &storage::StorageManager) {
     named_schema_store().clear();
@@ -51,13 +54,65 @@ pub struct ImportResourceCounts {
     pub tables: usize,
 }
 
-/// Accept a ZIP body via `axum::body::Bytes`.
+/// Accept a metadata bundle ZIP through a multipart `file` field.
 pub async fn import_storage_handler(
     State(state): State<AppState>,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Response {
     let audit = ResourceMutationLog::new("storage", "import", "zip_bundle", None);
-    let _import_export_permit = match state.try_acquire_import_export_op() {
+    let mut multipart = match required_multipart(&headers, multipart) {
+        Ok(multipart) => multipart,
+        Err(response) => return *response,
+    };
+    let mut upload: Option<TemporaryUpload> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(err) => {
+                let err = crate::streaming_upload::UploadFailure::multipart(
+                    "read multipart request",
+                    err,
+                );
+                audit.log_failure(&err.message);
+                return (err.status, err.message).into_response();
+            }
+        };
+        let field_name = field.name().unwrap_or("").to_string();
+        if field_name != "file" {
+            let err = format!("unknown multipart field '{field_name}'");
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+        if upload.is_some() {
+            let err = "field 'file' must not be repeated".to_string();
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+        if !is_zip_filename(field.file_name()) {
+            let err = "field 'file' must have a .zip filename".to_string();
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+        upload = match TemporaryUpload::receive(&state.storage, field, Some("zip")).await {
+            Ok(upload) => Some(upload),
+            Err(err) => {
+                audit.log_failure(&err.message);
+                return (err.status, err.message).into_response();
+            }
+        };
+    }
+    let upload = match upload {
+        Some(upload) => upload,
+        None => {
+            let err = "field 'file' is required and must not be empty".to_string();
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    };
+
+    let _import_export_permit = match state.try_acquire_storage_operation() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return import_export_busy_response(),
         Err(TryAcquireError::Closed) => {
@@ -76,7 +131,7 @@ pub async fn import_storage_handler(
         }
     };
 
-    if let Err(err) = extract_zip(&body, tmp.path()) {
+    if let Err(err) = extract_zip_file(upload.path(), tmp.path()) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -256,9 +311,9 @@ fn cleanup_unreferenced_wasm(wasm_dir: &Path, referenced: &BTreeSet<String>) -> 
     Ok(())
 }
 
-fn extract_zip(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
-    extract_zip_with_limits(
-        data,
+fn extract_zip_file(source: &Path, dest: &Path) -> Result<(), String> {
+    extract_zip_file_with_limits(
+        source,
         dest,
         MAX_ARCHIVE_ENTRIES,
         MAX_ARCHIVE_FILE_SIZE,
@@ -266,16 +321,18 @@ fn extract_zip(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
     )
 }
 
-fn extract_zip_with_limits(
-    data: &[u8],
-    dest: &std::path::Path,
+fn extract_zip_file_with_limits(
+    source: &Path,
+    dest: &Path,
     max_entries: usize,
     max_file_size: u64,
     max_total_size: u64,
 ) -> Result<(), String> {
-    let mut archive =
-        ZipArchive::new(Cursor::new(data)).map_err(|e| format!("open import ZIP: {e}"))?;
-    let declared_entries = declared_zip_entry_count(data)?;
+    let mut source_file =
+        std::fs::File::open(source).map_err(|err| format!("open import ZIP: {err}"))?;
+    let declared_entries = declared_zip_entry_count(&mut source_file)
+        .map_err(|err| format!("open import ZIP: {err}"))?;
+    let mut archive = ZipArchive::new(source_file).map_err(|e| format!("open import ZIP: {e}"))?;
     if declared_entries != archive.len() {
         return Err(
             "import ZIP contains duplicate entries or an inconsistent central directory"
@@ -384,23 +441,32 @@ fn extract_zip_with_limits(
     Ok(())
 }
 
-fn declared_zip_entry_count(data: &[u8]) -> Result<usize, String> {
+fn declared_zip_entry_count(file: &mut std::fs::File) -> Result<usize, String> {
     const EOCD_LEN: usize = 22;
     const MAX_COMMENT_LEN: usize = u16::MAX as usize;
-    if data.len() < EOCD_LEN {
+    let file_len = file
+        .metadata()
+        .map_err(|err| format!("inspect import ZIP: {err}"))?
+        .len();
+    if file_len < EOCD_LEN as u64 {
         return Err("import ZIP is missing its end-of-central-directory record".to_string());
     }
 
-    let search_start = data.len().saturating_sub(EOCD_LEN + MAX_COMMENT_LEN);
-    for offset in (search_start..=data.len() - EOCD_LEN).rev() {
-        if data[offset..offset + 4] != *b"PK\x05\x06" {
+    let tail_len = file_len.min((EOCD_LEN + MAX_COMMENT_LEN) as u64) as usize;
+    file.seek(SeekFrom::End(-(tail_len as i64)))
+        .map_err(|err| format!("seek import ZIP end record: {err}"))?;
+    let mut tail = vec![0u8; tail_len];
+    file.read_exact(&mut tail)
+        .map_err(|err| format!("read import ZIP end record: {err}"))?;
+    for offset in (0..=tail.len() - EOCD_LEN).rev() {
+        if tail[offset..offset + 4] != *b"PK\x05\x06" {
             continue;
         }
         let read_u16 = |relative: usize| {
-            u16::from_le_bytes([data[offset + relative], data[offset + relative + 1]])
+            u16::from_le_bytes([tail[offset + relative], tail[offset + relative + 1]])
         };
         let comment_len = usize::from(read_u16(20));
-        if offset + EOCD_LEN + comment_len != data.len() {
+        if offset + EOCD_LEN + comment_len != tail.len() {
             continue;
         }
         let disk_number = read_u16(4);
@@ -416,6 +482,34 @@ fn declared_zip_entry_count(data: &[u8]) -> Result<usize, String> {
         return Ok(usize::from(total_entries));
     }
     Err("import ZIP has an invalid end-of-central-directory record".to_string())
+}
+
+#[cfg(test)]
+fn extract_zip(data: &[u8], dest: &Path) -> Result<(), String> {
+    let source =
+        tempfile::NamedTempFile::new().map_err(|err| format!("create test import ZIP: {err}"))?;
+    std::fs::write(source.path(), data).map_err(|err| format!("write test import ZIP: {err}"))?;
+    extract_zip_file(source.path(), dest)
+}
+
+#[cfg(test)]
+fn extract_zip_with_limits(
+    data: &[u8],
+    dest: &Path,
+    max_entries: usize,
+    max_file_size: u64,
+    max_total_size: u64,
+) -> Result<(), String> {
+    let source =
+        tempfile::NamedTempFile::new().map_err(|err| format!("create test import ZIP: {err}"))?;
+    std::fs::write(source.path(), data).map_err(|err| format!("write test import ZIP: {err}"))?;
+    extract_zip_file_with_limits(
+        source.path(),
+        dest,
+        max_entries,
+        max_file_size,
+        max_total_size,
+    )
 }
 
 fn validate_pipeline_stream_references(
@@ -797,6 +891,7 @@ mod tests {
     };
     use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec};
     use axum::body::to_bytes;
+    use axum::extract::FromRequest;
     use axum::http::StatusCode;
     use serde_json::Value as JsonValue;
     use std::io::{Cursor, Write};
@@ -804,12 +899,62 @@ mod tests {
         StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState, StoredPipelineRunState,
     };
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     fn sample_default_instance_spec() -> FlowInstanceSpec {
         FlowInstanceSpec {
             id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
             ..FlowInstanceSpec::default()
         }
+    }
+
+    async fn import_zip(state: AppState, zip_bytes: Vec<u8>) -> Response {
+        let boundary = "import_test_boundary";
+        let mut body = Vec::new();
+        write!(
+            &mut body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"bundle.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+        )
+        .expect("write multipart header");
+        body.extend_from_slice(&zip_bytes);
+        write!(&mut body, "\r\n--{boundary}--\r\n").expect("write multipart trailer");
+        let request = axum::http::Request::builder()
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(axum::body::Body::from(body))
+            .expect("build multipart request");
+        let headers = request.headers().clone();
+        let multipart = Multipart::from_request(request, &())
+            .await
+            .expect("extract multipart");
+        import_storage_handler(State(state), headers, Ok(multipart)).await
+    }
+
+    #[tokio::test]
+    async fn import_rejects_raw_zip_body() {
+        let dir = tempdir().expect("create tempdir");
+        let storage = StorageManager::new(dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![sample_default_instance_spec()],
+            0,
+        )
+        .expect("create app state");
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/import")
+            .header(axum::http::header::CONTENT_TYPE, "application/zip")
+            .body(axum::body::Body::from(b"not-used".to_vec()))
+            .expect("build raw import request");
+
+        let response = crate::build_app(state)
+            .oneshot(request)
+            .await
+            .expect("send raw import request");
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
     fn sample_stream_request(name: &str) -> CreateStreamRequest {
@@ -1275,11 +1420,7 @@ mod tests {
             &dir.path().join("uploads"),
             &dir.path().join("schemas"),
         );
-        let body = axum::body::Bytes::from(zip_bytes);
-
-        let response = import_storage_handler(State(state.clone()), body)
-            .await
-            .into_response();
+        let response = import_zip(state.clone(), zip_bytes).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = to_bytes(response.into_body(), 1024 * 1024)
@@ -1328,11 +1469,7 @@ mod tests {
             &dir.path().join("uploads"),
             &dir.path().join("schemas"),
         );
-        let body = axum::body::Bytes::from(zip_bytes);
-
-        let response = import_storage_handler(State(state.clone()), body)
-            .await
-            .into_response();
+        let response = import_zip(state.clone(), zip_bytes).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         // Verify storage was not mutated
@@ -1491,10 +1628,7 @@ mod tests {
         )
         .unwrap();
 
-        let response =
-            import_storage_handler(State(state.clone()), axum::body::Bytes::from(zip_bytes))
-                .await
-                .into_response();
+        let response = import_zip(state.clone(), zip_bytes).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let stored = state
@@ -1546,10 +1680,7 @@ mod tests {
         )
         .unwrap();
 
-        let response =
-            import_storage_handler(State(state.clone()), axum::body::Bytes::from(zip_bytes))
-                .await
-                .into_response();
+        let response = import_zip(state.clone(), zip_bytes).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await

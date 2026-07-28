@@ -12,3 +12,9 @@ resource declarations. WASM modules referenced by UDF resources live under
 
 Operators must back up ordinary uploads separately when they are required by
 deployment-specific runtime configuration.
+
+Request-scoped streamed uploads use the reserved
+`<data_dir>/uploads/tmp/` directory. Temporary files use UUID names, are removed
+when the request finishes, and are cleared during storage startup after an
+unclean process exit. The file API does not list, export, or allow user paths
+below this reserved directory.

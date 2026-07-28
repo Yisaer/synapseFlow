@@ -171,6 +171,13 @@ pub(crate) fn validate_upload_file_name(value: &str) -> Result<(), String> {
             value.escape_debug()
         ));
     }
+    if value
+        .split('/')
+        .next()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("tmp"))
+    {
+        return Err("file name must not use reserved top-level directory `tmp`".to_string());
+    }
     // Each segment must be a valid filename.
     for segment in value.split('/') {
         validate_upload_segment(segment)?;
@@ -351,6 +358,9 @@ mod tests {
             ("a\nb", "contains newline"),
             ("spaced name", "contains space"),
             ("name:colon", "contains colon"),
+            ("tmp/upload.zip", "reserved temporary upload directory"),
+            ("Tmp/upload.zip", "case variant of reserved directory"),
+            ("TMP/upload.zip", "uppercase variant of reserved directory"),
             ("  leading", "leading whitespace"),
             ("trailing ", "trailing whitespace"),
             ("/onlyslash/", "starts and ends with /"),
