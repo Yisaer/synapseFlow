@@ -13,8 +13,8 @@ use tokio::time::Duration;
 use super::common::ColumnCheck;
 use super::common::{
     assert_no_json_output, build_expected_json, declare_memory_input_output_topics,
-    install_memory_stream_schema, make_memory_topics, normalize_json, publish_input_collection,
-    recv_next_json,
+    install_memory_stream_schema, install_memory_stream_schema_with_name, make_memory_topics,
+    normalize_json, publish_input_collection, recv_next_json,
 };
 
 struct ExpectedCollection {
@@ -32,6 +32,14 @@ struct StatefulCase {
     close_before_read: bool,
 }
 
+fn source_name_for_case(case: &StatefulCase) -> &'static str {
+    if case.sql.contains("FROM stream_ab") {
+        "stream_ab"
+    } else {
+        "stream"
+    }
+}
+
 async fn run_stateful_case(case: StatefulCase) {
     println!("Running test: {}", case.name);
 
@@ -42,7 +50,9 @@ async fn run_stateful_case(case: StatefulCase) {
     let (input_topic, output_topic) =
         make_memory_topics("stateful_function_table_driven", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
-    install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
+    let source_name = source_name_for_case(&case);
+    install_memory_stream_schema_with_name(&instance, &input_topic, source_name, &case.input_data)
+        .await;
 
     let mut output = instance
         .open_memory_subscribe_bytes(&output_topic)
@@ -68,7 +78,7 @@ async fn run_stateful_case(case: StatefulCase) {
     let columns = case
         .input_data
         .into_iter()
-        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .map(|(col_name, values)| (source_name.to_string(), col_name, values))
         .collect();
     let test_batch = batch_from_columns_simple(columns)
         .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case.name));
@@ -162,6 +172,52 @@ async fn stateful_function_table_driven() {
                     column_checks: vec![ColumnCheck {
                         expected_name: "sum(a)".to_string(),
                         expected_values: vec![Value::Int64(70)],
+                    }],
+                },
+            ],
+            wait_after_send: Duration::from_millis(200),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "aggregation_sum_countwindow_with_window_filter",
+            sql: "SELECT sum(a) FROM stream_ab GROUP BY countwindow(2) FILTER (WHERE b > 0)",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                        Value::Int64(50),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![
+                ExpectedCollection {
+                    expected_rows: 1,
+                    expected_columns: 1,
+                    column_checks: vec![ColumnCheck {
+                        expected_name: "sum(a)".to_string(),
+                        expected_values: vec![Value::Int64(40)],
+                    }],
+                },
+                ExpectedCollection {
+                    expected_rows: 1,
+                    expected_columns: 1,
+                    column_checks: vec![ColumnCheck {
+                        expected_name: "sum(a)".to_string(),
+                        expected_values: vec![Value::Int64(90)],
                     }],
                 },
             ],

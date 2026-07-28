@@ -2,6 +2,7 @@ use crate::catalog::{StreamDefinition, TableDefinition, TableProps};
 use crate::pipeline::SourceInputConfig;
 use parser::window as parser_window;
 use parser::SelectStmt;
+use sqlparser::ast::Expr;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -202,6 +203,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
     validate_aggregation_projection(&select_stmt)?;
     validate_order_by_constraints(&select_stmt)?;
     validate_expression_types(&select_stmt, stream_defs, table_defs)?;
+    validate_window_filter_constraints(&select_stmt)?;
 
     let start_index = 0i64;
     let mut current_index = start_index;
@@ -300,6 +302,12 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
 
     // 3. Create Window from window if present
     if let Some(window) = select_stmt.window.clone() {
+        let (window, window_filter) = split_window_filter(window);
+        if let Some(filter_expr) = window_filter {
+            let filter = Filter::new(filter_expr, current_plans, current_index);
+            current_plans = vec![Arc::new(LogicalPlan::Filter(filter))];
+            current_index += 1;
+        }
         let spec = convert_window_spec(window)?;
         let window_plan = LogicalWindow::new(spec, current_plans, current_index);
         current_plans = vec![Arc::new(LogicalPlan::Window(window_plan))];
@@ -471,6 +479,11 @@ fn validate_expression_types(
     for expr in &select_stmt.group_by_exprs {
         validate_expr_against_sources(expr, &sources)?;
     }
+    if let Some(window) = select_stmt.window.as_ref() {
+        if let Some(filter) = window.filter() {
+            validate_expr_against_sources(filter, &sources)?;
+        }
+    }
     for item in &select_stmt.order_by {
         validate_expr_against_sources(&item.expr, &sources)?;
     }
@@ -580,11 +593,17 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
         }
     }
     if let Some(window) = select_stmt.window.as_ref() {
+        if let Some(filter) = window.filter() {
+            if expr_references_any_alias(filter, &all_aliases) {
+                return Err("aliases in window FILTER are not supported yet".to_string());
+            }
+        }
         match window {
             Window::State {
                 open,
                 emit,
                 partition_by,
+                ..
             } => {
                 if expr_references_any_alias(open.as_ref(), &all_aliases)
                     || expr_references_any_alias(emit.as_ref(), &all_aliases)
@@ -1345,6 +1364,24 @@ fn validate_order_by_constraints(select_stmt: &SelectStmt) -> Result<(), String>
     Ok(())
 }
 
+fn validate_window_filter_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
+    let Some(window) = select_stmt.window.as_ref() else {
+        return Ok(());
+    };
+    let Some(filter) = window.filter() else {
+        return Ok(());
+    };
+
+    if let Some(reason) = find_disallowed_window_filter_expression(filter) {
+        return Err(format!(
+            "window FILTER expression '{}' is not supported: {}",
+            filter, reason
+        ));
+    }
+
+    Ok(())
+}
+
 fn expr_references_any_stateful_placeholder(
     expr: &sqlparser::ast::Expr,
     stateful_mappings: &[parser::StatefulMappingEntry],
@@ -1579,9 +1616,106 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
     }
 }
 
+fn find_disallowed_window_filter_expression(expr: &Expr) -> Option<String> {
+    fn visit(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Function(func) => {
+                let func_name = func.name.to_string().to_lowercase();
+                if is_window_function_name(&func_name) {
+                    return Some(format!("window function `{}`", func.name));
+                }
+                if func_name == "last_hit_count" {
+                    return Some("pipeline state function `last_hit_count`".to_string());
+                }
+                if parser::aggregate_registry::default_aggregate_registry()
+                    .is_aggregate_function(&func_name)
+                {
+                    return Some(format!("aggregate function `{}`", func.name));
+                }
+                if parser::stateful_registry::default_stateful_registry()
+                    .is_stateful_function(&func_name)
+                {
+                    return Some(format!("stateful function `{}`", func.name));
+                }
+                if func.filter.is_some() {
+                    return Some(format!("function FILTER clause on `{}`", func.name));
+                }
+                if func.over.is_some() {
+                    return Some(format!("function OVER clause on `{}`", func.name));
+                }
+                if !func.order_by.is_empty() {
+                    return Some(format!("function ORDER BY clause on `{}`", func.name));
+                }
+
+                for arg in &func.args {
+                    match arg {
+                        sqlparser::ast::FunctionArg::Unnamed(
+                            sqlparser::ast::FunctionArgExpr::Expr(expr),
+                        ) => {
+                            if let Some(reason) = visit(expr) {
+                                return Some(reason);
+                            }
+                        }
+                        sqlparser::ast::FunctionArg::Named {
+                            arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                            ..
+                        } => {
+                            if let Some(reason) = visit(expr) {
+                                return Some(reason);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Expr::BinaryOp { left, right, .. } => visit(left).or_else(|| visit(right)),
+            Expr::UnaryOp { expr, .. } => visit(expr),
+            Expr::Nested(expr) => visit(expr),
+            Expr::Cast { expr, .. } => visit(expr),
+            Expr::Between {
+                expr, low, high, ..
+            } => visit(expr).or_else(|| visit(low)).or_else(|| visit(high)),
+            Expr::InList { expr, list, .. } => visit(expr).or_else(|| list.iter().find_map(visit)),
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => operand
+                .as_deref()
+                .and_then(visit)
+                .or_else(|| conditions.iter().find_map(visit))
+                .or_else(|| results.iter().find_map(visit))
+                .or_else(|| else_result.as_deref().and_then(visit)),
+            Expr::JsonAccess { left, right, .. } => visit(left).or_else(|| visit(right)),
+            Expr::MapAccess { column, keys } => {
+                visit(column).or_else(|| keys.iter().find_map(visit))
+            }
+            _ => None,
+        }
+    }
+
+    visit(expr)
+}
+
+fn is_window_function_name(name: &str) -> bool {
+    matches!(
+        name,
+        "tumblingwindow" | "countwindow" | "slidingwindow" | "statewindow"
+    )
+}
+
+fn split_window_filter(window: parser_window::Window) -> (parser_window::Window, Option<Expr>) {
+    let filter = window.filter().cloned();
+    (window.with_filter(None), filter)
+}
+
 fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpec, String> {
     match window {
-        parser_window::Window::Tumbling { time_unit, length } => {
+        parser_window::Window::Tumbling {
+            time_unit, length, ..
+        } => {
             let unit = match time_unit {
                 parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
             };
@@ -1590,11 +1724,12 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
                 length,
             })
         }
-        parser_window::Window::Count { count } => Ok(LogicalWindowSpec::Count { count }),
+        parser_window::Window::Count { count, .. } => Ok(LogicalWindowSpec::Count { count }),
         parser_window::Window::Sliding {
             time_unit,
             lookback,
             lookahead,
+            ..
         } => {
             let unit = match time_unit {
                 parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
@@ -1609,6 +1744,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             open,
             emit,
             partition_by,
+            ..
         } => Ok(LogicalWindowSpec::State {
             open,
             emit,

@@ -531,7 +531,9 @@ mod source_info_tests {
         assert!(select_stmt.window.is_some());
 
         match select_stmt.window {
-            Some(Window::Tumbling { time_unit, length }) => {
+            Some(Window::Tumbling {
+                time_unit, length, ..
+            }) => {
                 assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
                 assert_eq!(length, 10);
             }
@@ -554,6 +556,7 @@ mod source_info_tests {
                 time_unit,
                 lookback,
                 lookahead,
+                ..
             }) => {
                 assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
                 assert_eq!(lookback, 10);
@@ -589,7 +592,9 @@ mod source_info_tests {
 
         // window should be parsed
         match select_stmt.window {
-            Some(Window::Tumbling { time_unit, length }) => {
+            Some(Window::Tumbling {
+                time_unit, length, ..
+            }) => {
                 assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
                 assert_eq!(length, 10);
             }
@@ -619,6 +624,7 @@ mod source_info_tests {
                 time_unit,
                 lookback,
                 lookahead,
+                ..
             }) => {
                 assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
                 assert_eq!(lookback, 10);
@@ -652,6 +658,7 @@ mod source_info_tests {
                 open,
                 emit,
                 partition_by,
+                ..
             }) => {
                 assert_eq!(open.as_ref().to_string(), "a > 0");
                 assert_eq!(emit.as_ref().to_string(), "b = 1");
@@ -675,6 +682,7 @@ mod source_info_tests {
                 open,
                 emit,
                 partition_by,
+                ..
             }) => {
                 assert_eq!(open.as_ref().to_string(), "a > 0");
                 assert_eq!(emit.as_ref().to_string(), "b = 1");
@@ -709,6 +717,7 @@ mod source_info_tests {
                 open,
                 emit,
                 partition_by,
+                ..
             }) => {
                 assert_eq!(open.as_ref().to_string(), "a > 0");
                 assert_eq!(emit.as_ref().to_string(), "b = 1");

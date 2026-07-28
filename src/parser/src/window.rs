@@ -7,9 +7,16 @@ use sqlparser::parser::ParserError;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Window {
     /// Fixed-size, non-overlapping window defined by time unit + length
-    Tumbling { time_unit: TimeUnit, length: u64 },
+    Tumbling {
+        time_unit: TimeUnit,
+        length: u64,
+        filter: Option<Box<Expr>>,
+    },
     /// Fixed-size window defined by number of rows
-    Count { count: u64 },
+    Count {
+        count: u64,
+        filter: Option<Box<Expr>>,
+    },
     /// Sliding window triggered by each received record.
     ///
     /// For a trigger time `t`, the window range is `[t - lookback, t + lookahead]`.
@@ -19,6 +26,7 @@ pub enum Window {
         time_unit: TimeUnit,
         lookback: u64,
         lookahead: Option<u64>,
+        filter: Option<Box<Expr>>,
     },
     /// State window driven by two boolean conditions:
     /// - `open`: when the window starts collecting state
@@ -29,6 +37,7 @@ pub enum Window {
         /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
         /// When empty, the window is global (single partition).
         partition_by: Vec<Expr>,
+        filter: Option<Box<Expr>>,
     },
 }
 
@@ -40,11 +49,18 @@ pub enum TimeUnit {
 
 impl Window {
     pub fn tumbling(time_unit: TimeUnit, length: u64) -> Self {
-        Window::Tumbling { time_unit, length }
+        Window::Tumbling {
+            time_unit,
+            length,
+            filter: None,
+        }
     }
 
     pub fn count(count: u64) -> Self {
-        Window::Count { count }
+        Window::Count {
+            count,
+            filter: None,
+        }
     }
 
     pub fn sliding(time_unit: TimeUnit, lookback: u64, lookahead: Option<u64>) -> Self {
@@ -52,6 +68,7 @@ impl Window {
             time_unit,
             lookback,
             lookahead,
+            filter: None,
         }
     }
 
@@ -64,6 +81,51 @@ impl Window {
             open: Box::new(open),
             emit: Box::new(emit),
             partition_by,
+            filter: None,
+        }
+    }
+
+    pub fn with_filter(self, filter: Option<Box<Expr>>) -> Self {
+        match self {
+            Window::Tumbling {
+                time_unit, length, ..
+            } => Window::Tumbling {
+                time_unit,
+                length,
+                filter,
+            },
+            Window::Count { count, .. } => Window::Count { count, filter },
+            Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                ..
+            } => Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                filter,
+            },
+            Window::State {
+                open,
+                emit,
+                partition_by,
+                ..
+            } => Window::State {
+                open,
+                emit,
+                partition_by,
+                filter,
+            },
+        }
+    }
+
+    pub fn filter(&self) -> Option<&Expr> {
+        match self {
+            Window::Tumbling { filter, .. }
+            | Window::Count { filter, .. }
+            | Window::Sliding { filter, .. }
+            | Window::State { filter, .. } => filter.as_deref(),
         }
     }
 
@@ -105,17 +167,20 @@ pub fn parse_window_function(function: &Function) -> Result<Window, ParserError>
 /// Convert a Window back to a SQL expression
 pub fn window_to_expr(window: &Window) -> Expr {
     let args = match window {
-        Window::Tumbling { time_unit, length } => {
+        Window::Tumbling {
+            time_unit, length, ..
+        } => {
             vec![
                 make_string_arg(time_unit.as_str()),
                 make_number_arg(*length),
             ]
         }
-        Window::Count { count } => vec![make_number_arg(*count)],
+        Window::Count { count, .. } => vec![make_number_arg(*count)],
         Window::Sliding {
             time_unit,
             lookback,
             lookahead,
+            ..
         } => {
             let mut args = vec![
                 make_string_arg(time_unit.as_str()),
@@ -149,7 +214,7 @@ pub fn window_to_expr(window: &Window) -> Expr {
         over,
         distinct: false,
         order_by: vec![],
-        filter: None,
+        filter: window.filter().cloned().map(Box::new),
         null_treatment: None,
         special: false,
     })
@@ -168,7 +233,7 @@ fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
 
     let time_unit = TimeUnit::try_from_str(&time_unit)?;
 
-    Ok(Window::tumbling(time_unit, length))
+    Ok(Window::tumbling(time_unit, length).with_filter(function.filter.clone()))
 }
 
 fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
@@ -180,7 +245,7 @@ fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
     }
 
     let count = parse_number_arg(&function.args[0], "countwindow", "count")?;
-    Ok(Window::count(count))
+    Ok(Window::count(count).with_filter(function.filter.clone()))
 }
 
 fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
@@ -206,7 +271,7 @@ fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
 
     let time_unit = TimeUnit::try_from_str(&time_unit)?;
 
-    Ok(Window::sliding(time_unit, lookback, lookahead))
+    Ok(Window::sliding(time_unit, lookback, lookahead).with_filter(function.filter.clone()))
 }
 
 fn parse_state_window(function: &Function) -> Result<Window, ParserError> {
@@ -221,7 +286,7 @@ fn parse_state_window(function: &Function) -> Result<Window, ParserError> {
 
     let partition_by = parse_over_partition_by(function, "statewindow")?;
 
-    Ok(Window::state_partitioned(open, emit, partition_by))
+    Ok(Window::state_partitioned(open, emit, partition_by).with_filter(function.filter.clone()))
 }
 
 fn parse_over_partition_by(function: &Function, func_name: &str) -> Result<Vec<Expr>, ParserError> {

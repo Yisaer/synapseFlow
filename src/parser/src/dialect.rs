@@ -105,7 +105,8 @@ mod tests {
             window.unwrap(),
             window::Window::Tumbling {
                 ref time_unit,
-                length: 10
+                length: 10,
+                ..
             } if *time_unit == window::TimeUnit::Seconds
         ));
     }
