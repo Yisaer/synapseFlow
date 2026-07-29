@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use can_dbc::{ByteOrder, MultiplexIndicator};
+use can_dbc::{ByteOrder, MultiplexIndicator, NumericValue};
 use flow::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use manager::{ParsedSchema, register_schema};
 use serde::Deserialize;
@@ -354,22 +354,22 @@ pub fn load_can_schema(path: &str) -> Result<DbcJson, String> {
 
 /// Load a single DBC file, assigning Bus ID=0, Name="Bus0".
 fn load_single_dbc(path: &Path) -> Result<DbcJson, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("failed to read dbc at {}: {}", path.display(), e))?;
-    let dbc = can_dbc::Dbc::try_from(content.as_str())
-        .map_err(|e| format!("failed to parse dbc {}: {:?}", path.display(), e))?;
-
+    let dbc = parse_dbc_file(path)?;
     let bus = convert_dbc_to_bus(&dbc, 0, "Bus0".to_string());
     Ok(DbcJson { buses: vec![bus] })
 }
 
 /// Load one DBC file and assign the bus identity supplied by its owning schema.
 pub(crate) fn load_dbc_bus(path: &Path, id: u32, name: String) -> Result<BusJson, String> {
+    let dbc = parse_dbc_file(path)?;
+    Ok(convert_dbc_to_bus(&dbc, id, name))
+}
+
+fn parse_dbc_file(path: &Path) -> Result<can_dbc::Dbc, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("failed to read dbc at {}: {}", path.display(), e))?;
-    let dbc = can_dbc::Dbc::try_from(content.as_str())
-        .map_err(|e| format!("failed to parse dbc {}: {:?}", path.display(), e))?;
-    Ok(convert_dbc_to_bus(&dbc, id, name))
+    can_dbc::Dbc::try_from(content.as_str())
+        .map_err(|e| format!("failed to parse dbc {}: {e}", path.display()))
 }
 
 /// Load a directory of DBC files with strict naming: `{id}_{name}.dbc`.
@@ -407,11 +407,7 @@ fn load_dbc_directory(dir: &Path) -> Result<DbcJson, String> {
             return Err(format!("duplicate bus ID {} in directory", id));
         }
 
-        let content = fs::read_to_string(&file_path)
-            .map_err(|e| format!("failed to read {}: {}", file_path.display(), e))?;
-        let dbc = can_dbc::Dbc::try_from(content.as_str())
-            .map_err(|e| format!("failed to parse {}: {:?}", file_path.display(), e))?;
-
+        let dbc = parse_dbc_file(&file_path)?;
         buses.push(convert_dbc_to_bus(&dbc, id, name));
     }
 
@@ -442,10 +438,10 @@ fn parse_bus_filename(stem: &str) -> Option<(u32, String)> {
 /// Convert a can_dbc::Dbc to our BusJson format.
 fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
     let messages = dbc
-        .messages()
+        .messages
         .iter()
         .map(|msg| {
-            let msg_id = match *msg.id() {
+            let msg_id = match msg.id {
                 can_dbc::MessageId::Standard(id) => {
                     let id = id as u32;
                     // A standard frame is 11-bit by definition. A larger value
@@ -456,7 +452,7 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                     // (issue #202). See docs/schema/dbc.md "Extended / 29-bit".
                     if id > 0x7FF {
                         tracing::warn!(
-                            message = %msg.name(),
+                            message = %msg.name,
                             msg_id = format!("0x{id:X}"),
                             "DBC message id exceeds the 11-bit standard range but is \
                              not marked as an extended frame; an extended id may be \
@@ -469,41 +465,40 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
             };
 
             let signals = msg
-                .signals()
+                .signals
                 .iter()
                 .map(|sig| {
                     let (is_multiplexer, is_multiplexed, multiplexer_value) =
-                        match sig.multiplexer_indicator() {
+                        match sig.multiplexer_indicator {
                             MultiplexIndicator::Plain => (false, false, None),
                             MultiplexIndicator::Multiplexor => (true, false, None),
                             MultiplexIndicator::MultiplexedSignal(val) => {
-                                (false, true, Some(*val as i64))
+                                (false, true, Some(val as i64))
                             }
                             MultiplexIndicator::MultiplexorAndMultiplexedSignal(val) => {
-                                (true, true, Some(*val as i64))
+                                (true, true, Some(val as i64))
                             }
                         };
 
-                    // can-dbc always carries min/max as f64; the DBC "no range"
-                    // convention is `[0|0]` (and can-dbc has no None). Map a
-                    // valid range to Some, and treat a zero-width/no range as
-                    // None. (`None` and `Some(0.0)/Some(0.0)` are equivalent
-                    // downstream anyway: CanDecoder::new's `max > min` guard
-                    // turns `[0|0]` into no-clamp.)
-                    let (min, max) = if sig.max > sig.min {
-                        (Some(sig.min), Some(sig.max))
+                    // can-dbc preserves integer bounds in NumericValue. VeloFlux
+                    // applies physical scaling as f64, so convert them at this
+                    // boundary. Treat a zero-width range as unspecified.
+                    let min = numeric_value_to_f64(sig.min);
+                    let max = numeric_value_to_f64(sig.max);
+                    let (min, max) = if max > min {
+                        (Some(min), Some(max))
                     } else {
                         (None, None)
                     };
 
                     SignalJson {
-                        name: sig.name().to_string(),
+                        name: sig.name.to_string(),
                         start: sig.start_bit as u32,
                         length: sig.size as u32,
                         scale: Some(sig.factor),
                         offset: Some(sig.offset),
-                        is_big_endian: matches!(sig.byte_order(), ByteOrder::BigEndian),
-                        is_signed: matches!(sig.value_type(), can_dbc::ValueType::Signed),
+                        is_big_endian: matches!(sig.byte_order, ByteOrder::BigEndian),
+                        is_signed: matches!(sig.value_type, can_dbc::ValueType::Signed),
                         is_multiplexer,
                         is_multiplexed,
                         multiplexer_value,
@@ -514,10 +509,10 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                 .collect();
 
             MessageJson {
-                name: msg.name().to_string(),
+                name: msg.name.to_string(),
                 id: msg_id,
                 frame_id: format!("0x{:X}", msg_id),
-                _length: *msg.size() as u32,
+                _length: msg.size as u32,
                 signals,
             }
         })
@@ -527,6 +522,14 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
         name: Some(name),
         id,
         messages,
+    }
+}
+
+fn numeric_value_to_f64(value: NumericValue) -> f64 {
+    match value {
+        NumericValue::Uint(value) => value as f64,
+        NumericValue::Int(value) => value as f64,
+        NumericValue::Double(value) => value,
     }
 }
 
@@ -550,6 +553,14 @@ mod tests {
     use super::*;
     use flow::ConcreteDatatype;
     use std::path::PathBuf;
+
+    fn load_inline_dbc(file_name: &str, content: &str) -> DbcJson {
+        let path = std::env::temp_dir().join(file_name);
+        std::fs::write(&path, content).expect("write inline DBC");
+        let result = load_can_schema(path.to_str().expect("inline DBC path"));
+        std::fs::remove_file(path).ok();
+        result.expect("load inline DBC")
+    }
 
     #[test]
     fn parse_sim_json_produces_expected_columns() {
@@ -762,6 +773,47 @@ mod tests {
         assert_eq!(dbc_json.buses[0].name, Some("Bus0".to_string()));
         // Should have 5 messages
         assert_eq!(dbc_json.buses[0].messages.len(), 5);
+    }
+
+    #[test]
+    fn load_can_schema_accepts_ns_with_or_without_space() {
+        for (file_name, ns_header) in [
+            ("vf179_ns_without_space.dbc", "NS_:"),
+            ("vf179_ns_with_space.dbc", "NS_ :"),
+        ] {
+            let dbc_content = format!(
+                "VERSION \"\"\n\n{ns_header}\n\nBS_:\n\nBU_:\n\n\
+                 BO_ 512 TestMsg: 8 Vector__XXX\n \
+                 SG_ TestSig : 0|8@1+ (1,0) [0|255] \"\" Vector__XXX\n"
+            );
+            let dbc = load_inline_dbc(file_name, &dbc_content);
+            assert_eq!(dbc.buses[0].messages[0].name, "TestMsg");
+            assert_eq!(dbc.buses[0].messages[0].signals[0].name, "TestSig");
+        }
+    }
+
+    #[test]
+    fn load_can_schema_accepts_multiline_signal_comment() {
+        let dbc_content = r#"VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 100 BeforeMsg: 8 Vector__XXX
+ SG_ BeforeSig : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+CM_ SG_ 100 BeforeSig "first line
+second line";
+BO_ 200 AfterMsg: 8 Vector__XXX
+ SG_ AfterSig : 8|8@1+ (1,0) [0|255] "" Vector__XXX
+"#;
+
+        let dbc = load_inline_dbc("vf179_multiline_comment.dbc", dbc_content);
+        assert_eq!(dbc.buses[0].messages.len(), 2);
+        assert_eq!(dbc.buses[0].messages[1].name, "AfterMsg");
+        assert_eq!(dbc.buses[0].messages[1].signals[0].name, "AfterSig");
     }
 
     #[test]

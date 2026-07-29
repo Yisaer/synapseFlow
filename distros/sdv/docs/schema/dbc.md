@@ -17,6 +17,12 @@ The DBC schema defines:
 | DBC | `.dbc` | Standard Vector DBC format |
 | Directory | folder | Multiple DBC files with naming convention |
 
+### Parser Compatibility
+
+DBC input accepts both `NS_:` and `NS_ :` section headers. Quoted comments may
+span multiple lines, including object comments such as `CM_ SG_`. Parse errors
+include the source path and the parser's line/column context.
+
 ---
 
 ## Loading Schema
