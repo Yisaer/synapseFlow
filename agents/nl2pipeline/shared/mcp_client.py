@@ -41,10 +41,11 @@ class VeloFluxMcpClient:
 
     def pipelines_create(self, body: Dict[str, Any]) -> Dict[str, Any]:
         pipeline_id = str(body.get("id", "")).strip()
+        revision = body.get("revision")
         sql = str(body.get("sql", "")).strip()
         sinks = body.get("sinks")
         options = body.get("options")
-        args: Dict[str, Any] = {"id": pipeline_id, "sql": sql}
+        args: Dict[str, Any] = {"id": pipeline_id, "revision": revision, "sql": sql}
         if sinks is not None:
             args["sinks"] = sinks
         if options is not None:

@@ -216,6 +216,7 @@ async fn shared_stream_stats_rejects_non_shared_stream_via_rest() {
         .post(format!("{manager_base}/streams"))
         .json(&StreamCreateRequest {
             name: stream_name.clone(),
+            revision: 1,
             stream_type: "mock".to_string(),
             schema: serde_json::json!({
                 "type": "json",

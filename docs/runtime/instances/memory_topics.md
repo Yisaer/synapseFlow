@@ -124,6 +124,10 @@ See also:
 
 Memory topics are part of the manager metadata snapshot.
 
+Creation requires a positive JSON safe integer `revision`. Get/list and export
+return the persisted revision. There is no online memory-topic update API;
+revision comparison is performed only by startup init.
+
 They are included in:
 
 - storage export
@@ -145,8 +149,10 @@ Import treats memory topics as part of the full metadata snapshot:
 - the imported snapshot fully replaces the stored topic set
 - import does not reconcile live runtime resources immediately
 
-the startup resource manifest uses the same bundle shape but add-only startup semantics. A memory topic in
-the startup resource manifest conflicts with an already stored topic of the same name and fails startup.
+The startup resource manifest uses revision-based best-effort Apply. A greater
+incoming revision replaces stored metadata, while an equal or lower revision is
+ignored. An invalid memory topic affects only itself and dependants without a
+usable live fallback; it never aborts process startup.
 
 ## Testing Guidance
 

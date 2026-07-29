@@ -72,6 +72,7 @@ async fn create_pipeline_raw(
         .post(format!("{}/pipelines", h.base()))
         .json(&json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": sql,
             "sinks": [
                 {
@@ -230,6 +231,7 @@ impl SelectAst {
 fn basic_mock_stream_req(name: String) -> StreamCreateRequest {
     StreamCreateRequest {
         name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",

@@ -35,7 +35,7 @@ pub struct ExportStorageQuery {
 #[serde(deny_unknown_fields)]
 pub struct ExportResources {
     pub memory_topics: Vec<ExportMemoryTopic>,
-    pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
+    pub shared_mqtt_clients: Vec<ExportSharedMqttClient>,
     #[serde(default)]
     pub schemas: Vec<ExportSchema>,
     pub streams: Vec<CreateStreamRequest>,
@@ -46,8 +46,18 @@ pub struct ExportResources {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct ExportSharedMqttClient {
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
+    #[serde(flatten)]
+    pub definition: SharedMqttClientConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExportMemoryTopic {
     pub topic: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     pub kind: StoredMemoryTopicKind,
     pub capacity: usize,
 }
@@ -69,6 +79,8 @@ fn default_pipeline_run_state() -> StoredPipelineDesiredState {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ExportUdf {
     pub name: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     pub wasm_sha256: String,
 }
 
@@ -83,6 +95,8 @@ pub struct ExportTable {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ExportSchema {
     pub name: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     #[serde(rename = "type")]
     pub schema_type: String,
     pub props: serde_json::Map<String, serde_json::Value>,
@@ -267,6 +281,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
         .into_iter()
         .map(|topic| ExportMemoryTopic {
             topic: topic.topic,
+            revision: topic.revision,
             kind: topic.kind,
             capacity: topic.capacity,
         })
@@ -288,9 +303,12 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
                 stored.key, cfg.key
             ));
         }
-        shared_mqtt_clients.push(cfg);
+        shared_mqtt_clients.push(ExportSharedMqttClient {
+            revision: stored.revision,
+            definition: cfg,
+        });
     }
-    shared_mqtt_clients.sort_by(|a, b| a.key.cmp(&b.key));
+    shared_mqtt_clients.sort_by(|a, b| a.definition.key.cmp(&b.definition.key));
 
     let mut schemas = Vec::with_capacity(snapshot.schemas.len());
     for stored in snapshot.schemas {
@@ -299,6 +317,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
                 .map_err(|err| format!("decode stored schema {} props: {err}", stored.name))?;
         schemas.push(ExportSchema {
             name: stored.name,
+            revision: stored.revision,
             schema_type: stored.schema_type,
             props,
         });
@@ -307,8 +326,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
 
     let mut streams = Vec::with_capacity(snapshot.streams.len());
     for stored in snapshot.streams {
-        let req: CreateStreamRequest = serde_json::from_str(&stored.raw_json)
-            .map_err(|err| format!("decode stored stream {}: {err}", stored.id))?;
+        let req = storage_bridge::stream_request_from_stored(&stored)?;
         if req.name != stored.id {
             return Err(format!(
                 "stored stream {} name mismatch in raw_json: {}",
@@ -353,6 +371,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
         .into_iter()
         .map(|u| ExportUdf {
             name: u.name,
+            revision: u.revision,
             wasm_sha256: u.wasm_sha256,
         })
         .collect();
@@ -360,8 +379,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
 
     let mut tables = Vec::with_capacity(snapshot.tables.len());
     for stored in snapshot.tables {
-        let req: CreateTableRequest = serde_json::from_str(&stored.raw_json)
-            .map_err(|err| format!("decode stored table {}: {err}", stored.id))?;
+        let req = storage_bridge::table_request_from_stored(&stored)?;
         if req.name != stored.id {
             return Err(format!(
                 "stored table {} name mismatch in raw_json: {}",
@@ -440,6 +458,7 @@ mod tests {
     fn sample_stream_request_named(name: &str) -> CreateStreamRequest {
         serde_json::from_value(serde_json::json!({
             "name": name,
+            "revision": 1,
             "type": "mqtt",
             "schema": {
                 "type": "json",
@@ -470,6 +489,7 @@ mod tests {
     fn sample_pipeline_request_named(id: &str, stream_name: &str) -> CreatePipelineRequest {
         serde_json::from_value(serde_json::json!({
             "id": id,
+            "revision": 1,
             "flow_instance_id": DEFAULT_FLOW_INSTANCE_ID,
             "sql": format!("SELECT * FROM {stream_name}"),
             "sinks": [
@@ -499,6 +519,7 @@ mod tests {
     fn sample_stored_udf(name: &str, sha: &str) -> StoredUdf {
         StoredUdf {
             name: name.to_string(),
+            revision: 1,
             wasm_sha256: sha.to_string(),
             raw_json: serde_json::json!({"name": name, "description": "test"}).to_string(),
         }
@@ -531,6 +552,7 @@ mod tests {
         };
         let memory_topic = StoredMemoryTopic {
             topic: "topic_1".to_string(),
+            revision: 1,
             kind: StoredMemoryTopicKind::Bytes,
             capacity: 16,
         };
@@ -554,7 +576,7 @@ mod tests {
             .create_pipeline(stored_pipeline_from_request(&pipeline).unwrap())
             .unwrap();
         storage
-            .create_mqtt_config(stored_mqtt_from_config(&mqtt))
+            .create_mqtt_config(stored_mqtt_from_config(&mqtt, 1))
             .unwrap();
         storage.create_memory_topic(memory_topic).unwrap();
         storage.put_pipeline_run_state(run_state).unwrap();
@@ -644,11 +666,13 @@ mod tests {
         for topic in [
             StoredMemoryTopic {
                 topic: "topic_b".to_string(),
+                revision: 2,
                 kind: StoredMemoryTopicKind::Bytes,
                 capacity: 16,
             },
             StoredMemoryTopic {
                 topic: "topic_a".to_string(),
+                revision: 1,
                 kind: StoredMemoryTopicKind::Collection,
                 capacity: 32,
             },
@@ -683,7 +707,7 @@ mod tests {
             },
         ] {
             storage
-                .create_mqtt_config(stored_mqtt_from_config(&mqtt))
+                .create_mqtt_config(stored_mqtt_from_config(&mqtt, 1))
                 .expect("create mqtt config");
         }
 
@@ -728,6 +752,28 @@ mod tests {
             .create_udf(sample_stored_udf("udf_a", "sha_a"))
             .expect("create udf a");
 
+        for (name, revision) in [("table_b", 2), ("table_a", 1)] {
+            storage
+                .create_table(storage::StoredTable {
+                    id: name.to_string(),
+                    revision,
+                    raw_json: serde_json::json!({
+                        "name": name,
+                        "type": "history",
+                        "schema": {
+                            "type": "json",
+                            "props": { "columns": [] }
+                        },
+                        "props": {
+                            "datasource": "history",
+                            "topic": name
+                        }
+                    })
+                    .to_string(),
+                })
+                .expect("create table");
+        }
+
         let first_bundle =
             build_resource_manifest(&storage, "test-bundle-1".to_string()).expect("first bundle");
         let second_bundle =
@@ -747,7 +793,7 @@ mod tests {
                 .resources
                 .shared_mqtt_clients
                 .iter()
-                .map(|cfg| cfg.key.as_str())
+                .map(|cfg| cfg.definition.key.as_str())
                 .collect::<Vec<_>>(),
             vec!["shared_a", "shared_b"]
         );
@@ -789,6 +835,15 @@ mod tests {
                 .map(|u| u.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["udf_a", "udf_b"]
+        );
+        assert_eq!(
+            first_bundle
+                .resources
+                .tables
+                .iter()
+                .map(|table| (table.definition.name.as_str(), table.definition.revision))
+                .collect::<Vec<_>>(),
+            vec![("table_a", 1), ("table_b", 2)]
         );
         assert_eq!(
             serde_json::to_value(&first_bundle.resources).expect("serialize first resources"),

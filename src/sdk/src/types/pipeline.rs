@@ -4,6 +4,7 @@ use serde_json::Value as JsonValue;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineCreateRequest {
     pub id: String,
+    pub revision: u64,
     pub sql: String,
     pub sinks: Vec<serde_json::Value>,
     #[serde(default)]
@@ -14,6 +15,7 @@ impl PipelineCreateRequest {
     pub fn nop(id: impl Into<String>, sql: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            revision: 1,
             sql: sql.into(),
             sinks: vec![serde_json::json!({ "type": "nop" })],
             flow_instance_id: None,
@@ -28,6 +30,7 @@ impl PipelineCreateRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineUpsertRequest {
+    pub revision: u64,
     pub sql: String,
     pub sinks: Vec<JsonValue>,
 
@@ -38,6 +41,7 @@ pub struct PipelineUpsertRequest {
 impl PipelineUpsertRequest {
     pub fn nop(sql: impl Into<String>) -> Self {
         Self {
+            revision: 2,
             sql: sql.into(),
             sinks: vec![serde_json::json!({ "type": "nop" })],
             options: serde_json::json!({}),

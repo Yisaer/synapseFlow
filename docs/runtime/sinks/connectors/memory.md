@@ -23,6 +23,7 @@ Declare the topic before creating a pipeline that uses a memory sink:
 ```json
 {
   "topic": "demo_bytes",
+  "revision": 1,
   "kind": "bytes",
   "capacity": 1024
 }
@@ -96,6 +97,7 @@ block on subscribers.
 POST /pipelines
 {
   "id": "pipe_mem_bytes",
+  "revision": 1,
   "sql": "SELECT * FROM mem_bytes_stream",
   "sinks": [
     {
@@ -114,6 +116,7 @@ POST /pipelines
 POST /pipelines
 {
   "id": "pipe_mem_collection",
+  "revision": 1,
   "sql": "SELECT * FROM mem_collection_stream",
   "sinks": [
     {

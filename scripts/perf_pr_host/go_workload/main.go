@@ -666,8 +666,9 @@ func deleteStream(client *apiClient, cfg *controlConfig, streamName string, res 
 
 func createStream(client *apiClient, cfg *controlConfig, spec streamSpec, res *opResult) {
 	body := map[string]any{
-		"name": spec.Name,
-		"type": "mqtt",
+		"name":     spec.Name,
+		"revision": 1,
+		"type":     "mqtt",
 		"props": map[string]any{
 			"broker_url": cfg.BrokerURL,
 			"topic":      spec.Topic,
@@ -724,6 +725,7 @@ func createPipeline(client *apiClient, cfg *controlConfig, spec pipelineSpec, re
 	sql := buildSelectSQLByMode(spec.StreamName, cfg.Columns, cfg.SQLMode)
 	body := map[string]any{
 		"id":               spec.ID,
+		"revision":         1,
 		"sql":              sql,
 		"flow_instance_id": spec.FlowInstanceID,
 		"sinks": []any{

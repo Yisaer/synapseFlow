@@ -24,6 +24,7 @@ a specific flow instance.
 A pipeline resource consists of:
 
 - stored pipeline spec
+- required persisted `revision`
 - target `flow_instance_id`
 - stored desired state (`running` or `stopped`)
 - runtime installation inside the selected flow instance
@@ -47,6 +48,13 @@ Upsert keeps the existing pipeline identity and flow-instance binding.
 
 Current rules:
 
+- `revision` is required and must be in `1..=9007199254740991`
+- a greater revision performs replacement
+- a lower revision returns `409 Conflict` with `older_revision`
+- an equal revision and equal normalized definition is idempotent and does not
+  mutate runtime
+- an equal revision and different definition returns `409 Conflict` with
+  `same_revision_different_spec`
 - if a stored pipeline exists, its `flow_instance_id` is reused
 - the new request must still pass normal create validation
 - previous desired state is read from storage before replacement
@@ -54,7 +62,7 @@ Current rules:
 Upsert behavior:
 
 - explain the new definition before deleting the old runtime
-- delete old runtime and storage record
+- delete the old runtime and storage record
 - persist the new spec
 - create the new runtime
 - if previous desired state was `running`, persist `running` again and best-effort restart
@@ -66,6 +74,8 @@ rather than transactional.
 
 Starting a pipeline first persists desired state as `running`, then asks the runtime to converge.
 
+Start does not change pipeline revision.
+
 Behavior:
 
 - `start_pipeline` is idempotent when the runtime is already running
@@ -75,6 +85,8 @@ Behavior:
 ## Stop Semantics
 
 Stopping a pipeline first persists desired state as `stopped`, then asks the runtime to stop.
+
+Stop does not change pipeline revision.
 
 Supported stop modes at the manager surface are:
 
@@ -120,6 +132,8 @@ Current persistence behavior:
 - start writes `running` before runtime converge
 - stop writes `stopped` before runtime converge
 - upsert preserves the previous desired state when possible
+- revision orders artifact definitions; operational start/stop state changes do
+  not increment it
 
 ## Failure And Rollback Semantics
 

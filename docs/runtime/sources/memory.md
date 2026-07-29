@@ -23,6 +23,7 @@ Before creating a memory stream, declare the topic:
 ```json
 {
   "topic": "demo_bytes",
+  "revision": 1,
   "kind": "bytes",
   "capacity": 1024
 }
@@ -101,6 +102,7 @@ Publishing when there are no subscribers is treated as success (delivered count 
 POST /streams
 {
   "name": "mem_bytes_stream",
+  "revision": 1,
   "type": "memory",
   "schema": {
     "type": "json",
@@ -121,6 +123,7 @@ POST /streams
 POST /streams
 {
   "name": "mem_collection_stream",
+  "revision": 1,
   "type": "memory",
   "schema": {
     "type": "json",

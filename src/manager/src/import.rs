@@ -512,9 +512,9 @@ fn extract_zip_with_limits(
     )
 }
 
-fn validate_pipeline_stream_references(
+fn validate_pipeline_source_references(
     req: &CreatePipelineRequest,
-    stream_names: &BTreeSet<String>,
+    source_names: &BTreeSet<String>,
 ) -> Result<(), String> {
     let select_stmt = parser::parse_sql(&req.sql).map_err(|err| {
         format!(
@@ -524,9 +524,9 @@ fn validate_pipeline_stream_references(
     })?;
 
     for source in &select_stmt.source_infos {
-        if !stream_names.contains(&source.name) {
+        if !source_names.contains(&source.name) {
             return Err(format!(
-                "pipeline {} references missing stream: {}",
+                "pipeline {} references missing stream or table: {}",
                 req.id, source.name
             ));
         }
@@ -550,6 +550,7 @@ where
         validate_memory_topic(topic, &mut memory_topic_names)?;
         memory_topics.push(StoredMemoryTopic {
             topic: topic.topic.trim().to_string(),
+            revision: topic.revision,
             kind: topic.kind.clone(),
             capacity: topic.capacity,
         });
@@ -558,15 +559,16 @@ where
     let mut mqtt_configs = Vec::with_capacity(bundle.resources.shared_mqtt_clients.len());
     let mut mqtt_keys = BTreeSet::new();
     for cfg in &bundle.resources.shared_mqtt_clients {
-        validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.key)?;
-        let key = cfg.key.as_str();
+        validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.definition.key)?;
+        let key = cfg.definition.key.as_str();
         if !mqtt_keys.insert(key.to_string()) {
             return Err(format!("duplicate shared mqtt client key in bundle: {key}"));
         }
-        let raw_json = serde_json::to_string(cfg)
+        let raw_json = serde_json::to_string(&cfg.definition)
             .map_err(|err| format!("serialize shared mqtt client config {key}: {err}"))?;
         mqtt_configs.push(StoredMqttClientConfig {
-            key: cfg.key.clone(),
+            key: cfg.definition.key.clone(),
+            revision: cfg.revision,
             raw_json,
         });
     }
@@ -583,6 +585,7 @@ where
             .map_err(|err| format!("serialize schema props for {name}: {err}"))?;
         schemas.push(StoredSchema {
             name: name.to_string(),
+            revision: schema.revision,
             schema_type: schema.schema_type.clone(),
             props_json,
         });
@@ -625,35 +628,11 @@ where
         streams.push(storage_bridge::stored_stream_from_request(req)?);
     }
 
-    let mut pipelines = Vec::with_capacity(bundle.resources.pipelines.len());
-    let mut pipeline_run_states = Vec::with_capacity(bundle.resources.pipelines.len());
-    let mut pipeline_ids = BTreeSet::new();
-    for pipeline in &bundle.resources.pipelines {
-        let normalized = normalize_pipeline_request(&pipeline.definition)?;
-        validate_pipeline_stream_references(&normalized, &available_stream_names)?;
-
-        let flow_instance_id = normalized
-            .flow_instance_id
-            .as_deref()
-            .ok_or_else(|| "flow_instance_id must not be empty".to_string())?;
-        validate_declared_flow_instance(flow_instance_id, is_declared_instance)?;
-
-        let id = normalized.id.clone();
-        if !pipeline_ids.insert(id.clone()) {
-            return Err(format!("duplicate pipeline id in bundle: {id}"));
-        }
-
-        pipelines.push(storage_bridge::stored_pipeline_from_request(&normalized)?);
-        pipeline_run_states.push(StoredPipelineRunState {
-            pipeline_id: id,
-            desired_state: pipeline.run_state.clone(),
-        });
-    }
-
     let udfs: Vec<StoredUdf> = validate_import_udfs(&bundle.resources.udfs)?;
 
     let mut tables = Vec::with_capacity(bundle.resources.tables.len());
     let mut table_ids = BTreeSet::new();
+    let mut available_source_names = available_stream_names;
     for table in &bundle.resources.tables {
         let req = &table.definition;
         validate_resource_id(ResourceIdKind::StreamName, &req.name)?;
@@ -673,9 +652,33 @@ where
                 ));
             }
         }
-        let raw_json = serde_json::to_string(req)
-            .map_err(|err| format!("serialize table {}: {err}", req.name))?;
-        tables.push(storage::StoredTable { id, raw_json });
+        available_source_names.insert(id.clone());
+        tables.push(storage_bridge::stored_table_from_request(req)?);
+    }
+
+    let mut pipelines = Vec::with_capacity(bundle.resources.pipelines.len());
+    let mut pipeline_run_states = Vec::with_capacity(bundle.resources.pipelines.len());
+    let mut pipeline_ids = BTreeSet::new();
+    for pipeline in &bundle.resources.pipelines {
+        let normalized = normalize_pipeline_request(&pipeline.definition)?;
+        validate_pipeline_source_references(&normalized, &available_source_names)?;
+
+        let flow_instance_id = normalized
+            .flow_instance_id
+            .as_deref()
+            .ok_or_else(|| "flow_instance_id must not be empty".to_string())?;
+        validate_declared_flow_instance(flow_instance_id, is_declared_instance)?;
+
+        let id = normalized.id.clone();
+        if !pipeline_ids.insert(id.clone()) {
+            return Err(format!("duplicate pipeline id in bundle: {id}"));
+        }
+
+        pipelines.push(storage_bridge::stored_pipeline_from_request(&normalized)?);
+        pipeline_run_states.push(StoredPipelineRunState {
+            pipeline_id: id,
+            desired_state: pipeline.run_state.clone(),
+        });
     }
 
     Ok(MetadataExportSnapshot {
@@ -705,6 +708,7 @@ fn validate_import_udfs(udfs: &[ExportUdf]) -> Result<Vec<StoredUdf>, String> {
         }
         result.push(StoredUdf {
             name: name.to_string(),
+            revision: udf.revision,
             wasm_sha256: sha.to_string(),
             raw_json: serde_json::json!({"name": name}).to_string(),
         });
@@ -960,6 +964,7 @@ mod tests {
     fn sample_stream_request(name: &str) -> CreateStreamRequest {
         serde_json::from_value(serde_json::json!({
             "name": name,
+            "revision": 1,
             "type": "mqtt",
             "schema": {
                 "type": "json",
@@ -986,6 +991,7 @@ mod tests {
     fn sample_pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
         serde_json::from_value(serde_json::json!({
             "id": id,
+            "revision": 1,
             "flow_instance_id": DEFAULT_FLOW_INSTANCE_ID,
             "sql": format!("SELECT * FROM {stream_name}"),
             "sinks": [
@@ -1020,19 +1026,23 @@ mod tests {
             resources: crate::export::ExportResources {
                 memory_topics: vec![ExportMemoryTopic {
                     topic: topic_name.to_string(),
+                    revision: 1,
                     kind: StoredMemoryTopicKind::Bytes,
                     capacity: 16,
                 }],
-                shared_mqtt_clients: vec![flow::connector::SharedMqttClientConfig {
-                    key: mqtt_key.to_string(),
-                    broker_url: "tcp://localhost:1883".to_string(),
-                    topic: format!("{mqtt_key}/topic"),
-                    client_id: format!("{mqtt_key}_client"),
-                    qos: 1,
-                    max_packet_size: None,
-                    username: None,
-                    password: None,
-                    resolved_password: None,
+                shared_mqtt_clients: vec![crate::export::ExportSharedMqttClient {
+                    revision: 1,
+                    definition: flow::connector::SharedMqttClientConfig {
+                        key: mqtt_key.to_string(),
+                        broker_url: "tcp://localhost:1883".to_string(),
+                        topic: format!("{mqtt_key}/topic"),
+                        client_id: format!("{mqtt_key}_client"),
+                        qos: 1,
+                        max_packet_size: None,
+                        username: None,
+                        password: None,
+                        resolved_password: None,
+                    },
                 }],
                 schemas: vec![],
                 streams: vec![sample_stream_request(stream_name)],
@@ -1059,6 +1069,7 @@ mod tests {
         .expect("write proto schema");
         bundle.resources.schemas.push(crate::export::ExportSchema {
             name: "simple_schema".to_string(),
+            revision: 1,
             schema_type: "proto".to_string(),
             props: serde_json::from_value(serde_json::json!({
                 "proto_path": "simple.proto",
@@ -1380,10 +1391,12 @@ mod tests {
         bundle.resources.udfs = vec![
             ExportUdf {
                 name: "my_udf".to_string(),
+                revision: 1,
                 wasm_sha256: "aaaa".to_string(),
             },
             ExportUdf {
                 name: "my_udf".to_string(),
+                revision: 2,
                 wasm_sha256: "bbbb".to_string(),
             },
         ];
@@ -1520,7 +1533,7 @@ mod tests {
     #[test]
     fn validate_snapshot_rejects_invalid_shared_mqtt_key() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.shared_mqtt_clients[0].key = "bad/key".to_string();
+        bundle.resources.shared_mqtt_clients[0].definition.key = "bad/key".to_string();
 
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert!(
@@ -1552,6 +1565,7 @@ mod tests {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
         bundle.resources.udfs = vec![ExportUdf {
             name: "bad-udf".to_string(),
+            revision: 1,
             wasm_sha256: "aaaa".to_string(),
         }];
 
@@ -1565,6 +1579,7 @@ mod tests {
         fn invalid() -> crate::export::ExportSchema {
             crate::export::ExportSchema {
                 name: "bad-schema".to_string(),
+                revision: 1,
                 schema_type: "json".to_string(),
                 props: serde_json::Map::new(),
             }
@@ -1580,7 +1595,7 @@ mod tests {
         let err = validate_and_build_snapshot(&bundle, None, &is_default_instance).unwrap_err();
         assert_eq!(
             err,
-            "pipeline pipe_a references missing stream: missing_stream"
+            "pipeline pipe_a references missing stream or table: missing_stream"
         );
     }
 

@@ -289,7 +289,7 @@ async fn create_stream(
     let resp = http
         .post(format!("{base}/streams"))
         .json(&serde_json::json!({
-            "name": name, "type": "mqtt",
+            "name": name, "revision": 1, "type": "mqtt",
             "schema": {"ref": schema_name},
             "props": {"broker_url": "tcp://127.0.0.1:1883", "topic": "x", "qos": 0},
             "decoder": {"type": "gbf", "props": {}}
@@ -316,6 +316,7 @@ async fn create_pipeline(
         .post(format!("{base}/pipelines"))
         .json(&serde_json::json!({
             "id": pipe_id,
+            "revision": 1,
             "sql": sql,
             "sinks": [{
                 "id": sink_id,
@@ -340,6 +341,7 @@ async fn create_memory_topic(http: &reqwest::Client, base: &str, topic: &str) {
         .post(format!("{base}/memory/topics"))
         .json(&serde_json::json!({
             "topic": topic,
+            "revision": 1,
             "kind": "bytes",
         }))
         .send()
@@ -368,7 +370,7 @@ async fn create_memory_stream(
     let resp = http
         .post(format!("{base}/streams"))
         .json(&serde_json::json!({
-            "name": name, "type": "memory",
+            "name": name, "revision": 1, "type": "memory",
             "schema": {"ref": schema_name},
             "props": {"topic": input_topic},
             "decoder": {"type": "gbf", "props": {}}
@@ -416,6 +418,7 @@ async fn install_gbf_schema(http: &reqwest::Client, base: &str, name: &str, arch
         .post(format!("{base}/schemas"))
         .json(&serde_json::json!({
             "name": name,
+            "revision": 1,
             "type": "gbf",
             "props": {"schema_path": archive_path}
         }))
@@ -441,6 +444,7 @@ async fn create_memory_pipeline(
         .post(format!("{base}/pipelines"))
         .json(&serde_json::json!({
             "id": pipe_id,
+            "revision": 1,
             "sql": sql,
             "sinks": [{
                 "id": format!("{pipe_id}_sink"),

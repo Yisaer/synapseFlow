@@ -156,6 +156,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{
               "name": "kura_e2e_input",
+              "revision": 1,
               "type": "mqtt",
               "schema": {
                 "type": "json",
@@ -180,6 +181,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{
               "id": "kura_e2e_pipe",
+              "revision": 1,
               "sql": "SELECT value, name FROM kura_e2e_input",
               "sinks": [{
                 "type": "kura",

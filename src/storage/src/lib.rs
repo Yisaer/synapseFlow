@@ -63,13 +63,15 @@ impl StorageError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredStream {
     pub id: String,
-    /// Original create-stream request serialized as JSON.
+    pub revision: u64,
+    /// Normalized stream definition serialized without identity revision.
     pub raw_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredSchema {
     pub name: String,
+    pub revision: u64,
     /// Schema type ("proto", "json", etc.)
     pub schema_type: String,
     /// Schema-type-specific properties serialized as JSON.
@@ -79,7 +81,8 @@ pub struct StoredSchema {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredPipeline {
     pub id: String,
-    /// Original create-pipeline request serialized as JSON.
+    pub revision: u64,
+    /// Normalized pipeline definition serialized without identity revision.
     pub raw_json: String,
 }
 
@@ -101,7 +104,8 @@ pub struct StoredPipelineRunState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredMqttClientConfig {
     pub key: String,
-    /// Original request serialized as JSON.
+    pub revision: u64,
+    /// Shared MQTT client definition serialized without identity revision.
     pub raw_json: String,
 }
 
@@ -115,6 +119,7 @@ pub enum StoredMemoryTopicKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredMemoryTopic {
     pub topic: String,
+    pub revision: u64,
     pub kind: StoredMemoryTopicKind,
     pub capacity: usize,
 }
@@ -129,7 +134,8 @@ pub struct StoredInitApplyMeta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredTable {
     pub id: String,
-    /// Original create-table request serialized as JSON.
+    pub revision: u64,
+    /// Original create-table request serialized without identity revision.
     pub raw_json: String,
 }
 
@@ -138,9 +144,10 @@ pub struct StoredTable {
 pub struct StoredUdf {
     /// Canonical function name (case-insensitive in SQL, stored lowercase).
     pub name: String,
+    pub revision: u64,
     /// SHA-256 hex digest of the uploaded WASM file contents.
     pub wasm_sha256: String,
-    /// Original upload metadata serialized as JSON for export portability.
+    /// Original upload metadata serialized without identity revision.
     pub raw_json: String,
 }
 
@@ -425,41 +432,9 @@ impl MetadataStorage {
     pub fn apply_init_snapshot(
         &self,
         snapshot: MetadataExportSnapshot,
-        meta: StoredInitApplyMeta,
+        meta: Option<StoredInitApplyMeta>,
     ) -> Result<(), StorageError> {
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
-        Self::ensure_entries_absent(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
-            stream.id.as_str()
-        })?;
-        Self::ensure_entries_absent(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
-            schema.name.as_str()
-        })?;
-        Self::ensure_entries_absent(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
-            pipeline.id.as_str()
-        })?;
-        Self::ensure_entries_absent(
-            &txn,
-            PIPELINE_RUN_STATES_TABLE,
-            &snapshot.pipeline_run_states,
-            |state| state.pipeline_id.as_str(),
-        )?;
-        Self::ensure_entries_absent(
-            &txn,
-            SHARED_MQTT_CONFIGS_TABLE,
-            &snapshot.mqtt_configs,
-            |cfg| cfg.key.as_str(),
-        )?;
-        Self::ensure_entries_absent(
-            &txn,
-            MEMORY_TOPICS_TABLE,
-            &snapshot.memory_topics,
-            |topic| topic.topic.as_str(),
-        )?;
-        Self::ensure_entries_absent(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
-        Self::ensure_entries_absent(&txn, TABLES_TABLE, &snapshot.tables, |table| {
-            table.id.as_str()
-        })?;
-
         Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
         })?;
@@ -491,7 +466,9 @@ impl MetadataStorage {
         Self::insert_entries(&txn, TABLES_TABLE, &snapshot.tables, |table| {
             table.id.as_str()
         })?;
-        Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
+        if let Some(meta) = meta {
+            Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
+        }
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
@@ -628,25 +605,6 @@ impl MetadataStorage {
             table
                 .insert(key_fn(value), encoded.as_slice())
                 .map_err(StorageError::backend)?;
-        }
-        Ok(())
-    }
-
-    fn ensure_entries_absent<T, F>(
-        txn: &WriteTransaction,
-        table: TableDefinition<&str, &[u8]>,
-        values: &[T],
-        key_fn: F,
-    ) -> Result<(), StorageError>
-    where
-        F: Fn(&T) -> &str,
-    {
-        let table = txn.open_table(table).map_err(StorageError::backend)?;
-        for value in values {
-            let key = key_fn(value);
-            if table.get(key).map_err(StorageError::backend)?.is_some() {
-                return Err(StorageError::AlreadyExists(key.to_string()));
-            }
         }
         Ok(())
     }
@@ -1055,7 +1013,7 @@ impl StorageManager {
     pub fn apply_init_snapshot(
         &self,
         snapshot: MetadataExportSnapshot,
-        meta: StoredInitApplyMeta,
+        meta: Option<StoredInitApplyMeta>,
     ) -> Result<(), StorageError> {
         self.metadata.apply_init_snapshot(snapshot, meta)
     }
@@ -1077,6 +1035,7 @@ mod tests {
     fn sample_stream() -> StoredStream {
         StoredStream {
             id: "stream_1".to_string(),
+            revision: 1,
             raw_json: r#"{"name":"stream_1","type":"mqtt","schema":{"columns":[]}}"#.to_string(),
         }
     }
@@ -1084,6 +1043,7 @@ mod tests {
     fn sample_pipeline() -> StoredPipeline {
         StoredPipeline {
             id: "pipe_1".to_string(),
+            revision: 1,
             raw_json: r#"{"id":"pipe_1","sql":"SELECT * FROM stream_1","sinks":[]}"#.to_string(),
         }
     }
@@ -1091,6 +1051,7 @@ mod tests {
     fn sample_mqtt_config() -> StoredMqttClientConfig {
         StoredMqttClientConfig {
             key: "shared_a".to_string(),
+            revision: 1,
             raw_json: r#"{"key":"shared_a","broker_url":"tcp://localhost:1883","topic":"foo/bar","client_id":"client_a","qos":1}"#.to_string(),
         }
     }
@@ -1105,6 +1066,7 @@ mod tests {
     fn sample_memory_topic() -> StoredMemoryTopic {
         StoredMemoryTopic {
             topic: "topic_1".to_string(),
+            revision: 1,
             kind: StoredMemoryTopicKind::Bytes,
             capacity: 16,
         }
@@ -1113,6 +1075,7 @@ mod tests {
     fn sample_udf(name: &str) -> StoredUdf {
         StoredUdf {
             name: name.to_string(),
+            revision: 1,
             wasm_sha256: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
                 .to_string(),
             raw_json: format!(r#"{{"name":"{name}","description":"test udf"}}"#),
@@ -1170,6 +1133,7 @@ mod tests {
     fn sample_table() -> StoredTable {
         StoredTable {
             id: "table_1".to_string(),
+            revision: 1,
             raw_json: r#"{"name":"table_1","table_type":"history","schema":{"columns":[]},"props":{"datasource":"ds1","topic":"t1"}}"#.to_string(),
         }
     }
@@ -1310,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn init_apply_snapshot_is_atomic_on_duplicate_conflict() {
+    fn init_apply_snapshot_upserts_existing_and_commits_atomically() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
         let existing_stream = sample_stream();
@@ -1327,25 +1291,24 @@ mod tests {
             tables: vec![],
         };
 
-        let result = storage.apply_init_snapshot(snapshot, sample_init_apply_meta());
-        match result {
-            Err(StorageError::AlreadyExists(id)) => assert_eq!(id, "stream_1"),
-            other => panic!("expected AlreadyExists, got {other:?}"),
-        }
+        storage
+            .apply_init_snapshot(snapshot, Some(sample_init_apply_meta()))
+            .expect("upsert init snapshot");
 
-        assert_eq!(
-            storage.list_pipelines().unwrap(),
-            Vec::<StoredPipeline>::new()
-        );
+        assert_eq!(storage.list_streams().unwrap(), vec![sample_stream()]);
+        assert_eq!(storage.list_pipelines().unwrap(), vec![sample_pipeline()]);
         assert_eq!(
             storage.list_mqtt_configs().unwrap(),
-            Vec::<StoredMqttClientConfig>::new()
+            vec![sample_mqtt_config()]
         );
         assert_eq!(
             storage.list_memory_topics().unwrap(),
-            Vec::<StoredMemoryTopic>::new()
+            vec![sample_memory_topic()]
         );
-        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
+        assert_eq!(
+            storage.get_init_apply_meta().unwrap(),
+            Some(sample_init_apply_meta())
+        );
     }
 
     #[test]
@@ -1370,7 +1333,9 @@ mod tests {
             tables: vec![],
         };
 
-        storage.apply_init_snapshot(snapshot, meta.clone()).unwrap();
+        storage
+            .apply_init_snapshot(snapshot, Some(meta.clone()))
+            .unwrap();
 
         assert_eq!(storage.list_streams().unwrap(), vec![stream]);
         assert_eq!(storage.list_pipelines().unwrap(), vec![pipeline]);

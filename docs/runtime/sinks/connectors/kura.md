@@ -113,6 +113,7 @@ Create a pipeline that publishes `SELECT speed, name` into kura:
 POST /pipelines
 {
   "id": "pipeline_kura",
+  "revision": 1,
   "sql": "SELECT speed, name FROM vehicle_stream",
   "sinks": [
     {

@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use storage::StorageManager;
 
 use super::types::{CreatePipelineRequest, CreatePipelineSinkRequest, MqttSinkPropsRequest};
+use crate::storage_bridge;
 
 fn normalized_optional_string(value: String) -> Option<String> {
     let trimmed = value.trim();
@@ -115,7 +116,7 @@ pub(super) fn shared_mqtt_connector_keys_from_pipeline_request(
         };
 
         let stream_req: crate::stream::CreateStreamRequest =
-            match serde_json::from_str(&stored_stream.raw_json) {
+            match storage_bridge::stream_request_from_stored(&stored_stream) {
                 Ok(req) => req,
                 Err(err) => {
                     return Err(Box::new(

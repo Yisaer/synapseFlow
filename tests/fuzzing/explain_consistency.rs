@@ -81,6 +81,7 @@ impl Drop for TestHarness {
 fn basic_mock_stream_req(name: String) -> StreamCreateRequest {
     StreamCreateRequest {
         name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",
@@ -232,6 +233,7 @@ async fn create_pipeline_with_bad_encoder(
         .post(format!("{}/pipelines", h.base()))
         .json(&json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": sql,
             "sinks": [
                 {

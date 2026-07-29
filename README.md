@@ -52,6 +52,7 @@ curl -XPOST http://localhost:8080/streams \
   -H "Content-Type: application/json" \
   -d '{
     "name": "source_stream",
+    "revision": 1,
     "type": "mqtt",
     "schema": {
       "type": "json",
@@ -73,6 +74,7 @@ curl -XPOST http://localhost:8080/pipelines \
   -H "Content-Type: application/json" \
   -d '{
     "id": "demo-pipeline",
+    "revision": 1,
     "sql": "SELECT user_id, score FROM source_stream WHERE score > 0",
     "sinks": [
       {

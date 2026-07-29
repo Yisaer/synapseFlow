@@ -15,6 +15,7 @@ mod memory_topic;
 mod mqtt_client;
 mod pipeline;
 mod resource_id;
+mod revision;
 mod schema;
 mod startup;
 mod status;

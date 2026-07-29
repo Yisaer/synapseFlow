@@ -5,12 +5,22 @@ use axum::{
     response::IntoResponse,
 };
 use flow::connector::{ConnectorError, SharedMqttClientConfig};
+use serde::{Deserialize, Serialize};
 use storage::StorageError;
 use tokio::sync::TryAcquireError;
 
 use crate::pipeline::AppState;
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::storage_bridge::{mqtt_config_from_stored, stored_mqtt_from_config};
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SharedMqttClientResource {
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
+    #[serde(flatten)]
+    pub definition: SharedMqttClientConfig,
+}
+
 fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), String> {
     validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.key)?;
     if cfg.broker_url.trim().is_empty() {
@@ -56,17 +66,6 @@ pub(crate) fn shared_mqtt_config_eq(
         && left.password == right.password
 }
 
-fn storage_conflict_message(key: &str, existing: &SharedMqttClientConfig) -> String {
-    format!(
-        "shared mqtt client {key} already exists with different config: broker_url={}, topic={}, client_id={}, qos={}, max_packet_size={:?}",
-        existing.broker_url,
-        existing.topic,
-        existing.client_id,
-        existing.qos,
-        existing.max_packet_size
-    )
-}
-
 fn shared_mqtt_busy_response(key: &str) -> axum::response::Response {
     (
         StatusCode::CONFLICT,
@@ -77,8 +76,9 @@ fn shared_mqtt_busy_response(key: &str) -> axum::response::Response {
 
 pub async fn create_shared_mqtt_client_handler(
     State(state): State<AppState>,
-    Json(req): Json<SharedMqttClientConfig>,
+    Json(resource): Json<SharedMqttClientResource>,
 ) -> impl IntoResponse {
+    let req = resource.definition;
     if let Err(err) = validate_shared_mqtt_config(&req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -99,25 +99,19 @@ pub async fn create_shared_mqtt_client_handler(
         }
     };
 
-    let mut storage_created = false;
     match state.storage.get_mqtt_config(&key) {
-        Ok(Some(stored)) => {
-            let existing = mqtt_config_from_stored(&stored);
-            if !shared_mqtt_config_eq(&existing, &req) {
-                return (
-                    StatusCode::CONFLICT,
-                    storage_conflict_message(&key, &existing),
-                )
-                    .into_response();
-            }
+        Ok(Some(_)) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("shared mqtt client {key} already exists"),
+            )
+                .into_response();
         }
         Ok(None) => match state
             .storage
-            .create_mqtt_config(stored_mqtt_from_config(&req))
+            .create_mqtt_config(stored_mqtt_from_config(&req, resource.revision))
         {
-            Ok(()) => {
-                storage_created = true;
-            }
+            Ok(()) => {}
             Err(StorageError::AlreadyExists(_)) => {
                 return (
                     StatusCode::CONFLICT,
@@ -149,9 +143,7 @@ pub async fn create_shared_mqtt_client_handler(
                 for created in &created_instances {
                     let _ = created.drop_shared_mqtt_client(&key);
                 }
-                if storage_created {
-                    let _ = state.storage.delete_mqtt_config(&key);
-                }
+                let _ = state.storage.delete_mqtt_config(&key);
                 return (
                     StatusCode::CONFLICT,
                     format!(
@@ -166,9 +158,7 @@ pub async fn create_shared_mqtt_client_handler(
             for created in &created_instances {
                 let _ = created.drop_shared_mqtt_client(&key);
             }
-            if storage_created {
-                let _ = state.storage.delete_mqtt_config(&key);
-            }
+            let _ = state.storage.delete_mqtt_config(&key);
             return (
                 StatusCode::BAD_REQUEST,
                 format!("create shared mqtt client {key} in runtime instance {instance_id}: {err}"),
@@ -178,12 +168,14 @@ pub async fn create_shared_mqtt_client_handler(
         created_instances.push(instance);
     }
 
-    let status = if storage_created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    (status, Json(req)).into_response()
+    (
+        StatusCode::CREATED,
+        Json(SharedMqttClientResource {
+            revision: resource.revision,
+            definition: req,
+        }),
+    )
+        .into_response()
 }
 
 pub async fn list_shared_mqtt_clients_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -191,9 +183,12 @@ pub async fn list_shared_mqtt_clients_handler(State(state): State<AppState>) -> 
         Ok(configs) => {
             let mut items = configs
                 .into_iter()
-                .map(|stored| mqtt_config_from_stored(&stored))
+                .map(|stored| SharedMqttClientResource {
+                    revision: stored.revision,
+                    definition: mqtt_config_from_stored(&stored),
+                })
                 .collect::<Vec<_>>();
-            items.sort_by(|a, b| a.key.cmp(&b.key));
+            items.sort_by(|a, b| a.definition.key.cmp(&b.definition.key));
             Json(items).into_response()
         }
         Err(err) => (
@@ -212,9 +207,14 @@ pub async fn get_shared_mqtt_client_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     match state.storage.get_mqtt_config(&key) {
-        Ok(Some(stored)) => {
-            (StatusCode::OK, Json(mqtt_config_from_stored(&stored))).into_response()
-        }
+        Ok(Some(stored)) => (
+            StatusCode::OK,
+            Json(SharedMqttClientResource {
+                revision: stored.revision,
+                definition: mqtt_config_from_stored(&stored),
+            }),
+        )
+            .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             format!("shared mqtt client {key} not found"),
@@ -334,6 +334,13 @@ mod tests {
         }
     }
 
+    fn resource(definition: SharedMqttClientConfig) -> super::SharedMqttClientResource {
+        super::SharedMqttClientResource {
+            revision: 1,
+            definition,
+        }
+    }
+
     fn build_state(temp_dir: &TempDir, flow_instances: Vec<crate::FlowInstanceSpec>) -> AppState {
         let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
         AppState::new(
@@ -382,9 +389,10 @@ mod tests {
         ];
 
         for (cfg, expected) in cases {
-            let response = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
-                .await
-                .into_response();
+            let response =
+                create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg)))
+                    .await
+                    .into_response();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
             let body = to_bytes(response.into_body(), 64 * 1024)
@@ -415,7 +423,7 @@ mod tests {
             key: "bad-key".to_string(),
             ..shared_mqtt_cfg("shared")
         };
-        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
+        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg)))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -437,20 +445,22 @@ mod tests {
 
     // coverage-covers: source.shared_mqtt_client.management
     #[tokio::test]
-    async fn create_shared_mqtt_client_is_idempotent_for_identical_config() {
+    async fn create_shared_mqtt_client_conflicts_for_identical_existing_config() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
         let cfg = shared_mqtt_cfg("shared");
 
-        let first = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg.clone()))
-            .await
-            .into_response();
+        let first =
+            create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg.clone())))
+                .await
+                .into_response();
         assert_eq!(first.status(), StatusCode::CREATED);
 
-        let second = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg.clone()))
-            .await
-            .into_response();
-        assert_eq!(second.status(), StatusCode::OK);
+        let second =
+            create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg.clone())))
+                .await
+                .into_response();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
 
         let stored = state
             .storage
@@ -472,9 +482,10 @@ mod tests {
         let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
         let cfg = shared_mqtt_cfg("shared");
 
-        let first = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg.clone()))
-            .await
-            .into_response();
+        let first =
+            create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg.clone())))
+                .await
+                .into_response();
         assert_eq!(first.status(), StatusCode::CREATED);
 
         let mut updated = cfg.clone();
@@ -482,7 +493,7 @@ mod tests {
         updated.client_id = "client_shared_v2".to_string();
         updated.qos = 1;
 
-        let response = create_shared_mqtt_client_handler(State(state), Json(updated))
+        let response = create_shared_mqtt_client_handler(State(state), Json(resource(updated)))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -492,7 +503,7 @@ mod tests {
             .expect("read response body");
         assert_eq!(
             String::from_utf8(body.to_vec()).expect("utf8 body"),
-            "shared mqtt client shared already exists with different config: broker_url=tcp://127.0.0.1:1883, topic=fleet/+/telemetry, client_id=client_shared, qos=0, max_packet_size=None"
+            "shared mqtt client shared already exists"
         );
     }
 
@@ -505,7 +516,7 @@ mod tests {
             ..shared_mqtt_cfg("shared")
         };
 
-        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
+        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg)))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -558,7 +569,7 @@ mod tests {
         let mut req = shared_mqtt_cfg("shared");
         req.topic = "fleet/+/status".to_string();
 
-        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(req))
+        let response = create_shared_mqtt_client_handler(State(state.clone()), Json(resource(req)))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -619,7 +630,7 @@ mod tests {
         for cfg in [shared_mqtt_cfg("shared_b"), shared_mqtt_cfg("shared_a")] {
             state
                 .storage
-                .create_mqtt_config(crate::storage_bridge::stored_mqtt_from_config(&cfg))
+                .create_mqtt_config(crate::storage_bridge::stored_mqtt_from_config(&cfg, 1))
                 .expect("seed shared mqtt config");
         }
 
@@ -671,7 +682,7 @@ mod tests {
 
         let response = create_shared_mqtt_client_handler(
             State(state.clone()),
-            Json(shared_mqtt_cfg("shared")),
+            Json(resource(shared_mqtt_cfg("shared"))),
         )
         .await
         .into_response();
@@ -700,9 +711,10 @@ mod tests {
         let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
 
         let cfg = shared_mqtt_cfg("shared");
-        let create_resp = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
-            .await
-            .into_response();
+        let create_resp =
+            create_shared_mqtt_client_handler(State(state.clone()), Json(resource(cfg)))
+                .await
+                .into_response();
         assert_eq!(create_resp.status(), StatusCode::CREATED);
 
         let local_instance = state

@@ -991,6 +991,7 @@ mod tests {
 
         let stored = StoredSchema {
             name: "installed".to_string(),
+            revision: 1,
             schema_type: "gbf".to_string(),
             props_json: serde_json::json!({"schema_path": "main.json"}).to_string(),
         };

@@ -89,6 +89,7 @@ fn run_gbf_test(test_name: &str, _dbc_schema_path: &str) {
 
     let schema_payload = json!({
         "name": schema_name,
+        "revision": 1,
         "type": "gbf",
         "props": { "schema_path": gbf_schema_path() }
     });
@@ -103,6 +104,7 @@ fn run_gbf_test(test_name: &str, _dbc_schema_path: &str) {
     // 1. Create stream with gbf decoder and dbc schema
     let stream_payload = json!({
         "name": stream_name,
+        "revision": 1,
         "type": "mqtt",
         "schema": { "ref": schema_name },
         "props": {
@@ -124,6 +126,7 @@ fn run_gbf_test(test_name: &str, _dbc_schema_path: &str) {
     // 2. Create pipeline with columnar_json encoder and mqtt sink
     let pipeline_payload = json!({
         "id": pipeline_id,
+        "revision": 1,
         "sql": format!("SELECT * from {}", stream_name),
         "sinks": [
             {

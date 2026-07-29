@@ -85,6 +85,7 @@ fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> Js
             "streams": [
                 {
                     "name": stream_name,
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -102,6 +103,7 @@ fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> Js
             "pipelines": [
                 {
                     "id": pipeline_id,
+                    "revision": 1,
                     "sql": format!("SELECT value FROM {stream_name}"),
                     "run_state": "Stopped",
                     "sinks": [
@@ -269,6 +271,7 @@ async fn import_rejects_duplicate_identifiers() {
             "streams": [
                 {
                     "name": stream_name,
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -280,6 +283,7 @@ async fn import_rejects_duplicate_identifiers() {
                 },
                 {
                     "name": stream_name,
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -293,6 +297,7 @@ async fn import_rejects_duplicate_identifiers() {
             "pipelines": [
                 {
                     "id": pipeline_id,
+                    "revision": 1,
                     "sql": format!("SELECT value FROM {stream_name}"),
                     "sinks": [{ "type": "nop" }]
                 }
@@ -320,6 +325,7 @@ async fn import_rejects_invalid_resources() {
             "streams": [
                 {
                     "name": "",
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -352,6 +358,7 @@ async fn import_rejects_empty_name_and_zero_capacity() {
             "memory_topics": [
                 {
                     "topic": "",
+                    "revision": 1,
                     "kind": "bytes",
                     "capacity": 0
                 }
@@ -486,6 +493,7 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
             "streams": [
                 {
                     "name": "",
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -625,6 +633,7 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
             "streams": [
                 {
                     "name": "z_stream",
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -636,6 +645,7 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
                 },
                 {
                     "name": "a_stream",
+                    "revision": 1,
                     "type": "mock",
                     "schema": {
                         "type": "json",
@@ -649,12 +659,14 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
             "pipelines": [
                 {
                     "id": "z_pipe",
+                    "revision": 1,
                     "sql": "SELECT value FROM z_stream",
                     "run_state": "Stopped",
                     "sinks": [{ "type": "nop" }]
                 },
                 {
                     "id": "a_pipe",
+                    "revision": 1,
                     "sql": "SELECT value FROM a_stream",
                     "run_state": "Stopped",
                     "sinks": [{ "type": "nop" }]

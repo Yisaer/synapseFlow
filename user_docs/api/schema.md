@@ -26,6 +26,7 @@ Request body:
 ```json
 {
   "name": "sensor_schema",
+  "revision": 1721797200000,
   "type": "proto",
   "props": {
     "proto_path": "schemas/sensor-schema.zip",
@@ -37,6 +38,7 @@ Request body:
 Fields:
 
 - `name: string` (required, non-empty) — Unique identifier for this schema.
+- `revision: number` (required) — Positive JSON-safe resource revision.
 - `type: string` (required) — Schema parser type. Built-in: `json`, `proto`;
   distributions may add types such as `gbf` and `busmirror`.
 - `props: object` (optional, defaults to `{}`) — Parser-specific properties.
@@ -56,7 +58,7 @@ Notes:
 
 Response:
 
-- `201 Created` with `{ "name": "..." }`.
+- `201 Created` with `{ "name": "...", "revision": 1721797200000 }`.
 - `409 Conflict` if the schema name already exists.
 
 Example:
@@ -66,6 +68,7 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sensor_schema",
+    "revision": 1721797200000,
     "type": "proto",
     "props": {
       "proto_path": "schemas/sensor-schema.zip",
@@ -84,6 +87,7 @@ create-only: an existing name returns `409 Conflict`.
 Multipart fields:
 
 - `file` (required, exactly once) — a non-empty `.zip` package.
+- `revision` (required, exactly once) — a positive JSON-safe integer.
 - `props` (optional) — a JSON object serialized as a string.
 - `name` (optional) — when present, must exactly match the path `:name`.
 
@@ -95,13 +99,14 @@ endpoint.
 ```bash
 curl -X POST \
   -F 'props={"message_type":"com.example.Sensor"}' \
+  -F 'revision=1721797200000' \
   -F 'file=@sensor-schema.zip' \
   http://127.0.0.1:8080/schemas/proto/sensor_schema/upload
 ```
 
 Response:
 
-- `201 Created` with `{ "name": "...", "type": "..." }`.
+- `201 Created` with `{ "name": "...", "revision": 1721797200000, "type": "..." }`.
 - `400 Bad Request` for invalid fields, props, type, ZIP name or package.
 - `409 Conflict` if the Schema already exists or a storage operation is active.
 - `413 Content Too Large` if the ZIP exceeds 512 MiB.
@@ -166,11 +171,12 @@ curl -s -XDELETE http://127.0.0.1:8080/schemas/sensor_schema
 
 ### `CreateSchemaRequest`
 
-| Field   | Type     | Required | Description                                 |
-|---------|----------|----------|---------------------------------------------|
-| `name`  | `string` | yes      | Unique schema identifier.                   |
-| `type`  | `string` | yes      | Parser type such as `"json"`, `"proto"`, or distribution-provided `"gbf"`. |
-| `props` | `object` | no       | Parser-specific properties. Default: `{}`.  |
+| Field      | Type     | Required | Description                                 |
+|------------|----------|----------|---------------------------------------------|
+| `name`     | `string` | yes      | Unique schema identifier.                   |
+| `revision` | `number` | yes      | Positive JSON-safe resource revision.       |
+| `type`     | `string` | yes      | Parser type such as `"json"`, `"proto"`, or distribution-provided `"gbf"`. |
+| `props`    | `object` | no       | Parser-specific properties. Default: `{}`.  |
 
 ### Schema `props` by `type`
 
@@ -245,6 +251,7 @@ See `distros/sdv/docs/schema/busmirror.md` for the entry grammar and ZIP layout.
 | Field     | Type     | Description                                              |
 |-----------|----------|----------------------------------------------------------|
 | `name`    | `string` | Schema identifier.                                       |
+| `revision`| `number` | Persisted resource revision.                             |
 | `type`    | `string` | Parser type.                                             |
 | `props`   | `object` | Parser-specific properties as submitted at creation.     |
 | `columns` | `Column[]` | Parsed column definitions (see below).                |
@@ -277,6 +284,7 @@ curl -s -XPOST http://127.0.0.1:8080/streams \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sensor_stream",
+    "revision": 1,
     "type": "mqtt",
     "schema": { "ref": "sensor_schema" },
     "props": {
@@ -316,6 +324,7 @@ In the `ExportResources` object:
   "schemas": [
     {
       "name": "sensor_schema",
+      "revision": 1,
       "type": "proto",
       "props": {
         "proto_path": "schemas/sensor.proto",

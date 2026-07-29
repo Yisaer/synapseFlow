@@ -29,20 +29,35 @@ use udf::WasmEngine;
 pub fn stored_stream_from_request(req: &CreateStreamRequest) -> Result<StoredStream, String> {
     let mut req = req.clone();
     req.normalize();
+    let revision = req.revision;
+    let mut value =
+        serde_json::to_value(&req).map_err(|err| format!("serialize stream request: {err}"))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| "stream request must serialize as an object".to_string())?
+        .remove("revision");
     let raw_json =
-        serde_json::to_string(&req).map_err(|err| format!("serialize stream request: {err}"))?;
+        serde_json::to_string(&value).map_err(|err| format!("serialize stream request: {err}"))?;
     Ok(StoredStream {
         id: req.name.clone(),
+        revision,
         raw_json,
     })
 }
 
 /// Serialize a create-table request for storage.
 pub fn stored_table_from_request(req: &CreateTableRequest) -> Result<StoredTable, String> {
+    let mut value =
+        serde_json::to_value(req).map_err(|err| format!("serialize table request: {err}"))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| "table request must serialize as an object".to_string())?
+        .remove("revision");
     let raw_json =
-        serde_json::to_string(req).map_err(|err| format!("serialize table request: {err}"))?;
+        serde_json::to_string(&value).map_err(|err| format!("serialize table request: {err}"))?;
     Ok(StoredTable {
         id: req.name.clone(),
+        revision: req.revision,
         raw_json,
     })
 }
@@ -52,8 +67,7 @@ pub fn stream_definition_from_stored(
     stored: &StoredStream,
     decoder_registry: &DecoderRegistry,
 ) -> Result<StreamDefinition, String> {
-    let req: CreateStreamRequest = serde_json::from_str(&stored.raw_json)
-        .map_err(|err| format!("decode stored stream {}: {err}", stored.id))?;
+    let req = stream_request_from_stored(stored)?;
     let resolved_schema = resolve_schema_from_request(&req)?;
     let props = build_stream_props(&req.stream_type, &req.props)?;
     let decoder = build_stream_decoder(&req, decoder_registry, &resolved_schema)?;
@@ -75,6 +89,27 @@ pub fn stream_definition_from_stored(
     Ok(definition)
 }
 
+pub fn stream_request_from_stored(stored: &StoredStream) -> Result<CreateStreamRequest, String> {
+    let mut value: serde_json::Value = serde_json::from_str(&stored.raw_json)
+        .map_err(|err| format!("decode stored stream {}: {err}", stored.id))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("stored stream {} must be a JSON object", stored.id))?
+        .insert("revision".to_string(), stored.revision.into());
+    serde_json::from_value(value)
+        .map_err(|err| format!("decode stored stream {}: {err}", stored.id))
+}
+
+pub fn table_request_from_stored(stored: &StoredTable) -> Result<CreateTableRequest, String> {
+    let mut value: serde_json::Value = serde_json::from_str(&stored.raw_json)
+        .map_err(|err| format!("decode stored table {}: {err}", stored.id))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("stored table {} must be a JSON object", stored.id))?
+        .insert("revision".to_string(), stored.revision.into());
+    serde_json::from_value(value).map_err(|err| format!("decode stored table {}: {err}", stored.id))
+}
+
 /// Rebuild a TableDefinition from stored raw JSON.
 pub fn table_definition_from_stored(
     stored: &StoredTable,
@@ -82,8 +117,7 @@ pub fn table_definition_from_stored(
 ) -> Result<TableDefinition, String> {
     use crate::table::{build_table_decoder, build_table_props};
 
-    let req: CreateTableRequest = serde_json::from_str(&stored.raw_json)
-        .map_err(|err| format!("decode stored table {}: {err}", stored.id))?;
+    let req = table_request_from_stored(stored)?;
     let resolved_schema = {
         if let Some(ref_name) = &req.schema.r#ref {
             validate_resource_id(ResourceIdKind::SchemaName, ref_name)
@@ -110,10 +144,17 @@ pub fn table_definition_from_stored(
 
 /// Serialize a create-pipeline request for storage.
 pub fn stored_pipeline_from_request(req: &CreatePipelineRequest) -> Result<StoredPipeline, String> {
-    let raw_json =
-        serde_json::to_string(req).map_err(|err| format!("serialize pipeline request: {err}"))?;
+    let mut value =
+        serde_json::to_value(req).map_err(|err| format!("serialize pipeline request: {err}"))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| "pipeline request must serialize as an object".to_string())?
+        .remove("revision");
+    let raw_json = serde_json::to_string(&value)
+        .map_err(|err| format!("serialize pipeline request: {err}"))?;
     Ok(StoredPipeline {
         id: req.id.clone(),
+        revision: req.revision,
         raw_json,
     })
 }
@@ -131,7 +172,13 @@ pub fn pipeline_definition_from_stored(
 pub fn pipeline_request_from_stored(
     stored: &StoredPipeline,
 ) -> Result<CreatePipelineRequest, String> {
-    let mut req: CreatePipelineRequest = serde_json::from_str(&stored.raw_json)
+    let mut value: serde_json::Value = serde_json::from_str(&stored.raw_json)
+        .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("stored pipeline {} must be a JSON object", stored.id))?
+        .insert("revision".to_string(), stored.revision.into());
+    let mut req: CreatePipelineRequest = serde_json::from_value(value)
         .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
     req.normalize();
     let instance_id = req
@@ -158,10 +205,14 @@ pub fn mqtt_config_from_stored(stored: &StoredMqttClientConfig) -> SharedMqttCli
     })
 }
 
-pub fn stored_mqtt_from_config(cfg: &SharedMqttClientConfig) -> StoredMqttClientConfig {
+pub fn stored_mqtt_from_config(
+    cfg: &SharedMqttClientConfig,
+    revision: u64,
+) -> StoredMqttClientConfig {
     let raw_json = serde_json::to_string(cfg).unwrap_or_default();
     StoredMqttClientConfig {
         key: cfg.key.clone(),
+        revision,
         raw_json,
     }
 }
@@ -325,8 +376,7 @@ async fn restore_stream(
 ) -> Result<(), String> {
     let decoder_registry = instance.decoder_registry();
     let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
-    let req = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
-        .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?;
+    let req = stream_request_from_stored(&stream)?;
     // Defensive: reject historically-invalid resource ids so bad data cannot
     // re-enter the runtime on restart (VF-51 §5.2). The error is propagated to
     // the caller, which logs and skips this stream.
@@ -564,6 +614,7 @@ mod tests {
 
         CreateStreamRequest {
             name: name.to_string(),
+            revision: 1,
             stream_type: "mqtt".to_string(),
             schema: crate::stream::SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -583,6 +634,7 @@ mod tests {
     fn sample_pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
         serde_json::from_value(json!({
             "id": id,
+            "revision": 1,
             "flow_instance_id": "default",
             "sql": format!("SELECT * FROM {stream_name}"),
             "sinks": [
@@ -624,6 +676,7 @@ mod tests {
         // 2. Create a BAD stream (manually insert invalid JSON)
         let bad_stored = StoredStream {
             id: "bad_stream".to_string(),
+            revision: 1,
             raw_json: "{ invalid json".to_string(),
         };
         storage.create_stream(bad_stored).unwrap();
@@ -663,6 +716,7 @@ mod tests {
         storage
             .create_pipeline(StoredPipeline {
                 id: "bad_pipe".to_string(),
+                revision: 1,
                 raw_json: "{ invalid json".to_string(),
             })
             .expect("store bad pipeline");

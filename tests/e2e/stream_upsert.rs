@@ -24,6 +24,7 @@ async fn start_manager(temp_dir: &tempfile::TempDir) -> (tokio::task::JoinHandle
 fn pipeline_nop(id: &str, sql: String) -> PipelineCreateRequest {
     PipelineCreateRequest {
         id: id.to_string(),
+        revision: 1,
         sql,
         sinks: vec![serde_json::json!({ "type": "nop" })],
         flow_instance_id: None,
@@ -87,6 +88,7 @@ async fn upsert_non_shared_stream_succeeds() {
 
     // Update schema + decoder (keep non-shared, no shared field in request)
     let upsert = StreamUpsertRequest {
+        revision: 2,
         schema: serde_json::json!({
             "type": "json",
             "props": { "columns": [{ "name": "x", "data_type": "float64" }] }
@@ -108,6 +110,55 @@ async fn upsert_non_shared_stream_succeeds() {
         "upsert non-shared stream: {}",
         resp.text().await.unwrap_or_default()
     );
+
+    let resp = http
+        .put(format!("{manager_base}/streams/{stream_name}"))
+        .json(&upsert)
+        .send()
+        .await
+        .expect("repeat equal stream revision");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "equal revision with equal spec must be idempotent"
+    );
+
+    let mut older = upsert.clone();
+    older.revision = 1;
+    older.schema = serde_json::json!({
+        "type": "json",
+        "props": { "columns": [{ "name": "older", "data_type": "int64" }] }
+    });
+    let resp = http
+        .put(format!("{manager_base}/streams/{stream_name}"))
+        .json(&older)
+        .send()
+        .await
+        .expect("send older stream revision");
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(resp
+        .text()
+        .await
+        .expect("older conflict body")
+        .contains("older_revision"));
+
+    let mut conflicting = upsert.clone();
+    conflicting.schema = serde_json::json!({
+        "type": "json",
+        "props": { "columns": [{ "name": "conflict", "data_type": "int64" }] }
+    });
+    let resp = http
+        .put(format!("{manager_base}/streams/{stream_name}"))
+        .json(&conflicting)
+        .send()
+        .await
+        .expect("send conflicting equal stream revision");
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(resp
+        .text()
+        .await
+        .expect("equal conflict body")
+        .contains("same_revision_different_spec"));
 
     // Describe to verify the update took effect
     let resp = http
@@ -371,6 +422,7 @@ async fn upsert_shared_stream_without_running_pipeline_succeeds() {
 
     // Now update the shared stream — pipeline is stopped, so update should succeed
     let upsert = StreamUpsertRequest {
+        revision: 2,
         schema: serde_json::json!({
             "type": "json",
             "props": { "columns": [

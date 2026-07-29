@@ -36,7 +36,7 @@ What is still missing is a broader control-plane matrix:
 
 - request validation edge cases
 - rollback behavior on partial runtime installation failure
-- replace-vs-add-only metadata semantics
+- snapshot import versus revision-based startup Apply semantics
 - flow-instance declaration validation
 - list/get/describe endpoint behavior
 - pipeline desired-state persistence edge cases

@@ -105,6 +105,7 @@ fn test_gbf_packer_integration() {
 
     let schema_payload = json!({
         "name": schema_name,
+        "revision": 1,
         "type": "gbf",
         "props": { "schema_path": gbf_schema_path() }
     });
@@ -120,6 +121,7 @@ fn test_gbf_packer_integration() {
     //    PLUS sampler with packer strategy
     let stream_payload = json!({
         "name": stream_name,
+        "revision": 1,
         "type": "mqtt",
         "schema": { "ref": schema_name },
         "props": {
@@ -154,6 +156,7 @@ fn test_gbf_packer_integration() {
     // 2. Create pipeline with columnar_json encoder (same as gbf_test)
     let pipeline_payload = json!({
         "id": pipeline_id,
+        "revision": 1,
         "sql": format!("SELECT * FROM {}", stream_name),
         "sinks": [
             {

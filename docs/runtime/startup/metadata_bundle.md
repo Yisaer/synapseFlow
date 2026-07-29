@@ -8,76 +8,126 @@ schemas/<type>/<name>/
 wasm_files/<sha256>.wasm
 ```
 
-`manifest.json` uses the `ResourceManifestV1` shape:
+`manifest.json` uses `format_version: 1` and contains seven resource collections:
+memory topics, shared MQTT clients, schemas, streams, tables, pipelines, and
+UDFs.
+Every entry requires a `revision` in `1..=9007199254740991`.
 
 ```json
 {
   "format_version": 1,
   "bundle_version": "2026.07.24-1",
   "resources": {
-    "memory_topics": [],
-    "shared_mqtt_clients": [],
-    "schemas": [],
-    "streams": [],
-    "pipelines": [],
-    "udfs": []
+    "memory_topics": [
+      {
+        "topic": "decoded_frames",
+        "revision": 1721797200000,
+        "kind": "collection",
+        "capacity": 1024
+      }
+    ],
+    "shared_mqtt_clients": [
+      {
+        "key": "vehicle_broker",
+        "revision": 1721797200001,
+        "broker_url": "tcp://127.0.0.1:1883",
+        "topic": "vehicle/telemetry",
+        "client_id": "vehicle_reader",
+        "qos": 1
+      }
+    ],
+    "schemas": [
+      {
+        "name": "telemetry_schema",
+        "revision": 1721797200002,
+        "type": "json",
+        "props": {
+          "columns": [
+            { "name": "speed", "data_type": "float64" }
+          ]
+        }
+      }
+    ],
+    "streams": [
+      {
+        "name": "telemetry",
+        "revision": 1721797200003,
+        "type": "mqtt",
+        "schema": { "ref": "telemetry_schema" },
+        "props": { "connector_key": "vehicle_broker" },
+        "decoder": { "type": "json", "props": {} }
+      }
+    ],
+    "tables": [
+      {
+        "name": "vehicle_history",
+        "revision": 1721797200004,
+        "type": "history",
+        "schema": { "ref": "telemetry_schema" },
+        "props": {
+          "datasource": "/var/lib/nanomq/history",
+          "topic": "vehicle",
+          "time_column": "ts"
+        },
+        "decoder": { "type": "json", "props": {} }
+      }
+    ],
+    "pipelines": [
+      {
+        "id": "speed_pipeline",
+        "revision": 1721797200005,
+        "sql": "SELECT speed FROM telemetry",
+        "sources": [],
+        "sinks": [],
+        "run_state": "Running"
+      }
+    ],
+    "udfs": [
+      {
+        "name": "normalize_speed",
+        "revision": 1721797200006,
+        "wasm_sha256": "<64 lowercase hex characters>"
+      }
+    ]
   }
 }
 ```
 
-Pipeline run state is inline in each pipeline. Resource collections are sorted
-by identity when exported. Schema files and WASM modules are present only when
-referenced by the manifest.
-
-Ordinary uploads, config, secrets, checkpoints, offsets, and runtime state are
-not part of this format.
+Pipeline desired run state is inline. Schema files and WASM modules are present
+only when referenced. Ordinary uploads, config, secrets, checkpoints, offsets,
+and runtime state are outside this format.
 
 The physical format does not select write semantics:
 
-- HTTP export writes the directory inside a ZIP envelope and requires
-  `bundle_version`.
-- Startup `--init-dir` reads the directory directly and uses add-only Apply.
-- HTTP import extracts a ZIP and uses full-snapshot Sync.
+- HTTP export writes a ZIP and includes stored revisions without generating or
+  comparing them.
+- Startup `--init-dir` reads an extracted directory and performs revision-based,
+  best-effort Apply. It retains resources absent from the directory.
+- HTTP import validates the complete ZIP and performs full-snapshot Sync in one
+  metadata transaction. It does not compare revisions, so an imported lower
+  revision replaces a stored higher revision and absent resources are deleted.
+  Import remains storage-only and reports `applied_to_runtime: false`.
 
-Apply retains live conflicts and resources absent from the manifest. Sync
-replaces all managed resource kinds and removes resources absent from the
-manifest. Both validate a complete candidate before committing metadata.
-
-`bundle_version` identifies producer content. It is not a database revision,
-resource version, timestamp, or sortable release number.
+`bundle_version` identifies one complete producer directory and is compared only
+for equality during init. It is not ordered and is distinct from per-resource
+`revision`.
 
 ## Export, Edit, and Initialize
-
-A common workflow is to export a working node, edit the exported resources, and
-use the extracted directory to initialize another node:
 
 ```shell
 curl -sS -o veloflux-export.zip \
   'http://127.0.0.1:8080/storage/export?bundle_version=2026.07.24-1'
 unzip veloflux-export.zip -d ./init
 
-# Edit ./init/manifest.json and referenced files as needed.
+# Increase revision for every resource whose definition or pipeline run state
+# is changed, and choose a new bundle_version for the edited directory.
 
 veloflux --config ./config.yaml --data-dir ./data --init-dir ./init
 ```
 
-Choose the final `bundle_version` when exporting. Manual edits made while
-preparing that artifact remain part of the selected version. A target that has
-already applied the same `bundle_version` skips it, so choose a new version for
-a later revision.
+Keep file-backed schema sources under `schemas/<type>/<name>/`. After changing a
+WASM module, recompute its SHA-256, rename it to
+`wasm_files/<sha256>.wasm`, update `wasm_sha256`, and increase the UDF revision.
 
-The extracted directory, not the ZIP file, is passed to `--init-dir`.
-`manifest.json` must be directly under that directory. HTTP import instead
-accepts the ZIP envelope.
-
-When editing an exported directory:
-
-- keep all resource references valid
-- keep file-backed schema sources under `schemas/<type>/<name>/`
-- after changing a WASM module, recompute its SHA-256, rename it to
-  `wasm_files/<sha256>.wasm`, and update the UDF `wasm_sha256`
-- leave `format_version` unchanged
-
-Use startup Apply to add missing resources without changing live conflicts. Use
-HTTP import Sync when the edited artifact must replace the complete persisted
-resource set.
+Use startup Apply for selective revision-based deployment. Use HTTP import when
+the artifact must replace the complete persisted resource set.

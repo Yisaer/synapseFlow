@@ -81,6 +81,7 @@ Content-Type: application/json
 ```json
 {
   "name": "camera",
+  "revision": 1,
   "type": "video",
   "props": {
     "url": "rtsp://127.0.0.1:8554/camera",
@@ -108,6 +109,7 @@ Content-Type: application/json
 ```json
 {
   "id": "camera_recording",
+  "revision": 1,
   "sql": "SELECT * FROM camera",
   "sources": [
     {

@@ -91,6 +91,7 @@ def create_stream_body(
     columns = build_columns(column_count)
     return {
         "name": stream_name,
+        "revision": 1,
         "type": "mqtt",
         "props": {"broker_url": broker_url, "topic": topic, "qos": qos},
         "schema": {"type": "json", "props": {"columns": columns}},
@@ -102,6 +103,7 @@ def create_stream_body(
 def create_pipeline_body(pipeline_id: str, sql: str) -> Dict[str, Any]:
     return {
         "id": pipeline_id,
+        "revision": 1,
         "sql": sql,
         "sinks": [
             {

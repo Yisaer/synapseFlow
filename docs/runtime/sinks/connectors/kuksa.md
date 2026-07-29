@@ -95,6 +95,7 @@ Create a pipeline that publishes `SELECT *` into Kuksa:
 POST /pipelines
 {
   "id": "pipeline_kuksa",
+  "revision": 1,
   "sql": "SELECT * FROM stream",
   "sinks": [
     {

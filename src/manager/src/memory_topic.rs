@@ -31,6 +31,8 @@ impl MemoryTopicKindRequest {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateMemoryTopicRequest {
     pub topic: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     pub kind: MemoryTopicKindRequest,
     #[serde(default)]
     pub capacity: Option<usize>,
@@ -39,6 +41,7 @@ pub struct CreateMemoryTopicRequest {
 #[derive(Debug, Serialize)]
 pub struct MemoryTopicInfo {
     pub topic: String,
+    pub revision: u64,
     pub kind: StoredMemoryTopicKind,
     pub capacity: usize,
 }
@@ -85,6 +88,7 @@ pub async fn create_memory_topic_handler(
 
     let stored = StoredMemoryTopic {
         topic: topic.clone(),
+        revision: req.revision,
         kind: req.kind.as_storage_kind(),
         capacity,
     };
@@ -135,6 +139,7 @@ pub async fn create_memory_topic_handler(
         StatusCode::CREATED,
         Json(MemoryTopicInfo {
             topic,
+            revision: stored.revision,
             kind: stored.kind,
             capacity,
         }),
@@ -149,6 +154,7 @@ pub async fn list_memory_topics_handler(State(state): State<AppState>) -> impl I
                 .into_iter()
                 .map(|topic| MemoryTopicInfo {
                     topic: topic.topic,
+                    revision: topic.revision,
                     kind: topic.kind,
                     capacity: topic.capacity,
                 })
@@ -200,6 +206,7 @@ mod tests {
             State(state.clone()),
             Json(CreateMemoryTopicRequest {
                 topic: "topic_a".to_string(),
+                revision: 1,
                 kind: MemoryTopicKindRequest::Bytes,
                 capacity: None,
             }),
@@ -234,6 +241,7 @@ mod tests {
             State(state),
             Json(CreateMemoryTopicRequest {
                 topic: "   ".to_string(),
+                revision: 1,
                 kind: MemoryTopicKindRequest::Bytes,
                 capacity: Some(8),
             }),
@@ -260,6 +268,7 @@ mod tests {
             State(state.clone()),
             Json(CreateMemoryTopicRequest {
                 topic: "bad-topic".to_string(),
+                revision: 1,
                 kind: MemoryTopicKindRequest::Bytes,
                 capacity: Some(8),
             }),
@@ -293,6 +302,7 @@ mod tests {
             State(state.clone()),
             Json(CreateMemoryTopicRequest {
                 topic: "topic_zero".to_string(),
+                revision: 1,
                 kind: MemoryTopicKindRequest::Collection,
                 capacity: Some(0),
             }),
@@ -324,6 +334,7 @@ mod tests {
             State(state.clone()),
             Json(CreateMemoryTopicRequest {
                 topic: "topic_existing".to_string(),
+                revision: 1,
                 kind: MemoryTopicKindRequest::Collection,
                 capacity: Some(16),
             }),
@@ -364,6 +375,7 @@ mod tests {
             State(state.clone()),
             Json(CreateMemoryTopicRequest {
                 topic: "topic_existing".to_string(),
+                revision: 1,
                 kind: MemoryTopicKindRequest::Bytes,
                 capacity: Some(32),
             }),
@@ -397,11 +409,13 @@ mod tests {
         for topic in [
             StoredMemoryTopic {
                 topic: "topic_b".to_string(),
+                revision: 2,
                 kind: StoredMemoryTopicKind::Bytes,
                 capacity: 16,
             },
             StoredMemoryTopic {
                 topic: "topic_a".to_string(),
+                revision: 1,
                 kind: StoredMemoryTopicKind::Collection,
                 capacity: 32,
             },

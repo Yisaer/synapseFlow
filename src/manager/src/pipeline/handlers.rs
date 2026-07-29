@@ -373,6 +373,7 @@ pub async fn create_pipeline_handler(
         StatusCode::CREATED,
         Json(CreatePipelineResponse {
             id: pipeline_id,
+            revision: req.revision,
             status,
         }),
     )
@@ -435,6 +436,7 @@ pub async fn upsert_pipeline_handler(
 
     let mut create_req = CreatePipelineRequest {
         id: id.clone(),
+        revision: req.revision,
         flow_instance_id: Some(flow_instance_id),
         sql: req.sql,
         sources: req.sources,
@@ -442,6 +444,54 @@ pub async fn upsert_pipeline_handler(
         options: req.options,
     };
     create_req.normalize();
+
+    if let Some(stored) = &old_pipeline {
+        if create_req.revision < stored.revision {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "pipeline {id} older_revision: incoming revision {}, current revision {}",
+                    create_req.revision, stored.revision
+                ),
+            )
+                .into_response();
+        }
+        if create_req.revision == stored.revision {
+            let old_req = match storage_bridge::pipeline_request_from_stored(stored) {
+                Ok(req) => req,
+                Err(err) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+                }
+            };
+            let old_spec = match crate::revision::normalized_spec_without_revision(&old_req) {
+                Ok(spec) => spec,
+                Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+            };
+            let new_spec = match crate::revision::normalized_spec_without_revision(&create_req) {
+                Ok(spec) => spec,
+                Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+            };
+            if old_spec == new_spec {
+                let status =
+                    stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
+                return Json(CreatePipelineResponse {
+                    id,
+                    revision: stored.revision,
+                    status,
+                })
+                .into_response();
+            }
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "pipeline {id} same_revision_different_spec: incoming revision {}, current revision {}",
+                    create_req.revision, stored.revision
+                ),
+            )
+                .into_response();
+        }
+    }
+
     if let Err(err) = validate_create_request(&create_req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -598,7 +648,12 @@ pub async fn upsert_pipeline_handler(
 
     let status = stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
     audit.log_success();
-    Json(CreatePipelineResponse { id, status }).into_response()
+    Json(CreatePipelineResponse {
+        id,
+        revision: create_req.revision,
+        status,
+    })
+    .into_response()
 }
 
 pub async fn get_pipeline_handler(
@@ -666,6 +721,7 @@ pub async fn get_pipeline_handler(
 
     Json(GetPipelineResponse {
         id: id.clone(),
+        revision: stored.revision,
         status: stored_state_label(run_state),
         spec,
         schedule_status,
@@ -1042,6 +1098,7 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                     .unwrap_or_else(|| "stopped".to_string());
                 list.push(ListPipelineItem {
                     id: entry.id,
+                    revision: entry.revision,
                     status,
                     flow_instance_id,
                 });
@@ -1109,6 +1166,7 @@ mod tests {
 
         CreateStreamRequest {
             name: name.to_string(),
+            revision: 1,
             stream_type: "mqtt".to_string(),
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -1126,6 +1184,7 @@ mod tests {
     fn mqtt_stream_request_without_connector_key(name: &str) -> CreateStreamRequest {
         CreateStreamRequest {
             name: name.to_string(),
+            revision: 1,
             stream_type: "mqtt".to_string(),
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -1168,7 +1227,7 @@ mod tests {
         let connector_key = "shared".to_string();
         state
             .storage
-            .create_mqtt_config(stored_mqtt_from_config(&shared_mqtt_cfg(&connector_key)))
+            .create_mqtt_config(stored_mqtt_from_config(&shared_mqtt_cfg(&connector_key), 1))
             .expect("persist shared mqtt config");
 
         let stream_req = mqtt_stream_request("src", &connector_key);
@@ -1181,6 +1240,7 @@ mod tests {
 
         let pipeline_req = CreatePipelineRequest {
             id: "pipe_busy".to_string(),
+            revision: 1,
             flow_instance_id: Some("default".to_string()),
             sql: "select * from src".to_string(),
             sources: Vec::new(),
@@ -1246,11 +1306,12 @@ mod tests {
         let connector_key = "shared_sink".to_string();
         state
             .storage
-            .create_mqtt_config(stored_mqtt_from_config(&shared_mqtt_cfg(&connector_key)))
+            .create_mqtt_config(stored_mqtt_from_config(&shared_mqtt_cfg(&connector_key), 1))
             .expect("persist shared mqtt config");
 
         let pipeline_req = CreatePipelineRequest {
             id: "pipe_busy_sink".to_string(),
+            revision: 1,
             flow_instance_id: Some("default".to_string()),
             sql: "select * from src".to_string(),
             sources: Vec::new(),
@@ -1307,6 +1368,7 @@ mod tests {
 
         let req = CreatePipelineRequest {
             id: "bad-id".to_string(),
+            revision: 1,
             flow_instance_id: Some("default".to_string()),
             sql: "select * from src".to_string(),
             sources: Vec::new(),

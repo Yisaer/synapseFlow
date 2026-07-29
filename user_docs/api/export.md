@@ -5,7 +5,7 @@ This document describes the **Manager** REST API for exporting persisted metadat
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 > **Resource IDs.** Resource ids in the exported bundle (stream names, pipeline
-> ids, schema names, memory topics, shared MQTT client keys, UDF names, and
+> ids, schema names, table names, memory topics, shared MQTT client keys, UDF names, and
 > `flow_instance_id` references) follow `` `[A-Za-z][A-Za-z0-9_]{0,127}` `` — the
 > same grammar required by the create APIs and re-validated on import.
 
@@ -62,12 +62,14 @@ curl -sOJ 'http://127.0.0.1:8080/storage/export?bundle_version=2026.07.24-1'
 ### `ExportMemoryTopic`
 
 - `topic: string`
+- `revision: number`
 - `kind: string` (`bytes` or `collection`)
 - `capacity: number`
 
 ### `SharedMqttClientConfig`
 
 - `key: string`
+- `revision: number`
 - `broker_url: string`
 - `topic: string`
 - `client_id: string`
@@ -121,10 +123,11 @@ When preparing the artifact:
 A node skips a startup artifact whose `bundle_version` it has already applied.
 Choose a new version when preparing a later revision for that node.
 
-Startup uses add-only Apply semantics: missing resources are created, but live
-resources with the same identity are retained and resources omitted from the
-manifest are not deleted. To replace the complete persisted resource set, send
-the ZIP to the import API instead.
+Every exported resource includes its stored `revision`. Startup uses
+revision-based, best-effort Apply: an entry replaces stored metadata only when
+its revision is greater, equal and lower revisions are ignored, and resources
+omitted from the manifest are retained. To replace the complete persisted
+resource set, send the ZIP to the import API instead.
 
 ## Notes
 

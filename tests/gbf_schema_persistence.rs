@@ -85,6 +85,7 @@ async fn create_gbf_stream(
         .post(format!("{base}/streams"))
         .json(&json!({
             "name": stream_name,
+            "revision": 1,
             "type": "mqtt",
             "schema": {"ref": schema_name},
             "props": {
@@ -133,6 +134,7 @@ async fn export_import_restores_file_backed_gbf_schema_artifact() {
         .post(format!("{source_base}/schemas"))
         .json(&json!({
             "name": schema_name,
+            "revision": 1,
             "type": "gbf",
             "props": {"schema_path": schema_archive}
         }))

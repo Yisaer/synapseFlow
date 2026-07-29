@@ -17,6 +17,7 @@ Content-Type: application/json
 ```json
 {
   "name": "vehicle_busmirror",
+  "revision": 1,
   "type": "busmirror",
   "props": {
     "schema_path": "/opt/schema-source/vehicle-busmirror.zip"
@@ -32,6 +33,7 @@ paths, network topology, signal naming, or format options:
 ```json
 {
   "name": "vehicle_input",
+  "revision": 1,
   "type": "mqtt",
   "schema": { "ref": "vehicle_busmirror" },
   "props": {

@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use storage::{StoredPipelineDesiredState, StoredPipelineRunState};
 
-use super::types::{CreatePipelineRequest, PipelineScheduleRequest, ScheduleStatus};
+use super::types::{PipelineScheduleRequest, ScheduleStatus};
+use crate::storage_bridge;
 
 /// Validate a 5-field cron expression.
 pub(crate) fn validate_cron_expression(expr: &str) -> Result<(), String> {
@@ -157,7 +158,7 @@ async fn patrol_pipeline(
 ) {
     let pipeline_id = &stored.id;
 
-    let req: CreatePipelineRequest = match serde_json::from_str(&stored.raw_json) {
+    let req = match storage_bridge::pipeline_request_from_stored(stored) {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!(pipeline_id, %err, "patrol: failed to decode stored pipeline");

@@ -146,6 +146,7 @@ fn assert_success(response: reqwest::blocking::Response, operation: &str) {
 fn create_stream(client: &ApiClient, name: &str, schema_name: &str, topic: &str, packer: bool) {
     let mut body = json!({
         "name": name,
+        "revision": 1,
         "type": "mqtt",
         "schema": { "ref": schema_name },
         "props": {
@@ -211,6 +212,7 @@ fn create_pipeline(
     };
     let body = json!({
         "id": id,
+        "revision": 1,
         "sql": format!("SELECT {} FROM {stream_name}", columns.join(", ")),
         "sinks": [sink]
     });
@@ -288,6 +290,7 @@ fn decodes_and_packs_busmirror_end_to_end() {
             "/schemas",
             &json!({
                 "name": schema_name,
+                "revision": 1,
                 "type": "busmirror",
                 "props": { "schema_path": archive }
             }),
@@ -401,4 +404,5 @@ fn decodes_and_packs_busmirror_end_to_end() {
     let _ = client.delete(&format!("/schemas/{schema_name}"));
     let _ = std::fs::remove_file(archive);
     let _ = std::fs::remove_dir_all(packer_output);
+    server.stop();
 }

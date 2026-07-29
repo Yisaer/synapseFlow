@@ -69,6 +69,7 @@ The tool creates a stream definition shaped like:
 ```json
 {
   "name": "demo_stream",
+  "revision": 1,
   "type": "mqtt",
   "props": { "broker_url": "tcp://127.0.0.1:1883", "topic": "/demo/data", "qos": 0 },
   "schema": {
@@ -100,6 +101,7 @@ The tool creates a pipeline definition shaped like:
 ```json
 {
   "id": "demo_pipeline",
+  "revision": 1,
   "sql": "select a1,a2,a3,a4,a5 from demo_stream",
   "sinks": [
     {
@@ -128,13 +130,13 @@ If you prefer calling the REST endpoints directly:
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/streams \
   -H 'Content-Type: application/json' \
-  -d '{"name":"demo_stream","type":"mqtt","props":{"broker_url":"tcp://127.0.0.1:1883","topic":"/demo/data","qos":0},"schema":{"type":"json","props":{"columns":[{"name":"a1","data_type":"string"},{"name":"a2","data_type":"string"},{"name":"a3","data_type":"string"},{"name":"a4","data_type":"string"},{"name":"a5","data_type":"string"}]}},"decoder":{"type":"json","props":{}},"shared":false}'
+  -d '{"name":"demo_stream","revision":1,"type":"mqtt","props":{"broker_url":"tcp://127.0.0.1:1883","topic":"/demo/data","qos":0},"schema":{"type":"json","props":{"columns":[{"name":"a1","data_type":"string"},{"name":"a2","data_type":"string"},{"name":"a3","data_type":"string"},{"name":"a4","data_type":"string"},{"name":"a5","data_type":"string"}]}},"decoder":{"type":"json","props":{}},"shared":false}'
 ```
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/pipelines \
   -H 'Content-Type: application/json' \
-  -d '{"id":"demo_pipeline","sql":"select a1,a2,a3,a4,a5 from demo_stream","sinks":[{"type":"nop","commonSinkProps":{"batch_duration":100,"batch_count":50}}],"options":{"eventtime":{"enabled":false}}}'
+  -d '{"id":"demo_pipeline","revision":1,"sql":"select a1,a2,a3,a4,a5 from demo_stream","sinks":[{"type":"nop","commonSinkProps":{"batch_duration":100,"batch_count":50}}],"options":{"eventtime":{"enabled":false}}}'
 ```
 
 ```bash

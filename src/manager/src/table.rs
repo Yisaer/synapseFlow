@@ -21,6 +21,8 @@ use tokio::sync::TryAcquireError;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreateTableRequest {
     pub name: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     #[serde(rename = "type")]
     pub table_type: String,
     #[serde(default)]
@@ -56,6 +58,7 @@ pub struct HistoryTablePropsRequest {
 #[derive(Serialize)]
 pub struct TableInfo {
     pub name: String,
+    pub revision: u64,
     #[serde(rename = "type")]
     pub table_type: String,
     pub schema: crate::stream::StreamSchemaInfo,
@@ -247,7 +250,7 @@ pub async fn create_table_handler(
         StatusCode::CREATED,
         Json(serde_json::json!({
             "name": req.name,
-            "spec_version": 1,
+            "revision": req.revision,
         })),
     )
         .into_response()
@@ -258,7 +261,7 @@ pub async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
         Ok(entries) => {
             let mut result = Vec::new();
             for entry in entries {
-                let req: CreateTableRequest = match serde_json::from_str(&entry.raw_json) {
+                let req = match crate::storage_bridge::table_request_from_stored(&entry) {
                     Ok(req) => req,
                     Err(err) => {
                         return (
@@ -285,6 +288,7 @@ pub async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
                     .collect();
                 result.push(TableInfo {
                     name: req.name,
+                    revision: req.revision,
                     table_type: req.table_type,
                     schema: crate::stream::StreamSchemaInfo { columns },
                 });
@@ -449,6 +453,7 @@ mod tests {
 
         CreateTableRequest {
             name: name.to_string(),
+            revision: 1,
             table_type: "history".to_string(),
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -478,11 +483,16 @@ mod tests {
             .expect("read response body");
         let json: JsonValue = serde_json::from_slice(&body).expect("decode response");
         assert_eq!(json["name"], "test_history_table");
-        assert_eq!(json["spec_version"], 1);
+        assert_eq!(json["revision"], 1);
 
         // Verify stored
-        let stored = state.storage.get_table("test_history_table").unwrap();
-        assert!(stored.is_some());
+        let stored = state
+            .storage
+            .get_table("test_history_table")
+            .unwrap()
+            .expect("stored table");
+        assert_eq!(stored.revision, 1);
+        assert!(!stored.raw_json.contains("\"revision\""));
 
         // Verify in catalog
         let instance = state.instances.default_instance();
@@ -567,6 +577,7 @@ mod tests {
         let json: Vec<JsonValue> = serde_json::from_slice(&body).expect("decode response");
         assert_eq!(json.len(), 2);
         assert_eq!(json[0]["name"], "table_a");
+        assert_eq!(json[0]["revision"], 1);
         assert_eq!(json[1]["name"], "table_b");
     }
 

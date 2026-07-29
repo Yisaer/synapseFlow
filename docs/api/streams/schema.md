@@ -57,6 +57,7 @@ a standalone stream feature.
 ### `GET /streams` → `StreamInfo[]`
 
 - `name: string` (identifier used in SQL)
+- `revision: number` (persisted resource revision)
 - `shared: boolean`
 - `schema: { columns: Column[] }`
 - Optional `shared_stream: SharedStreamItem`
@@ -66,8 +67,26 @@ Note: current implementation does not populate `shared_stream` in this endpoint.
 ### `GET /streams/describe/:name` → `DescribeStreamResponse`
 
 - `stream: string` (identifier used in SQL)
-- `spec_version: number` (currently `1`)
+- `revision: number` (persisted resource revision)
 - `spec: StreamDefinitionSpec`
+
+## Revision-Based Update
+
+`revision` is required when creating a stream and in
+`PUT /streams/:name`. It must be an integer from `1` through
+`9007199254740991`.
+
+For an existing stream:
+
+- a greater revision executes the normal validation, replacement, and rollback
+  flow;
+- a lower revision returns `409 Conflict` with `older_revision`;
+- an equal revision with the same normalized definition returns idempotent
+  success without runtime mutation;
+- an equal revision with a different definition returns `409 Conflict` with
+  `same_revision_different_spec`.
+
+JSON formatting and object field order do not affect equality.
 
 ### `StreamDefinitionSpec`
 

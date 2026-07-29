@@ -5,7 +5,7 @@ This document describes the **Manager** REST API for importing persisted metadat
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 > **Resource IDs.** Every resource id in the bundle — stream names, pipeline ids,
-> sink ids, schema names, memory topics, shared MQTT client keys, UDF names, and
+> sink ids, schema names, table names, memory topics, shared MQTT client keys, UDF names, and
 > `flow_instance_id` references — must match `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``,
 > the same grammar enforced by the REST API. Import cannot bypass these rules: a
 > bundle containing any invalid id is rejected as a whole with `400 Bad Request`,
@@ -42,6 +42,9 @@ Important behavior:
 - import is **storage-only**
 - runtime resources are **not** reconciled by this API call
 - the imported bundle fully replaces the existing persisted metadata set
+- every resource must include a positive JSON-safe `revision`
+- import stores revisions but does not compare them; a lower imported revision
+  replaces a higher stored revision
 - resources missing from the imported bundle are removed from persisted storage
 - storage replacement is atomic: either the entire snapshot is replaced or nothing is changed
 

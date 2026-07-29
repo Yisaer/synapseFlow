@@ -21,6 +21,8 @@ use super::source::{PreparedSchemaSource, delete_installed_source};
 #[derive(Deserialize)]
 pub struct CreateSchemaRequest {
     pub name: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     #[serde(rename = "type")]
     pub schema_type: String,
     #[serde(default)]
@@ -30,6 +32,7 @@ pub struct CreateSchemaRequest {
 #[derive(Serialize)]
 pub struct SchemaInfo {
     pub name: String,
+    pub revision: u64,
     #[serde(rename = "type")]
     pub schema_type: String,
     pub props: JsonMap<String, JsonValue>,
@@ -124,6 +127,7 @@ async fn create_schema_locked(
     };
     let stored = StoredSchema {
         name: name.clone(),
+        revision: req.revision,
         schema_type: req.schema_type.clone(),
         props_json,
     };
@@ -156,9 +160,13 @@ async fn create_schema_locked(
     named_schema_store().insert_resolved(name, schema, proto_bundle, artifact);
     audit.log_success();
     let body = if include_type {
-        serde_json::json!({ "name": req.name, "type": req.schema_type })
+        serde_json::json!({
+            "name": req.name,
+            "revision": req.revision,
+            "type": req.schema_type
+        })
     } else {
-        serde_json::json!({ "name": req.name })
+        serde_json::json!({ "name": req.name, "revision": req.revision })
     };
     (StatusCode::CREATED, Json(body)).into_response()
 }
@@ -190,6 +198,7 @@ pub async fn upload_create_schema_handler(
     let mut upload: Option<TemporaryUpload> = None;
     let mut props: Option<JsonMap<String, JsonValue>> = None;
     let mut form_name: Option<String> = None;
+    let mut revision: Option<u64> = None;
     loop {
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
@@ -264,6 +273,32 @@ pub async fn upload_create_schema_handler(
                     Err(err) => return (err.status, err.message).into_response(),
                 };
             }
+            "revision" => {
+                if revision.is_some() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "field 'revision' must not be repeated",
+                    )
+                        .into_response();
+                }
+                let text = match read_text_field(field, "revision").await {
+                    Ok(value) => value,
+                    Err(err) => return (err.status, err.message).into_response(),
+                };
+                revision = match text.parse::<u64>() {
+                    Ok(value) => match crate::revision::validate_revision(value) {
+                        Ok(()) => Some(value),
+                        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+                    },
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            "field 'revision' must be a positive JSON safe integer",
+                        )
+                            .into_response();
+                    }
+                };
+            }
             _ => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -289,6 +324,12 @@ pub async fn upload_create_schema_handler(
                 "field 'file' is required and must not be empty",
             )
                 .into_response();
+        }
+    };
+    let revision = match revision {
+        Some(revision) => revision,
+        None => {
+            return (StatusCode::BAD_REQUEST, "field 'revision' is required").into_response();
         }
     };
     let mut props = props.unwrap_or_default();
@@ -326,6 +367,7 @@ pub async fn upload_create_schema_handler(
         &state,
         CreateSchemaRequest {
             name,
+            revision,
             schema_type,
             props,
         },
@@ -462,6 +504,7 @@ fn stored_to_info(stored: &StoredSchema) -> SchemaInfo {
     };
     SchemaInfo {
         name: stored.name.clone(),
+        revision: stored.revision,
         schema_type: stored.schema_type.clone(),
         props,
         columns,
@@ -614,6 +657,11 @@ mod tests {
         .expect("write props field");
         write!(
             &mut body,
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"revision\"\r\n\r\n1\r\n"
+        )
+        .expect("write revision field");
+        write!(
+            &mut body,
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sensor.zip\"\r\nContent-Type: application/zip\r\n\r\n"
         )
         .expect("write file header");
@@ -686,6 +734,7 @@ mod tests {
             State(state.clone()),
             Json(CreateSchemaRequest {
                 name: "bad-schema".to_string(),
+                revision: 1,
                 schema_type: "json".to_string(),
                 props: JsonMap::new(),
             }),
@@ -734,6 +783,7 @@ mod tests {
             .storage
             .create_schema(StoredSchema {
                 name: schema_name.to_string(),
+                revision: 1,
                 schema_type: "json".to_string(),
                 props_json: "{}".to_string(),
             })
@@ -742,6 +792,7 @@ mod tests {
             .storage
             .create_table(StoredTable {
                 id: "referencing_table".to_string(),
+                revision: 1,
                 raw_json: serde_json::json!({
                     "name": "referencing_table",
                     "type": "history",

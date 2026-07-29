@@ -148,6 +148,7 @@ async fn stream_with_protobuf_decoder_decodes_and_pipelines_data() {
         .post(format!("{manager_base}/schemas"))
         .json(&serde_json::json!({
             "name": schema_name,
+            "revision": 1,
             "type": "proto",
             "props": {
                 "proto_path": proto_path.to_string_lossy(),
@@ -171,6 +172,7 @@ async fn stream_with_protobuf_decoder_decodes_and_pipelines_data() {
         .post(format!("{manager_base}/streams"))
         .json(&serde_json::json!({
             "name": stream_name,
+            "revision": 1,
             "type": "mock",
             "schema": { "ref": schema_name },
             "props": {},
@@ -194,6 +196,7 @@ async fn stream_with_protobuf_decoder_decodes_and_pipelines_data() {
         .post(format!("{manager_base}/pipelines"))
         .json(&serde_json::json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": format!("SELECT a, b FROM {stream_name}"),
             "sinks": [{
                 "type": "mqtt",

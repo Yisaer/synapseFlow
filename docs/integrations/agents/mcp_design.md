@@ -77,7 +77,7 @@ The agent creates a pipeline with a temporary id (agent convention) and deletes 
 
 ### Pipelines (verification only)
 
-5) `pipelines.create { id, sql, sinks, options }`
+5) `pipelines.create { id, revision, sql, sinks, options }`
 - REST: `POST /pipelines`
 - Agent convention: `id` is generated as a temporary pipeline id; it must be deleted after explain.
 

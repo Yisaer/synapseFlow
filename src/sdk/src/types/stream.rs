@@ -4,6 +4,7 @@ use serde_json::Value as JsonValue;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamCreateRequest {
     pub name: String,
+    pub revision: u64,
     #[serde(rename = "type")]
     pub stream_type: String,
     pub schema: JsonValue,
@@ -17,6 +18,7 @@ impl StreamCreateRequest {
         let name = name.into();
         Self {
             name,
+            revision: 1,
             stream_type: "mock".to_string(),
             schema: serde_json::json!({
                 "type": "json",
@@ -42,6 +44,7 @@ impl StreamCreateRequest {
 /// Request body for `PUT /streams/:name`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamUpsertRequest {
+    pub revision: u64,
     pub schema: JsonValue,
     pub props: JsonValue,
     pub decoder: JsonValue,
@@ -52,6 +55,7 @@ pub struct StreamUpsertRequest {
 impl StreamUpsertRequest {
     pub fn from_create(req: &StreamCreateRequest) -> Self {
         Self {
+            revision: req.revision.saturating_add(1),
             schema: req.schema.clone(),
             props: req.props.clone(),
             decoder: req.decoder.clone(),

@@ -68,6 +68,7 @@ impl Drop for TestHarness {
 fn basic_mock_stream_req(name: String) -> StreamCreateRequest {
     StreamCreateRequest {
         name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",
@@ -98,6 +99,7 @@ fn mqtt_stream_req(
 
     StreamCreateRequest {
         name,
+        revision: 1,
         stream_type: "mqtt".to_string(),
         schema: json!({
             "type": "json",
@@ -116,6 +118,7 @@ fn mqtt_stream_req(
 fn pipeline_with_default_sink(id: String, sql: String) -> JsonValue {
     json!({
         "id": id,
+            "revision": 1,
         "sql": sql,
         "sinks": [
             {
@@ -134,6 +137,7 @@ fn pipeline_with_sink_type(
 ) -> JsonValue {
     json!({
         "id": id,
+            "revision": 1,
         "sql": sql,
         "sinks": [
             {
@@ -191,6 +195,7 @@ async fn create_stream_rejects_missing_type() {
     let stream_name = format!("missing_type_{}", random_suffix());
     let req = StreamCreateRequest {
         name: stream_name,
+        revision: 1,
         stream_type: "".to_string(),
         schema: json!({
             "type": "json",
@@ -228,6 +233,7 @@ async fn create_stream_rejects_missing_schema() {
     let stream_name = format!("missing_schema_{}", random_suffix());
     let req = StreamCreateRequest {
         name: stream_name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({}),
         props: json!({}),
@@ -294,6 +300,7 @@ async fn create_stream_does_not_reject_empty_columns() {
     let stream_name = format!("empty_columns_{}", random_suffix());
     let req = StreamCreateRequest {
         name: stream_name.clone(),
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",
@@ -322,6 +329,7 @@ async fn create_stream_rejects_column_without_name() {
     let stream_name = format!("column_without_name_{}", random_suffix());
     let req = StreamCreateRequest {
         name: stream_name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",
@@ -359,6 +367,7 @@ async fn create_stream_rejects_column_without_data_type() {
     let stream_name = format!("column_without_dtype_{}", random_suffix());
     let req = StreamCreateRequest {
         name: stream_name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",
@@ -396,6 +405,7 @@ async fn create_stream_rejects_invalid_data_type() {
     let stream_name = format!("invalid_dtype_{}", random_suffix());
     let req = StreamCreateRequest {
         name: stream_name,
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: json!({
             "type": "json",
@@ -603,6 +613,7 @@ async fn create_pipeline_rejects_missing_sinks() {
         .post(format!("{}/pipelines", h.base()))
         .json(&json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": format!("SELECT value FROM {stream_name}")
         }))
         .send()
@@ -632,6 +643,7 @@ async fn create_pipeline_rejects_empty_sinks() {
         .post(format!("{}/pipelines", h.base()))
         .json(&json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": format!("SELECT value FROM {stream_name}"),
             "sinks": []
         }))
@@ -923,6 +935,7 @@ async fn upsert_pipeline_rejects_missing_sinks() {
         .put(format!("{}/pipelines/{pipeline_id}", h.base()))
         .json(&json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": format!("SELECT value FROM {stream_name}")
         }))
         .send()

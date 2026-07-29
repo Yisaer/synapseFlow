@@ -3,6 +3,12 @@
 This document describes the schema registry system — the mechanism for
 defining, storing, and reusing named schemas in veloflux.
 
+Every schema create specification requires a positive JSON safe integer
+`revision` (`1..=9007199254740991`). The multipart upload endpoint requires the
+same value in a `revision` text field. Schema get/list and resource export return
+the persisted revision. There is no online schema update API; revision
+arbitration is used by startup init.
+
 For the REST API contract, see `user_docs/api/schema.md`.
 
 > **Resource IDs.** Named-schema names (used as the store key and as `schema.ref`
@@ -30,7 +36,7 @@ Schema parser flow used by `POST /schemas`.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    POST /schemas                             │
-│  { name: "sensor", type: "proto", props: {...} }            │
+│  { name: "sensor", revision: 1, type: "proto", props: {...} }│
 └──────────────────┬──────────────────────────────────────────┘
                    │
                    ▼
@@ -161,6 +167,7 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sensor_schema",
+    "revision": 1,
     "type": "proto",
     "props": {
       "proto_path": "schemas/sensor-schema.zip",
@@ -207,6 +214,7 @@ pre-defined named schema instead of inline-defining columns:
 ```json
 {
   "name": "my_stream",
+  "revision": 1,
   "type": "mqtt",
   "schema": {
     "ref": "sensor_schema"

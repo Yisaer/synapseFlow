@@ -23,6 +23,7 @@ Request body: `CreatePipelineRequest`
 ```json
 {
   "id": "demo_pipeline",
+  "revision": 1721797200000,
   "sql": "SELECT user_id, score FROM source_stream WHERE score > 0",
   "sinks": [
     {
@@ -39,7 +40,7 @@ Request body: `CreatePipelineRequest`
 
 Response:
 
-- `201 Created` with `{ id, status }`.
+- `201 Created` with `{ id, revision, status }`.
 - `409 Conflict` if the pipeline already exists.
 - `409 Conflict` if the pipeline is busy processing another command.
 
@@ -70,17 +71,20 @@ Note: `status` is derived from the **stored desired state**, not from the runtim
 
 `PUT /pipelines/:id`
 
-Replaces pipeline spec by id:
+Replaces pipeline spec by id when the request revision is greater:
 
 - If present, manager deletes the existing pipeline in runtime and storage.
 - Manager persists the new spec and registers the new pipeline.
 - If the old desired state was `running`, manager attempts to start the new pipeline.
+- A lower revision returns `409 Conflict`.
+- An equal revision is an idempotent success only when the normalized
+  definition is unchanged; otherwise it returns `409 Conflict`.
 
 Request body: `UpsertPipelineRequest` (same shape as create but without `id`).
 
 Response:
 
-- `200 OK` with `{ id, status }`.
+- `200 OK` with `{ id, revision, status }`.
 - `400 Bad Request` for invalid specs or planning failures.
 
 ### Start Pipeline
@@ -157,12 +161,14 @@ Response:
 ### `CreatePipelineRequest`
 
 - `id: string` (required, non-empty)
+- `revision: number` (required, positive JSON-safe integer)
 - `sql: string` (required, non-empty)
 - `sinks: CreatePipelineSinkRequest[]` (required, at least one)
 - `options: PipelineOptionsRequest` (optional)
 
 ### `UpsertPipelineRequest`
 
+- `revision: number` (required, positive JSON-safe integer)
 - `sql: string` (required, non-empty)
 - `sinks: CreatePipelineSinkRequest[]` (required, at least one)
 - `options: PipelineOptionsRequest` (optional)
@@ -300,16 +306,19 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 ### `CreatePipelineResponse`
 
 - `id: string`
+- `revision: number`
 - `status: string` (`running` or `stopped`)
 
 ### `ListPipelineItem`
 
 - `id: string`
+- `revision: number`
 - `status: string` (`running` or `stopped`)
 
 ### `GetPipelineResponse`
 
 - `id: string`
+- `revision: number`
 - `status: string` (`running` or `stopped`)
 - `spec: CreatePipelineRequest`
 

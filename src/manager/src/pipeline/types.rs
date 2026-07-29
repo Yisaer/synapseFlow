@@ -18,6 +18,8 @@ use std::time::Duration;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreatePipelineRequest {
     pub id: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     #[serde(default)]
     pub flow_instance_id: Option<String>,
     pub sql: String,
@@ -42,6 +44,8 @@ impl CreatePipelineRequest {
 
 #[derive(Deserialize, Serialize)]
 pub struct UpsertPipelineRequest {
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     pub sql: String,
     #[serde(default)]
     pub sources: Vec<CreatePipelineSourceRequest>,
@@ -91,12 +95,14 @@ pub struct EventtimeOptionsRequest {
 #[derive(Serialize)]
 pub struct CreatePipelineResponse {
     pub id: String,
+    pub revision: u64,
     pub status: String,
 }
 
 #[derive(Serialize)]
 pub struct ListPipelineItem {
     pub id: String,
+    pub revision: u64,
     pub status: String,
     pub flow_instance_id: String,
 }
@@ -104,6 +110,7 @@ pub struct ListPipelineItem {
 #[derive(Serialize)]
 pub struct GetPipelineResponse {
     pub id: String,
+    pub revision: u64,
     pub status: String,
     pub spec: CreatePipelineRequest,
     #[serde(skip_serializing_if = "Option::is_none")]

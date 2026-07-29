@@ -360,5 +360,5 @@
 
 ## Out of Scope
 
-- Startup the startup resource manifest semantics (add-only / mtime behavior)
+- Startup resource revision arbitration and best-effort Apply semantics
 - Parser-level fuzzing beyond planner contract boundaries

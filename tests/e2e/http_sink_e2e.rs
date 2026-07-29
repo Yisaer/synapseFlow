@@ -118,6 +118,7 @@ async fn http_sink_basic_json_post() {
         .post(format!("{manager_base}/streams"))
         .json(&serde_json::json!({
             "name": stream_name,
+            "revision": 1,
             "type": "mock",
             "schema": {
                 "type": "json",
@@ -149,6 +150,7 @@ async fn http_sink_basic_json_post() {
         .post(format!("{manager_base}/pipelines"))
         .json(&serde_json::json!({
             "id": pipeline_id,
+            "revision": 1,
             "sql": format!("SELECT * FROM {stream_name}"),
             "sinks": [{
                 "type": "http",

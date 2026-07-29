@@ -34,6 +34,7 @@ This matters because the same stream may feed different pipelines with different
 ```json
 {
   "id": "vehicle_pipe",
+  "revision": 1,
   "sql": "SELECT speed FROM vehicle_stream",
   "sources": [
     {

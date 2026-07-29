@@ -25,6 +25,7 @@ Request body: `CreateTableRequest`
 ```json
 {
   "name": "history_table",
+  "revision": 1721797200000,
   "type": "history",
   "schema": {
     "type": "json",
@@ -58,7 +59,7 @@ Notes:
 
 Response:
 
-- `201 Created` with `{ "name": "...", "spec_version": 1 }`.
+- `201 Created` with `{ "name": "...", "revision": 1721797200000 }`.
 - `409 Conflict` if the table already exists or another storage operation is active.
 
 Example:
@@ -110,6 +111,7 @@ curl -s -XDELETE http://127.0.0.1:8080/tables/history_table
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | - | SQL-visible table name. |
+| `revision` | number | yes | - | Positive JSON-safe resource revision. |
 | `type` | string | yes | - | Table provider type. Supported: `history`. |
 | `schema` | object | yes | - | Decoded row schema. Shape matches stream schema declarations. |
 | `props` | object | no | `{}` | Table-provider configuration. |
@@ -154,6 +156,7 @@ decoder. The table schema must describe the decoded payload, not the raw Parquet
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Table name. |
+| `revision` | number | Persisted resource revision. |
 | `type` | string | Table provider type (e.g. `history`). |
 | `schema` | object | `{ columns: Column[] }` — decoded row schema summary. |
 
@@ -189,3 +192,7 @@ props before committing the snapshot.
 
 Tables also participate in startup init-directory apply (`--init-dir`) and are restored from
 persistent storage on restart.
+
+Import performs full-snapshot replacement and does not compare revisions.
+Startup init applies a table only when its revision is greater than the stored
+table revision; equal and lower revisions are ignored.

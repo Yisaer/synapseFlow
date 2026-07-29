@@ -22,6 +22,7 @@ Content-Type: application/json
 ```json
 {
   "name": "vehicle_gbf",
+  "revision": 1,
   "type": "gbf",
   "props": {
     "schema_path": "/opt/schema-source/vehicle-gbf.zip"
@@ -59,6 +60,7 @@ Content-Type: application/json
 ```json
 {
   "name": "vehicle_input",
+  "revision": 1,
   "type": "mqtt",
   "schema": { "ref": "vehicle_gbf" },
   "props": {

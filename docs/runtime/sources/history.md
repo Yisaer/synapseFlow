@@ -38,6 +38,7 @@ Note: the History connector replays the raw Parquet `data` bytes as the stream p
 POST /streams
 {
   "name": "history_stream",
+  "revision": 1,
   "type": "history",
   "schema": {
     "type": "json",

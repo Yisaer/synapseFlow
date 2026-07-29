@@ -28,6 +28,7 @@ Request body: `CreateStreamRequest`
 ```json
 {
   "name": "source_stream",
+  "revision": 1721797200000,
   "type": "mqtt",
   "schema": {
     "type": "json",
@@ -173,6 +174,7 @@ curl -s \
 ### `CreateStreamRequest`
 
 - `name: string` (required, non-empty)
+- `revision: number` (required, positive JSON-safe integer)
 - `type: string` (required)
   - Supported: `mqtt`, `history`
 - `schema: { type: string, props: object }` (required)
@@ -282,6 +284,7 @@ Supported type strings:
 ### `StreamInfo`
 
 - `name: string`
+- `revision: number`
 - `shared: boolean`
 - `schema: { columns: Column[] }`
 - Optional `shared_stream: SharedStreamItem`
@@ -298,8 +301,12 @@ Supported type strings:
 ### `DescribeStreamResponse`
 
 - `stream: string`
-- `spec_version: number` (currently `1`)
+- `revision: number`
 - `spec: StreamDefinitionSpec`
+
+`PUT /streams/:name` applies only a greater revision. A lower revision returns
+`409 Conflict`; an equal revision succeeds only when the normalized definition
+is unchanged, otherwise it returns `409 Conflict`.
 
 ### `SharedStreamStatsResponse`
 

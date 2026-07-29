@@ -41,6 +41,8 @@ use storage::{StorageError, StorageManager, StoredMemoryTopicKind};
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreateStreamRequest {
     pub name: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     #[serde(rename = "type")]
     pub stream_type: String,
     #[serde(default)]
@@ -99,6 +101,8 @@ impl CreateStreamRequest {
 /// (`true` → `false`) is not supported.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct UpsertStreamRequest {
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
     pub schema: SchemaConfigRequest,
     pub props: StreamPropsRequest,
     pub decoder: DecoderConfigRequest,
@@ -447,6 +451,7 @@ impl Default for VideoReconnectRequest {
 #[derive(Serialize)]
 pub struct StreamInfo {
     pub name: String,
+    pub revision: u64,
     pub shared: bool,
     pub schema: StreamSchemaInfo,
     pub shared_stream: Option<SharedStreamItem>,
@@ -480,7 +485,7 @@ pub struct SharedStreamItem {
 #[derive(Serialize)]
 pub struct DescribeStreamResponse {
     pub stream: String,
-    pub spec_version: u32,
+    pub revision: u64,
     pub spec: StreamDefinitionSpec,
 }
 
@@ -658,7 +663,11 @@ pub async fn create_stream_handler(
             .into_response();
     };
     audit.log_success();
-    (StatusCode::CREATED, Json(build_stream_info(info))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(build_stream_info(info, req.revision)),
+    )
+        .into_response()
 }
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
@@ -666,7 +675,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
         Ok(entries) => {
             let mut result = Vec::new();
             for entry in entries {
-                let req: CreateStreamRequest = match serde_json::from_str(&entry.raw_json) {
+                let req = match storage_bridge::stream_request_from_stored(&entry) {
                     Ok(req) => req,
                     Err(err) => {
                         return (
@@ -693,6 +702,7 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
                     .collect();
                 result.push(StreamInfo {
                     name: req.name,
+                    revision: entry.revision,
                     shared: req.shared,
                     schema: StreamSchemaInfo { columns },
                     shared_stream: None,
@@ -729,7 +739,7 @@ pub async fn describe_stream_handler(
         }
     };
 
-    let shared = match serde_json::from_str::<CreateStreamRequest>(&stored.raw_json) {
+    let shared = match storage_bridge::stream_request_from_stored(&stored) {
         Ok(req) => req.shared,
         Err(err) => {
             return (
@@ -781,7 +791,7 @@ pub async fn describe_stream_handler(
         StatusCode::OK,
         Json(DescribeStreamResponse {
             stream: name,
-            spec_version: 1,
+            revision: stored.revision,
             spec,
         }),
     )
@@ -810,7 +820,7 @@ pub async fn shared_stream_stats_handler(
         }
     };
 
-    let req = match serde_json::from_str::<CreateStreamRequest>(&stored.raw_json) {
+    let req = match storage_bridge::stream_request_from_stored(&stored) {
         Ok(req) => req,
         Err(err) => {
             return (
@@ -891,7 +901,7 @@ pub async fn upsert_stream_handler(
         }
     };
 
-    let old_req: CreateStreamRequest = match serde_json::from_str(&old_stored.raw_json) {
+    let old_req = match storage_bridge::stream_request_from_stored(&old_stored) {
         Ok(req) => req,
         Err(err) => {
             let err = format!("decode stored stream {name}: {err}");
@@ -937,6 +947,7 @@ pub async fn upsert_stream_handler(
     // Build new CreateStreamRequest — keep immutable fields from the old definition.
     let mut new_req = CreateStreamRequest {
         name: old_req.name.clone(),
+        revision: req.revision,
         stream_type: old_req.stream_type.clone(),
         shared: new_shared,
         schema: req.schema,
@@ -946,6 +957,45 @@ pub async fn upsert_stream_handler(
         sampler: req.sampler,
     };
     new_req.normalize();
+
+    if new_req.revision < old_stored.revision {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "stream {name} older_revision: incoming revision {}, current revision {}",
+                new_req.revision, old_stored.revision
+            ),
+        )
+            .into_response();
+    }
+    if new_req.revision == old_stored.revision {
+        let old_spec = match crate::revision::normalized_spec_without_revision(&old_req) {
+            Ok(spec) => spec,
+            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+        };
+        let new_spec = match crate::revision::normalized_spec_without_revision(&new_req) {
+            Ok(spec) => spec,
+            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+        };
+        if old_spec == new_spec {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": name,
+                    "revision": old_stored.revision
+                })),
+            )
+                .into_response();
+        }
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "stream {name} same_revision_different_spec: incoming revision {}, current revision {}",
+                new_req.revision, old_stored.revision
+            ),
+        )
+            .into_response();
+    }
 
     // ── Full validation (same checks as create) ──
     if let Err(err) = validate_stream_connector_key(&new_req) {
@@ -1073,7 +1123,7 @@ pub async fn upsert_stream_handler(
         StatusCode::OK,
         Json(serde_json::json!({
             "name": name,
-            "spec_version": 2
+            "revision": new_req.revision
         })),
     )
         .into_response()
@@ -1147,11 +1197,12 @@ pub async fn delete_stream_handler(
     (StatusCode::OK, format!("stream {name} deleted")).into_response()
 }
 
-fn build_stream_info(info: StreamRuntimeInfo) -> StreamInfo {
+fn build_stream_info(info: StreamRuntimeInfo, revision: u64) -> StreamInfo {
     let schema = info.definition.schema();
     let shared_item = info.shared_info.map(into_shared_stream_item);
     StreamInfo {
         name: info.definition.id().to_string(),
+        revision,
         shared: shared_item.is_some(),
         schema: StreamSchemaInfo {
             columns: schema
@@ -1876,6 +1927,7 @@ mod tests {
     fn base_stream_request(stream_type: &str) -> CreateStreamRequest {
         CreateStreamRequest {
             name: "stream_test".to_string(),
+            revision: 1,
             stream_type: stream_type.to_string(),
             schema: SchemaConfigRequest::default(),
             props: StreamPropsRequest::default(),
@@ -1907,6 +1959,7 @@ mod tests {
 
         CreateStreamRequest {
             name: name.to_string(),
+            revision: 1,
             stream_type: "mqtt".to_string(),
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -1947,6 +2000,7 @@ mod tests {
 
         CreateStreamRequest {
             name: name.to_string(),
+            revision: 1,
             stream_type: "mqtt".to_string(),
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -1975,6 +2029,7 @@ mod tests {
 
         CreateStreamRequest {
             name: name.to_string(),
+            revision: 1,
             stream_type: "mock".to_string(),
             schema: SchemaConfigRequest {
                 schema_type: "json".to_string(),
@@ -2048,6 +2103,7 @@ mod tests {
     fn pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
         serde_json::from_value(json!({
             "id": id,
+            "revision": 1,
             "flow_instance_id": "default",
             "sql": format!("SELECT * FROM {stream_name}"),
             "sinks": [
@@ -2489,7 +2545,8 @@ mod tests {
             .expect("read response body");
         let json: JsonValue = serde_json::from_slice(&body).expect("decode describe response");
         assert_eq!(json["stream"], req.name);
-        assert_eq!(json["spec_version"], 1);
+        assert_eq!(json["revision"], 1);
+        assert!(json.get("spec_version").is_none());
         assert_eq!(json["spec"]["type"], "mqtt");
         assert_eq!(json["spec"]["shared"], true);
         assert_eq!(json["spec"]["decoder"]["type"], "json");

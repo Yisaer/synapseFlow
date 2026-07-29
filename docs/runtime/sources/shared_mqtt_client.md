@@ -87,6 +87,7 @@ userinfo would otherwise land in the startup resource manifest / redb, which sta
    ```json
    {
      "key": "fleet-broker",
+     "revision": 1,
      "broker_url": "tcp://broker.example.com:1883",
      "topic": "fleet/+/telemetry",
      "client_id": "veloflux-fleet",
@@ -198,7 +199,7 @@ detail.
 
 Manager-side control-plane operations currently provide:
 
-- create with exact-match idempotency
+- create-only semantics; an existing key returns `409 Conflict`
 - get and list from storage-backed metadata
 - delete with storage-authoritative removal and best-effort runtime cleanup
 
@@ -207,6 +208,11 @@ This management surface exists to keep `connector_key` bindings stable across:
 - startup hydration
 - import/export bundles
 - concurrent pipeline create, update, and start operations
+
+Create specifications require `revision` in `1..=9007199254740991`; get/list
+and export return it. There is no online shared-client update API. Startup init
+uses revision comparison, while import restores the supplied full snapshot
+without comparing live revisions.
 
 ## Busy Guard And Mutation Serialization
 

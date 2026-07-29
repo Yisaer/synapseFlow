@@ -15,6 +15,7 @@ use crate::resource_id::{ResourceIdKind, validate_resource_id};
 #[derive(Serialize)]
 pub struct UdfInfo {
     pub name: String,
+    pub revision: u64,
     pub wasm_sha256: String,
     pub size_bytes: u64,
 }
@@ -22,6 +23,7 @@ pub struct UdfInfo {
 #[derive(Serialize)]
 pub struct UploadUdfResponse {
     pub name: String,
+    pub revision: u64,
     pub wasm_sha256: String,
     pub status: String,
 }
@@ -30,6 +32,7 @@ pub struct UploadUdfResponse {
 ///
 /// Accepts multipart form data with fields:
 /// - `name` (text): canonical function name
+/// - `revision` (text): positive JSON-safe integer
 /// - `wasm_file` (binary): the compiled .wasm file
 pub async fn upload_udf_handler(
     State(state): State<AppState>,
@@ -37,6 +40,7 @@ pub async fn upload_udf_handler(
 ) -> impl IntoResponse {
     let mut name: Option<String> = None;
     let mut wasm_bytes: Option<Vec<u8>> = None;
+    let mut revision: Option<u64> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let field_name = field.name().unwrap_or("").to_string();
@@ -46,6 +50,13 @@ pub async fn upload_udf_handler(
             }
             "wasm_file" => {
                 wasm_bytes = field.bytes().await.ok().map(|b| b.to_vec());
+            }
+            "revision" => {
+                revision = field
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok());
             }
             _ => {}
         }
@@ -65,6 +76,20 @@ pub async fn upload_udf_handler(
     let wasm_bytes = match wasm_bytes {
         Some(b) if !b.is_empty() => b,
         _ => return (StatusCode::BAD_REQUEST, "field 'wasm_file' is required").into_response(),
+    };
+    let revision = match revision.and_then(|value| {
+        crate::revision::validate_revision(value)
+            .ok()
+            .map(|()| value)
+    }) {
+        Some(revision) => revision,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "field 'revision' is required and must be a positive JSON safe integer",
+            )
+                .into_response();
+        }
     };
 
     // Validate the WASM module
@@ -125,6 +150,7 @@ pub async fn upload_udf_handler(
 
     let stored = StoredUdf {
         name: name.clone(),
+        revision,
         wasm_sha256: sha256.clone(),
         raw_json: serde_json::to_string(&metadata).unwrap_or_default(),
     };
@@ -164,6 +190,7 @@ pub async fn upload_udf_handler(
         StatusCode::OK,
         Json(UploadUdfResponse {
             name,
+            revision,
             wasm_sha256: sha256,
             status,
         }),
@@ -193,6 +220,7 @@ pub async fn list_udfs_handler(State(state): State<AppState>) -> impl IntoRespon
                 .unwrap_or(0u64);
             UdfInfo {
                 name: udf.name,
+                revision: udf.revision,
                 wasm_sha256: udf.wasm_sha256,
                 size_bytes,
             }
@@ -234,6 +262,7 @@ pub async fn get_udf_handler(
                 StatusCode::OK,
                 Json(UdfInfo {
                     name: udf.name,
+                    revision: udf.revision,
                     wasm_sha256: udf.wasm_sha256,
                     size_bytes,
                 }),

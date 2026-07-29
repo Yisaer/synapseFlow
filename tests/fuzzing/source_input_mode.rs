@@ -87,6 +87,7 @@ fn stream_req(
 ) -> StreamCreateRequest {
     StreamCreateRequest {
         name,
+        revision: 1,
         stream_type: stream_type.to_string(),
         schema: schema(),
         props,
@@ -138,6 +139,7 @@ fn bad_decoder_stream_req(name: String) -> StreamCreateRequest {
 fn pipeline_with_sources(id: String, sql: String, sources: JsonValue) -> JsonValue {
     json!({
         "id": id,
+            "revision": 1,
         "sql": sql,
         "sources": sources,
         "sinks": [

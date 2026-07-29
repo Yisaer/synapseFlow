@@ -134,6 +134,7 @@ async fn failed_pipeline_spec_build_does_not_leave_stored_pipeline() {
     let pipeline_id = format!("cleanup_failed_spec_pipe_{}", random_suffix());
     let invalid_req = serde_json::json!({
         "id": pipeline_id,
+        "revision": 1,
         "sql": format!("SELECT value FROM {stream_name}"),
         "sinks": [
             {

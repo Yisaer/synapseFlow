@@ -71,6 +71,7 @@ async fn multi_in_process_flow_instances_pipeline_lifecycle_via_rest() {
     let stream_name = format!("multi_inst_stream_{}", random_suffix());
     let stream_req = StreamCreateRequest {
         name: stream_name.clone(),
+        revision: 1,
         stream_type: "mock".to_string(),
         schema: serde_json::json!({
             "type": "json",

@@ -4,6 +4,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use storage::{MetadataExportSnapshot, StorageManager, StoredInitApplyMeta};
 
 use crate::export::{
@@ -21,6 +23,33 @@ const MAX_SOURCE_ENTRIES: usize = 4096;
 const MAX_SOURCE_FILE_SIZE: u64 = 512 * 1024 * 1024;
 const MAX_SOURCE_TOTAL_SIZE: u64 = 512 * 1024 * 1024;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInitManifest {
+    format_version: u32,
+    bundle_version: String,
+    resources: RawInitResources,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInitResources {
+    memory_topics: Vec<serde_json::Value>,
+    shared_mqtt_clients: Vec<serde_json::Value>,
+    #[serde(default)]
+    schemas: Vec<serde_json::Value>,
+    streams: Vec<serde_json::Value>,
+    pipelines: Vec<serde_json::Value>,
+    udfs: Vec<serde_json::Value>,
+    #[serde(default)]
+    tables: Vec<serde_json::Value>,
+}
+
+struct ParsedInitManifest {
+    manifest: ResourceManifestV1,
+    had_entry_errors: bool,
+}
+
 pub(crate) fn apply_init_directory_if_needed<F>(
     storage: &StorageManager,
     init_dir: Option<&Path>,
@@ -30,8 +59,26 @@ where
     F: Fn(&str) -> bool,
 {
     let staging_root = storage.base_dir().join(".init-staging");
-    fs::create_dir_all(&staging_root).map_err(|err| format!("create init staging root: {err}"))?;
-    clean_staging_root(&staging_root)?;
+    if let Err(err) =
+        fs::create_dir_all(&staging_root).map_err(|err| format!("create init staging root: {err}"))
+    {
+        tracing::warn!(
+            phase = INIT_APPLY_PHASE,
+            result = "skipped",
+            reason = %err,
+            "startup init directory"
+        );
+        return Ok(());
+    }
+    if let Err(err) = clean_staging_root(&staging_root) {
+        tracing::warn!(
+            phase = INIT_APPLY_PHASE,
+            result = "skipped",
+            reason = %err,
+            "startup init directory"
+        );
+        return Ok(());
+    }
 
     let Some(init_dir) = init_dir else {
         tracing::info!(
@@ -70,20 +117,9 @@ where
             return Ok(());
         }
     };
-    let manifest: ResourceManifestV1 = match serde_json::from_slice(&raw) {
+    let raw_manifest: RawInitManifest = match serde_json::from_slice(&raw) {
         Ok(manifest) => manifest,
         Err(err) => {
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw)
-                && value.is_object()
-            {
-                match value.get("bundle_version") {
-                    None => return Err("bundle_version is required".to_string()),
-                    Some(version) if !version.is_string() => {
-                        return Err("bundle_version must be a string".to_string());
-                    }
-                    Some(_) => {}
-                }
-            }
             tracing::warn!(
                 phase = INIT_APPLY_PHASE,
                 result = "skipped",
@@ -94,24 +130,44 @@ where
             return Ok(());
         }
     };
-    if manifest.format_version != RESOURCE_DIRECTORY_FORMAT_VERSION {
+    if raw_manifest.format_version != RESOURCE_DIRECTORY_FORMAT_VERSION {
         tracing::warn!(
             phase = INIT_APPLY_PHASE,
             result = "skipped",
             init_path = %init_dir.display(),
-            format_version = manifest.format_version,
+            format_version = raw_manifest.format_version,
             reason = "unsupported_format_version",
             "startup init directory"
         );
         return Ok(());
     }
-    validate_bundle_version(&manifest.bundle_version)?;
+    if let Err(err) = validate_bundle_version(&raw_manifest.bundle_version) {
+        tracing::warn!(
+            phase = INIT_APPLY_PHASE,
+            result = "skipped",
+            init_path = %init_dir.display(),
+            reason = %err,
+            "startup init directory"
+        );
+        return Ok(());
+    }
 
-    if storage
-        .get_init_apply_meta()
-        .map_err(|err| format!("read init apply state: {err}"))?
-        .is_some_and(|state| state.bundle_version == manifest.bundle_version)
-    {
+    let parsed = parse_init_entries(raw_manifest);
+    let manifest = parsed.manifest;
+
+    let applied_state = match storage.get_init_apply_meta() {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::warn!(
+                phase = INIT_APPLY_PHASE,
+                result = "skipped",
+                reason = %format!("read init apply state: {err}"),
+                "startup init directory"
+            );
+            return Ok(());
+        }
+    };
+    if applied_state.is_some_and(|state| state.bundle_version == manifest.bundle_version) {
         tracing::info!(
             phase = INIT_APPLY_PHASE,
             result = "skipped_unchanged",
@@ -123,13 +179,19 @@ where
     }
 
     let phase = StartupPhase::new("manager", DEFAULT_FLOW_INSTANCE_ID, INIT_APPLY_PHASE);
-    let result = apply_manifest(storage, &init_dir, manifest, is_declared_instance);
+    let result = apply_manifest(
+        storage,
+        &init_dir,
+        manifest,
+        parsed.had_entry_errors,
+        is_declared_instance,
+    );
     match &result {
         Ok(summary) => {
             tracing::info!(
                 phase = INIT_APPLY_PHASE,
                 result = "applied",
-                created = summary.created,
+                resources_applied = summary.resources_applied,
                 kept_existing = summary.kept_existing,
                 schema_files_installed = summary.schema_files,
                 wasm_files_installed = summary.wasm_files,
@@ -139,7 +201,180 @@ where
         }
         Err(err) => phase.log_failure(err),
     }
-    result.map(|_| ())
+    if let Err(err) = result {
+        tracing::warn!(
+            phase = INIT_APPLY_PHASE,
+            result = "partial_or_skipped",
+            reason = %err,
+            "startup init directory did not complete"
+        );
+    }
+    Ok(())
+}
+
+fn parse_init_entries(raw: RawInitManifest) -> ParsedInitManifest {
+    let bundle_version = raw.bundle_version;
+    let (memory_topics, memory_errors) = decode_resource_entries(
+        &bundle_version,
+        "memory_topics",
+        "topic",
+        raw.resources.memory_topics,
+        false,
+    );
+    let (shared_mqtt_clients, mqtt_errors) = decode_resource_entries(
+        &bundle_version,
+        "shared_mqtt_clients",
+        "key",
+        raw.resources.shared_mqtt_clients,
+        false,
+    );
+    let (schemas, schema_errors) = decode_resource_entries(
+        &bundle_version,
+        "schemas",
+        "name",
+        raw.resources.schemas,
+        false,
+    );
+    let (streams, stream_errors) = decode_resource_entries(
+        &bundle_version,
+        "streams",
+        "name",
+        raw.resources.streams,
+        false,
+    );
+    let (pipelines, pipeline_errors) = decode_resource_entries(
+        &bundle_version,
+        "pipelines",
+        "id",
+        raw.resources.pipelines,
+        false,
+    );
+    let (udfs, udf_errors) =
+        decode_resource_entries(&bundle_version, "udfs", "name", raw.resources.udfs, true);
+    let (tables, table_errors) = decode_resource_entries(
+        &bundle_version,
+        "tables",
+        "name",
+        raw.resources.tables,
+        false,
+    );
+    ParsedInitManifest {
+        manifest: ResourceManifestV1 {
+            format_version: raw.format_version,
+            bundle_version,
+            resources: ExportResources {
+                memory_topics,
+                shared_mqtt_clients,
+                schemas,
+                streams,
+                pipelines,
+                udfs,
+                tables,
+            },
+        },
+        had_entry_errors: memory_errors
+            || mqtt_errors
+            || schema_errors
+            || stream_errors
+            || pipeline_errors
+            || udf_errors
+            || table_errors,
+    }
+}
+
+fn decode_resource_entries<T>(
+    bundle_version: &str,
+    resource_kind: &str,
+    identity_field: &str,
+    entries: Vec<serde_json::Value>,
+    lowercase_identity: bool,
+) -> (Vec<T>, bool)
+where
+    T: DeserializeOwned,
+{
+    let mut identities = Vec::with_capacity(entries.len());
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for entry in &entries {
+        let identity = entry
+            .get(identity_field)
+            .and_then(serde_json::Value::as_str)
+            .map(|value| {
+                if lowercase_identity {
+                    value.to_ascii_lowercase()
+                } else {
+                    value.to_string()
+                }
+            });
+        if let Some(identity) = &identity {
+            *counts.entry(identity.clone()).or_default() += 1;
+        }
+        identities.push(identity);
+    }
+
+    let mut decoded = Vec::new();
+    let mut had_errors = false;
+    for (index, (entry, identity)) in entries.into_iter().zip(identities).enumerate() {
+        if identity
+            .as_ref()
+            .and_then(|identity| counts.get(identity))
+            .is_some_and(|count| *count > 1)
+        {
+            had_errors = true;
+            log_init_resource_result(
+                bundle_version,
+                resource_kind,
+                identity.as_deref(),
+                entry.get("revision").and_then(serde_json::Value::as_u64),
+                None,
+                "failed_validation",
+                "duplicate_identity",
+                Some(index),
+            );
+            continue;
+        }
+        match serde_json::from_value(entry) {
+            Ok(resource) => decoded.push(resource),
+            Err(err) => {
+                had_errors = true;
+                log_init_resource_result(
+                    bundle_version,
+                    resource_kind,
+                    identity.as_deref(),
+                    None,
+                    None,
+                    "failed_validation",
+                    &err.to_string(),
+                    Some(index),
+                );
+            }
+        }
+    }
+    (decoded, had_errors)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_init_resource_result(
+    bundle_version: &str,
+    resource_kind: &str,
+    resource_id: Option<&str>,
+    incoming_revision: Option<u64>,
+    current_revision: Option<u64>,
+    result: &str,
+    reason: &str,
+    resource_index: Option<usize>,
+) {
+    tracing::info!(
+        phase = INIT_APPLY_PHASE,
+        bundle_version,
+        resource_kind,
+        resource_id = resource_id.unwrap_or("<unknown>"),
+        incoming_revision,
+        current_revision,
+        result,
+        reason,
+        resource_index,
+        "startup init resource"
+    );
 }
 
 fn resolve_init_directory(storage: &StorageManager, path: &Path) -> Result<PathBuf, String> {
@@ -167,6 +402,7 @@ fn apply_manifest<F>(
     storage: &StorageManager,
     init_dir: &Path,
     manifest: ResourceManifestV1,
+    had_entry_errors: bool,
     is_declared_instance: &F,
 ) -> Result<ApplySummary, String>
 where
@@ -174,8 +410,9 @@ where
 {
     validate_incoming_identities(&manifest.resources)?;
     let live = build_export_resources(storage)?;
-    let (candidate_resources, pending_resources, kept_existing) =
-        build_apply_candidate(live, manifest.resources);
+    let initial_live = live.clone();
+    let (_candidate_resources, mut pending_resources, kept_existing) =
+        build_apply_candidate(&manifest.bundle_version, live, manifest.resources);
     let staging_root = storage.base_dir().join(".init-staging");
     let work = tempfile::Builder::new()
         .prefix("apply.")
@@ -183,52 +420,126 @@ where
         .map_err(|err| format!("create init staging directory: {err}"))?;
 
     let mut limits = SourceLimits::default();
+    let mut preparation_errors = false;
     let combined_schemas = if pending_resources.schemas.is_empty() {
         storage.schemas_dir()
     } else {
         let combined = work.path().join("schemas");
         fs::create_dir(&combined).map_err(|err| format!("create schema staging root: {err}"))?;
         copy_tree_limited(&storage.schemas_dir(), &combined, &mut limits)?;
-        for schema in &pending_resources.schemas {
+        let mut prepared_schemas = Vec::with_capacity(pending_resources.schemas.len());
+        for schema in pending_resources.schemas.drain(..) {
             let source = init_dir
                 .join("schemas")
                 .join(schema.schema_type.trim().to_ascii_lowercase())
                 .join(&schema.name);
-            if source.exists() {
-                let destination = combined
-                    .join(schema.schema_type.trim().to_ascii_lowercase())
-                    .join(&schema.name);
-                fs::create_dir_all(
-                    destination.parent().ok_or_else(|| {
+            let copy_result =
+                if source.exists() {
+                    let destination = combined
+                        .join(schema.schema_type.trim().to_ascii_lowercase())
+                        .join(&schema.name);
+                    fs::create_dir_all(destination.parent().ok_or_else(|| {
                         format!("schema {} has no destination parent", schema.name)
-                    })?,
-                )
-                .map_err(|err| format!("create schema type staging directory: {err}"))?;
-                copy_tree_limited(&source, &destination, &mut limits)?;
+                    })?)
+                    .map_err(|err| format!("create schema type staging directory: {err}"))
+                    .and_then(|()| copy_tree_limited(&source, &destination, &mut limits))
+                } else {
+                    Ok(())
+                };
+            match copy_result {
+                Ok(()) => prepared_schemas.push(schema),
+                Err(err) => {
+                    preparation_errors = true;
+                    log_init_resource_result(
+                        &manifest.bundle_version,
+                        "schemas",
+                        Some(&schema.name),
+                        Some(schema.revision),
+                        None,
+                        "failed_install",
+                        &err,
+                        None,
+                    );
+                }
             }
         }
+        pending_resources.schemas = prepared_schemas;
         combined
     };
 
-    let candidate = ResourceManifestV1 {
-        format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
-        bundle_version: manifest.bundle_version.clone(),
-        resources: candidate_resources,
-    };
-    let candidate_snapshot =
-        validate_and_build_snapshot(&candidate, Some(&combined_schemas), is_declared_instance)?;
-    let pending_snapshot = filter_pending_snapshot(candidate_snapshot, &pending_resources);
+    let (mut pending_resources, mut pending_snapshot, validation_errors) =
+        validate_pending_resources_best_effort(
+            &manifest.bundle_version,
+            initial_live,
+            pending_resources,
+            Some(&combined_schemas),
+            is_declared_instance,
+        );
 
     let wasm_source = work.path().join("wasm-source");
     fs::create_dir(&wasm_source).map_err(|err| format!("create WASM source staging: {err}"))?;
-    for udf in &pending_resources.udfs {
+    let mut prepared_udfs = Vec::with_capacity(pending_resources.udfs.len());
+    for udf in pending_resources.udfs.drain(..) {
         let file_name = format!("{}.wasm", udf.wasm_sha256);
-        copy_regular_file_limited(
-            &init_dir.join("wasm_files").join(&file_name),
-            &wasm_source.join(&file_name),
-            &mut limits,
-        )?;
+        let udf_source = work.path().join("one-udf-source");
+        let udf_staged = work.path().join("one-udf-staged");
+        if let Err(err) = fs::create_dir_all(&udf_source)
+            .map_err(|err| format!("create per-UDF source staging: {err}"))
+            .and_then(|()| {
+                fs::create_dir_all(&udf_staged)
+                    .map_err(|err| format!("create per-UDF validation staging: {err}"))
+            })
+            .and_then(|()| {
+                copy_regular_file_limited(
+                    &init_dir.join("wasm_files").join(&file_name),
+                    &udf_source.join(&file_name),
+                    &mut limits,
+                )
+            })
+            .and_then(|()| {
+                crate::import::validate_and_copy_udfs_for_import(
+                    std::slice::from_ref(
+                        pending_snapshot
+                            .udfs
+                            .iter()
+                            .find(|stored| stored.name == udf.name)
+                            .ok_or_else(|| {
+                                format!("validated UDF {} is missing from snapshot", udf.name)
+                            })?,
+                    ),
+                    &udf_source,
+                    &udf_staged,
+                )
+            })
+            .and_then(|()| {
+                copy_regular_file_limited(
+                    &udf_staged.join(&file_name),
+                    &wasm_source.join(&file_name),
+                    &mut limits,
+                )
+            })
+        {
+            preparation_errors = true;
+            pending_snapshot
+                .udfs
+                .retain(|stored| stored.name != udf.name);
+            log_init_resource_result(
+                &manifest.bundle_version,
+                "udfs",
+                Some(&udf.name),
+                Some(udf.revision),
+                None,
+                "failed_install",
+                &err,
+                None,
+            );
+        } else {
+            prepared_udfs.push(udf);
+        }
+        let _ = fs::remove_dir_all(&udf_source);
+        let _ = fs::remove_dir_all(&udf_staged);
     }
+    pending_resources.udfs = prepared_udfs;
     let staged_wasm = work.path().join("wasm_files");
     fs::create_dir(&staged_wasm).map_err(|err| format!("create WASM staging directory: {err}"))?;
     crate::import::validate_and_copy_udfs_for_import(
@@ -237,18 +548,47 @@ where
         &staged_wasm,
     )?;
 
+    let final_schemas = if pending_resources.schemas.is_empty() {
+        storage.schemas_dir()
+    } else {
+        let final_schemas = work.path().join("final-schemas");
+        fs::create_dir(&final_schemas)
+            .map_err(|err| format!("create final schema staging root: {err}"))?;
+        copy_tree_limited(&storage.schemas_dir(), &final_schemas, &mut limits)?;
+        for schema in &pending_resources.schemas {
+            let source = init_dir
+                .join("schemas")
+                .join(schema.schema_type.trim().to_ascii_lowercase())
+                .join(&schema.name);
+            if source.exists() {
+                let destination = final_schemas
+                    .join(schema.schema_type.trim().to_ascii_lowercase())
+                    .join(&schema.name);
+                fs::create_dir_all(destination.parent().ok_or_else(|| {
+                    format!("schema {} has no final destination parent", schema.name)
+                })?)
+                .map_err(|err| format!("create final schema type directory: {err}"))?;
+                copy_tree_limited(&source, &destination, &mut limits)?;
+            }
+        }
+        final_schemas
+    };
     let mut schema_tree = if pending_resources.schemas.is_empty() {
         None
     } else {
-        Some(PreparedSchemaTree::prepare(storage, &combined_schemas)?)
+        Some(PreparedSchemaTree::prepare(storage, &final_schemas)?)
     };
     if let Some(tree) = &mut schema_tree {
         tree.activate()?;
     }
     let installed_wasm = install_staged_wasm(&staged_wasm, &storage.wasm_files_dir())?;
-    let meta = StoredInitApplyMeta {
-        bundle_version: manifest.bundle_version,
-        applied_at_ms: unix_time_ms(SystemTime::now())?,
+    let meta = if had_entry_errors || validation_errors || preparation_errors {
+        None
+    } else {
+        Some(StoredInitApplyMeta {
+            bundle_version: manifest.bundle_version,
+            applied_at_ms: unix_time_ms(SystemTime::now())?,
+        })
     };
     if let Err(err) = storage.apply_init_snapshot(pending_snapshot, meta) {
         for path in &installed_wasm {
@@ -267,14 +607,379 @@ where
     }
 
     Ok(ApplySummary {
-        created: count_resources(&pending_resources),
+        resources_applied: count_resources(&pending_resources),
         kept_existing,
         schema_files: limits.entries,
         wasm_files: installed_wasm.len(),
     })
 }
 
+fn empty_resources() -> ExportResources {
+    ExportResources {
+        memory_topics: Vec::new(),
+        shared_mqtt_clients: Vec::new(),
+        schemas: Vec::new(),
+        streams: Vec::new(),
+        pipelines: Vec::new(),
+        udfs: Vec::new(),
+        tables: Vec::new(),
+    }
+}
+
+fn append_snapshot(target: &mut MetadataExportSnapshot, mut source: MetadataExportSnapshot) {
+    target.streams.append(&mut source.streams);
+    target.schemas.append(&mut source.schemas);
+    target.pipelines.append(&mut source.pipelines);
+    target
+        .pipeline_run_states
+        .append(&mut source.pipeline_run_states);
+    target.mqtt_configs.append(&mut source.mqtt_configs);
+    target.memory_topics.append(&mut source.memory_topics);
+    target.udfs.append(&mut source.udfs);
+    target.tables.append(&mut source.tables);
+}
+
+fn empty_snapshot() -> MetadataExportSnapshot {
+    MetadataExportSnapshot {
+        streams: Vec::new(),
+        schemas: Vec::new(),
+        pipelines: Vec::new(),
+        pipeline_run_states: Vec::new(),
+        mqtt_configs: Vec::new(),
+        memory_topics: Vec::new(),
+        udfs: Vec::new(),
+        tables: Vec::new(),
+    }
+}
+
+fn validation_result_label(error: &str) -> &'static str {
+    if error.contains("missing")
+        || error.contains("not found")
+        || error.contains("unknown stream")
+        || error.contains("undeclared flow instance")
+    {
+        "failed_dependency"
+    } else {
+        "failed_validation"
+    }
+}
+
+fn validate_pending_resources_best_effort<F>(
+    bundle_version: &str,
+    mut effective: ExportResources,
+    pending: ExportResources,
+    schema_source_root: Option<&Path>,
+    is_declared_instance: &F,
+) -> (ExportResources, MetadataExportSnapshot, bool)
+where
+    F: Fn(&str) -> bool,
+{
+    let mut accepted = empty_resources();
+    let mut collected = empty_snapshot();
+    let mut had_errors = false;
+
+    macro_rules! process_foundation {
+        ($field:ident, $kind:literal, $id:expr, $revision:expr) => {
+            for item in pending.$field {
+                let id = $id(&item);
+                let incoming_revision = $revision(&item);
+                let current_revision = effective
+                    .$field
+                    .iter()
+                    .find(|current| $id(current) == id)
+                    .map($revision);
+                let mut proposed = effective.clone();
+                upsert_resource(&mut proposed.$field, item.clone(), $id);
+                let mut validation_view = proposed.clone();
+                validation_view.streams.clear();
+                validation_view.pipelines.clear();
+                validation_view.tables.clear();
+                match validate_resources(
+                    bundle_version,
+                    validation_view,
+                    schema_source_root,
+                    is_declared_instance,
+                ) {
+                    Ok(snapshot) => {
+                        let mut selected = empty_resources();
+                        selected.$field.push(item.clone());
+                        append_snapshot(
+                            &mut collected,
+                            filter_pending_snapshot(snapshot, &selected),
+                        );
+                        accepted.$field.push(item);
+                        effective = proposed;
+                        log_init_resource_result(
+                            bundle_version,
+                            $kind,
+                            Some(&id),
+                            Some(incoming_revision),
+                            current_revision,
+                            if current_revision.is_some() {
+                                "updated"
+                            } else {
+                                "created"
+                            },
+                            "revision_won",
+                            None,
+                        );
+                    }
+                    Err(err) => {
+                        had_errors = true;
+                        log_init_resource_result(
+                            bundle_version,
+                            $kind,
+                            Some(&id),
+                            Some(incoming_revision),
+                            current_revision,
+                            validation_result_label(&err),
+                            &err,
+                            None,
+                        );
+                    }
+                }
+            }
+        };
+    }
+
+    process_foundation!(
+        schemas,
+        "schemas",
+        |item: &crate::export::ExportSchema| item.name.clone(),
+        |item: &crate::export::ExportSchema| item.revision
+    );
+    process_foundation!(
+        udfs,
+        "udfs",
+        |item: &crate::export::ExportUdf| item.name.to_ascii_lowercase(),
+        |item: &crate::export::ExportUdf| item.revision
+    );
+    process_foundation!(
+        memory_topics,
+        "memory_topics",
+        |item: &crate::export::ExportMemoryTopic| item.topic.clone(),
+        |item: &crate::export::ExportMemoryTopic| item.revision
+    );
+    process_foundation!(
+        shared_mqtt_clients,
+        "shared_mqtt_clients",
+        |item: &crate::export::ExportSharedMqttClient| item.definition.key.clone(),
+        |item: &crate::export::ExportSharedMqttClient| item.revision
+    );
+
+    for item in pending.tables {
+        let id = item.definition.name.clone();
+        let incoming_revision = item.definition.revision;
+        let current_revision = effective
+            .tables
+            .iter()
+            .find(|current| current.definition.name == id)
+            .map(|current| current.definition.revision);
+        let mut proposed = effective.clone();
+        upsert_resource(&mut proposed.tables, item.clone(), |table| {
+            table.definition.name.clone()
+        });
+        let mut validation_view = proposed.clone();
+        validation_view.tables = vec![item.clone()];
+        validation_view.pipelines.clear();
+        match validate_resources(
+            bundle_version,
+            validation_view,
+            schema_source_root,
+            is_declared_instance,
+        ) {
+            Ok(snapshot) => {
+                let mut selected = empty_resources();
+                selected.tables.push(item.clone());
+                append_snapshot(&mut collected, filter_pending_snapshot(snapshot, &selected));
+                accepted.tables.push(item);
+                effective = proposed;
+                log_init_resource_result(
+                    bundle_version,
+                    "tables",
+                    Some(&id),
+                    Some(incoming_revision),
+                    current_revision,
+                    if current_revision.is_some() {
+                        "updated"
+                    } else {
+                        "created"
+                    },
+                    "revision_won",
+                    None,
+                );
+            }
+            Err(err) => {
+                had_errors = true;
+                log_init_resource_result(
+                    bundle_version,
+                    "tables",
+                    Some(&id),
+                    Some(incoming_revision),
+                    current_revision,
+                    validation_result_label(&err),
+                    &err,
+                    None,
+                );
+            }
+        }
+    }
+
+    for item in pending.streams {
+        let id = item.name.clone();
+        let incoming_revision = item.revision;
+        let current_revision = effective
+            .streams
+            .iter()
+            .find(|current| current.name == id)
+            .map(|current| current.revision);
+        let mut proposed = effective.clone();
+        upsert_resource(&mut proposed.streams, item.clone(), |stream| {
+            stream.name.clone()
+        });
+        let mut validation_view = proposed.clone();
+        validation_view.streams = vec![item.clone()];
+        validation_view.pipelines.clear();
+        match validate_resources(
+            bundle_version,
+            validation_view,
+            schema_source_root,
+            is_declared_instance,
+        ) {
+            Ok(snapshot) => {
+                let mut selected = empty_resources();
+                selected.streams.push(item.clone());
+                append_snapshot(&mut collected, filter_pending_snapshot(snapshot, &selected));
+                accepted.streams.push(item);
+                effective = proposed;
+                log_init_resource_result(
+                    bundle_version,
+                    "streams",
+                    Some(&id),
+                    Some(incoming_revision),
+                    current_revision,
+                    if current_revision.is_some() {
+                        "updated"
+                    } else {
+                        "created"
+                    },
+                    "revision_won",
+                    None,
+                );
+            }
+            Err(err) => {
+                had_errors = true;
+                log_init_resource_result(
+                    bundle_version,
+                    "streams",
+                    Some(&id),
+                    Some(incoming_revision),
+                    current_revision,
+                    validation_result_label(&err),
+                    &err,
+                    None,
+                );
+            }
+        }
+    }
+
+    for item in pending.pipelines {
+        let id = item.definition.id.clone();
+        let incoming_revision = item.definition.revision;
+        let current_revision = effective
+            .pipelines
+            .iter()
+            .find(|current| current.definition.id == id)
+            .map(|current| current.definition.revision);
+        let mut proposed = effective.clone();
+        upsert_resource(&mut proposed.pipelines, item.clone(), |pipeline| {
+            pipeline.definition.id.clone()
+        });
+        let mut validation_view = proposed.clone();
+        validation_view.pipelines = vec![item.clone()];
+        match validate_resources(
+            bundle_version,
+            validation_view,
+            schema_source_root,
+            is_declared_instance,
+        ) {
+            Ok(snapshot) => {
+                let mut selected = empty_resources();
+                selected.pipelines.push(item.clone());
+                append_snapshot(&mut collected, filter_pending_snapshot(snapshot, &selected));
+                accepted.pipelines.push(item);
+                effective = proposed;
+                log_init_resource_result(
+                    bundle_version,
+                    "pipelines",
+                    Some(&id),
+                    Some(incoming_revision),
+                    current_revision,
+                    if current_revision.is_some() {
+                        "updated"
+                    } else {
+                        "created"
+                    },
+                    "revision_won",
+                    None,
+                );
+            }
+            Err(err) => {
+                had_errors = true;
+                log_init_resource_result(
+                    bundle_version,
+                    "pipelines",
+                    Some(&id),
+                    Some(incoming_revision),
+                    current_revision,
+                    validation_result_label(&err),
+                    &err,
+                    None,
+                );
+            }
+        }
+    }
+
+    (accepted, collected, had_errors)
+}
+
+fn validate_resources<F>(
+    bundle_version: &str,
+    resources: ExportResources,
+    schema_source_root: Option<&Path>,
+    is_declared_instance: &F,
+) -> Result<MetadataExportSnapshot, String>
+where
+    F: Fn(&str) -> bool,
+{
+    validate_and_build_snapshot(
+        &ResourceManifestV1 {
+            format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
+            bundle_version: bundle_version.to_string(),
+            resources,
+        },
+        schema_source_root,
+        is_declared_instance,
+    )
+}
+
+fn upsert_resource<T, F>(resources: &mut Vec<T>, item: T, identity: F)
+where
+    F: Fn(&T) -> String,
+{
+    let id = identity(&item);
+    if let Some(position) = resources
+        .iter()
+        .position(|resource| identity(resource) == id)
+    {
+        resources[position] = item;
+    } else {
+        resources.push(item);
+    }
+}
+
 fn build_apply_candidate(
+    bundle_version: &str,
     mut live: ExportResources,
     incoming: ExportResources,
 ) -> (ExportResources, ExportResources, usize) {
@@ -289,49 +994,70 @@ fn build_apply_candidate(
     };
     let mut kept = 0;
     macro_rules! merge {
-        ($field:ident, $id:expr) => {{
-            let mut ids: BTreeSet<String> = live.$field.iter().map($id).collect();
+        ($field:ident, $id:expr, $revision:expr) => {{
             for item in incoming.$field {
                 let id = $id(&item);
-                if ids.insert(id.clone()) {
+                let incoming_revision = $revision(&item);
+                if let Some(position) = live.$field.iter().position(|live| $id(live) == id) {
+                    let current_revision = $revision(&live.$field[position]);
+                    if incoming_revision <= current_revision {
+                        kept += 1;
+                        log_init_resource_result(
+                            bundle_version,
+                            stringify!($field),
+                            Some(&id),
+                            Some(incoming_revision),
+                            Some(current_revision),
+                            "ignored_not_newer",
+                            "incoming_revision_not_greater",
+                            None,
+                        );
+                        continue;
+                    }
+                    pending.$field.push(item.clone());
+                    live.$field[position] = item;
+                } else {
                     pending.$field.push(item.clone());
                     live.$field.push(item);
-                } else {
-                    kept += 1;
-                    tracing::warn!(
-                        resource_kind = stringify!($field),
-                        resource_id = %id,
-                        reason = "data_dir_preferred",
-                        "init resource kept existing"
-                    );
                 }
             }
         }};
     }
-    merge!(memory_topics, |item: &crate::export::ExportMemoryTopic| {
-        item.topic.clone()
-    });
+    merge!(
+        memory_topics,
+        |item: &crate::export::ExportMemoryTopic| { item.topic.clone() },
+        |item: &crate::export::ExportMemoryTopic| item.revision
+    );
     merge!(
         shared_mqtt_clients,
-        |item: &flow::connector::SharedMqttClientConfig| item.key.clone()
+        |item: &crate::export::ExportSharedMqttClient| item.definition.key.clone(),
+        |item: &crate::export::ExportSharedMqttClient| item.revision
     );
-    merge!(schemas, |item: &crate::export::ExportSchema| item
-        .name
-        .clone());
-    merge!(streams, |item: &crate::stream::CreateStreamRequest| item
-        .name
-        .clone());
-    merge!(pipelines, |item: &crate::export::ExportPipeline| item
-        .definition
-        .id
-        .clone());
-    merge!(udfs, |item: &crate::export::ExportUdf| item
-        .name
-        .to_ascii_lowercase());
-    merge!(tables, |item: &crate::export::ExportTable| item
-        .definition
-        .name
-        .clone());
+    merge!(
+        schemas,
+        |item: &crate::export::ExportSchema| item.name.clone(),
+        |item: &crate::export::ExportSchema| item.revision
+    );
+    merge!(
+        streams,
+        |item: &crate::stream::CreateStreamRequest| item.name.clone(),
+        |item: &crate::stream::CreateStreamRequest| item.revision
+    );
+    merge!(
+        pipelines,
+        |item: &crate::export::ExportPipeline| item.definition.id.clone(),
+        |item: &crate::export::ExportPipeline| item.definition.revision
+    );
+    merge!(
+        udfs,
+        |item: &crate::export::ExportUdf| item.name.to_ascii_lowercase(),
+        |item: &crate::export::ExportUdf| item.revision
+    );
+    merge!(
+        tables,
+        |item: &crate::export::ExportTable| item.definition.name.clone(),
+        |item: &crate::export::ExportTable| item.definition.revision
+    );
     (live, pending, kept)
 }
 
@@ -359,7 +1085,7 @@ fn validate_incoming_identities(resources: &ExportResources) -> Result<(), Strin
         resources
             .shared_mqtt_clients
             .iter()
-            .map(|item| item.key.as_str()),
+            .map(|item| item.definition.key.as_str()),
     )?;
     unique(
         "schema",
@@ -408,7 +1134,7 @@ fn filter_pending_snapshot(
     let mqtt_ids = pending
         .shared_mqtt_clients
         .iter()
-        .map(|v| v.key.as_str())
+        .map(|v| v.definition.key.as_str())
         .collect::<BTreeSet<_>>();
     let topic_ids = pending
         .memory_topics
@@ -678,7 +1404,7 @@ fn unix_time_ms(value: SystemTime) -> Result<u64, String> {
 }
 
 struct ApplySummary {
-    created: usize,
+    resources_applied: usize,
     kept_existing: usize,
     schema_files: usize,
     wasm_files: usize,
@@ -690,18 +1416,21 @@ mod tests {
     use storage::{StorageManager, StoredMemoryTopicKind};
     use tempfile::tempdir;
 
-    fn manifest(version: &str, topics: &[(&str, usize)]) -> ResourceManifestV1 {
+    fn manifest(version: &str, topics: &[(&str, usize, u64)]) -> ResourceManifestV1 {
         ResourceManifestV1 {
             format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
             bundle_version: version.to_string(),
             resources: ExportResources {
                 memory_topics: topics
                     .iter()
-                    .map(|(topic, capacity)| crate::export::ExportMemoryTopic {
-                        topic: (*topic).to_string(),
-                        kind: StoredMemoryTopicKind::Bytes,
-                        capacity: *capacity,
-                    })
+                    .map(
+                        |(topic, capacity, revision)| crate::export::ExportMemoryTopic {
+                            topic: (*topic).to_string(),
+                            revision: *revision,
+                            kind: StoredMemoryTopicKind::Bytes,
+                            capacity: *capacity,
+                        },
+                    )
                     .collect(),
                 shared_mqtt_clients: Vec::new(),
                 schemas: Vec::new(),
@@ -727,7 +1456,7 @@ mod tests {
         let root = tempdir().expect("root");
         let storage = StorageManager::new(root.path().join("data")).expect("storage");
         let init_dir = root.path().join("init");
-        write_manifest(&init_dir, &manifest("v1", &[("topic_a", 16)]));
+        write_manifest(&init_dir, &manifest("v1", &[("topic_a", 16, 1)]));
 
         apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true).expect("first apply");
         assert!(storage.get_memory_topic("topic_a").unwrap().is_some());
@@ -752,12 +1481,12 @@ mod tests {
         let root = tempdir().expect("root");
         let storage = StorageManager::new(root.path().join("data")).expect("storage");
         let init_dir = root.path().join("init");
-        write_manifest(&init_dir, &manifest("v1", &[("topic_a", 16)]));
+        write_manifest(&init_dir, &manifest("v1", &[("topic_a", 16, 1)]));
         apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true).expect("first apply");
 
         write_manifest(
             &init_dir,
-            &manifest("v2", &[("topic_a", 64), ("topic_b", 32)]),
+            &manifest("v2", &[("topic_a", 64, 2), ("topic_b", 32, 1)]),
         );
         apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true).expect("second apply");
 
@@ -767,7 +1496,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .capacity,
-            16
+            64
         );
         assert_eq!(
             storage
@@ -793,7 +1522,86 @@ mod tests {
     }
 
     #[test]
-    fn missing_bundle_version_fails_startup() {
+    fn invalid_entry_does_not_block_independent_valid_entry() {
+        let root = tempdir().expect("root");
+        let storage = StorageManager::new(root.path().join("data")).expect("storage");
+        let init_dir = root.path().join("init");
+        fs::create_dir_all(&init_dir).expect("create init directory");
+        fs::write(
+            init_dir.join(MANIFEST_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "format_version": 1,
+                "bundle_version": "partial-v1",
+                "resources": {
+                    "memory_topics": [
+                        {"topic": "valid_topic", "revision": 1, "kind": "bytes", "capacity": 8},
+                        {"topic": "invalid_topic", "kind": "bytes", "capacity": 8}
+                    ],
+                    "shared_mqtt_clients": [],
+                    "schemas": [],
+                    "streams": [],
+                    "pipelines": [],
+                    "udfs": []
+                }
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true)
+            .expect("partial init is non-fatal");
+
+        assert!(storage.get_memory_topic("valid_topic").unwrap().is_some());
+        assert!(storage.get_memory_topic("invalid_topic").unwrap().is_none());
+        assert!(
+            storage.get_init_apply_meta().unwrap().is_none(),
+            "partial static failure must not advance bundle_version"
+        );
+    }
+
+    #[test]
+    fn duplicate_identity_skips_all_duplicates_but_applies_other_resources() {
+        let root = tempdir().expect("root");
+        let storage = StorageManager::new(root.path().join("data")).expect("storage");
+        let init_dir = root.path().join("init");
+        fs::create_dir_all(&init_dir).expect("create init directory");
+        fs::write(
+            init_dir.join(MANIFEST_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "format_version": 1,
+                "bundle_version": "duplicates-v1",
+                "resources": {
+                    "memory_topics": [
+                        {"topic": "duplicate_topic", "revision": 1, "kind": "bytes", "capacity": 8},
+                        {"topic": "duplicate_topic", "revision": 2, "kind": "bytes", "capacity": 16},
+                        {"topic": "other_topic", "revision": 1, "kind": "bytes", "capacity": 4}
+                    ],
+                    "shared_mqtt_clients": [],
+                    "schemas": [],
+                    "streams": [],
+                    "pipelines": [],
+                    "udfs": []
+                }
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true)
+            .expect("duplicate entry is non-fatal");
+
+        assert!(
+            storage
+                .get_memory_topic("duplicate_topic")
+                .unwrap()
+                .is_none()
+        );
+        assert!(storage.get_memory_topic("other_topic").unwrap().is_some());
+        assert!(storage.get_init_apply_meta().unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_bundle_version_is_skipped_without_failing_startup() {
         let root = tempdir().expect("root");
         let storage = StorageManager::new(root.path().join("data")).expect("storage");
         let init_dir = root.path().join("init");
@@ -804,9 +1612,9 @@ mod tests {
         )
         .expect("write manifest");
 
-        let err = apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true)
-            .expect_err("missing bundle_version must fail");
-        assert_eq!(err, "bundle_version is required");
+        apply_init_directory_if_needed(&storage, Some(&init_dir), &|_| true)
+            .expect("missing bundle_version must be a soft init failure");
+        assert!(storage.get_init_apply_meta().unwrap().is_none());
     }
 
     #[test]

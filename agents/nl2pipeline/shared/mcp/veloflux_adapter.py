@@ -81,14 +81,17 @@ def register_veloflux_mcp(registry: McpRegistry, manager: ManagerClient) -> None
     def _pipelines_create(args: Dict[str, Any]) -> Dict[str, Any]:
         # Pass-through to Manager (agent controls the id lifecycle).
         pipeline_id = str(args.get("id", "")).strip()
+        revision = args.get("revision")
         sql = str(args.get("sql", "")).strip()
         sinks = args.get("sinks")
         options = args.get("options")
         if not pipeline_id:
             raise McpError(code="invalid_params", message="missing required param: id")
+        if revision is None:
+            raise McpError(code="invalid_params", message="missing required param: revision")
         if not sql:
             raise McpError(code="invalid_params", message="missing required param: sql")
-        body: Dict[str, Any] = {"id": pipeline_id, "sql": sql}
+        body: Dict[str, Any] = {"id": pipeline_id, "revision": revision, "sql": sql}
         if sinks is not None:
             body["sinks"] = sinks
         if options is not None:

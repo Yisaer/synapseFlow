@@ -5,7 +5,7 @@ use std::sync::Once;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn write_schema_zip(path: &std::path::Path, files: &[(&str, &[u8])]) {
     use std::io::Write;
@@ -69,6 +69,7 @@ use std::sync::Mutex;
 #[allow(dead_code)]
 pub struct TestEnvironment {
     server_process: Mutex<Child>,
+    data_dir: PathBuf,
     pub base_url: String,
     stopped: AtomicBool,
 }
@@ -127,11 +128,22 @@ impl TestEnvironment {
     fn start() -> Self {
         let binary_path = Self::binary_path();
         let config_path = Self::config_path();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!(
+            "veloflux-sdv-test-data-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&data_dir).expect("create isolated sdv test data directory");
 
         // Start the server process
-        let process = Command::new(&binary_path)
+        let mut process = Command::new(&binary_path)
             .arg("--config")
             .arg(&config_path)
+            .arg("--data-dir")
+            .arg(&data_dir)
             .env(
                 "VELOFLUX_SERVER__MANAGER_ADDR",
                 format!("0.0.0.0:{}", TEST_PORT),
@@ -156,12 +168,16 @@ impl TestEnvironment {
             if client.get(&health_url).send().is_ok() {
                 return Self {
                     server_process: Mutex::new(process),
+                    data_dir,
                     base_url,
                     stopped: AtomicBool::new(false),
                 };
             }
         }
 
+        let _ = process.kill();
+        let _ = process.wait();
+        let _ = std::fs::remove_dir_all(&data_dir);
         panic!("server did not become ready within 30s — check binary path or port conflict");
     }
 
@@ -190,6 +206,7 @@ impl TestEnvironment {
         let _ = Command::new("kill").arg(process.id().to_string()).status();
 
         let _ = process.wait();
+        let _ = std::fs::remove_dir_all(&self.data_dir);
     }
 }
 

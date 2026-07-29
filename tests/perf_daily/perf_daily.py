@@ -174,6 +174,7 @@ def create_stream_body(
 ) -> Dict[str, Any]:
     return {
         "name": stream_name,
+        "revision": 1,
         "type": "mqtt",
         "props": {"broker_url": broker_url, "topic": topic, "qos": qos},
         "schema": {"type": "json", "props": {"columns": build_columns(column_count)}},
@@ -186,6 +187,7 @@ def create_pipeline_body(pipeline_id: str, sql: str) -> Dict[str, Any]:
     # Ensure JSON encoder config is present.
     return {
         "id": pipeline_id,
+        "revision": 1,
         "sql": sql,
         "sinks": [
             {

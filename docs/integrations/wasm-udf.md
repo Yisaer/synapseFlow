@@ -81,7 +81,7 @@ Hot-unregister is deferred to future work.
 
 3. **WASM files stored on-disk, metadata in redb.** The WASM module binary is written to
    a `wasm_files/` directory under `base_dir`. A `udfs` table in `MetadataStorage` holds
-   the serialized `StoredUdf` record (name, file hash, metadata). This follows the same
+   the serialized `StoredUdf` record (name, revision, file hash, metadata). This follows the same
    pattern as existing persisted resources (streams, pipelines, mqtt configs, memory topics).
 
 4. **Batch mode via optional `eval_batch` on `CustomFunc`.** WASM functions can optionally
@@ -107,9 +107,10 @@ const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
 pub struct StoredUdf {
     /// Canonical function name (case-insensitive in SQL, stored lowercase).
     pub name: String,
+    pub revision: u64,
     /// SHA-256 hex digest of the WASM file contents.
     pub wasm_sha256: String,
-    /// Original upload metadata (serialized as JSON for export portability).
+    /// Original upload metadata serialized without identity revision.
     pub raw_json: String,
 }
 ```
@@ -152,12 +153,14 @@ Request: `multipart/form-data`
   `` `[A-Za-z][A-Za-z0-9_]{0,127}` `` (a letter followed by letters, digits, or
   underscores). `GET`/`DELETE /udfs/:name` apply the same lowercase
   canonicalization before lookup. Invalid names return `400 Bad Request`.
+- Field `revision` (text): positive JSON-safe resource revision.
 - Field `wasm_file` (binary): the `.wasm` file
 
 Response `200 OK`:
 ```json
 {
   "name": "my_udf",
+  "revision": 1,
   "wasm_sha256": "a1b2c3...",
   "status": "registered",
   "metadata": {
@@ -207,7 +210,7 @@ Export produces a **ZIP archive** containing:
 
 ```
 veloflux-export-<timestamp>.zip
-├── manifest.json          # ResourceManifestV1 (streams, pipelines, mqtt, memory_topics, udfs)
+├── manifest.json          # ResourceManifestV1 (schemas, streams, tables, pipelines, mqtt, memory_topics, udfs)
 └── wasm_files/            # WASM UDF binaries (one .wasm per function)
     ├── <sha256_1>.wasm
     └── <sha256_2>.wasm
@@ -223,7 +226,8 @@ veloflux-export-<timestamp>.zip
 **Export flow**
 
 1. Serialize `ResourceManifestV1` to `manifest.json`. The `udfs` field contains
-   `ExportUdf` records with `name` and `wasm_sha256` (not the binary).
+   `ExportUdf` records with required `name`, `revision`, and `wasm_sha256` (not
+   the binary).
 2. Copy referenced `.wasm` files from `<base_dir>/wasm_files/` into the archive's
    `wasm_files/` directory.
 3. Return as `application/zip` with `Content-Disposition: attachment`.
@@ -233,6 +237,7 @@ veloflux-export-<timestamp>.zip
 1. Safely extract the ZIP to a temporary directory.
 2. Parse and validate `manifest.json` (streams, pipelines, etc.).
 3. For each UDF in the `udfs` list:
+   - Require `revision` in `1..=9007199254740991`.
    - Require `<sha256>.wasm` to exist in the archive.
    - Recomputed SHA-256 and compare to declared value.
    - Validate the WASM module via `WasmEngine::validate`.
@@ -248,6 +253,10 @@ veloflux-export-<timestamp>.zip
 | `POST` | `/import`         | `multipart/form-data` with a ZIP `file` field |
 
 The previous JSON-only format is no longer supported.
+
+`POST /udfs/upload` requires a multipart `revision` text field. UDF get/list
+responses and export include the persisted revision. UDF create remains
+create-only; startup init is the entry point that compares UDF revisions.
 
 ## WASM Runtime Integration (wasmtime)
 

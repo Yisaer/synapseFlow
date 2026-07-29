@@ -83,6 +83,7 @@ curl -s -XPOST http://127.0.0.1:8080/streams \
   -H "Content-Type: application/json" \
   -d '{
     "name": "powertrain_stream",
+    "revision": 1,
     "type": "mqtt",
     "schema": { "ref": "vehicle_gbf" },
     "props": {
@@ -116,6 +117,7 @@ curl -s -XPOST http://127.0.0.1:8080/pipelines \
   -H "Content-Type: application/json" \
   -d '{
     "id": "powertrain_pipeline",
+    "revision": 1,
     "sql": "SELECT ts, Mess0_Sig1 AS speed, Mess0_Sig2 AS rpm FROM powertrain_stream",
     "sinks": [
       {
@@ -173,6 +175,7 @@ the path identifies the pipeline.
 curl -s -XPUT http://127.0.0.1:8080/pipelines/powertrain_pipeline \
   -H "Content-Type: application/json" \
   -d '{
+    "revision": 2,
     "sql": "SELECT ts, Mess0_Sig1 AS speed, Mess0_Sig2 AS rpm FROM powertrain_stream WHERE Mess0_Sig2 > 900",
     "sinks": [
       {
@@ -244,6 +247,7 @@ curl -s -XPOST http://127.0.0.1:8080/pipelines \
   -H "Content-Type: application/json" \
   -d '{
     "id": "vss_pipeline",
+    "revision": 1,
     "sql": "SELECT * FROM powertrain_stream",
     "sinks": [
       {

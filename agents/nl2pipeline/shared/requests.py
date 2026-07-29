@@ -12,6 +12,7 @@ def build_create_stream_request(
 ) -> Dict[str, Any]:
     return {
         "name": name,
+        "revision": 1,
         "type": "mqtt",
         "props": {"broker_url": broker_url, "topic": topic, "qos": qos},
         "schema": {"type": "json", "props": {"columns": columns}},
@@ -29,6 +30,7 @@ def build_create_pipeline_request(
 ) -> Dict[str, Any]:
     return {
         "id": pipeline_id,
+        "revision": 1,
         "sql": sql,
         "sinks": [
             {

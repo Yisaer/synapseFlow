@@ -200,6 +200,7 @@ fn stream_req(
 ) -> StreamCreateRequest {
     StreamCreateRequest {
         name,
+        revision: 1,
         stream_type: stream_type.to_string(),
         schema,
         props,
@@ -318,6 +319,7 @@ async fn import_bundle(
 fn stream_resource(name: &str) -> JsonValue {
     json!({
         "name": name,
+        "revision": 1,
         "type": "mock",
         "schema": {
             "type": "json",
@@ -336,6 +338,7 @@ fn stream_resource(name: &str) -> JsonValue {
 fn pipeline_resource(id: &str, stream_name: &str) -> JsonValue {
     json!({
         "id": id,
+        "revision": 1,
         "sql": format!("SELECT value FROM {stream_name}"),
         "sinks": [
             {
@@ -613,6 +616,7 @@ fn proptest_pipeline_sink_type_specific_props_validation() {
 
                 let body = json!({
                     "id": pipeline_id,
+                    "revision": 1,
                     "sql": format!("SELECT value FROM {stream_name}"),
                     "sinks": [sink],
                 });
@@ -664,6 +668,7 @@ fn pipeline_encoder_shapes_are_validated() {
 
         let cases = vec![json!({
             "id": format!("pipe_encoder_{}", random_suffix()),
+            "revision": 1,
             "sql": format!("SELECT value FROM {stream_name}"),
             "sinks": [
                 {

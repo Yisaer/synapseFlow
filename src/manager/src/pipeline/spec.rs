@@ -675,6 +675,7 @@ mod tests {
     fn sample_request_with_encoder(encoder: serde_json::Value) -> CreatePipelineRequest {
         serde_json::from_value(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -731,6 +732,7 @@ mod tests {
             .expect("declare collection memory topic");
         let request = serde_json::from_value(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -770,6 +772,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -810,6 +813,7 @@ mod tests {
     fn create_pipeline_request_rejects_non_object_encoder_transform() {
         let result = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -841,6 +845,7 @@ mod tests {
     fn create_pipeline_request_rejects_missing_template_in_encoder_transform() {
         let result = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -874,6 +879,7 @@ mod tests {
     fn create_pipeline_request_rejects_missing_sink_output_mode() {
         let result = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -910,6 +916,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -950,6 +957,7 @@ mod tests {
 
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT speed FROM vehicle_stream",
             "sources": [
                 {
@@ -997,6 +1005,7 @@ mod tests {
 
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_1",
+            "revision": 1,
             "sql": "SELECT speed FROM vehicle_stream",
             "sources": [
                 {
@@ -1040,6 +1049,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_shared_mqtt_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -1079,6 +1089,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_nng_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -1120,6 +1131,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_file_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -1169,6 +1181,7 @@ mod tests {
         let key = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=";
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_file_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -1223,6 +1236,7 @@ mod tests {
         let raw_key = "this-is-not-valid-base64";
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_file_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -1264,6 +1278,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_file_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
@@ -1301,6 +1316,7 @@ mod tests {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_invalid_mqtt_sink",
+            "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [
                 {
