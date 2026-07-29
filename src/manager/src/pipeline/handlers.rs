@@ -11,6 +11,8 @@ use std::time::Duration;
 use storage::{StorageError, StoredPipelineDesiredState, StoredPipelineRunState};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
+const EXPLAIN_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+
 use super::context::shared_mqtt_connector_keys_from_pipeline_request;
 use super::spec::{
     build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
@@ -745,7 +747,32 @@ pub async fn explain_pipeline_handler(
         Ok(instance) => instance,
         Err(resp) => return *resp,
     };
-    let explain = match instance.explain_pipeline(flow::ExplainPipelineTarget::Id(&id)) {
+
+    let explain_result = tokio::task::spawn_blocking({
+        let instance = std::sync::Arc::clone(&instance);
+        let id = id.clone();
+        move || {
+            std::thread::Builder::new()
+                .name("pipeline-explain".to_string())
+                .stack_size(EXPLAIN_THREAD_STACK_SIZE)
+                .spawn(move || {
+                    instance
+                        .explain_pipeline(flow::ExplainPipelineTarget::Id(&id))
+                        .map(|explain| explain.to_pretty_string())
+                })
+                .map_err(|err| {
+                    PipelineError::Runtime(format!("failed to spawn explain thread: {err}"))
+                })?
+                .join()
+                .map_err(|_| {
+                    PipelineError::Runtime("pipeline explain thread panicked".to_string())
+                })?
+        }
+    })
+    .await
+    .map_err(|err| PipelineError::Runtime(format!("pipeline explain task failed: {err}")));
+
+    let explain = match explain_result.and_then(|result| result) {
         Ok(explain) => explain,
         Err(PipelineError::NotFound(_)) => {
             return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
@@ -759,7 +786,7 @@ pub async fn explain_pipeline_handler(
         }
     };
 
-    let mut response = explain.to_pretty_string().into_response();
+    let mut response = explain.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),

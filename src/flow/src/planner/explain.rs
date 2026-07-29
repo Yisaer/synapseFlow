@@ -5,9 +5,16 @@ use crate::planner::physical::{WatermarkConfig, WatermarkStrategy};
 use datatypes::{ConcreteDatatype, ListType, Schema, StructField, StructType};
 use parser::StatefulCallSpec;
 use serde::Serialize;
-use sqlparser::ast::Expr;
+use sqlparser::ast::{BinaryOperator, Expr};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const EXPLAIN_MAX_SCHEMA_ITEMS: usize = 64;
+const EXPLAIN_MAX_LIST_ITEMS: usize = 64;
+const EXPLAIN_MAX_STATEFUL_CALLS: usize = 32;
+const EXPLAIN_MAX_EXPR_CHAIN_ITEMS: usize = 64;
+const EXPLAIN_MAX_EXPR_DEPTH: usize = 8;
+const EXPLAIN_MAX_TEXT_CHARS: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainRow {
@@ -228,7 +235,10 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("source={}", ds.source_name));
             info.push(format!("decoder={}", ds.decoder().kind()));
             if let Some(required) = ds.shared_required_schema() {
-                info.push(format!("schema=[{}]", required.join(", ")));
+                info.push(format!(
+                    "schema=[{}]",
+                    format_display_list(required, EXPLAIN_MAX_SCHEMA_ITEMS)
+                ));
             } else {
                 info.push(format_schema_with_decode_projection(
                     ds.schema.as_ref(),
@@ -261,63 +271,56 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             }
         }
         LogicalPlan::StatefulFunction(stateful) => {
-            let mappings = stateful
-                .calls
-                .iter()
-                .map(|call| {
+            let mappings =
+                format_semicolon_items(&stateful.calls, EXPLAIN_MAX_STATEFUL_CALLS, |call| {
                     format!(
                         "{} -> {}",
                         format_stateful_call_spec(&call.spec),
                         call.output_column
                     )
-                })
-                .collect::<Vec<_>>();
-            info.push(format!("calls=[{}]", mappings.join("; ")));
+                });
+            info.push(format!("calls=[{}]", mappings));
         }
         LogicalPlan::Filter(filter) => {
-            info.push(format!("predicate={}", filter.predicate));
+            info.push(format!(
+                "predicate={}",
+                format_expr_for_explain(&filter.predicate)
+            ));
         }
         LogicalPlan::Aggregation(agg) => {
-            let mut mappings = agg
-                .aggregate_mappings
-                .iter()
-                .map(|(out, expr)| format!("{} -> {}", expr, out))
-                .collect::<Vec<_>>();
-            mappings.sort();
-            info.push(format!("aggregates=[{}]", mappings.join("; ")));
+            info.push(format!(
+                "aggregates=[{}]",
+                format_aggregation_calls(&agg.aggregate_mappings)
+            ));
             if !agg.group_by_exprs.is_empty() {
-                let group_exprs = agg
-                    .group_by_exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>();
-                info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+                info.push(format!(
+                    "group_by=[{}]",
+                    format_expr_list(&agg.group_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
+                ));
             }
         }
         LogicalPlan::Compute(compute) => {
             // Keep compute fields in order; it reflects evaluation order (later fields may depend on earlier ones).
-            let temps = compute
-                .fields
-                .iter()
-                .map(|f| format!("{} = {}", f.field_name, f.expr))
-                .collect::<Vec<_>>();
-            info.push(format!("temps=[{}]", temps.join("; ")));
+            let temps = format_semicolon_items(&compute.fields, EXPLAIN_MAX_LIST_ITEMS, |f| {
+                format!("{} = {}", f.field_name, format_expr_for_explain(&f.expr))
+            });
+            info.push(format!("temps=[{}]", temps));
         }
         LogicalPlan::Order(order) => {
-            let keys = order
-                .items
-                .iter()
-                .map(|item| format!("{} {}", item.expr, if item.asc { "ASC" } else { "DESC" }))
-                .collect::<Vec<_>>();
-            info.push(format!("keys=[{}]", keys.join("; ")));
+            let keys = format_semicolon_items(&order.items, EXPLAIN_MAX_LIST_ITEMS, |item| {
+                format!(
+                    "{} {}",
+                    format_expr_for_explain(&item.expr),
+                    if item.asc { "ASC" } else { "DESC" }
+                )
+            });
+            info.push(format!("keys=[{}]", keys));
         }
         LogicalPlan::Project(project) => {
-            let fields = project
-                .fields
-                .iter()
-                .map(|f| format_project_field(&f.expr, &f.field_name))
-                .collect::<Vec<_>>();
-            info.push(format!("fields=[{}]", fields.join("; ")));
+            let fields = format_semicolon_items(&project.fields, EXPLAIN_MAX_LIST_ITEMS, |f| {
+                format_project_field(&f.expr, &f.field_name)
+            });
+            info.push(format!("fields=[{}]", fields));
         }
         LogicalPlan::DataSink(DataSinkPlan { sink, .. }) => {
             info.push(format!("sink_id={}", sink.sink_id));
@@ -390,16 +393,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 partition_by,
             } => {
                 info.push("kind=state".to_string());
-                info.push(format!("open={}", open.as_ref()));
-                info.push(format!("emit={}", emit.as_ref()));
+                info.push(format!("open={}", format_expr_for_explain(open.as_ref())));
+                info.push(format!("emit={}", format_expr_for_explain(emit.as_ref())));
                 if !partition_by.is_empty() {
                     info.push(format!(
                         "partition_by={}",
-                        partition_by
-                            .iter()
-                            .map(|e| e.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",")
+                        format_expr_csv(partition_by, EXPLAIN_MAX_LIST_ITEMS)
                     ));
                 }
             }
@@ -419,13 +418,147 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
     }
 }
 
+fn truncate_for_explain(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+
+    let mut end = 0;
+    for (count, (idx, ch)) in text.char_indices().enumerate() {
+        if count == max_chars {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+    format!("{}...", &text[..end])
+}
+
+fn format_items<T>(
+    items: &[T],
+    max_items: usize,
+    mut format_item: impl FnMut(&T) -> String,
+) -> String {
+    format_items_joined(items, max_items, ", ", &mut format_item)
+}
+
+fn format_semicolon_items<T>(
+    items: &[T],
+    max_items: usize,
+    mut format_item: impl FnMut(&T) -> String,
+) -> String {
+    format_items_joined(items, max_items, "; ", &mut format_item)
+}
+
+fn format_items_joined<T>(
+    items: &[T],
+    max_items: usize,
+    separator: &str,
+    format_item: &mut impl FnMut(&T) -> String,
+) -> String {
+    let mut rendered = Vec::with_capacity(items.len().min(max_items));
+    for item in items.iter().take(max_items) {
+        rendered.push(truncate_for_explain(
+            format_item(item),
+            EXPLAIN_MAX_TEXT_CHARS,
+        ));
+    }
+    if items.len() > max_items {
+        rendered.push(format!("... (+{} more)", items.len() - max_items));
+    }
+    rendered.join(separator)
+}
+
+fn format_display_list<T: std::fmt::Display>(items: &[T], max_items: usize) -> String {
+    format_items(items, max_items, |item| item.to_string())
+}
+
+fn format_expr_list(exprs: &[Expr], max_items: usize) -> String {
+    format_items(exprs, max_items, format_expr_for_explain)
+}
+
+fn format_expr_csv(exprs: &[Expr], max_items: usize) -> String {
+    let mut format_item = format_expr_for_explain;
+    format_items_joined(exprs, max_items, ",", &mut format_item)
+}
+
+fn format_expr_for_explain(expr: &Expr) -> String {
+    format_expr_for_explain_inner(expr, 0)
+}
+
+fn format_expr_for_explain_inner(expr: &Expr, depth: usize) -> String {
+    if depth >= EXPLAIN_MAX_EXPR_DEPTH {
+        return "...".to_string();
+    }
+
+    match expr {
+        Expr::Nested(inner) => truncate_for_explain(
+            format!("({})", format_expr_for_explain_inner(inner, depth + 1)),
+            EXPLAIN_MAX_TEXT_CHARS,
+        ),
+        Expr::BinaryOp { op, .. } if is_chain_operator(op) => {
+            format_binary_chain_for_explain(expr, op, depth)
+        }
+        Expr::BinaryOp { left, op, right } => truncate_for_explain(
+            format!(
+                "{} {} {}",
+                format_expr_for_explain_inner(left, depth + 1),
+                op,
+                format_expr_for_explain_inner(right, depth + 1)
+            ),
+            EXPLAIN_MAX_TEXT_CHARS,
+        ),
+        _ => truncate_for_explain(expr.to_string(), EXPLAIN_MAX_TEXT_CHARS),
+    }
+}
+
+fn is_chain_operator(op: &BinaryOperator) -> bool {
+    matches!(op, BinaryOperator::And | BinaryOperator::Or)
+}
+
+fn format_binary_chain_for_explain(
+    expr: &Expr,
+    target_op: &BinaryOperator,
+    depth: usize,
+) -> String {
+    let mut stack = vec![expr];
+    let mut parts = Vec::new();
+    let mut remaining = 0usize;
+
+    while let Some(next) = stack.pop() {
+        match next {
+            Expr::BinaryOp { left, op, right } if op == target_op => {
+                stack.push(right);
+                stack.push(left);
+            }
+            other => {
+                if parts.len() < EXPLAIN_MAX_EXPR_CHAIN_ITEMS {
+                    parts.push(format_expr_for_explain_inner(other, depth + 1));
+                } else {
+                    remaining += 1;
+                }
+            }
+        }
+    }
+
+    if remaining > 0 {
+        parts.push(format!("... (+{} more)", remaining));
+    }
+
+    truncate_for_explain(
+        parts.join(&format!(" {} ", target_op)),
+        EXPLAIN_MAX_TEXT_CHARS,
+    )
+}
+
 fn format_schema(schema: &Schema) -> String {
-    let cols: Vec<String> = schema
-        .column_schemas()
-        .iter()
-        .map(format_column_projection)
-        .collect();
-    format!("schema=[{}]", cols.join(", "))
+    format!(
+        "schema=[{}]",
+        format_items(
+            schema.column_schemas(),
+            EXPLAIN_MAX_SCHEMA_ITEMS,
+            format_column_projection,
+        )
+    )
 }
 
 fn format_schema_with_decode_projection(
@@ -436,12 +569,12 @@ fn format_schema_with_decode_projection(
         return format_schema(schema);
     };
 
-    let cols: Vec<String> = schema
-        .column_schemas()
-        .iter()
-        .map(|col| format_column_projection_with_decode_projection(col, decode_projection))
-        .collect();
-    format!("schema=[{}]", cols.join(", "))
+    format!(
+        "schema=[{}]",
+        format_items(schema.column_schemas(), EXPLAIN_MAX_SCHEMA_ITEMS, |col| {
+            format_column_projection_with_decode_projection(col, decode_projection)
+        })
+    )
 }
 
 fn format_column_projection(column: &datatypes::ColumnSchema) -> String {
@@ -570,27 +703,25 @@ fn format_list_index_selection(indexes: Option<&ListIndexSelection>) -> String {
 }
 
 fn format_struct_fields_projection(struct_type: &StructType) -> String {
-    struct_type
-        .fields()
-        .iter()
-        .map(format_struct_field_projection)
-        .collect::<Vec<_>>()
-        .join(", ")
+    format_items(
+        struct_type.fields().as_ref(),
+        EXPLAIN_MAX_SCHEMA_ITEMS,
+        format_struct_field_projection,
+    )
 }
 
 fn format_struct_fields_projection_with_decode_projection(
     struct_type: &StructType,
     projection_fields: Option<&std::collections::BTreeMap<String, ProjectionNode>>,
 ) -> String {
-    struct_type
-        .fields()
-        .iter()
-        .map(|field| {
+    format_items(
+        struct_type.fields().as_ref(),
+        EXPLAIN_MAX_SCHEMA_ITEMS,
+        |field| {
             let projection = projection_fields.and_then(|fields| fields.get(field.name()));
             format_struct_field_projection_with_decode_projection(field, projection)
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+        },
+    )
 }
 
 fn format_struct_field_projection(field: &StructField) -> String {
@@ -657,7 +788,7 @@ fn format_project_field(expr: &Expr, field_name: &str) -> String {
         return field_name.to_string();
     }
 
-    let expr_str = expr.to_string();
+    let expr_str = format_expr_for_explain(expr);
     if expr_str == field_name {
         expr_str
     } else {
@@ -668,25 +799,18 @@ fn format_project_field(expr: &Expr, field_name: &str) -> String {
 }
 
 fn format_stateful_call_spec(spec: &StatefulCallSpec) -> String {
-    let args = spec
-        .args
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let args = format_expr_list(&spec.args, EXPLAIN_MAX_LIST_ITEMS);
     let mut rendered = format!("{}({})", spec.func_name, args);
 
     if let Some(when) = &spec.when {
-        rendered.push_str(&format!(" FILTER (WHERE {})", when));
+        rendered.push_str(&format!(
+            " FILTER (WHERE {})",
+            format_expr_for_explain(when)
+        ));
     }
 
     if !spec.partition_by.is_empty() {
-        let partition_by = spec
-            .partition_by
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let partition_by = format_expr_list(&spec.partition_by, EXPLAIN_MAX_LIST_ITEMS);
         rendered.push_str(&format!(" OVER (PARTITION BY {})", partition_by));
     }
 
@@ -753,18 +877,19 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::SharedStream(ds) => {
             info.push(format!("source={}", ds.stream_name()));
-            info.push(format!("schema=[{}]", ds.required_columns().join(", ")));
+            info.push(format!(
+                "schema=[{}]",
+                format_display_list(ds.required_columns(), EXPLAIN_MAX_SCHEMA_ITEMS)
+            ));
         }
         PhysicalPlan::SourceChangeGate(gate) => {
             info.push(format!("source={}", gate.source_name));
             info.push(format!("mode={}", gate.input.mode.as_str()));
             info.push(format!(
                 "columns=[{}]",
-                gate.tracked_columns
-                    .iter()
-                    .map(|col| col.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_items(&gate.tracked_columns, EXPLAIN_MAX_SCHEMA_ITEMS, |col| col
+                    .as_ref()
+                    .to_string())
             ));
         }
         PhysicalPlan::CollectionLayoutNormalize(normalize) => {
@@ -775,64 +900,59 @@ fn build_physical_node_with_prefix(
             // Intentionally keep this node opaque in EXPLAIN (no column layout dumped).
         }
         PhysicalPlan::StatefulFunction(stateful) => {
-            let calls = stateful
-                .calls
-                .iter()
-                .map(|call| {
+            let calls =
+                format_semicolon_items(&stateful.calls, EXPLAIN_MAX_STATEFUL_CALLS, |call| {
                     format!(
                         "{} -> {}",
                         format_stateful_call_spec(&call.spec),
                         call.output_column
                     )
-                })
-                .collect::<Vec<_>>();
-            info.push(format!("calls=[{}]", calls.join("; ")));
+                });
+            info.push(format!("calls=[{}]", calls));
         }
         PhysicalPlan::Filter(filter) => {
-            info.push(format!("predicate={}", filter.predicate));
+            info.push(format!(
+                "predicate={}",
+                format_expr_for_explain(&filter.predicate)
+            ));
         }
         PhysicalPlan::Compute(compute) => {
             // Keep compute fields in order; it reflects evaluation order (later fields may depend on earlier ones).
-            let temps = compute
-                .fields
-                .iter()
-                .map(|f| format!("{} = {}", f.field_name, f.original_expr))
-                .collect::<Vec<_>>();
-            info.push(format!("temps=[{}]", temps.join("; ")));
+            let temps = format_semicolon_items(&compute.fields, EXPLAIN_MAX_LIST_ITEMS, |f| {
+                format!(
+                    "{} = {}",
+                    f.field_name,
+                    format_expr_for_explain(&f.original_expr)
+                )
+            });
+            info.push(format!("temps=[{}]", temps));
         }
         PhysicalPlan::Order(order) => {
-            let keys = order
-                .keys
-                .iter()
-                .map(|key| {
-                    format!(
-                        "{} {}",
-                        key.original_expr,
-                        if key.asc { "ASC" } else { "DESC" }
-                    )
-                })
-                .collect::<Vec<_>>();
-            info.push(format!("keys=[{}]", keys.join("; ")));
+            let keys = format_semicolon_items(&order.keys, EXPLAIN_MAX_LIST_ITEMS, |key| {
+                format!(
+                    "{} {}",
+                    format_expr_for_explain(&key.original_expr),
+                    if key.asc { "ASC" } else { "DESC" }
+                )
+            });
+            info.push(format!("keys=[{}]", keys));
         }
         PhysicalPlan::Project(project) => {
-            let fields = project
-                .fields
-                .iter()
-                .map(|f| format_project_field(&f.original_expr, f.field_name.as_ref()))
-                .collect::<Vec<_>>();
-            info.push(format!("fields=[{}]", fields.join("; ")));
+            let fields = format_semicolon_items(&project.fields, EXPLAIN_MAX_LIST_ITEMS, |f| {
+                format_project_field(&f.original_expr, f.field_name.as_ref())
+            });
+            info.push(format!("fields=[{}]", fields));
         }
         PhysicalPlan::RowDiff(row_diff) => {
             info.push(format!("sink_id={}", row_diff.sink_id));
             info.push(format!("mode={}", row_diff.output.mode.as_str()));
             info.push(format!(
                 "columns=[{}]",
-                row_diff
-                    .tracked_columns
-                    .iter()
-                    .map(|column| column.as_ref())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_items(
+                    &row_diff.tracked_columns,
+                    EXPLAIN_MAX_SCHEMA_ITEMS,
+                    |column| { column.as_ref().to_string() }
+                )
             ));
         }
         PhysicalPlan::ColumnFilter(filter) => {
@@ -854,12 +974,10 @@ fn build_physical_node_with_prefix(
                 format_aggregation_calls(&aggregation.aggregate_mappings)
             ));
             if !aggregation.group_by_exprs.is_empty() {
-                let group_exprs = aggregation
-                    .group_by_exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>();
-                info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+                info.push(format!(
+                    "group_by=[{}]",
+                    format_expr_list(&aggregation.group_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
+                ));
             }
         }
         PhysicalPlan::StreamingAggregation(aggregation) => {
@@ -868,12 +986,10 @@ fn build_physical_node_with_prefix(
                 format_aggregation_calls(&aggregation.aggregate_mappings)
             ));
             if !aggregation.group_by_exprs.is_empty() {
-                let group_exprs = aggregation
-                    .group_by_exprs
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>();
-                info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+                info.push(format!(
+                    "group_by=[{}]",
+                    format_expr_list(&aggregation.group_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
+                ));
             }
             match &aggregation.window {
                 crate::planner::physical::StreamingWindowSpec::Tumbling { time_unit, length } => {
@@ -905,16 +1021,12 @@ fn build_physical_node_with_prefix(
                     ..
                 } => {
                     info.push("window=state".to_string());
-                    info.push(format!("open={}", open_expr));
-                    info.push(format!("emit={}", emit_expr));
+                    info.push(format!("open={}", format_expr_for_explain(open_expr)));
+                    info.push(format!("emit={}", format_expr_for_explain(emit_expr)));
                     if !partition_by_exprs.is_empty() {
                         info.push(format!(
                             "partition_by={}",
-                            partition_by_exprs
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
+                            format_expr_csv(partition_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
                         ));
                     }
                 }
@@ -1160,17 +1272,18 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::StateWindow(window) => {
             info.push("kind=state".to_string());
-            info.push(format!("open={}", window.open_expr));
-            info.push(format!("emit={}", window.emit_expr));
+            info.push(format!(
+                "open={}",
+                format_expr_for_explain(&window.open_expr)
+            ));
+            info.push(format!(
+                "emit={}",
+                format_expr_for_explain(&window.emit_expr)
+            ));
             if !window.partition_by_exprs.is_empty() {
                 info.push(format!(
                     "partition_by={}",
-                    window
-                        .partition_by_exprs
-                        .iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
+                    format_expr_csv(&window.partition_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
                 ));
             }
         }
@@ -1227,11 +1340,20 @@ fn sampling_strategy_name(strategy: &crate::processor::SamplingStrategy) -> &'st
 }
 
 fn format_aggregation_calls(mappings: &std::collections::HashMap<String, Expr>) -> String {
-    let mut out = mappings
+    let mut entries = mappings.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(out, _)| *out);
+
+    let mut out = entries
         .iter()
-        .map(|(out, expr)| format!("{} -> {}", expr, out))
+        .take(EXPLAIN_MAX_LIST_ITEMS)
+        .map(|(out, expr)| format!("{} -> {}", format_expr_for_explain(expr), out))
         .collect::<Vec<_>>();
-    out.sort();
+    if entries.len() > EXPLAIN_MAX_LIST_ITEMS {
+        out.push(format!(
+            "... (+{} more)",
+            entries.len() - EXPLAIN_MAX_LIST_ITEMS
+        ));
+    }
     out.join("; ")
 }
 
