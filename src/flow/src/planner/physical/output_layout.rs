@@ -150,6 +150,7 @@ impl PhysicalPlan {
             | PhysicalPlan::CountWindow(_)
             | PhysicalPlan::SlidingWindow(_)
             | PhysicalPlan::StateWindow(_)
+            | PhysicalPlan::EosWindow(_)
             | PhysicalPlan::ProcessTimeWatermark(_)
             | PhysicalPlan::EventtimeWatermark(_)
             | PhysicalPlan::Watermark(_)

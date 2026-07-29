@@ -24,12 +24,12 @@ Implemented:
 - `TableScanProcessor`
 - `SELECT` over one history table
 - scalar projection and `WHERE` filtering
+- aggregate queries that explicitly use `GROUP BY eoswindow()`
 
 Not implemented yet:
 
 - stream-table joins and lookup table planning
 - table aliases in SQL
-- aggregate functions over table scans
 - table scan decode projection
 - manager REST endpoints and persistent storage for table definitions
 
@@ -71,11 +71,14 @@ The `data` bytes are decoded with the table decoder into the table schema.
 During SQL planning, catalog resolution can return either a stream or a table. A table relation lowers
 to logical `TableScan` instead of `DataSource`.
 
-For the first stage, table scans are scan-only:
+Table scans currently support scalar scan queries and a planner-only aggregate shape:
 
 - exactly one table source is supported in a table-scan query
 - stream-table mixed queries are rejected because lookup join planning is deferred
-- aggregate mappings are rejected with `aggregate functions over table scans are not supported yet`
+- aggregate mappings require an explicit `GROUP BY eoswindow()`
+- incremental aggregate calls are rewritten to `PhysicalStreamingAggregation(window=eos)`
+- non-incremental aggregate calls keep the unfused `PhysicalEosWindow -> PhysicalAggregation`
+  plan shape
 
 Table bindings use `SourceBindingKind::TableScan`. Logical column pruning keeps the full schema for
 this binding kind. This is required because `TableScanProcessor` currently decodes the full payload
@@ -96,6 +99,14 @@ terminal handling.
 
 The control channel remains reserved for control signals. The table scan completion signal is not
 mirrored onto the control channel.
+
+`GROUP BY eoswindow()` has two runtime paths:
+
+- Incremental aggregate calls use `StreamingEosAggregationProcessor`, which updates aggregate
+  state for each incoming collection and finalizes once on data-channel graceful end.
+- Non-incremental aggregate calls use `EosWindowProcessor`, which buffers decoded rows and emits
+  one collection only after receiving data-channel graceful end. If no rows were buffered, it emits
+  no collection.
 
 ## Test Coverage
 

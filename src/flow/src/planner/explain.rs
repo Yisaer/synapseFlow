@@ -403,6 +403,9 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     ));
                 }
             }
+            LogicalWindowSpec::Eos => {
+                info.push("kind=eos".to_string());
+            }
         },
     }
 
@@ -915,7 +918,13 @@ fn build_physical_node_with_prefix(
                         ));
                     }
                 }
+                crate::planner::physical::StreamingWindowSpec::Eos => {
+                    info.push("window=eos".to_string());
+                }
             }
+        }
+        PhysicalPlan::EosWindow(_) => {
+            info.push("kind=eos".to_string());
         }
         PhysicalPlan::Batch(batch) => {
             info.push(format!("sink_id={}", batch.sink_id));

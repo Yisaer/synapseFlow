@@ -39,6 +39,10 @@ pub enum Window {
         partition_by: Vec<Expr>,
         filter: Option<Box<Expr>>,
     },
+    /// End-of-stream window for bounded table scans.
+    ///
+    /// The window closes when the bounded source reaches graceful end-of-stream.
+    Eos { filter: Option<Box<Expr>> },
 }
 
 /// Supported time units for window definitions.
@@ -85,6 +89,10 @@ impl Window {
         }
     }
 
+    pub fn eos() -> Self {
+        Window::Eos { filter: None }
+    }
+
     pub fn with_filter(self, filter: Option<Box<Expr>>) -> Self {
         match self {
             Window::Tumbling {
@@ -117,6 +125,7 @@ impl Window {
                 partition_by,
                 filter,
             },
+            Window::Eos { .. } => Window::Eos { filter },
         }
     }
 
@@ -125,7 +134,8 @@ impl Window {
             Window::Tumbling { filter, .. }
             | Window::Count { filter, .. }
             | Window::Sliding { filter, .. }
-            | Window::State { filter, .. } => filter.as_deref(),
+            | Window::State { filter, .. }
+            | Window::Eos { filter } => filter.as_deref(),
         }
     }
 
@@ -135,6 +145,7 @@ impl Window {
             Window::Count { .. } => "countwindow",
             Window::Sliding { .. } => "slidingwindow",
             Window::State { .. } => "statewindow",
+            Window::Eos { .. } => "eoswindow",
         }
     }
 }
@@ -157,6 +168,7 @@ pub fn parse_window_function(function: &Function) -> Result<Window, ParserError>
         "countwindow" => parse_count_window(function),
         "slidingwindow" => parse_sliding_window(function),
         "statewindow" => parse_state_window(function),
+        "eoswindow" => parse_eos_window(function),
         name => Err(ParserError::ParserError(format!(
             "Unsupported window function: {}",
             name
@@ -195,6 +207,7 @@ pub fn window_to_expr(window: &Window) -> Expr {
             make_expr_arg(open.as_ref().clone()),
             make_expr_arg(emit.as_ref().clone()),
         ],
+        Window::Eos { .. } => Vec::new(),
     };
 
     let over = match window {
@@ -289,6 +302,17 @@ fn parse_state_window(function: &Function) -> Result<Window, ParserError> {
     Ok(Window::state_partitioned(open, emit, partition_by).with_filter(function.filter.clone()))
 }
 
+fn parse_eos_window(function: &Function) -> Result<Window, ParserError> {
+    ensure_no_over(function, "eoswindow")?;
+    if !function.args.is_empty() {
+        return Err(ParserError::ParserError(
+            "eoswindow requires no arguments".to_string(),
+        ));
+    }
+
+    Ok(Window::eos().with_filter(function.filter.clone()))
+}
+
 fn parse_over_partition_by(function: &Function, func_name: &str) -> Result<Vec<Expr>, ParserError> {
     let Some(over) = function.over.as_ref() else {
         return Ok(Vec::new());
@@ -379,7 +403,7 @@ fn parse_number_arg(
 pub(crate) fn is_supported_window_function(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "tumblingwindow" | "countwindow" | "slidingwindow" | "statewindow"
+        "tumblingwindow" | "countwindow" | "slidingwindow" | "statewindow" | "eoswindow"
     )
 }
 
@@ -520,6 +544,36 @@ mod tests {
         })
     }
 
+    fn eos_expr() -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("eoswindow")]),
+            args: vec![],
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        })
+    }
+
+    fn eos_expr_with_filter() -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("eoswindow")]),
+            args: vec![],
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: Some(Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident::new("a"))),
+                op: sqlparser::ast::BinaryOperator::Gt,
+                right: Box::new(Expr::Value(Value::Number("0".to_string(), false))),
+            })),
+            null_treatment: None,
+            special: false,
+        })
+    }
+
     #[test]
     fn parse_tumbling_window_expr() {
         let parsed = parse_window_expr(&tumbling_expr()).unwrap();
@@ -563,6 +617,44 @@ mod tests {
                 Expr::Identifier(Ident::new("emit")),
                 vec![Expr::Identifier(Ident::new("k1"))],
             ))
+        );
+    }
+
+    #[test]
+    fn parse_eos_window_expr() {
+        let parsed = parse_window_expr(&eos_expr()).unwrap();
+        assert_eq!(parsed, Some(Window::eos()));
+    }
+
+    #[test]
+    fn parse_eos_window_expr_with_filter() {
+        let parsed = parse_window_expr(&eos_expr_with_filter()).unwrap();
+        let Some(Window::Eos {
+            filter: Some(filter),
+        }) = parsed
+        else {
+            panic!("expected eos window with filter");
+        };
+        assert_eq!(filter.to_string(), "a > 0");
+    }
+
+    #[test]
+    fn reject_eos_window_arguments() {
+        let expr = Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("eoswindow")]),
+            args: vec![make_number_arg(1)],
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        });
+
+        let err = parse_window_expr(&expr).unwrap_err().to_string();
+        assert!(
+            err.contains("eoswindow requires no arguments"),
+            "unexpected error: {err}",
         );
     }
 
@@ -618,6 +710,14 @@ mod tests {
                 Expr::Identifier(Ident::new("k2")),
             ],
         );
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn eos_window_round_trip_back_to_expr() {
+        let window = Window::eos();
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));

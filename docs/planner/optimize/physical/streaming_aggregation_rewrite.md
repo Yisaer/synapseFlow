@@ -27,6 +27,7 @@ This rule matches `PhysicalPlan::Aggregation(agg)` where the aggregation’s (fi
 - `PhysicalPlan::CountWindow`
 - `PhysicalPlan::SlidingWindow`
 - `PhysicalPlan::StateWindow`
+- `PhysicalPlan::EosWindow`
 
 ## Preconditions (When It Is Safe)
 
@@ -35,6 +36,8 @@ The rewrite is applied only when **all aggregate calls are incremental**:
 - `PhysicalAggregation::all_calls_incremental(&agg.aggregate_calls, &AggregateFunctionRegistry)`
 
 If any call is non-incremental, the plan is left unchanged.
+For EOS windows, the unfused fallback is executed by `EosWindowProcessor` followed by
+`AggregationProcessor`.
 
 ## Outputs (What It Produces)
 
@@ -46,6 +49,7 @@ When the match and preconditions hold, the rule replaces the `Window -> Aggregat
   - `Count { count }`
   - `Sliding { time_unit, lookback, lookahead }`
   - `State { open_expr, emit_expr, partition_by_exprs, ... }`
+  - `Eos`
 - The fused node inherits aggregation fields:
   - `aggregate_calls`, `aggregate_mappings`
   - `group_by_exprs`, `group_by_scalars`
@@ -63,9 +67,15 @@ dispatched by `StreamingWindowSpec`:
 - `Tumbling` → `StreamingTumblingAggregationProcessor`
 - `Sliding` → `StreamingSlidingAggregationProcessor`
 - `State` → `StreamingStateAggregationProcessor`
+- `Eos` → `StreamingEosAggregationProcessor`
 
 See `src/flow/src/processor/streaming_aggregation_processor.rs` and the concrete processor
 implementations under `src/flow/src/processor/`.
+
+For `Eos`, the streaming processor updates aggregate state for each incoming collection and
+finalizes exactly once when it receives a graceful terminal signal on the data channel. Quick
+terminal signals and terminal signals received on the control channel are forwarded without
+finalizing aggregate state.
 
 ## Explain / Tests
 
@@ -77,6 +87,7 @@ Example cases include:
 
 - `stateful_before_window_and_aggregation`
 - `optimize_rewrites_streaming_agg_for_state_window`
+- `eos global aggregate from history table`
 - `explain_ndv_countwindow_non_incremental` (negative case)
 
 ## Limitations
@@ -84,4 +95,3 @@ Example cases include:
 - Only rewrites when the aggregation is **directly** on top of a supported window node.
 - Only checks the aggregation’s first child (aggregations are expected to be unary in the
   current physical plan).
-

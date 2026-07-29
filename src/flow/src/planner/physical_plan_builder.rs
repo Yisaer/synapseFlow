@@ -835,6 +835,11 @@ fn create_physical_window_with_builder(
             );
             PhysicalPlan::StateWindow(Box::new(state))
         }
+        LogicalWindowSpec::Eos => {
+            let index = builder.allocate_index();
+            let eos = crate::planner::physical::PhysicalEosWindow::new(physical_children, index);
+            PhysicalPlan::EosWindow(eos)
+        }
     };
 
     Ok(Arc::new(physical))

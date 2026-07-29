@@ -567,6 +567,29 @@ mod source_info_tests {
     }
 
     #[test]
+    fn parse_group_by_eos_window() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT sum(a) FROM history_table GROUP BY eoswindow()");
+
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+        assert_eq!(select_stmt.window, Some(Window::eos()));
+    }
+
+    #[test]
+    fn select_eos_window_function_does_not_set_group_window() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT eoswindow() FROM history_table");
+
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert!(select_stmt.window.is_none());
+        assert_eq!(select_stmt.select_fields.len(), 1);
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "eoswindow()");
+    }
+
+    #[test]
     fn reject_multiple_windows() {
         let parser = StreamSqlParser::new();
         let result =

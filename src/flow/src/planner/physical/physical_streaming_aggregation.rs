@@ -30,6 +30,7 @@ pub enum StreamingWindowSpec {
         emit_scalar: ScalarExpr,
         partition_by_scalars: Vec<ScalarExpr>,
     },
+    Eos,
 }
 
 /// Physical node that fuses window + aggregation for incremental processing.

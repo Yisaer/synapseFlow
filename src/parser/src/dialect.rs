@@ -5,7 +5,7 @@ use super::window;
 pub use window::{Window, parse_window_expr, window_to_expr};
 
 /// Stream processing dialect that supports window functions in GROUP BY clauses
-/// Supported windows: tumblingwindow, slidingwindow, countwindow, statewindow
+/// Supported windows: tumblingwindow, slidingwindow, countwindow, statewindow, eoswindow
 #[derive(Debug, Clone)]
 pub struct StreamDialect {}
 
@@ -135,5 +135,30 @@ mod tests {
         assert!(window.is_some());
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].to_string(), "b");
+    }
+
+    #[test]
+    fn parse_single_eos_window() {
+        let sql = "SELECT sum(a) FROM history_table GROUP BY eoswindow()";
+        let dialect = StreamDialect::new();
+
+        let statements = Parser::parse_sql(&dialect, sql).unwrap();
+        let (window, remaining) = collect_window_and_group_by_exprs(&statements[0]).unwrap();
+
+        assert_eq!(window, Some(window::Window::eos()));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn split_group_by_keeps_non_window_exprs_for_eos_window() {
+        let sql = "SELECT device_id, sum(a) FROM history_table GROUP BY device_id, eoswindow()";
+        let dialect = StreamDialect::new();
+
+        let statements = Parser::parse_sql(&dialect, sql).unwrap();
+        let (window, remaining) = collect_window_and_group_by_exprs(&statements[0]).unwrap();
+
+        assert_eq!(window, Some(window::Window::eos()));
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].to_string(), "device_id");
     }
 }

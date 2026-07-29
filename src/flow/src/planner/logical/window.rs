@@ -30,6 +30,7 @@ pub enum LogicalWindowSpec {
         /// When empty, the window is global (single partition).
         partition_by: Vec<Expr>,
     },
+    Eos,
 }
 
 /// Logical plan node for windowing.

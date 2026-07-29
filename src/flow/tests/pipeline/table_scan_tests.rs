@@ -31,6 +31,7 @@ struct TableScanCase {
     rows: Vec<HistoryPayloadRow>,
     expected_rows: usize,
     column_checks: Vec<ColumnCheck>,
+    sort_by: Option<&'static str>,
 }
 
 fn history_table_schema(table_name: &str) -> Arc<Schema> {
@@ -161,6 +162,32 @@ async fn assert_no_extra_json_output(
     }
 }
 
+fn sort_json_rows_by_field(value: JsonValue, field: &str) -> JsonValue {
+    let JsonValue::Array(mut rows) = value else {
+        return value;
+    };
+
+    rows.sort_by(|left, right| {
+        json_sort_key(left, field)
+            .as_str()
+            .cmp(json_sort_key(right, field).as_str())
+    });
+    JsonValue::Array(rows)
+}
+
+fn json_sort_key(row: &JsonValue, field: &str) -> String {
+    row.as_object()
+        .and_then(|obj| obj.get(field))
+        .map(|value| match value {
+            JsonValue::String(value) => format!("s:{value}"),
+            JsonValue::Number(value) => format!("n:{value}"),
+            JsonValue::Bool(value) => format!("b:{value}"),
+            JsonValue::Null => "z:null".to_string(),
+            other => format!("x:{other}"),
+        })
+        .unwrap_or_default()
+}
+
 async fn run_table_scan_case(case: TableScanCase) {
     println!("Running test: {}", case.name);
 
@@ -207,8 +234,12 @@ async fn run_table_scan_case(case: TableScanCase) {
         .expect("start table scan pipeline");
 
     let timeout_duration = Duration::from_secs(5);
-    let expected = build_expected_json(case.expected_rows, &case.column_checks);
-    let actual = collect_json_rows(&mut output, case.expected_rows, timeout_duration).await;
+    let mut expected = build_expected_json(case.expected_rows, &case.column_checks);
+    let mut actual = collect_json_rows(&mut output, case.expected_rows, timeout_duration).await;
+    if let Some(field) = case.sort_by {
+        expected = sort_json_rows_by_field(expected, field);
+        actual = sort_json_rows_by_field(actual, field);
+    }
     assert_eq!(
         normalize_json(actual),
         normalize_json(expected),
@@ -253,6 +284,7 @@ async fn pipeline_table_scan_table_driven() {
                 },
             ],
             expected_rows: 3,
+            sort_by: None,
             column_checks: vec![
                 ColumnCheck {
                     expected_name: "ts".to_string(),
@@ -290,9 +322,129 @@ async fn pipeline_table_scan_table_driven() {
                 },
             ],
             expected_rows: 2,
+            sort_by: None,
             column_checks: vec![ColumnCheck {
                 expected_name: "next_speed".to_string(),
                 expected_values: vec![Value::Int64(21), Value::Int64(31)],
+            }],
+        },
+        TableScanCase {
+            name: "eos_global_incremental_avg_from_history_table",
+            sql: "SELECT avg(speed) AS avg_speed FROM history_table GROUP BY eoswindow()",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 3,
+                    json: r#"{"ts":3,"vehicle_id":"v1","speed":30}"#,
+                },
+            ],
+            expected_rows: 1,
+            sort_by: None,
+            column_checks: vec![ColumnCheck {
+                expected_name: "avg_speed".to_string(),
+                expected_values: vec![Value::Float64(20.0)],
+            }],
+        },
+        TableScanCase {
+            name: "eos_grouped_incremental_avg_from_history_table",
+            sql: "SELECT vehicle_id, avg(speed) AS avg_speed FROM history_table GROUP BY vehicle_id, eoswindow()",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 3,
+                    json: r#"{"ts":3,"vehicle_id":"v1","speed":30}"#,
+                },
+            ],
+            expected_rows: 2,
+            sort_by: Some("vehicle_id"),
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "vehicle_id".to_string(),
+                    expected_values: vec![
+                        Value::String("v1".into()),
+                        Value::String("v2".into()),
+                    ],
+                },
+                ColumnCheck {
+                    expected_name: "avg_speed".to_string(),
+                    expected_values: vec![Value::Float64(20.0), Value::Float64(20.0)],
+                },
+            ],
+        },
+        TableScanCase {
+            name: "eos_window_filter_before_post_aggregation_where",
+            sql: "SELECT vehicle_id, avg(speed) AS avg_speed FROM history_table WHERE vehicle_id = 'v1' GROUP BY vehicle_id, eoswindow() FILTER (WHERE speed > 0)",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v1","speed":-100}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 3,
+                    json: r#"{"ts":3,"vehicle_id":"v1","speed":30}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 4,
+                    json: r#"{"ts":4,"vehicle_id":"v2","speed":20}"#,
+                },
+            ],
+            expected_rows: 1,
+            sort_by: None,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "vehicle_id".to_string(),
+                    expected_values: vec![Value::String("v1".into())],
+                },
+                ColumnCheck {
+                    expected_name: "avg_speed".to_string(),
+                    expected_values: vec![Value::Float64(20.0)],
+                },
+            ],
+        },
+        TableScanCase {
+            name: "eos_non_incremental_ndv_from_history_table",
+            sql: "SELECT ndv(speed) AS distinct_speed FROM history_table GROUP BY eoswindow()",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 3,
+                    json: r#"{"ts":3,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 4,
+                    json: r#"{"ts":4,"vehicle_id":"v3","speed":30}"#,
+                },
+            ],
+            expected_rows: 1,
+            sort_by: None,
+            column_checks: vec![ColumnCheck {
+                expected_name: "distinct_speed".to_string(),
+                expected_values: vec![Value::Int64(3)],
             }],
         },
     ];

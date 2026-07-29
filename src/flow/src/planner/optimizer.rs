@@ -162,6 +162,10 @@ impl StreamingAggregationRewrite {
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)
             }
+            PhysicalPlan::EosWindow(window) => {
+                let upstream = window.base.children.first()?.clone();
+                (StreamingWindowSpec::Eos, upstream)
+            }
             _ => return None,
         };
 
@@ -537,6 +541,11 @@ fn rebuild_with_children(
             let mut new = window.as_ref().clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::StateWindow(Box::new(new)))
+        }
+        PhysicalPlan::EosWindow(window) => {
+            let mut new = window.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::EosWindow(new))
         }
         PhysicalPlan::DataSink(sink) => {
             let mut new = sink.clone();

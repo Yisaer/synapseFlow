@@ -65,7 +65,8 @@ pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, Streaming
 pub use physical_table_scan::{PhysicalTableScan, PhysicalTableScanSpec};
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
 pub use physical_window::{
-    PhysicalCountWindow, PhysicalSlidingWindow, PhysicalStateWindow, PhysicalTumblingWindow,
+    PhysicalCountWindow, PhysicalEosWindow, PhysicalSlidingWindow, PhysicalStateWindow,
+    PhysicalTumblingWindow,
 };
 
 /// Enum describing all supported physical execution nodes
@@ -104,6 +105,7 @@ pub enum PhysicalPlan {
     CountWindow(PhysicalCountWindow),
     SlidingWindow(PhysicalSlidingWindow),
     StateWindow(Box<PhysicalStateWindow>),
+    EosWindow(PhysicalEosWindow),
     /// Processing-time watermark physical node (ticker-based).
     ProcessTimeWatermark(PhysicalProcessTimeWatermark),
     /// Event-time watermark physical node (data-driven).
@@ -151,6 +153,7 @@ impl PhysicalPlan {
             PhysicalPlan::CountWindow(plan) => plan.base.children(),
             PhysicalPlan::SlidingWindow(plan) => plan.base.children(),
             PhysicalPlan::StateWindow(plan) => plan.base.children(),
+            PhysicalPlan::EosWindow(plan) => plan.base.children(),
             PhysicalPlan::ProcessTimeWatermark(plan) => plan.base.children(),
             PhysicalPlan::EventtimeWatermark(plan) => plan.base.children(),
             PhysicalPlan::Watermark(plan) => plan.base.children(),
@@ -193,6 +196,7 @@ impl PhysicalPlan {
             PhysicalPlan::CountWindow(_) => "PhysicalCountWindow",
             PhysicalPlan::SlidingWindow(_) => "PhysicalSlidingWindow",
             PhysicalPlan::StateWindow(_) => "PhysicalStateWindow",
+            PhysicalPlan::EosWindow(_) => "PhysicalEosWindow",
             PhysicalPlan::ProcessTimeWatermark(_) => "PhysicalProcessTimeWatermark",
             PhysicalPlan::EventtimeWatermark(_) => "PhysicalEventtimeWatermark",
             PhysicalPlan::Watermark(_) => "PhysicalWatermark",
@@ -234,6 +238,7 @@ impl PhysicalPlan {
             PhysicalPlan::CountWindow(plan) => plan.base.index(),
             PhysicalPlan::SlidingWindow(plan) => plan.base.index(),
             PhysicalPlan::StateWindow(plan) => plan.base.index(),
+            PhysicalPlan::EosWindow(plan) => plan.base.index(),
             PhysicalPlan::ProcessTimeWatermark(plan) => plan.base.index(),
             PhysicalPlan::EventtimeWatermark(plan) => plan.base.index(),
             PhysicalPlan::Watermark(plan) => plan.base.index(),
@@ -296,6 +301,7 @@ impl PhysicalPlan {
             PhysicalPlan::CountWindow(plan) => &mut plan.base.children,
             PhysicalPlan::SlidingWindow(plan) => &mut plan.base.children,
             PhysicalPlan::StateWindow(plan) => &mut plan.base.children,
+            PhysicalPlan::EosWindow(plan) => &mut plan.base.children,
             PhysicalPlan::ProcessTimeWatermark(plan) => &mut plan.base.children,
             PhysicalPlan::EventtimeWatermark(plan) => &mut plan.base.children,
             PhysicalPlan::Watermark(plan) => &mut plan.base.children,

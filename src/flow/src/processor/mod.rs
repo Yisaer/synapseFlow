@@ -18,6 +18,7 @@ pub mod control_source_processor;
 pub mod datasource_processor;
 pub mod decoder_processor;
 pub mod empty_suppress_processor;
+pub mod eos_window_processor;
 pub mod eventtime;
 pub mod filter_processor;
 pub mod memory_collection_materialize_processor;
@@ -56,6 +57,7 @@ pub use control_source_processor::{ControlSourceProcessor, Ingress, IngressTarge
 pub use datasource_processor::DataSourceProcessor;
 pub use decoder_processor::DecoderProcessor;
 pub use empty_suppress_processor::EmptySuppressProcessor;
+pub use eos_window_processor::EosWindowProcessor;
 pub use eventtime::EventtimePipelineContext;
 pub use filter_processor::FilterProcessor;
 pub use memory_collection_materialize_processor::MemoryCollectionMaterializeProcessor;

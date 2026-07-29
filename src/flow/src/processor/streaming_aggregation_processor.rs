@@ -19,10 +19,13 @@ use std::sync::Arc;
 
 #[path = "streaming_count_aggregation_processor.rs"]
 mod streaming_count_aggregation_processor;
+#[path = "streaming_eos_aggregation_processor.rs"]
+mod streaming_eos_aggregation_processor;
 #[path = "streaming_tumbling_aggregation_processor.rs"]
 mod streaming_tumbling_aggregation_processor;
 
 pub use streaming_count_aggregation_processor::StreamingCountAggregationProcessor;
+pub use streaming_eos_aggregation_processor::StreamingEosAggregationProcessor;
 #[path = "streaming_sliding_aggregation_processor.rs"]
 mod streaming_sliding_aggregation_processor;
 pub use streaming_sliding_aggregation_processor::StreamingSlidingAggregationProcessor;
@@ -37,6 +40,7 @@ pub enum StreamingAggregationProcessor {
     Tumbling(StreamingTumblingAggregationProcessor),
     Sliding(StreamingSlidingAggregationProcessor),
     State(StreamingStateAggregationProcessor),
+    Eos(StreamingEosAggregationProcessor),
 }
 
 impl StreamingAggregationProcessor {
@@ -100,6 +104,14 @@ impl StreamingAggregationProcessor {
                     channel_capacities,
                 )?,
             )),
+            StreamingWindowSpec::Eos => Ok(StreamingAggregationProcessor::Eos(
+                StreamingEosAggregationProcessor::new_with_channel_capacities(
+                    id,
+                    physical,
+                    aggregate_registry,
+                    channel_capacities,
+                ),
+            )),
         }
     }
 
@@ -124,6 +136,7 @@ impl StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.set_stats(stats),
             StreamingAggregationProcessor::Sliding(p) => p.set_stats(stats),
             StreamingAggregationProcessor::State(p) => p.set_stats(stats),
+            StreamingAggregationProcessor::Eos(p) => p.set_stats(stats),
         }
     }
 }
@@ -135,6 +148,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.id(),
             StreamingAggregationProcessor::Sliding(p) => p.id(),
             StreamingAggregationProcessor::State(p) => p.id(),
+            StreamingAggregationProcessor::Eos(p) => p.id(),
         }
     }
 
@@ -144,6 +158,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.start(spawner),
             StreamingAggregationProcessor::Sliding(p) => p.start(spawner),
             StreamingAggregationProcessor::State(p) => p.start(spawner),
+            StreamingAggregationProcessor::Eos(p) => p.start(spawner),
         }
     }
 
@@ -153,6 +168,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.subscribe_output(),
             StreamingAggregationProcessor::Sliding(p) => p.subscribe_output(),
             StreamingAggregationProcessor::State(p) => p.subscribe_output(),
+            StreamingAggregationProcessor::Eos(p) => p.subscribe_output(),
         }
     }
 
@@ -162,6 +178,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.subscribe_control_output(),
             StreamingAggregationProcessor::Sliding(p) => p.subscribe_control_output(),
             StreamingAggregationProcessor::State(p) => p.subscribe_control_output(),
+            StreamingAggregationProcessor::Eos(p) => p.subscribe_control_output(),
         }
     }
 
@@ -174,6 +191,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.add_input(receiver),
             StreamingAggregationProcessor::Sliding(p) => p.add_input(receiver),
             StreamingAggregationProcessor::State(p) => p.add_input(receiver),
+            StreamingAggregationProcessor::Eos(p) => p.add_input(receiver),
         }
     }
 
@@ -186,6 +204,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Tumbling(p) => p.add_control_input(receiver),
             StreamingAggregationProcessor::Sliding(p) => p.add_control_input(receiver),
             StreamingAggregationProcessor::State(p) => p.add_control_input(receiver),
+            StreamingAggregationProcessor::Eos(p) => p.add_control_input(receiver),
         }
     }
 }

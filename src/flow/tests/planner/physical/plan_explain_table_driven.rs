@@ -766,6 +766,26 @@ fn plan_explain_table_scan_table_driven() {
             sql: "SELECT speed + 1 AS next_speed FROM history_table WHERE ts > 0",
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Filter_1","info":["predicate=ts > 0"],"operator":"Filter"}],"id":"Project_2","info":["fields=[speed + 1 as next_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalFilter_1","info":["predicate=ts > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_2","info":["fields=[speed + 1 as next_speed]"],"operator":"PhysicalProject"}}"##,
         },
+        Case {
+            name: "eos global aggregate from history table",
+            sql: "SELECT avg(speed) AS avg_speed FROM history_table GROUP BY eoswindow()",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Window_1","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[avg(speed) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[avg(speed) -> col_1]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_3","info":["fields=[col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "eos aggregate from history table with group key",
+            sql: "SELECT vehicle_id, avg(speed) AS avg_speed FROM history_table GROUP BY vehicle_id, eoswindow()",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Window_1","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[avg(speed) -> col_1]","group_by=[vehicle_id]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[vehicle_id; col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[avg(speed) -> col_1]","group_by=[vehicle_id]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_3","info":["fields=[vehicle_id; col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "where and eos window filter keep separate filter stages",
+            sql: "SELECT avg(speed) AS avg_speed FROM history_table WHERE ts > 0 GROUP BY eoswindow() FILTER (WHERE speed > 0)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Filter_1","info":["predicate=speed > 0"],"operator":"Filter"}],"id":"Window_2","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_3","info":["aggregates=[avg(speed) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_4","info":["predicate=ts > 0"],"operator":"Filter"}],"id":"Project_5","info":["fields=[col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalFilter_1","info":["predicate=speed > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[avg(speed) -> col_1]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=ts > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_5","info":["fields=[col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "eos aggregate from history table with having",
+            sql: "SELECT avg(speed) AS avg_speed FROM history_table GROUP BY eoswindow() HAVING avg(speed) > 0",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Window_1","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[avg(speed) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=col_1 > 0"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[avg(speed) -> col_1]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_3","info":["predicate=col_1 > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_4","info":["fields=[col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
+        },
     ];
 
     for case in cases {
@@ -782,7 +802,7 @@ fn plan_explain_table_scan_rejects_aggregates() {
     println!("{sql}");
     println!("{err}");
     assert!(
-        err.contains("aggregate functions over table scans are not supported yet"),
+        err.contains("aggregate functions over table scans require GROUP BY eoswindow()"),
         "expected table scan aggregate rejection, got: {err}"
     );
 }

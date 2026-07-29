@@ -101,3 +101,15 @@ impl PhysicalStateWindow {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct PhysicalEosWindow {
+    pub base: BasePhysicalPlan,
+}
+
+impl PhysicalEosWindow {
+    pub fn new(children: Vec<Arc<PhysicalPlan>>, index: i64) -> Self {
+        let base = BasePhysicalPlan::new(children, index);
+        Self { base }
+    }
+}

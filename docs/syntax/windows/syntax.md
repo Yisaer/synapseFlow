@@ -18,6 +18,7 @@ only. The parser recognizes these functions and records the single allowed windo
 - `countwindow(<count>)` — fixed windows measured by number of rows.
 - `statewindow(<open_expr>, <emit_expr>) [OVER (PARTITION BY <expr> [, <expr> ...])]` — stateful
   open/emit window.
+- `eoswindow()` — bounded table-scan window that closes when the source reaches end-of-stream.
 
 ## Parameter Rules
 
@@ -31,6 +32,21 @@ For `statewindow`:
 - `open_expr` and `emit_expr` are general SQL expressions (typically boolean conditions).
 - `OVER` is optional. When present, it supports **only** `PARTITION BY <expr> [, <expr> ...]`.
 - `ORDER BY`, window frames, named windows, and other `OVER` features are not supported.
+
+For `eoswindow`:
+- No arguments are accepted.
+- `OVER` is not supported.
+- It is intended for bounded table scans. Source eligibility validation belongs to flow planning and
+  is implemented with EOS window planning.
+- It can be mixed with regular grouping keys to aggregate the whole scan per key.
+
+## Filter Stages
+
+Window functions may use SQL function `FILTER (WHERE ...)` syntax. The filter stages are:
+
+- `window(...) FILTER (WHERE ...)`: filters rows while collecting the window.
+- `HAVING`: filters aggregate results after windowing and aggregation.
+- `WHERE`: filters rows in the final filter stage after windowing and aggregation.
 
 ## Examples
 
@@ -53,4 +69,10 @@ GROUP BY user_id, tumblingwindow('ss', 10);
 SELECT *
 FROM users
 GROUP BY statewindow(a > 0, b = 1) OVER (PARTITION BY user_id);
+
+-- End-of-stream window over a bounded table scan
+SELECT device_id, sum(bytes)
+FROM history_table
+WHERE region = 'west'
+GROUP BY device_id, eoswindow() FILTER (WHERE bytes > 0);
 ```

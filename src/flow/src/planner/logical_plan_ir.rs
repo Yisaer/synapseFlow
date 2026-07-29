@@ -111,6 +111,7 @@ pub enum WindowIR {
         emit: Box<Expr>,
         partition_by: Vec<Expr>,
     },
+    Eos,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -759,6 +760,7 @@ fn window_ir_to_spec(
             emit: emit.clone(),
             partition_by: partition_by.clone(),
         },
+        WindowIR::Eos => crate::planner::logical::LogicalWindowSpec::Eos,
     })
 }
 
@@ -1118,6 +1120,7 @@ fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> Windo
             emit: emit.clone(),
             partition_by: partition_by.clone(),
         },
+        crate::planner::logical::LogicalWindowSpec::Eos => WindowIR::Eos,
     }
 }
 

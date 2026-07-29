@@ -143,7 +143,7 @@ impl LogicalPlan {
 /// The plan structure will be:
 /// - DataSource(s) (from SelectStmt::source_infos, one per source)
 /// - StatefulFunction (from SelectStmt::stateful_mappings, if present) - takes DataSources as children
-/// - Window (from SelectStmt::window, if present) - takes DataSources as children
+/// - Window (from SelectStmt::window, if present) - takes StatefulFunction/DataSources as children
 /// - Aggregation (from SelectStmt::aggregate_mappings, if present) - takes Window or DataSources as children
 /// - Filter (from SelectStmt::having, if present) - takes Aggregation as children
 /// - Filter (from SelectStmt::where_condition, if present) - takes HAVING/Aggregation/Window/DataSources as children
@@ -219,15 +219,29 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
         .iter()
         .filter(|source| table_defs.contains_key(&source.name))
         .count();
+    validate_eos_window_source_constraints(&select_stmt, table_sources)?;
     if table_sources > 0 {
         if select_stmt.source_infos.len() != 1 {
             return Err("table scan currently supports exactly one relation".to_string());
         }
-        if select_stmt.window.is_some() {
-            return Err("windowed table scans are not supported yet".to_string());
-        }
         if !select_stmt.aggregate_mappings.is_empty() {
-            return Err("aggregate functions over table scans are not supported yet".to_string());
+            match select_stmt.window.as_ref() {
+                Some(parser_window::Window::Eos { .. }) => {}
+                Some(_) => {
+                    return Err(
+                        "table scan aggregate queries only support GROUP BY eoswindow()"
+                            .to_string(),
+                    );
+                }
+                None => {
+                    return Err(
+                        "aggregate functions over table scans require GROUP BY eoswindow()"
+                            .to_string(),
+                    );
+                }
+            }
+        } else if select_stmt.window.is_some() {
+            return Err("windowed table scans require aggregate functions".to_string());
         }
         let source_info = &select_stmt.source_infos[0];
         let definition = table_defs.get(&source_info.name).ok_or_else(|| {
@@ -335,9 +349,6 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
 
     // 6. Create Filter from where_condition if present
     if let Some(where_expr) = select_stmt.where_condition.clone() {
-        // Convert sqlparser Expr to ScalarExpr for the filter predicate
-        // For now, we'll keep the original expression in the Filter node
-        // In a full implementation, we'd convert this to a ScalarExpr
         let filter = Filter::new(where_expr, current_plans, current_index);
         current_plans = vec![Arc::new(LogicalPlan::Filter(filter))];
         current_index += 1;
@@ -614,7 +625,10 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
                     return Err("aliases in window definitions are not supported yet".to_string());
                 }
             }
-            Window::Tumbling { .. } | Window::Count { .. } | Window::Sliding { .. } => {}
+            Window::Tumbling { .. }
+            | Window::Count { .. }
+            | Window::Sliding { .. }
+            | Window::Eos { .. } => {}
         }
     }
 
@@ -1382,6 +1396,27 @@ fn validate_window_filter_constraints(select_stmt: &SelectStmt) -> Result<(), St
     Ok(())
 }
 
+fn validate_eos_window_source_constraints(
+    select_stmt: &SelectStmt,
+    table_sources: usize,
+) -> Result<(), String> {
+    let Some(window) = select_stmt.window.as_ref() else {
+        return Ok(());
+    };
+    if !matches!(window, parser_window::Window::Eos { .. }) {
+        return Ok(());
+    }
+
+    if table_sources == 0 {
+        return Err("eoswindow() is only supported for table scan queries".to_string());
+    }
+    if select_stmt.source_infos.len() != 1 {
+        return Err("eoswindow() requires exactly one table source".to_string());
+    }
+
+    Ok(())
+}
+
 fn expr_references_any_stateful_placeholder(
     expr: &sqlparser::ast::Expr,
     stateful_mappings: &[parser::StatefulMappingEntry],
@@ -1702,7 +1737,7 @@ fn find_disallowed_window_filter_expression(expr: &Expr) -> Option<String> {
 fn is_window_function_name(name: &str) -> bool {
     matches!(
         name,
-        "tumblingwindow" | "countwindow" | "slidingwindow" | "statewindow"
+        "tumblingwindow" | "countwindow" | "slidingwindow" | "statewindow" | "eoswindow"
     )
 }
 
@@ -1750,6 +1785,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             emit,
             partition_by,
         }),
+        parser_window::Window::Eos { .. } => Ok(LogicalWindowSpec::Eos),
     }
 }
 
