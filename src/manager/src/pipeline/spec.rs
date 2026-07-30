@@ -21,6 +21,8 @@ use super::types::{
     VideoSinkPropsRequest,
 };
 
+const MAX_SCHEDULE_DATETIME_RANGES: usize = 128;
+
 #[derive(Deserialize)]
 struct KuksaSinkPropsRequest {
     pub addr: Option<String>,
@@ -154,6 +156,28 @@ pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(),
         }
         crate::pipeline::scheduler::validate_cron_expression(&schedule.cron)
             .map_err(|err| format!("invalid options.schedule.cron: {err}"))?;
+        if schedule.datetime_ranges.len() > MAX_SCHEDULE_DATETIME_RANGES {
+            return Err(format!(
+                "options.schedule.datetime_ranges must contain at most {MAX_SCHEDULE_DATETIME_RANGES} ranges"
+            ));
+        }
+        for (index, range) in schedule.datetime_ranges.iter().enumerate() {
+            if range.begin_timestamp_ms < 0 {
+                return Err(format!(
+                    "options.schedule.datetime_ranges[{index}].begin_timestamp_ms must be non-negative"
+                ));
+            }
+            if range.end_timestamp_ms < 0 {
+                return Err(format!(
+                    "options.schedule.datetime_ranges[{index}].end_timestamp_ms must be non-negative"
+                ));
+            }
+            if range.begin_timestamp_ms >= range.end_timestamp_ms {
+                return Err(format!(
+                    "options.schedule.datetime_ranges[{index}].begin_timestamp_ms must be less than end_timestamp_ms"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -562,11 +586,20 @@ pub(crate) fn build_pipeline_definition(
         sink_definition.retry.validate()?;
         sinks.push(sink_definition);
     }
-    let schedule = req
-        .options
-        .schedule
-        .as_ref()
-        .map(|s| flow::pipeline::PipelineScheduleConfig::new(s.cron.trim(), s.duration_secs));
+    let schedule = req.options.schedule.as_ref().map(|s| {
+        flow::pipeline::PipelineScheduleConfig::new(s.cron.trim(), s.duration_secs)
+            .with_datetime_ranges(
+                s.datetime_ranges
+                    .iter()
+                    .map(|range| {
+                        flow::pipeline::PipelineScheduleDatetimeRange::new(
+                            range.begin_timestamp_ms,
+                            range.end_timestamp_ms,
+                        )
+                    })
+                    .collect(),
+            )
+    });
     let options = PipelineOptions {
         data_channel_capacity: req.options.data_channel_capacity,
         eventtime: flow::pipeline::EventtimeOptions {

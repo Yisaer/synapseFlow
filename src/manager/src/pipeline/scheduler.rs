@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use storage::{StoredPipelineDesiredState, StoredPipelineRunState};
 
-use super::types::{PipelineScheduleRequest, ScheduleStatus};
+use super::types::{PipelineDatetimeRangeRequest, PipelineScheduleRequest, ScheduleStatus};
 use crate::storage_bridge;
 
 /// Validate a 5-field cron expression.
@@ -58,6 +58,30 @@ fn find_active_window(
     })
 }
 
+fn datetime_range_contains(range: &PipelineDatetimeRangeRequest, timestamp_ms: i64) -> bool {
+    range.begin_timestamp_ms <= timestamp_ms && timestamp_ms < range.end_timestamp_ms
+}
+
+fn effective_window_end_ms(
+    schedule_config: &PipelineScheduleRequest,
+    active_fire: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> Option<i64> {
+    let cron_window_end_ms =
+        active_fire.timestamp_millis() + (schedule_config.duration_secs as i64) * 1000;
+    if schedule_config.datetime_ranges.is_empty() {
+        return Some(cron_window_end_ms);
+    }
+
+    let now_ms = now.timestamp_millis();
+    schedule_config
+        .datetime_ranges
+        .iter()
+        .filter(|range| datetime_range_contains(range, now_ms))
+        .map(|range| cron_window_end_ms.min(range.end_timestamp_ms))
+        .max()
+}
+
 /// Find the most recent cron fire that is <= `reference`.
 /// Searches backwards up to 2 years; worst case ~1M iterations for minutely
 /// cron but only called from the GET handler, not the hot patrol loop.
@@ -86,12 +110,15 @@ fn find_previous_fire(
 }
 
 /// Compute the `ScheduleStatus` for a pipeline at the current time.
-pub(crate) fn compute_schedule_status(
+pub(crate) fn compute_schedule_status(schedule_config: &PipelineScheduleRequest) -> ScheduleStatus {
+    compute_schedule_status_at(schedule_config, Utc::now())
+}
+
+fn compute_schedule_status_at(
     schedule_config: &PipelineScheduleRequest,
-    scheduled_until_ms: Option<i64>,
+    now: chrono::DateTime<Utc>,
 ) -> ScheduleStatus {
     let cron_schedule = parse_cron_schedule(&schedule_config.cron);
-    let now = Utc::now();
 
     let next_fire_at = cron_schedule
         .as_ref()
@@ -103,21 +130,21 @@ pub(crate) fn compute_schedule_status(
         .and_then(|s| find_previous_fire(s, now))
         .map(|t| t.to_rfc3339());
 
-    let active_fire = cron_schedule
+    let active_window_end_ms = cron_schedule
         .as_ref()
-        .and_then(|s| find_active_window(s, now, schedule_config.duration_secs));
+        .and_then(|s| find_active_window(s, now, schedule_config.duration_secs))
+        .and_then(|fire| effective_window_end_ms(schedule_config, fire, now));
 
-    let in_window = active_fire.is_some();
+    let in_window = active_window_end_ms.is_some();
 
-    let auto_stop_at = scheduled_until_ms.filter(|_| in_window).map(|ms| {
-        chrono::DateTime::from_timestamp_millis(ms)
-            .unwrap_or(chrono::DateTime::UNIX_EPOCH)
-            .to_rfc3339()
-    });
+    let auto_stop_at = active_window_end_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|t| t.to_rfc3339());
 
     ScheduleStatus {
         cron: schedule_config.cron.clone(),
         duration_secs: schedule_config.duration_secs,
+        datetime_ranges: schedule_config.datetime_ranges.clone(),
         in_window,
         previous_fire_at,
         next_fire_at,
@@ -148,6 +175,82 @@ pub(crate) async fn run_patrol(
         for stored in &pipelines {
             patrol_pipeline(stored, storage.as_ref(), &instances).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn schedule(
+        cron: &str,
+        duration_secs: u64,
+        datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
+    ) -> PipelineScheduleRequest {
+        PipelineScheduleRequest {
+            cron: cron.to_string(),
+            duration_secs,
+            datetime_ranges,
+        }
+    }
+
+    #[test]
+    fn schedule_status_requires_datetime_range_match() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 10).unwrap();
+        let req = schedule(
+            "* * * * *",
+            30,
+            vec![PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: now.timestamp_millis() + 60_000,
+                end_timestamp_ms: now.timestamp_millis() + 120_000,
+            }],
+        );
+
+        let status = compute_schedule_status_at(&req, now);
+
+        assert!(!status.in_window);
+        assert_eq!(status.auto_stop_at, None);
+    }
+
+    #[test]
+    fn schedule_status_clips_auto_stop_at_to_datetime_range_end() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 10, 1, 0).unwrap();
+        let range_end = Utc.with_ymd_and_hms(2026, 1, 1, 10, 2, 0).unwrap();
+        let req = schedule(
+            "0 10 * * *",
+            300,
+            vec![PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: Utc
+                    .with_ymd_and_hms(2026, 1, 1, 10, 0, 0)
+                    .unwrap()
+                    .timestamp_millis(),
+                end_timestamp_ms: range_end.timestamp_millis(),
+            }],
+        );
+
+        let status = compute_schedule_status_at(&req, now);
+
+        assert!(status.in_window);
+        assert_eq!(status.auto_stop_at, Some(range_end.to_rfc3339()));
+    }
+
+    #[test]
+    fn schedule_status_without_datetime_ranges_uses_cron_window() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 10).unwrap();
+        let req = schedule("* * * * *", 30, Vec::new());
+
+        let status = compute_schedule_status_at(&req, now);
+
+        assert!(status.in_window);
+        assert_eq!(
+            status.auto_stop_at,
+            Some(
+                Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 30)
+                    .unwrap()
+                    .to_rfc3339()
+            )
+        );
     }
 }
 
@@ -183,20 +286,20 @@ async fn patrol_pipeline(
     };
 
     let now = Utc::now();
-    let _now_ms = now.timestamp_millis();
+    let active_window_end_ms =
+        find_active_window(&cron_schedule, now, schedule_config.duration_secs)
+            .and_then(|fire| effective_window_end_ms(schedule_config, fire, now));
+    let in_window = active_window_end_ms.is_some();
 
-    let active_fire = find_active_window(&cron_schedule, now, schedule_config.duration_secs);
-    let in_window = active_fire.is_some();
+    let expected_desired_state = if in_window {
+        StoredPipelineDesiredState::ScheduledRunning
+    } else {
+        StoredPipelineDesiredState::ScheduledStopped
+    };
 
-    let window_end_ms = active_fire
-        .map(|fire| fire.timestamp_millis() + (schedule_config.duration_secs as i64) * 1000);
-
-    let run_state = match storage.get_pipeline_run_state(pipeline_id) {
-        Ok(Some(state)) => state,
-        Ok(None) => StoredPipelineRunState {
-            pipeline_id: pipeline_id.clone(),
-            desired_state: StoredPipelineDesiredState::Stopped,
-        },
+    let current_desired_state = match storage.get_pipeline_run_state(pipeline_id) {
+        Ok(Some(state)) => state.desired_state,
+        Ok(None) => StoredPipelineDesiredState::ScheduledStopped,
         Err(err) => {
             tracing::warn!(pipeline_id, %err, "patrol: failed to read run state");
             return;
@@ -222,49 +325,41 @@ async fn patrol_pipeline(
             && matches!(s.status, flow::pipeline::PipelineStatus::Running)
     });
 
-    let is_scheduled_run = matches!(
-        run_state.desired_state,
-        StoredPipelineDesiredState::RunningScheduled(_)
-    );
+    if current_desired_state != expected_desired_state
+        && storage
+            .put_pipeline_run_state(StoredPipelineRunState {
+                pipeline_id: pipeline_id.clone(),
+                desired_state: expected_desired_state.clone(),
+            })
+            .is_err()
+    {
+        tracing::error!(
+            pipeline_id,
+            "patrol: failed to persist scheduled desired state"
+        );
+        return;
+    }
 
     if in_window && !is_running {
-        let window_end = window_end_ms.expect("window_end_ms must be set when in_window is true");
         tracing::info!(
             pipeline_id,
             cron = %schedule_config.cron,
-            window_end_ms = window_end,
             "patrol: auto-starting pipeline"
         );
-
-        if let Err(err) = storage.put_pipeline_run_state(StoredPipelineRunState {
-            pipeline_id: pipeline_id.clone(),
-            desired_state: StoredPipelineDesiredState::RunningScheduled(window_end),
-        }) {
-            tracing::error!(pipeline_id, %err, "patrol: failed to persist scheduled run state");
-            return;
-        }
 
         if let Err(err) = instance.start_pipeline(pipeline_id).await {
             tracing::error!(pipeline_id, %err, "patrol: failed to auto-start pipeline");
             let _ = storage.put_pipeline_run_state(StoredPipelineRunState {
                 pipeline_id: pipeline_id.clone(),
-                desired_state: StoredPipelineDesiredState::Stopped,
+                desired_state: StoredPipelineDesiredState::ScheduledStopped,
             });
         }
-    } else if !in_window && is_running && is_scheduled_run {
+    } else if !in_window && is_running {
         tracing::info!(
             pipeline_id,
             cron = %schedule_config.cron,
             "patrol: auto-stopping pipeline (scheduled window ended)"
         );
-
-        if let Err(err) = storage.put_pipeline_run_state(StoredPipelineRunState {
-            pipeline_id: pipeline_id.clone(),
-            desired_state: StoredPipelineDesiredState::Stopped,
-        }) {
-            tracing::error!(pipeline_id, %err, "patrol: failed to clear scheduled run state");
-            return;
-        }
 
         let timeout = Duration::from_secs(30);
         if let Err(err) = instance
@@ -276,22 +371,6 @@ async fn patrol_pipeline(
             .await
         {
             tracing::error!(pipeline_id, %err, "patrol: failed to auto-stop pipeline");
-        }
-    } else if in_window && is_running && is_scheduled_run {
-        let window_end = window_end_ms.expect("window_end_ms must be set when in_window is true");
-        let current_window = match run_state.desired_state {
-            StoredPipelineDesiredState::RunningScheduled(ms) => Some(ms),
-            _ => None,
-        };
-        if current_window != Some(window_end)
-            && storage
-                .put_pipeline_run_state(StoredPipelineRunState {
-                    pipeline_id: pipeline_id.clone(),
-                    desired_state: StoredPipelineDesiredState::RunningScheduled(window_end),
-                })
-                .is_err()
-        {
-            tracing::error!(pipeline_id, "patrol: failed to update scheduled window end");
         }
     }
 }

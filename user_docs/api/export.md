@@ -81,7 +81,8 @@ curl -sOJ 'http://127.0.0.1:8080/storage/export?bundle_version=2026.07.24-1'
 - `run_state: StoredPipelineDesiredState`
   - `Stopped`
   - `Running`
-  - `{ "RunningScheduled": <unix_timestamp_ms> }`
+  - `ScheduledStopped`
+  - `ScheduledRunning`
 
 ## Export, Edit, and Use as an Init Directory
 

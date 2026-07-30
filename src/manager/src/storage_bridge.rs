@@ -433,6 +433,7 @@ async fn restore_pipeline(
             if matches!(
                 state.desired_state,
                 storage::StoredPipelineDesiredState::Running
+                    | storage::StoredPipelineDesiredState::ScheduledRunning
             ) =>
         {
             if let Err(err) = instance.start_pipeline(&pipeline.id).await {

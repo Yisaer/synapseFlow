@@ -86,13 +86,39 @@ pub struct StoredPipeline {
     pub raw_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum StoredPipelineDesiredState {
     Stopped,
     Running,
-    /// Running because of a scheduler auto-start. The i64 is the
-    /// unix timestamp (ms) at which the scheduler should auto-stop.
-    RunningScheduled(i64),
+    ScheduledStopped,
+    ScheduledRunning,
+}
+
+impl<'de> Deserialize<'de> for StoredPipelineDesiredState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum CompatDesiredState {
+            Stopped,
+            Running,
+            ScheduledStopped,
+            ScheduledRunning,
+            RunningScheduled(i64),
+        }
+
+        match CompatDesiredState::deserialize(deserializer)? {
+            CompatDesiredState::Stopped => Ok(Self::Stopped),
+            CompatDesiredState::Running => Ok(Self::Running),
+            CompatDesiredState::ScheduledStopped => Ok(Self::ScheduledStopped),
+            CompatDesiredState::ScheduledRunning => Ok(Self::ScheduledRunning),
+            CompatDesiredState::RunningScheduled(until_ms) => {
+                let _ = until_ms;
+                Ok(Self::ScheduledRunning)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

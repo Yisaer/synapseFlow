@@ -1346,7 +1346,7 @@ mod tests {
     #[test]
     fn validate_snapshot_preserves_inline_pipeline_run_state() {
         let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
-        bundle.resources.pipelines[0].run_state = StoredPipelineDesiredState::RunningScheduled(123);
+        bundle.resources.pipelines[0].run_state = StoredPipelineDesiredState::Running;
 
         let snapshot = validate_and_build_snapshot(&bundle, None, &is_default_instance)
             .expect("build snapshot");
@@ -1354,8 +1354,23 @@ mod tests {
             snapshot.pipeline_run_states,
             vec![StoredPipelineRunState {
                 pipeline_id: "pipe_a".to_string(),
-                desired_state: StoredPipelineDesiredState::RunningScheduled(123),
+                desired_state: StoredPipelineDesiredState::Running,
             }]
+        );
+    }
+
+    #[test]
+    fn deserialize_pipeline_legacy_scheduled_run_state_as_scheduled_running() {
+        let mut value =
+            serde_json::to_value(sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a"))
+                .expect("serialize bundle");
+        value["resources"]["pipelines"][0]["run_state"] =
+            serde_json::json!({ "RunningScheduled": 123 });
+
+        let bundle: ResourceManifestV1 = serde_json::from_value(value).expect("deserialize bundle");
+        assert_eq!(
+            bundle.resources.pipelines[0].run_state,
+            StoredPipelineDesiredState::ScheduledRunning
         );
     }
 

@@ -594,6 +594,9 @@ pub struct PipelineScheduleConfig {
     /// How long the pipeline runs after each cron trigger, in seconds.
     /// Must be greater than 0.
     pub duration_secs: u64,
+    /// Absolute timestamp ranges in which cron windows may run.
+    /// Empty means no datetime restriction.
+    pub datetime_ranges: Vec<PipelineScheduleDatetimeRange>,
 }
 
 impl PipelineScheduleConfig {
@@ -601,6 +604,30 @@ impl PipelineScheduleConfig {
         Self {
             cron: cron.into(),
             duration_secs,
+            datetime_ranges: Vec::new(),
+        }
+    }
+
+    pub fn with_datetime_ranges(
+        mut self,
+        datetime_ranges: Vec<PipelineScheduleDatetimeRange>,
+    ) -> Self {
+        self.datetime_ranges = datetime_ranges;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineScheduleDatetimeRange {
+    pub begin_timestamp_ms: i64,
+    pub end_timestamp_ms: i64,
+}
+
+impl PipelineScheduleDatetimeRange {
+    pub fn new(begin_timestamp_ms: i64, end_timestamp_ms: i64) -> Self {
+        Self {
+            begin_timestamp_ms,
+            end_timestamp_ms,
         }
     }
 }

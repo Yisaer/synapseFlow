@@ -732,7 +732,7 @@ mod tests {
         for run_state in [
             StoredPipelineRunState {
                 pipeline_id: "pipe_b".to_string(),
-                desired_state: StoredPipelineDesiredState::RunningScheduled(123),
+                desired_state: StoredPipelineDesiredState::ScheduledRunning,
             },
             StoredPipelineRunState {
                 pipeline_id: "pipe_a".to_string(),
@@ -824,7 +824,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 &StoredPipelineDesiredState::Stopped,
-                &StoredPipelineDesiredState::RunningScheduled(123)
+                &StoredPipelineDesiredState::ScheduledRunning
             ]
         );
         assert_eq!(

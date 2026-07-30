@@ -84,9 +84,9 @@ fn stream_refs_busy_response(streams: &BTreeSet<String>) -> axum::response::Resp
 
 fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
     match state.map(|s| s.desired_state) {
-        Some(
-            StoredPipelineDesiredState::Running | StoredPipelineDesiredState::RunningScheduled(_),
-        ) => "running".to_string(),
+        Some(StoredPipelineDesiredState::Running) => "running".to_string(),
+        Some(StoredPipelineDesiredState::ScheduledRunning) => "scheduled_running".to_string(),
+        Some(StoredPipelineDesiredState::ScheduledStopped) => "scheduled_stopped".to_string(),
         _ => "stopped".to_string(),
     }
 }
@@ -238,7 +238,7 @@ pub async fn create_pipeline_handler(
     }
 
     if query.start && req.options.schedule.is_some() {
-        let err = "cannot use start=true with a scheduled pipeline; the scheduler manages pipeline lifecyle"
+        let err = "cannot use start=true with a scheduled pipeline; the scheduler manages pipeline lifecycle"
             .to_string();
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
@@ -367,6 +367,22 @@ pub async fn create_pipeline_handler(
                         });
                 }
             }
+        }
+    } else if req.options.schedule.is_some() {
+        if let Err(err) = state
+            .storage
+            .put_pipeline_run_state(StoredPipelineRunState {
+                pipeline_id: pipeline_id.clone(),
+                desired_state: StoredPipelineDesiredState::ScheduledStopped,
+            })
+        {
+            tracing::error!(
+                pipeline_id = %pipeline_id,
+                error = %err,
+                "failed to persist scheduled desired state after create"
+            );
+        } else {
+            status = "scheduled_stopped".to_string();
         }
     }
 
@@ -613,39 +629,55 @@ pub async fn upsert_pipeline_handler(
             .into_response();
     }
 
+    let desired_state = match (create_req.options.schedule.is_some(), old_desired_state) {
+        (true, StoredPipelineDesiredState::ScheduledRunning) => {
+            StoredPipelineDesiredState::ScheduledRunning
+        }
+        (true, _) => StoredPipelineDesiredState::ScheduledStopped,
+        (
+            false,
+            StoredPipelineDesiredState::Running | StoredPipelineDesiredState::ScheduledRunning,
+        ) => StoredPipelineDesiredState::Running,
+        (false, _) => StoredPipelineDesiredState::Stopped,
+    };
+
+    if let Err(err) = state
+        .storage
+        .put_pipeline_run_state(StoredPipelineRunState {
+            pipeline_id: id.clone(),
+            desired_state: desired_state.clone(),
+        })
+    {
+        let _ = instance.delete_pipeline(&id).await;
+        let _ = state.storage.delete_pipeline(&id);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist pipeline {id} desired state: {err}"),
+        )
+            .into_response();
+    }
+
     if matches!(
-        old_desired_state,
-        StoredPipelineDesiredState::Running | StoredPipelineDesiredState::RunningScheduled(_)
-    ) {
-        if let Err(err) = state
+        desired_state,
+        StoredPipelineDesiredState::Running | StoredPipelineDesiredState::ScheduledRunning
+    ) && let Err(err) = instance.start_pipeline(&id).await
+    {
+        tracing::error!(
+            pipeline_id = %id,
+            error = %err,
+            "failed to start pipeline after upsert, leaving stopped"
+        );
+        let _ = state
             .storage
             .put_pipeline_run_state(StoredPipelineRunState {
                 pipeline_id: id.clone(),
-                desired_state: StoredPipelineDesiredState::Running,
-            })
-        {
-            let _ = instance.delete_pipeline(&id).await;
-            let _ = state.storage.delete_pipeline(&id);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist pipeline {id} desired state: {err}"),
-            )
-                .into_response();
-        }
-
-        if let Err(err) = instance.start_pipeline(&id).await {
-            tracing::error!(
-                pipeline_id = %id,
-                error = %err,
-                "failed to start pipeline after upsert, leaving stopped"
-            );
-            let _ = state
-                .storage
-                .put_pipeline_run_state(StoredPipelineRunState {
-                    pipeline_id: id.clone(),
-                    desired_state: StoredPipelineDesiredState::Stopped,
-                });
-        }
+                desired_state: match desired_state {
+                    StoredPipelineDesiredState::ScheduledRunning => {
+                        StoredPipelineDesiredState::ScheduledStopped
+                    }
+                    _ => StoredPipelineDesiredState::Stopped,
+                },
+            });
     }
 
     let status = stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
@@ -713,13 +745,11 @@ pub async fn get_pipeline_handler(
         }
     };
 
-    let schedule_status = spec.options.schedule.as_ref().map(|s| {
-        let scheduled_until_ms = run_state.as_ref().and_then(|rs| match rs.desired_state {
-            storage::StoredPipelineDesiredState::RunningScheduled(until_ms) => Some(until_ms),
-            _ => None,
-        });
-        super::scheduler::compute_schedule_status(s, scheduled_until_ms)
-    });
+    let schedule_status = spec
+        .options
+        .schedule
+        .as_ref()
+        .map(super::scheduler::compute_schedule_status);
 
     Json(GetPipelineResponse {
         id: id.clone(),
@@ -875,6 +905,14 @@ pub async fn start_pipeline_handler(
     };
     let audit = ResourceMutationLog::new("pipeline", "start", id.as_str(), Some(&flow_instance_id));
 
+    if pipeline_req.options.schedule.is_some() {
+        let err = format!(
+            "pipeline {id} is scheduled; manual start conflicts with scheduler-managed lifecycle"
+        );
+        audit.log_failure(&err);
+        return (StatusCode::CONFLICT, err).into_response();
+    }
+
     let _shared_mqtt_permits =
         match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
             Ok(permits) => permits,
@@ -948,11 +986,19 @@ pub async fn stop_pipeline_handler(
                 .into_response();
         }
     };
-    let (flow_instance_id, _) = match resolve_pipeline_spec(&state, &id).await {
+    let (flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
         Err(resp) => return resp,
     };
     let audit = ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(&flow_instance_id));
+
+    if pipeline_req.options.schedule.is_some() {
+        let err = format!(
+            "pipeline {id} is scheduled; manual stop conflicts with scheduler-managed lifecycle"
+        );
+        audit.log_failure(&err);
+        return (StatusCode::CONFLICT, err).into_response();
+    }
 
     let mode = match parse_stop_mode(&query.mode) {
         Ok(mode) => mode,
@@ -963,9 +1009,6 @@ pub async fn stop_pipeline_handler(
     };
     let timeout = Duration::from_millis(query.timeout_ms);
 
-    // Set desired_state to Stopped (not RunningScheduled) on manual stop
-    // so the patrol scheduler does not re-start the pipeline within the
-    // same scheduling window.
     if let Err(err) = state
         .storage
         .put_pipeline_run_state(StoredPipelineRunState {
@@ -1119,10 +1162,24 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                     };
                 spec.flow_instance_id = Some(flow_instance_id.clone());
 
-                let status = runtime_status
-                    .get(&entry.id)
-                    .cloned()
-                    .unwrap_or_else(|| "stopped".to_string());
+                let desired_status = match state.storage.get_pipeline_run_state(&entry.id) {
+                    Ok(run_state) => stored_state_label(run_state),
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to read pipeline {} run state: {err}", entry.id),
+                        )
+                            .into_response();
+                    }
+                };
+                let status = if desired_status.starts_with("scheduled_") {
+                    desired_status
+                } else {
+                    runtime_status
+                        .get(&entry.id)
+                        .cloned()
+                        .unwrap_or(desired_status)
+                };
                 list.push(ListPipelineItem {
                     id: entry.id,
                     revision: entry.revision,

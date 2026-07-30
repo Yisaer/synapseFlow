@@ -39,6 +39,7 @@ impl CreatePipelineRequest {
         for sink in &mut self.sinks {
             sink.normalize();
         }
+        self.options.normalize();
     }
 }
 
@@ -62,6 +63,22 @@ pub struct PipelineScheduleRequest {
     /// How long each scheduled run lasts, in seconds.
     /// Must be greater than 0.
     pub duration_secs: u64,
+    /// Absolute UTC timestamp ranges in which the cron windows are effective.
+    /// Empty means no datetime restriction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
+}
+
+impl PipelineScheduleRequest {
+    fn normalize(&mut self) {
+        normalize_datetime_ranges(&mut self.datetime_ranges);
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct PipelineDatetimeRangeRequest {
+    pub begin_timestamp_ms: i64,
+    pub end_timestamp_ms: i64,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -83,6 +100,39 @@ impl Default for PipelineOptionsRequest {
             schedule: None,
         }
     }
+}
+
+impl PipelineOptionsRequest {
+    fn normalize(&mut self) {
+        if let Some(schedule) = &mut self.schedule {
+            schedule.normalize();
+        }
+    }
+}
+
+fn normalize_datetime_ranges(ranges: &mut Vec<PipelineDatetimeRangeRequest>) {
+    if ranges.iter().any(|range| {
+        range.begin_timestamp_ms < 0
+            || range.end_timestamp_ms < 0
+            || range.begin_timestamp_ms >= range.end_timestamp_ms
+    }) {
+        return;
+    }
+
+    ranges.sort_by_key(|range| (range.begin_timestamp_ms, range.end_timestamp_ms));
+    let mut merged: Vec<PipelineDatetimeRangeRequest> = Vec::with_capacity(ranges.len());
+
+    for range in ranges.drain(..) {
+        if let Some(last) = merged.last_mut()
+            && range.begin_timestamp_ms <= last.end_timestamp_ms
+        {
+            last.end_timestamp_ms = last.end_timestamp_ms.max(range.end_timestamp_ms);
+            continue;
+        }
+        merged.push(range);
+    }
+
+    *ranges = merged;
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -122,6 +172,8 @@ pub struct GetPipelineResponse {
 pub struct ScheduleStatus {
     pub cron: String,
     pub duration_secs: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
     /// Whether current time falls within an active scheduling window.
     pub in_window: bool,
     /// Timestamp of the last (or current) cron fire, in RFC 3339 UTC.

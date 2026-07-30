@@ -20,9 +20,10 @@ pub use api::{
     CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget, FileRetentionConfig,
     FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps,
     NngPubSubSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
-    PipelineScheduleConfig, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition,
-    SinkProps, SinkRetryConfig, SinkType, SourceDefinition, SourceInputConfig, SourceInputMode,
-    SourceOnChangeConfig, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    PipelineScheduleConfig, PipelineScheduleDatetimeRange, PipelineSnapshot, PipelineStatus,
+    PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig, SinkType, SourceDefinition,
+    SourceInputConfig, SourceInputMode, SourceOnChangeConfig, VideoCodec, VideoContainer,
+    VideoRollingConfig, VideoSinkProps,
 };
 pub(crate) use context::PipelineContext;
 
