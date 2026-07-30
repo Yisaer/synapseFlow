@@ -10,7 +10,7 @@ use flow::connector::sink::video::{
     VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig, VideoRollingConfig,
     VideoSinkConfig, VideoSinkTargetConfig,
 };
-use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
+use flow::connector::{HttpSinkConfig, KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
 use flow::expr::func::EvalError;
 use flow::planner::logical::{
     create_logical_plan, create_logical_plan_with_source_inputs,
@@ -34,11 +34,13 @@ use flow::{
 use flow::{HistoryTableProps, TableDefinition, TableProps};
 use parser::parse_sql;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use flow::pipeline::{EventtimeOptions, PipelineOptions, SourceInputConfig};
+use flow::pipeline::{
+    EventtimeOptions, HttpBodyConfig, HttpMultipartConfig, PipelineOptions, SourceInputConfig,
+};
 use serde_json::Map as JsonMap;
 
 fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
@@ -927,6 +929,30 @@ fn plan_explain_with_sinks_table_driven() {
                 ),
             )],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a + 1]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a + 1]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=memory","topic=demo_bytes","kind=bytes"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+        Case {
+            name: "http_multipart_sink_includes_non_sensitive_body_summary",
+            sql: "SELECT a FROM stream",
+            sinks: vec![PipelineSink::new(
+                "test_sink",
+                PipelineSinkConnector::new(
+                    "test_connector",
+                    SinkConnectorConfig::Http(
+                        HttpSinkConfig::new("https://example.com/upload").with_body(
+                            HttpBodyConfig::Multipart(HttpMultipartConfig {
+                                file_field_name: "d".to_string(),
+                                file_name: "payload.bin".to_string(),
+                                fields: BTreeMap::from([
+                                    ("rid".to_string(), "customer-secret".to_string()),
+                                    ("tp".to_string(), "1".to_string()),
+                                ]),
+                            }),
+                        ),
+                    ),
+                    SinkEncoderConfig::json(),
+                ),
+            )],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=http","encoder=json","body=multipart","file_field_name=d","static_fields=2"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=http","body=multipart","file_field_name=d","static_fields=2"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
             name: "omit_if_empty_full_output_inserts_empty_suppress_between_project_and_encoder",

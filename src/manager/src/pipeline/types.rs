@@ -4,7 +4,8 @@ use flow::codec::{
     SinkEncryptionConfig,
 };
 use flow::pipeline::{
-    SinkRetryConfig, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
+    HttpBodyConfig, HttpMultipartConfig, SinkRetryConfig, SourceDefinition, SourceInputConfig,
+    SourceInputMode, SourceOnChangeConfig,
 };
 use flow::planner::sink::{
     CommonSinkProps, SinkDeltaOutputConfig, SinkOutputConfig, SinkOutputMode,
@@ -677,6 +678,24 @@ pub struct HttpSinkPropsRequest {
     pub retry_max_attempts: Option<usize>,
     pub retry_backoff_ms: Option<u64>,
     pub retry_max_backoff_ms: Option<u64>,
+    pub body: Option<HttpBodyConfigRequest>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HttpBodyConfigRequest {
+    Raw,
+    Multipart {
+        file_field_name: String,
+        #[serde(default = "default_multipart_file_name")]
+        file_name: String,
+        #[serde(default)]
+        fields: BTreeMap<String, String>,
+    },
+}
+
+fn default_multipart_file_name() -> String {
+    "payload.bin".to_string()
 }
 
 /// Header names that must not appear in the plain `headers` map (VF-51 §7.4):
@@ -728,6 +747,64 @@ fn log_secret_warning(warning: Option<String>) {
 }
 
 impl HttpSinkPropsRequest {
+    pub(super) fn to_body_config(&self) -> Result<HttpBodyConfig, String> {
+        let Some(body) = &self.body else {
+            return Ok(HttpBodyConfig::Raw);
+        };
+
+        match body {
+            HttpBodyConfigRequest::Raw => Ok(HttpBodyConfig::Raw),
+            HttpBodyConfigRequest::Multipart {
+                file_field_name,
+                file_name,
+                fields,
+            } => {
+                if self
+                    .content_type
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err("http multipart body does not allow props.content_type".to_string());
+                }
+                if self.headers.as_ref().is_some_and(|headers| {
+                    headers
+                        .keys()
+                        .any(|name| name.trim().eq_ignore_ascii_case("content-type"))
+                }) {
+                    return Err(
+                        "http multipart body does not allow a Content-Type header".to_string()
+                    );
+                }
+
+                let file_field_name = normalize_multipart_name(file_field_name, "file_field_name")?;
+                let file_name = normalize_multipart_name(file_name, "file_name")?;
+                let mut normalized_fields = BTreeMap::new();
+                for (name, value) in fields {
+                    let name = normalize_multipart_name(name, "text field name")?;
+                    if name == file_field_name {
+                        return Err(format!(
+                            "http multipart text field `{name}` conflicts with file_field_name"
+                        ));
+                    }
+                    if normalized_fields
+                        .insert(name.clone(), value.clone())
+                        .is_some()
+                    {
+                        return Err(format!(
+                            "http multipart text field `{name}` is duplicated after trimming"
+                        ));
+                    }
+                }
+
+                Ok(HttpBodyConfig::Multipart(HttpMultipartConfig {
+                    file_field_name,
+                    file_name,
+                    fields: normalized_fields,
+                }))
+            }
+        }
+    }
+
     /// Reject sensitive auth headers placed in the plain `headers` map; they must
     /// use `auth`/`secret_headers` so the value never lands in scannable config.
     pub(super) fn reject_sensitive_plain_headers(&self) -> Result<(), String> {
@@ -764,6 +841,22 @@ impl HttpSinkPropsRequest {
         }
         Ok(out)
     }
+}
+
+fn normalize_multipart_name(value: &str, field: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("http multipart {field} must not be empty"));
+    }
+    if value
+        .chars()
+        .any(|character| matches!(character, '\r' | '\n' | '\0'))
+    {
+        return Err(format!(
+            "http multipart {field} must not contain CR, LF, or NUL"
+        ));
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -954,5 +1047,86 @@ mod secret_tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("store:api-token"));
         assert!(json.contains("\"type\":\"bearer\""));
+    }
+
+    #[test]
+    fn http_body_defaults_to_raw() {
+        let req = HttpSinkPropsRequest::default();
+        assert_eq!(req.to_body_config().unwrap(), HttpBodyConfig::Raw);
+    }
+
+    #[test]
+    fn multipart_body_uses_default_file_name_and_normalizes_names() {
+        let req: HttpSinkPropsRequest = serde_json::from_value(serde_json::json!({
+            "body": {
+                "type": "multipart",
+                "file_field_name": " d ",
+                "fields": {
+                    " rid ": "cold",
+                    "tp": ""
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            req.to_body_config().unwrap(),
+            HttpBodyConfig::Multipart(HttpMultipartConfig {
+                file_field_name: "d".to_string(),
+                file_name: "payload.bin".to_string(),
+                fields: BTreeMap::from([
+                    ("rid".to_string(), "cold".to_string()),
+                    ("tp".to_string(), String::new()),
+                ]),
+            })
+        );
+    }
+
+    #[test]
+    fn multipart_body_rejects_conflicting_field_names() {
+        let req: HttpSinkPropsRequest = serde_json::from_value(serde_json::json!({
+            "body": {
+                "type": "multipart",
+                "file_field_name": "d",
+                "fields": {
+                    " d ": "value"
+                }
+            }
+        }))
+        .unwrap();
+
+        let error = req.to_body_config().unwrap_err();
+        assert!(error.contains("conflicts with file_field_name"), "{error}");
+        assert!(!error.contains("value"), "{error}");
+    }
+
+    #[test]
+    fn multipart_body_rejects_content_type_override() {
+        let req: HttpSinkPropsRequest = serde_json::from_value(serde_json::json!({
+            "content_type": "multipart/form-data",
+            "body": {
+                "type": "multipart",
+                "file_field_name": "d"
+            }
+        }))
+        .unwrap();
+
+        let error = req.to_body_config().unwrap_err();
+        assert!(error.contains("props.content_type"), "{error}");
+    }
+
+    #[test]
+    fn multipart_body_rejects_unknown_fields() {
+        let error = serde_json::from_value::<HttpSinkPropsRequest>(serde_json::json!({
+            "body": {
+                "type": "multipart",
+                "file_field_name": "d",
+                "dynamic_field": "unsupported"
+            }
+        }))
+        .err()
+        .expect("unknown multipart field should fail");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }

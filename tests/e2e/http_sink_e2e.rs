@@ -1,9 +1,10 @@
 use super::{bind_manager_listener_or_skip, default_flow_instances, http_client, random_suffix};
 use axum::body::Bytes;
+use axum::extract::Multipart;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,10 +54,44 @@ impl RequestRecorder {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RecordedMultipartRequest {
+    request_content_type: String,
+    file_field_name: String,
+    file_name: String,
+    file_content_type: String,
+    file_body: Vec<u8>,
+    fields: BTreeMap<String, String>,
+}
+
+struct MultipartRequestRecorder {
+    requests: Mutex<Vec<RecordedMultipartRequest>>,
+}
+
+impl MultipartRequestRecorder {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn record(&self, request: RecordedMultipartRequest) {
+        self.requests.lock().unwrap().push(request);
+    }
+
+    fn requests(&self) -> Vec<RecordedMultipartRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn take_requests(&self) -> Vec<RecordedMultipartRequest> {
+        std::mem::take(&mut *self.requests.lock().unwrap())
+    }
+}
+
 // ── Test ───────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_sink_basic_json_post() {
+async fn http_sink_raw_and_multipart_json_post() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
     let instance = manager::new_default_flow_instance();
@@ -88,17 +123,63 @@ async fn http_sink_basic_json_post() {
 
     let recorder = RequestRecorder::new();
     let recorder_clone = recorder.clone();
+    let multipart_recorder = MultipartRequestRecorder::new();
+    let multipart_recorder_clone = multipart_recorder.clone();
 
-    let app = Router::new().route(
-        "/test",
-        post(move |headers: HeaderMap, body: Bytes| {
-            let recorder = recorder_clone.clone();
-            async move {
-                recorder.record("POST".to_string(), headers, body);
-                StatusCode::OK
-            }
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/raw",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let recorder = recorder_clone.clone();
+                async move {
+                    recorder.record("POST".to_string(), headers, body);
+                    StatusCode::OK
+                }
+            }),
+        )
+        .route(
+            "/multipart",
+            post(move |headers: HeaderMap, mut multipart: Multipart| {
+                let recorder = multipart_recorder_clone.clone();
+                async move {
+                    let request_content_type = headers
+                        .get("content-type")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut file_field_name = String::new();
+                    let mut file_name = String::new();
+                    let mut file_content_type = String::new();
+                    let mut file_body = Vec::new();
+                    let mut fields = BTreeMap::new();
+
+                    while let Some(field) = multipart.next_field().await.unwrap() {
+                        let name = field.name().unwrap().to_string();
+                        if field.file_name().is_some() {
+                            file_field_name = name;
+                            file_name = field.file_name().unwrap().to_string();
+                            file_content_type = field
+                                .content_type()
+                                .map(ToString::to_string)
+                                .unwrap_or_default();
+                            file_body = field.bytes().await.unwrap().to_vec();
+                        } else {
+                            fields.insert(name, field.text().await.unwrap());
+                        }
+                    }
+
+                    recorder.record(RecordedMultipartRequest {
+                        request_content_type,
+                        file_field_name,
+                        file_name,
+                        file_content_type,
+                        file_body,
+                        fields,
+                    });
+                    StatusCode::OK
+                }
+            }),
+        );
 
     let sink_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -152,17 +233,39 @@ async fn http_sink_basic_json_post() {
             "id": pipeline_id,
             "revision": 1,
             "sql": format!("SELECT * FROM {stream_name}"),
-            "sinks": [{
-                "type": "http",
-                "props": {
-                    "url": format!("http://127.0.0.1:{sink_port}/test"),
-                    "content_type": "application/json"
+            "sinks": [
+                {
+                    "id": "raw",
+                    "type": "http",
+                    "props": {
+                        "url": format!("http://127.0.0.1:{sink_port}/raw"),
+                        "content_type": "application/json"
+                    },
+                    "encoder": {
+                        "type": "json",
+                        "props": {}
+                    }
                 },
-                "encoder": {
-                    "type": "json",
-                    "props": {}
+                {
+                    "id": "multipart",
+                    "type": "http",
+                    "props": {
+                        "url": format!("http://127.0.0.1:{sink_port}/multipart"),
+                        "body": {
+                            "type": "multipart",
+                            "file_field_name": " d ",
+                            "fields": {
+                                " rid ": "cold",
+                                "tp": "1"
+                            }
+                        }
+                    },
+                    "encoder": {
+                        "type": "json",
+                        "props": {}
+                    }
                 }
-            }]
+            ]
         }))
         .send()
         .await
@@ -207,7 +310,7 @@ async fn http_sink_basic_json_post() {
 
         tokio::time::sleep(INJECT_RETRY_DELAY).await;
 
-        if !recorder.requests().is_empty() {
+        if !recorder.requests().is_empty() && !multipart_recorder.requests().is_empty() {
             break;
         }
     }
@@ -243,6 +346,35 @@ async fn http_sink_basic_json_post() {
 
     let expected = serde_json::json!([{"amount": 42, "status": "ok"}]);
     assert_eq!(body, expected, "http sink delivered unexpected body");
+
+    let multipart_recorded = multipart_recorder.take_requests();
+    assert_eq!(
+        multipart_recorded.len(),
+        1,
+        "expected exactly 1 multipart HTTP request"
+    );
+    let multipart_req = &multipart_recorded[0];
+    assert!(
+        multipart_req
+            .request_content_type
+            .starts_with("multipart/form-data; boundary="),
+        "unexpected multipart Content-Type: {}",
+        multipart_req.request_content_type
+    );
+    assert_eq!(multipart_req.file_field_name, "d");
+    assert_eq!(multipart_req.file_name, "payload.bin");
+    assert_eq!(multipart_req.file_content_type, "application/octet-stream");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&multipart_req.file_body).unwrap(),
+        expected
+    );
+    assert_eq!(
+        multipart_req.fields,
+        BTreeMap::from([
+            ("rid".to_string(), "cold".to_string()),
+            ("tp".to_string(), "1".to_string()),
+        ])
+    );
 
     // ── 6. Cleanup ─────────────────────────────────────────────────
 

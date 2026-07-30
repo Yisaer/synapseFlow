@@ -16,7 +16,7 @@ affects what is sent. The HTTP sink requires an encoder (e.g. `json`, `csv`, `pr
 - Define the runtime contract of the HTTP sink connector.
 - Document HTTP-specific configuration parameters and the common sink retry behavior.
 - Explain how encoder and sink-output features interact with HTTP delivery.
-- Specify `Content-Type` inference rules.
+- Specify raw and multipart request body behavior.
 
 ## Non-Goals
 
@@ -36,6 +36,7 @@ HTTP sink definitions accept:
   (`application/json` for JSON, `text/csv; charset=utf-8` for CSV,
   `application/octet-stream` for protobuf)
 - Optional `max_body_size` (default: 64 MiB) — single-delivery body limit
+- Optional `body` (default: `{ "type": "raw" }`) — raw or multipart request body mode
 - Optional common sink-level `retry` config:
   - `max_attempts` (default: none) — maximum delivery attempts including the first
   - `initial_backoff_ms` (default: `1000`) — initial backoff, doubles each retry
@@ -49,6 +50,47 @@ Manager validates `url` as required and rejects `encoder.type=none`. Legacy HTTP
 `retry_max_attempts`, `retry_backoff_ms`, and `retry_max_backoff_ms` are still accepted as
 compatibility input and are converted to the common sink-level retry config.
 
+### Multipart body
+
+Multipart mode uploads the final delivery as one file part and adds zero or more static UTF-8 text
+parts:
+
+```json
+{
+  "type": "http",
+  "props": {
+    "url": "https://example.com/api/offline/upload",
+    "body": {
+      "type": "multipart",
+      "file_field_name": "d",
+      "file_name": "payload.bin",
+      "fields": {
+        "tp": "1",
+        "rid": "cold"
+      }
+    }
+  },
+  "encoder": {
+    "type": "json"
+  }
+}
+```
+
+| Field | Required | Default | Meaning |
+|---|---:|---|---|
+| `type` | yes | — | Must be `multipart` |
+| `file_field_name` | yes | — | Form field name for the file part |
+| `file_name` | no | `payload.bin` | Filename in the part's `Content-Disposition` |
+| `fields` | no | `{}` | Static text field name/value pairs |
+
+Field names and the filename are trimmed. Empty names and names containing CR, LF, or NUL are
+rejected. A text field cannot use the file field name. Text values are preserved exactly and do
+not perform template, environment variable, or property expansion.
+
+The file part media type is always `application/octet-stream`. Multipart mode rejects both
+`props.content_type` and a `Content-Type` entry in `props.headers`; reqwest generates the request
+boundary and the matching `multipart/form-data; boundary=...` header.
+
 ## Delivery Lifecycle
 
 ```
@@ -60,7 +102,8 @@ write_chunk(bytes)                  // called 0..N times
   └─ Err if buffer > max_body_size  // size guard
 
 finish_delivery()
-  └─ send HTTP request with buffer as body
+  └─ raw: send buffer as the complete HTTP body
+  └─ multipart: send buffer as one file part with static text parts
      └─ on 2xx: return DeliveryResult
      └─ on 5xx/429: return SinkConnectorError::Transient
      └─ on 4xx (not 429): return SinkConnectorError::Permanent
@@ -103,6 +146,8 @@ When retry is not configured (`retry.max_attempts` unset), each delivery is atte
   the full delivery on each attempt.
 - `max_body_size` is exposed to `SinkProcessor`, so oversized encoded deliveries are rejected while
   being accumulated and before a connector attempt is made.
+- In multipart mode, reqwest streams the multipart envelope around the retained delivery bytes. The
+  connector does not build a second complete multipart buffer.
 
 ## Encoder and Output Feature Interaction
 
@@ -115,7 +160,9 @@ When retry is not configured (`retry.max_attempts` unset), each delivery is atte
 - **Encoder transform**: Template transforms are supported when the encoder is `json`. The
   transform output forms the HTTP body.
 - **Compression / Encryption**: Delivery compression (`gzip`, `zstd`) and encryption (`aes-gcm`) are
-  supported as pre-processing steps before the HTTP request is sent.
+  supported as pre-processing steps before the HTTP request is sent. In multipart mode, only the
+  file part contains the transformed bytes; the multipart envelope and static fields remain
+  untransformed.
 
 ## `Content-Type` Inference
 
@@ -129,7 +176,20 @@ When `content_type` is not explicitly configured:
 | Other / custom | (no Content-Type header set) |
 
 The inference happens during physical plan building, before the connector is instantiated.
-Explicit `content_type` always takes precedence.
+Explicit `content_type` always takes precedence in raw mode. Multipart mode disables inference and
+does not allow an explicit request `Content-Type`.
+
+Compression of the file payload does not automatically add a request-level `Content-Encoding`,
+because that header would describe the entire multipart representation. Endpoint-specific headers
+can still be configured explicitly.
+
+## Size and Metrics
+
+`max_body_size` limits the encoded delivery payload. In multipart mode this is the file part size;
+multipart boundaries, part headers, static fields, and trailing framing are not included.
+
+`DeliveryResult.bytes_written` uses the same payload-byte definition and does not include multipart
+envelope overhead.
 
 ## Error Handling
 
@@ -143,7 +203,7 @@ Explicit `content_type` always takes precedence.
 ## Testing
 
 - **Unit tests** (`connector/sink/http.rs`): config defaults, builder methods, content-type
-  inference, and status classification.
+  inference, status classification, and structurally parsed multipart requests.
 - **E2E tests** (`tests/e2e/http_sink_e2e.rs`): full pipeline with mock stream source → JSON
-  decoder → HTTP sink → embedded axum test server. Verifies correct method, Content-Type, and
-  JSON body delivery.
+  decoder → raw and multipart HTTP sinks → embedded axum test server. Verifies raw compatibility
+  and that the complete JSON encoder output is delivered in the configured file part.

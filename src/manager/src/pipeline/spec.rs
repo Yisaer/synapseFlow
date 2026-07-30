@@ -468,11 +468,12 @@ pub(crate) fn build_pipeline_definition(
                         .map_err(|err| format!("invalid http sink props: {err}"))?;
                 http_props.reject_sensitive_plain_headers()?;
                 let resolved_secret_headers = http_props.resolve_secret_headers(&secret_ctx)?;
+                let body = http_props.to_body_config()?;
                 let url = http_props
                     .url
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| "http sink requires url".to_string())?;
-                let mut props = HttpSinkProps::new(url);
+                let mut props = HttpSinkProps::new(url).with_body(body);
                 if let Some(method) = http_props.method.filter(|v| !v.trim().is_empty()) {
                     props = props.with_method(method);
                 }

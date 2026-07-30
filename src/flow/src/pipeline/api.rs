@@ -3,7 +3,7 @@ use crate::codec::{CompressionCodec, SinkEncryptionConfig};
 pub use crate::planner::sink::SinkRetryConfig;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkOutputConfig};
 use crate::PipelineRegistries;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -190,6 +190,29 @@ pub struct HttpSinkProps {
     pub content_type: Option<String>,
     /// Maximum single-delivery body size in bytes, defaults to 64 MiB.
     pub max_body_size: Option<usize>,
+    /// HTTP request body mode.
+    pub body: HttpBodyConfig,
+}
+
+/// HTTP request body mode.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum HttpBodyConfig {
+    /// Send the encoded delivery as the complete request body.
+    #[default]
+    Raw,
+    /// Send the encoded delivery as a file part in a multipart request.
+    Multipart(HttpMultipartConfig),
+}
+
+/// Multipart request configuration for an HTTP sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpMultipartConfig {
+    /// Form field name of the file part.
+    pub file_field_name: String,
+    /// Filename reported in the file part's Content-Disposition header.
+    pub file_name: String,
+    /// Static UTF-8 text fields included in every request.
+    pub fields: BTreeMap<String, String>,
 }
 
 impl HttpSinkProps {
@@ -202,6 +225,7 @@ impl HttpSinkProps {
             headers: HashMap::new(),
             content_type: None,
             max_body_size: None,
+            body: HttpBodyConfig::Raw,
         }
     }
 
@@ -232,6 +256,12 @@ impl HttpSinkProps {
     /// Set the maximum body size for a single delivery.
     pub fn with_max_body_size(mut self, max_bytes: usize) -> Self {
         self.max_body_size = Some(max_bytes);
+        self
+    }
+
+    /// Set the HTTP request body mode.
+    pub fn with_body(mut self, body: HttpBodyConfig) -> Self {
+        self.body = body;
         self
     }
 }

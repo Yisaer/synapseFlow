@@ -1015,7 +1015,7 @@ fn build_sinks_from_definition(
                         sink.sink_id
                     ));
                 }
-                let mut http_cfg = HttpSinkConfig::new(&props.url);
+                let mut http_cfg = HttpSinkConfig::new(&props.url).with_body(props.body.clone());
                 if let Some(method) = &props.method {
                     http_cfg = http_cfg.with_method(match method.to_uppercase().as_str() {
                         "GET" => HttpMethod::Get,
@@ -1037,6 +1037,7 @@ fn build_sinks_from_definition(
                 if let Some(max_size) = props.max_body_size {
                     http_cfg = http_cfg.with_max_body_size(max_size);
                 }
+                http_cfg.validate()?;
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Http(http_cfg),

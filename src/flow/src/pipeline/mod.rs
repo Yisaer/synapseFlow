@@ -18,12 +18,13 @@ pub(crate) use api::PipelineManager;
 pub use api::{
     is_hls_video_url, is_rtsp_video_url, validate_video_filename_prefix, CreatePipelineRequest,
     CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget, FileRetentionConfig,
-    FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps,
-    NngPubSubSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
-    PipelineScheduleConfig, PipelineScheduleDatetimeRange, PipelineSnapshot, PipelineStatus,
-    PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig, SinkType, SourceDefinition,
-    SourceInputConfig, SourceInputMode, SourceOnChangeConfig, VideoCodec, VideoContainer,
-    VideoRollingConfig, VideoSinkProps,
+    FileSinkProps, HttpBodyConfig, HttpMultipartConfig, HttpSinkProps, KuksaSinkProps,
+    KuraSinkProps, MemorySinkProps, MqttSinkProps, NngPubSubSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineError, PipelineOptions, PipelineScheduleConfig,
+    PipelineScheduleDatetimeRange, PipelineSnapshot, PipelineStatus, PipelineStopMode,
+    SinkDefinition, SinkProps, SinkRetryConfig, SinkType, SourceDefinition, SourceInputConfig,
+    SourceInputMode, SourceOnChangeConfig, VideoCodec, VideoContainer, VideoRollingConfig,
+    VideoSinkProps,
 };
 pub(crate) use context::PipelineContext;
 

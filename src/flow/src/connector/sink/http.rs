@@ -1,7 +1,9 @@
 //! HTTP sink connector for delivering encoded payloads to remote HTTP endpoints.
 
 use super::{DeliveryResult, SinkConnector, SinkConnectorError};
+use crate::pipeline::HttpBodyConfig;
 use async_trait::async_trait;
+use reqwest::multipart::{Form, Part};
 use reqwest::{Client, Method, StatusCode};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -25,6 +27,8 @@ pub struct HttpSinkConfig {
     /// Maximum allowed body size (bytes) for a single delivery. Exceeding this
     /// limit aborts the delivery and returns an error.
     pub max_body_size: usize,
+    /// HTTP request body mode.
+    pub body: HttpBodyConfig,
 }
 
 impl HttpSinkConfig {
@@ -37,6 +41,7 @@ impl HttpSinkConfig {
             headers: HashMap::new(),
             content_type: None,
             max_body_size: 64 * 1024 * 1024,
+            body: HttpBodyConfig::Raw,
         }
     }
 
@@ -70,14 +75,63 @@ impl HttpSinkConfig {
         self
     }
 
+    /// Set the HTTP request body mode.
+    pub fn with_body(mut self, body: HttpBodyConfig) -> Self {
+        self.body = body;
+        self
+    }
+
     /// Infer and set `content_type` from the pipeline encoder kind when it is
     /// not already explicitly configured. Called during physical plan building.
     pub fn with_inferred_content_type(mut self, encoder_kind: Option<&str>) -> Self {
-        if self.content_type.is_none() {
+        if matches!(self.body, HttpBodyConfig::Raw) && self.content_type.is_none() {
             self.content_type = infer_content_type_for_encoder(encoder_kind);
         }
         self
     }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let HttpBodyConfig::Multipart(config) = &self.body else {
+            return Ok(());
+        };
+
+        validate_multipart_name(&config.file_field_name, "file_field_name")?;
+        validate_multipart_name(&config.file_name, "file_name")?;
+        for name in config.fields.keys() {
+            validate_multipart_name(name, "text field name")?;
+            if name == &config.file_field_name {
+                return Err(format!(
+                    "http multipart text field `{name}` conflicts with file_field_name"
+                ));
+            }
+        }
+        if self.content_type.is_some() {
+            return Err("http multipart body does not allow an explicit content_type".to_string());
+        }
+        if self
+            .headers
+            .keys()
+            .any(|name| name.trim().eq_ignore_ascii_case("content-type"))
+        {
+            return Err("http multipart body does not allow a Content-Type header".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn validate_multipart_name(value: &str, field: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("http multipart {field} must not be empty"));
+    }
+    if value
+        .chars()
+        .any(|character| matches!(character, '\r' | '\n' | '\0'))
+    {
+        return Err(format!(
+            "http multipart {field} must not contain CR, LF, or NUL"
+        ));
+    }
+    Ok(())
 }
 
 /// Infer a Content-Type header value from the encoder kind string.
@@ -186,20 +240,38 @@ impl HttpSinkConnector {
     async fn send_single_request(
         connector_id: &str,
         client: &Client,
-        method: Method,
-        url: &str,
-        headers: &HashMap<String, String>,
-        content_type: Option<&str>,
+        config: &HttpSinkConfig,
         body: bytes::Bytes,
     ) -> Result<(), SinkConnectorError> {
-        let mut request = client.request(method, url).body(body);
+        let mut request = client.request(config.method.to_reqwest(), &config.url);
 
-        for (key, value) in headers {
+        for (key, value) in &config.headers {
             request = request.header(key.as_str(), value.as_str());
         }
 
-        if let Some(ct) = content_type {
-            request = request.header("Content-Type", ct);
+        match &config.body {
+            HttpBodyConfig::Raw => {
+                request = request.body(body);
+                if let Some(ct) = config.content_type.as_deref() {
+                    request = request.header("Content-Type", ct);
+                }
+            }
+            HttpBodyConfig::Multipart(config) => {
+                let body_len = body.len() as u64;
+                let file_part = Part::stream_with_length(body, body_len)
+                    .file_name(config.file_name.clone())
+                    .mime_str("application/octet-stream")
+                    .map_err(|err| {
+                        SinkConnectorError::Other(format!(
+                            "http sink `{connector_id}` failed to build multipart file part: {err}"
+                        ))
+                    })?;
+                let mut form = Form::new().part(config.file_field_name.clone(), file_part);
+                for (name, value) in &config.fields {
+                    form = form.text(name.clone(), value.clone());
+                }
+                request = request.multipart(form);
+            }
         }
 
         let response = match request.send().await {
@@ -247,6 +319,7 @@ impl SinkConnector for HttpSinkConnector {
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
         Self::validate_url(&self.config.url)?;
+        self.config.validate().map_err(SinkConnectorError::Other)?;
         self.client = Some(self.build_client()?);
         Ok(())
     }
@@ -301,21 +374,11 @@ impl SinkConnector for HttpSinkConnector {
             ))
         })?;
 
-        let method = self.config.method.to_reqwest();
         let body_bytes: bytes::Bytes = std::mem::take(&mut self.buffer).into();
         let bytes_written = body_bytes.len() as u64;
 
         // Single attempt — retry is managed by the SinkProcessor.
-        Self::send_single_request(
-            &self.id,
-            client,
-            method,
-            &self.config.url,
-            &self.config.headers,
-            self.config.content_type.as_deref(),
-            body_bytes,
-        )
-        .await?;
+        Self::send_single_request(&self.id, client, &self.config, body_bytes).await?;
 
         Ok(DeliveryResult { bytes_written })
     }
@@ -336,6 +399,9 @@ impl SinkConnector for HttpSinkConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::HttpMultipartConfig;
+    use axum::{extract::Multipart, routing::post, Router};
+    use std::collections::BTreeMap;
 
     #[test]
     fn config_new_sets_sensible_defaults() {
@@ -434,5 +500,74 @@ mod tests {
             .with_content_type("text/plain")
             .with_inferred_content_type(Some("json"));
         assert_eq!(cfg.content_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn multipart_content_type_is_not_inferred() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_body(HttpBodyConfig::Multipart(HttpMultipartConfig {
+                file_field_name: "d".to_string(),
+                file_name: "payload.bin".to_string(),
+                fields: BTreeMap::new(),
+            }))
+            .with_inferred_content_type(Some("json"));
+        assert_eq!(cfg.content_type, None);
+    }
+
+    #[tokio::test]
+    async fn multipart_sends_file_and_static_text_fields() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        async fn receive(mut multipart: Multipart) {
+            let mut file_seen = false;
+            let mut text_fields = BTreeMap::new();
+
+            while let Some(field) = multipart.next_field().await.unwrap() {
+                let name = field.name().unwrap().to_string();
+                if name == "d" {
+                    assert_eq!(field.file_name(), Some("payload.bin"));
+                    assert_eq!(
+                        field.content_type().map(|value| value.as_ref()),
+                        Some("application/octet-stream")
+                    );
+                    assert_eq!(field.bytes().await.unwrap().as_ref(), b"encoded-payload");
+                    file_seen = true;
+                } else {
+                    text_fields.insert(name, field.text().await.unwrap());
+                }
+            }
+
+            assert!(file_seen);
+            assert_eq!(text_fields.get("rid").map(String::as_str), Some("cold"));
+            assert_eq!(text_fields.get("tp").map(String::as_str), Some("1"));
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route("/upload", post(receive));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let fields = BTreeMap::from([
+            ("rid".to_string(), "cold".to_string()),
+            ("tp".to_string(), "1".to_string()),
+        ]);
+        let config = HttpSinkConfig::new(format!("http://{address}/upload")).with_body(
+            HttpBodyConfig::Multipart(HttpMultipartConfig {
+                file_field_name: "d".to_string(),
+                file_name: "payload.bin".to_string(),
+                fields,
+            }),
+        );
+        let mut connector = HttpSinkConnector::new("multipart-test", config);
+        connector.ready().await.unwrap();
+        connector.start_delivery().await.unwrap();
+        connector.write_chunk(b"encoded-").await.unwrap();
+        connector.write_chunk(b"payload").await.unwrap();
+        let result = connector.finish_delivery().await.unwrap();
+
+        assert_eq!(result.bytes_written, 15);
+        server.abort();
     }
 }

@@ -326,6 +326,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("sink_id={}", sink.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
             info.push(format!("encoder={}", sink.connector.encoder.kind_str()));
+            append_http_body_info(&mut info, &sink.connector.connector);
             if sink.output.is_delta() {
                 info.push(format!("output.mode={}", sink.output.mode.as_str()));
                 if let Some(columns) = sink.output.delta_columns() {
@@ -1050,6 +1051,7 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::DataSink(sink) | PhysicalPlan::SinkConnector(sink) => {
             info.push(format!("sink_id={}", sink.connector.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
+            append_http_body_info(&mut info, &sink.connector.connector);
             if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) =
                 &sink.connector.connector
             {
@@ -1330,6 +1332,22 @@ fn build_physical_node_with_prefix(
         info,
         children,
     }
+}
+
+fn append_http_body_info(
+    info: &mut Vec<String>,
+    connector: &crate::planner::sink::SinkConnectorConfig,
+) {
+    let crate::planner::sink::SinkConnectorConfig::Http(config) = connector else {
+        return;
+    };
+    let crate::pipeline::HttpBodyConfig::Multipart(multipart) = &config.body else {
+        return;
+    };
+
+    info.push("body=multipart".to_string());
+    info.push(format!("file_field_name={}", multipart.file_field_name));
+    info.push(format!("static_fields={}", multipart.fields.len()));
 }
 
 fn sampling_strategy_name(strategy: &crate::processor::SamplingStrategy) -> &'static str {

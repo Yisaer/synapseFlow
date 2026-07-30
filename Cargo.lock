@@ -1585,6 +1585,7 @@ dependencies = [
  "anng",
  "arrow",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "build_info",
  "bytes",
