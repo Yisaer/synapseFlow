@@ -197,6 +197,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
 
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
+    validate_last_agg_hit_count_placement(&select_stmt)?;
     validate_relation_aliases_unsupported(&select_stmt)?;
     validate_select_alias_names(&select_stmt, stream_defs, table_defs)?;
     resolve_select_aliases(&mut select_stmt)?;
@@ -1272,7 +1273,7 @@ fn validate_having_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
         return Err("HAVING requires GROUP BY window".to_string());
     }
 
-    if !expr_contains_aggregate_placeholder(having) {
+    if !expr_contains_aggregate_placeholder(having) && !expr_contains_last_agg_hit_count(having) {
         return Err(format!(
             "HAVING expression '{}' must reference aggregate functions",
             having
@@ -1286,6 +1287,64 @@ fn validate_having_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
             having,
             referenced_columns.join(", ")
         ));
+    }
+
+    Ok(())
+}
+
+fn validate_last_agg_hit_count_placement(select_stmt: &SelectStmt) -> Result<(), String> {
+    for field in &select_stmt.select_fields {
+        if expr_contains_last_agg_hit_count(&field.expr) {
+            return Err(
+                "pipeline state function `last_agg_hit_count` is only allowed in HAVING"
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(expr) = &select_stmt.where_condition {
+        if expr_contains_last_agg_hit_count(expr) {
+            return Err(
+                "pipeline state function `last_agg_hit_count` is only allowed in HAVING"
+                    .to_string(),
+            );
+        }
+    }
+
+    for expr in &select_stmt.group_by_exprs {
+        if expr_contains_last_agg_hit_count(expr) {
+            return Err(
+                "pipeline state function `last_agg_hit_count` is only allowed in HAVING"
+                    .to_string(),
+            );
+        }
+    }
+
+    for item in &select_stmt.order_by {
+        if expr_contains_last_agg_hit_count(&item.expr) {
+            return Err(
+                "pipeline state function `last_agg_hit_count` is only allowed in HAVING"
+                    .to_string(),
+            );
+        }
+    }
+
+    for expr in select_stmt.aggregate_mappings.values() {
+        if expr_contains_last_agg_hit_count(expr) {
+            return Err(
+                "pipeline state function `last_agg_hit_count` is not allowed inside aggregate function arguments"
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(window) = select_stmt.window.as_ref() {
+        if window_contains_last_agg_hit_count(window) {
+            return Err(
+                "pipeline state function `last_agg_hit_count` is only allowed in HAVING"
+                    .to_string(),
+            );
+        }
     }
 
     Ok(())
@@ -1648,6 +1707,133 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
                 || keys.iter().any(expr_contains_aggregate_placeholder)
         }
         _ => false,
+    }
+}
+
+fn expr_contains_last_agg_hit_count(expr: &sqlparser::ast::Expr) -> bool {
+    expr_contains_function_name(expr, "last_agg_hit_count")
+}
+
+fn expr_contains_function_name(expr: &sqlparser::ast::Expr, target_name: &str) -> bool {
+    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
+
+    match expr {
+        Expr::Function(func) => {
+            func.name.to_string().eq_ignore_ascii_case(target_name)
+                || func.args.iter().any(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                        expr_contains_function_name(expr, target_name)
+                    }
+                    FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(expr),
+                        ..
+                    } => expr_contains_function_name(expr, target_name),
+                    _ => false,
+                })
+                || func
+                    .filter
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_function_name(expr, target_name))
+                || func.over.as_ref().is_some_and(|window_type| {
+                    window_type_contains_function_name(window_type, target_name)
+                })
+                || func
+                    .order_by
+                    .iter()
+                    .any(|item| expr_contains_function_name(&item.expr, target_name))
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_function_name(left, target_name)
+                || expr_contains_function_name(right, target_name)
+        }
+        Expr::UnaryOp { expr, .. } => expr_contains_function_name(expr, target_name),
+        Expr::Nested(expr) => expr_contains_function_name(expr, target_name),
+        Expr::Cast { expr, .. } => expr_contains_function_name(expr, target_name),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_function_name(expr, target_name)
+                || expr_contains_function_name(low, target_name)
+                || expr_contains_function_name(high, target_name)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_contains_function_name(expr, target_name)
+                || list
+                    .iter()
+                    .any(|expr| expr_contains_function_name(expr, target_name))
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|expr| expr_contains_function_name(expr, target_name))
+                || conditions
+                    .iter()
+                    .any(|expr| expr_contains_function_name(expr, target_name))
+                || results
+                    .iter()
+                    .any(|expr| expr_contains_function_name(expr, target_name))
+                || else_result
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_function_name(expr, target_name))
+        }
+        Expr::JsonAccess { left, right, .. } => {
+            expr_contains_function_name(left, target_name)
+                || expr_contains_function_name(right, target_name)
+        }
+        Expr::MapAccess { column, keys } => {
+            expr_contains_function_name(column, target_name)
+                || keys
+                    .iter()
+                    .any(|expr| expr_contains_function_name(expr, target_name))
+        }
+        _ => false,
+    }
+}
+
+fn window_type_contains_function_name(
+    window_type: &sqlparser::ast::WindowType,
+    target_name: &str,
+) -> bool {
+    match window_type {
+        sqlparser::ast::WindowType::WindowSpec(spec) => {
+            spec.partition_by
+                .iter()
+                .any(|expr| expr_contains_function_name(expr, target_name))
+                || spec
+                    .order_by
+                    .iter()
+                    .any(|item| expr_contains_function_name(&item.expr, target_name))
+        }
+        sqlparser::ast::WindowType::NamedWindow(_) => false,
+    }
+}
+
+fn window_contains_last_agg_hit_count(window: &parser_window::Window) -> bool {
+    match window {
+        parser_window::Window::Tumbling { filter, .. }
+        | parser_window::Window::Count { filter, .. }
+        | parser_window::Window::Sliding { filter, .. }
+        | parser_window::Window::Eos { filter } => filter
+            .as_deref()
+            .is_some_and(expr_contains_last_agg_hit_count),
+        parser_window::Window::State {
+            open,
+            emit,
+            partition_by,
+            filter,
+        } => {
+            expr_contains_last_agg_hit_count(open)
+                || expr_contains_last_agg_hit_count(emit)
+                || partition_by.iter().any(expr_contains_last_agg_hit_count)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_last_agg_hit_count)
+        }
     }
 }
 

@@ -1375,6 +1375,38 @@ fn plan_explain_pipeline_state_table_driven() {
 }
 
 #[test]
+fn plan_explain_last_agg_hit_count_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "last_agg_hit_count_having_only",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4) HAVING last_agg_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=last_agg_hit_count() < 3"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=last_agg_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_agg_hit_count_with_aggregate_predicate",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4) HAVING sum(a) > 10 AND last_agg_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=col_1 > 10 AND last_agg_hit_count() < 3"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=col_1 > 10 AND last_agg_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_count_where_with_last_agg_hit_count_having",
+            sql: "SELECT sum(a) FROM stream WHERE last_hit_count() < 5 GROUP BY countwindow(4) HAVING last_agg_hit_count() < 3",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=last_agg_hit_count() < 3"],"operator":"Filter"}],"id":"Filter_4","info":["predicate=last_hit_count() < 5"],"operator":"Filter"}],"id":"Project_5","info":["fields=[col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=last_agg_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalFilter_5","info":["predicate=last_hit_count() < 5"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_6","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn plan_explain_csv_encoder_table_driven() {
     enum Expected {
         Explain(&'static str),

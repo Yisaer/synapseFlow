@@ -277,9 +277,16 @@ fn convert_expr_to_scalar_internal(
                         "{function_name}() takes zero arguments"
                     )));
                 }
-                return Ok(ScalarExpr::PipelineState {
-                    field: ProcStateField::LastHitCount,
-                });
+                let field = match function_name.as_str() {
+                    "last_hit_count" => ProcStateField::LastHitCount,
+                    "last_agg_hit_count" => ProcStateField::LastAggHitCount,
+                    _ => {
+                        return Err(ConversionError::UnsupportedExpression(format!(
+                            "unknown pipeline state function {function_name}()"
+                        )));
+                    }
+                };
+                return Ok(ScalarExpr::PipelineState { field });
             }
 
             convert_function_call(name, args, bindings, custom_func_registry)
