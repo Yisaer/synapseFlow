@@ -126,11 +126,17 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          cargo llvm-cov --workspace --features default --fail-under-lines ${{ env.COVERAGE_THRESHOLD }} --lcov --output-path lcov.info
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          cargo build --bin veloflux --features default
+          export CARGO_BIN_EXE_veloflux="$PWD/target/debug/veloflux"
+          cargo test --workspace --features default --tests
+          cargo llvm-cov report --fail-under-lines ${{ env.COVERAGE_THRESHOLD }} --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         if: always()
         run: |
+          source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov report --summary-only
 
       - name: Upload coverage to Codecov
