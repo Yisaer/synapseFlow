@@ -314,7 +314,7 @@ fn json_template_transform_from_config(
 ) -> Result<Option<Arc<JsonTemplateTransform>>, EncodeError> {
     match config.transform() {
         Some(SinkEncoderTransformConfig::Template { template }) => {
-            JsonTemplateTransform::compile(template)
+            JsonTemplateTransform::compile(template, config.property_context().clone())
                 .map(Arc::new)
                 .map(Some)
         }
@@ -335,10 +335,12 @@ mod tests {
     use crate::model::Collection;
     use crate::planner::physical::output_layout::OutputColumnLayout;
     use crate::planner::sink::SinkEncoderConfig;
+    use crate::secret::SecretString;
     use datatypes::{
         ConcreteDatatype, Int64Type, ListType, ListValue, StringType, StructField, StructType,
         StructValue, TimestampValue,
     };
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn extend_optional(payload: &mut Vec<u8>, chunk: Option<bytes::Bytes>) {
@@ -757,6 +759,52 @@ mod tests {
                 {"value":2, "label":"fail"}
             ])
         );
+    }
+
+    #[test]
+    fn json_encoder_transform_exposes_row_json_and_properties() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10)],
+        )])
+        .expect("valid batch");
+        let properties = crate::PropertyContext::new(BTreeMap::from([(
+            "vin".to_string(),
+            SecretString::new("VIN-123".to_string()),
+        )]));
+        let config = SinkEncoderConfig::json_with_transform_template(
+            r#"{"vin":{{ prop("vin") | json }},"amount":{{ json(.row.amount) }} }"#,
+        )
+        .with_property_context(properties);
+
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
+        let payload = encode_collection(&encoder, &batch);
+
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&payload).expect("valid JSON"),
+            serde_json::json!([{"vin": "VIN-123", "amount": 10}])
+        );
+    }
+
+    #[test]
+    fn json_encoder_transform_reports_missing_property_as_encode_error() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10)],
+        )])
+        .expect("valid batch");
+        let config = SinkEncoderConfig::json_with_transform_template(
+            r#"{"vin":{{ prop("missing") | json }},"amount":{{ json(.row.amount) }} }"#,
+        );
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
+        let mut runtime = test_runtime(&encoder, &batch);
+
+        let err = runtime.append(&batch).expect_err("missing property");
+        assert!(err
+            .to_string()
+            .contains("property `missing` is not defined"));
     }
 
     #[test]

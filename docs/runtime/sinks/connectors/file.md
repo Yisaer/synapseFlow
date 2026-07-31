@@ -33,8 +33,8 @@ the connector does not inspect rows, schema, output mode, or encoder format.
 |----------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Must be `file`. |
 | `props.path` | string | Yes | - | Local output directory. |
-| `props.filename_prefix` | string | No | `""` | Literal prefix before the timestamp. It may be empty and must not contain path separators. |
-| `props.filename_suffix` | string | No | `""` | Literal suffix after the sequence. It may be empty and must not contain path separators. |
+| `props.filename_prefix` | string | No | `""` | Prefix before the timestamp. It may use static property templates, may be empty, and must not render path separators. |
+| `props.filename_suffix` | string | No | `""` | Suffix after the sequence. It may use static property templates, may be empty, and must not render path separators. |
 | `props.retention.max_file_count` | integer | No | `0` | Maximum generated files to keep for this prefix/suffix scope. `0` disables count pruning. |
 | `props.retention.max_file_age_days` | integer | No | `0` | Maximum generated file age in days. `0` disables age pruning. |
 | `encoder.type` | string | No | `json` | Encoder kind. `none` is rejected for file sinks. |
@@ -118,13 +118,31 @@ speed_1779945123456_000002.json
 `ts_ms` is the file sink wall-clock UTC epoch milliseconds when the payload write starts. `seq` is a
 six-digit collision retry sequence in the same timestamp bucket.
 
-`filename_prefix` and `filename_suffix` are literal affixes:
+`filename_prefix` and `filename_suffix` are fixed affixes:
 
 - `filename_prefix: "speed_"` includes the separator before the timestamp.
 - `filename_prefix: ""` produces names such as `1779945123456_000001.json`.
 - `filename_suffix: ".jsonl.gz"` is allowed.
 - `filename_suffix: ""` intentionally produces extension-less files such as
   `speed_1779945123456_000001`.
+
+Both affixes support process-wide static property templates:
+
+```json
+{
+  "filename_prefix": "vehicle_{{ prop(\"vin\") }}_",
+  "filename_suffix": ".{{ prop(\"format\") }}"
+}
+```
+
+Templates are rendered once when the pipeline is applied. The rendered affixes
+must satisfy the normal filename validation: neither may contain `/` or `\`,
+and the suffix must not be `.` or `..`. `props.path` remains literal and is not
+template-enabled.
+
+Rendered property values remain redacted in internal configuration,
+diagnostics, and planner IR. The resulting filename is necessarily plaintext
+on the filesystem.
 
 The file type is determined by the encoder and pipeline context, not by the file sink. The connector
 does not infer suffixes from encoder, compression, or encryption settings.

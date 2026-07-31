@@ -787,7 +787,7 @@ impl HttpSinkPropsRequest {
                         ));
                     }
                     if normalized_fields
-                        .insert(name.clone(), value.clone())
+                        .insert(name.clone(), flow::ConnectorString::plain(value.clone()))
                         .is_some()
                     {
                         return Err(format!(
@@ -1075,8 +1075,8 @@ mod secret_tests {
                 file_field_name: "d".to_string(),
                 file_name: "payload.bin".to_string(),
                 fields: BTreeMap::from([
-                    ("rid".to_string(), "cold".to_string()),
-                    ("tp".to_string(), String::new()),
+                    ("rid".to_string(), flow::ConnectorString::plain("cold")),
+                    ("tp".to_string(), flow::ConnectorString::plain("")),
                 ]),
             })
         );

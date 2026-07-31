@@ -18,11 +18,13 @@ pub mod model;
 pub mod pipeline;
 pub mod planner;
 pub mod processor;
+pub mod property;
 mod runtime;
 pub mod secret;
 pub mod shared_stream;
 pub mod stateful;
 pub mod table;
+pub mod template;
 pub mod test_proto;
 #[cfg(test)]
 mod test_support;
@@ -83,11 +85,15 @@ pub use planner::sink::{
     SinkDeltaOutputConfig, SinkEncoderConfig, SinkEncoderKind, SinkOutputConfig, SinkOutputMode,
 };
 pub use processor::{ControlSignal, ProcessorError, StreamData};
+pub use property::{
+    validate_mqtt_publish_topic, validate_property_key, PropertyContext, PropertyTemplateError,
+};
 pub use shared_stream::{
     SharedSourceConnectorConfig, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
     SharedStreamProcessorStats, SharedStreamStatus, SharedStreamSubscription,
 };
 pub use stateful::StatefulFunctionRegistry;
+pub use template::ConnectorString;
 
 /// Initialize process-global utilities used by the `flow` crate.
 ///

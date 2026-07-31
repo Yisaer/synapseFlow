@@ -23,6 +23,7 @@ pub(crate) struct PipelineContext {
     memory_pubsub_registry: MemoryPubSubRegistry,
     mock_source_handle_registry: MockSourceHandleRegistry,
     spawner: crate::runtime::TaskSpawner,
+    property_context: Arc<RwLock<crate::PropertyContext>>,
 }
 
 impl PipelineContext {
@@ -40,6 +41,7 @@ impl PipelineContext {
             memory_pubsub_registry,
             mock_source_handle_registry: MockSourceHandleRegistry::default(),
             spawner,
+            property_context: Arc::new(RwLock::new(crate::PropertyContext::default())),
         }
     }
 
@@ -65,5 +67,13 @@ impl PipelineContext {
 
     pub(crate) fn spawner(&self) -> &crate::runtime::TaskSpawner {
         &self.spawner
+    }
+
+    pub(crate) fn property_context(&self) -> crate::PropertyContext {
+        self.property_context.read().clone()
+    }
+
+    pub(crate) fn property_context_handle(&self) -> Arc<RwLock<crate::PropertyContext>> {
+        Arc::clone(&self.property_context)
     }
 }

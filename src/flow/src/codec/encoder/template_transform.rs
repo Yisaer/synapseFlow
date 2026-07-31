@@ -1,4 +1,5 @@
 use super::EncodeError;
+use crate::property::PropertyContext;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use upon::Engine;
 
@@ -9,8 +10,8 @@ pub(super) struct JsonTemplateTransform {
 }
 
 impl JsonTemplateTransform {
-    pub fn compile(template: &str) -> Result<Self, EncodeError> {
-        let mut engine = Engine::new();
+    pub fn compile(template: &str, properties: PropertyContext) -> Result<Self, EncodeError> {
+        let (mut engine, _) = crate::template::engine_with_properties(properties);
         engine.add_function("json", |value: &upon::Value| -> String {
             upon_value_to_json(value).to_string()
         });

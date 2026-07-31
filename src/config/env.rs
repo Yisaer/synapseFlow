@@ -1,8 +1,9 @@
 use super::{AppConfig, ConfigResult, LogLevel, LoggingOutput};
 use serde::de::DeserializeOwned;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SUPPORTED_ENV_PREFIX: &str = "VELOFLUX_";
+const PROPERTIES_ENV_PREFIX: &str = "VELOFLUX_PROPERTIES__";
 
 type ApplyFn = fn(&mut AppConfig, &EnvBinding, &str) -> ConfigResult<()>;
 
@@ -114,6 +115,7 @@ pub(super) fn apply_env_overrides(config: &mut AppConfig) -> ConfigResult<()> {
         };
         (binding.apply)(config, &binding, &raw)?;
     }
+    apply_property_env_overrides(config)?;
     Ok(())
 }
 
@@ -130,7 +132,10 @@ fn warn_unsupported_env_vars() {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(SUPPORTED_ENV_PREFIX) || supported.contains(name) {
+        if !name.starts_with(SUPPORTED_ENV_PREFIX)
+            || supported.contains(name)
+            || name.starts_with(PROPERTIES_ENV_PREFIX)
+        {
             continue;
         }
         unknown.insert(name.to_string());
@@ -141,7 +146,35 @@ fn warn_unsupported_env_vars() {
     }
 }
 
-fn read_env_string(name: &'static str) -> ConfigResult<Option<String>> {
+fn apply_property_env_overrides(config: &mut AppConfig) -> ConfigResult<()> {
+    let mut overrides = BTreeMap::<String, (String, String)>::new();
+    for (name, value) in std::env::vars_os() {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(raw_key) = name.strip_prefix(PROPERTIES_ENV_PREFIX) else {
+            continue;
+        };
+        let key = raw_key.to_ascii_lowercase();
+        flow::validate_property_key(&key)
+            .map_err(|err| format!("invalid property environment variable {name}: {err}"))?;
+        let value = value
+            .into_string()
+            .map_err(|_| format!("environment variable {name} must be valid UTF-8"))?;
+        if let Some((previous, _)) = overrides.insert(key.clone(), (name.to_string(), value)) {
+            return Err(format!(
+                "property environment variables {previous} and {name} both normalize to `{key}`"
+            )
+            .into());
+        }
+    }
+    for (key, (_, value)) in overrides {
+        config.properties.insert_env(key, value);
+    }
+    Ok(())
+}
+
+fn read_env_string(name: &str) -> ConfigResult<Option<String>> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),

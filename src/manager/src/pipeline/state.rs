@@ -83,6 +83,7 @@ impl AppState {
         // propagate the bootstrapped store/policy from the default instance so
         // `store:NAME` references resolve everywhere (VF-51).
         let secret_ctx = default_instance.secret_context();
+        let property_ctx = default_instance.property_context();
         for spec in &flow_instances {
             let id = spec.id.trim();
             if id == DEFAULT_FLOW_INSTANCE_ID {
@@ -91,6 +92,7 @@ impl AppState {
 
             let instance = build_in_process_flow_instance(spec, Some(shared_registries.clone()))?;
             instance.set_secret_context(secret_ctx.clone());
+            instance.set_property_context(property_ctx.clone());
             if state.instances.insert_local_instance(instance).is_some() {
                 return Err(format!("duplicate flow instance id in runtime: {id}"));
             }

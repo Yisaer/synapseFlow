@@ -466,17 +466,12 @@ fn file_sink_from_ir_settings(
     if path.trim().is_empty() {
         return Err("file sink settings missing path".to_string());
     }
-    let filename_prefix = obj
-        .get("filename_prefix")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let filename_suffix = obj
-        .get("filename_suffix")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    crate::connector::sink::file::validate_file_name_affixes(&filename_prefix, &filename_suffix)?;
+    let filename_prefix = file_name_affix_from_ir(obj, "filename_prefix")?;
+    let filename_suffix = file_name_affix_from_ir(obj, "filename_suffix")?;
+    crate::connector::sink::file::validate_file_name_affixes(
+        filename_prefix.expose(),
+        filename_suffix.expose(),
+    )?;
     let retention = obj.get("retention").and_then(|v| v.as_object());
     let max_file_count = retention
         .and_then(|retention| retention.get("max_file_count"))
@@ -498,6 +493,24 @@ fn file_sink_from_ir_settings(
             max_file_age_days,
         },
     })
+}
+
+fn file_name_affix_from_ir(
+    settings: &JsonMap<String, JsonValue>,
+    field: &str,
+) -> Result<crate::ConnectorString, String> {
+    match settings.get(field) {
+        None => Ok(crate::ConnectorString::plain("")),
+        Some(JsonValue::String(value)) => Ok(crate::ConnectorString::plain(value.clone())),
+        Some(JsonValue::Object(marker))
+            if marker.get("sensitive").and_then(JsonValue::as_bool) == Some(true) =>
+        {
+            Err(format!(
+                "file sink settings {field} contains a redacted sensitive value and cannot be restored"
+            ))
+        }
+        Some(_) => Err(format!("file sink settings {field} must be a string")),
+    }
 }
 
 fn nng_pubsub_sink_from_ir_settings(
@@ -979,7 +992,7 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
             serde_json::json!({
                 "sink_name": cfg.sink_name,
                 "broker_url": cfg.broker_url,
-                "topic": cfg.topic,
+                "topic": connector_string_to_ir(&cfg.topic),
                 "qos": cfg.qos,
                 "retain": cfg.retain,
                 "client_id": cfg.client_id,
@@ -1024,8 +1037,8 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "sink_name": cfg.sink_name,
                 "pipeline_id": cfg.pipeline_id,
                 "path": cfg.path,
-                "filename_prefix": cfg.filename_prefix,
-                "filename_suffix": cfg.filename_suffix,
+                "filename_prefix": connector_string_to_ir(&cfg.filename_prefix),
+                "filename_suffix": connector_string_to_ir(&cfg.filename_suffix),
                 "retention": {
                     "max_file_count": cfg.retention.max_file_count,
                     "max_file_age_days": cfg.retention.max_file_age_days,
@@ -1055,7 +1068,9 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "timeout_ms": cfg.timeout.as_millis(),
                 "max_body_size": cfg.max_body_size,
                 "content_type": cfg.content_type,
-                "headers": cfg.headers,
+                "headers": cfg.headers.iter().map(|(name, value)| {
+                    (name.clone(), connector_string_to_ir(value))
+                }).collect::<JsonMap<String, JsonValue>>(),
             }),
         ),
         SinkConnectorConfig::Video(cfg) => {
@@ -1084,6 +1099,15 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
             )
         }
         SinkConnectorConfig::Custom(custom) => (custom.kind.clone(), custom.settings.clone()),
+    }
+}
+
+fn connector_string_to_ir(value: &crate::ConnectorString) -> JsonValue {
+    match value {
+        crate::ConnectorString::Plain(value) => JsonValue::String(value.clone()),
+        crate::ConnectorString::Sensitive(_) => {
+            serde_json::json!({ "sensitive": true })
+        }
     }
 }
 
@@ -1160,7 +1184,7 @@ mod tests {
 
         let config = mqtt_sink_from_ir_settings(&settings).expect("decode mqtt sink config");
         assert_eq!(config.broker_url, "");
-        assert_eq!(config.topic, "out/topic");
+        assert_eq!(config.topic.expose(), "out/topic");
         assert_eq!(config.connector_key.as_deref(), Some("shared_mqtt"));
     }
 
@@ -1186,8 +1210,8 @@ mod tests {
             sink_name: "sink_1".to_string(),
             pipeline_id: "pipe_1".to_string(),
             path: "/tmp/vf-file".to_string(),
-            filename_prefix: "speed_".to_string(),
-            filename_suffix: ".json".to_string(),
+            filename_prefix: "speed_".into(),
+            filename_suffix: ".json".into(),
             retention: crate::connector::sink::file::FileRetentionConfig {
                 max_file_count: 10,
                 max_file_age_days: 7,
@@ -1201,10 +1225,96 @@ mod tests {
         assert_eq!(decoded.sink_name, "sink_1");
         assert_eq!(decoded.pipeline_id, "pipe_1");
         assert_eq!(decoded.path, "/tmp/vf-file");
-        assert_eq!(decoded.filename_prefix, "speed_");
-        assert_eq!(decoded.filename_suffix, ".json");
+        assert_eq!(decoded.filename_prefix.expose(), "speed_");
+        assert_eq!(decoded.filename_suffix.expose(), ".json");
         assert_eq!(decoded.retention.max_file_count, 10);
         assert_eq!(decoded.retention.max_file_age_days, 7);
+    }
+
+    #[test]
+    fn file_sink_ir_redacts_sensitive_filename_affixes() {
+        let connector = SinkConnectorConfig::File(crate::connector::sink::file::FileSinkConfig {
+            sink_name: "sink_1".to_string(),
+            pipeline_id: "pipe_1".to_string(),
+            path: "/tmp/vf-file".to_string(),
+            filename_prefix: crate::ConnectorString::sensitive("VIN-123_"),
+            filename_suffix: crate::ConnectorString::sensitive(".private"),
+            retention: crate::connector::sink::file::FileRetentionConfig::default(),
+        });
+
+        let (_, settings) = connector_to_ir(&connector);
+
+        assert_eq!(
+            settings.get("filename_prefix"),
+            Some(&serde_json::json!({ "sensitive": true }))
+        );
+        assert_eq!(
+            settings.get("filename_suffix"),
+            Some(&serde_json::json!({ "sensitive": true }))
+        );
+        assert!(!settings.to_string().contains("VIN-123"));
+        assert!(!settings.to_string().contains(".private"));
+    }
+
+    #[test]
+    fn file_sink_ir_defaults_missing_filename_affixes() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": "/tmp/vf-file"
+        });
+
+        let decoded = file_sink_from_ir_settings(&settings).expect("decode file sink config");
+
+        assert_eq!(decoded.filename_prefix.expose(), "");
+        assert_eq!(decoded.filename_suffix.expose(), "");
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_non_string_filename_affixes() {
+        for (field, value) in [
+            ("filename_prefix", serde_json::json!(123)),
+            ("filename_suffix", serde_json::json!([".json"])),
+        ] {
+            let mut settings = serde_json::json!({
+                "sink_name": "sink_1",
+                "pipeline_id": "pipe_1",
+                "path": "/tmp/vf-file"
+            });
+            settings
+                .as_object_mut()
+                .expect("settings object")
+                .insert(field.to_string(), value);
+
+            let err = file_sink_from_ir_settings(&settings)
+                .expect_err("non-string affix must be rejected");
+            assert!(
+                err.contains(&format!("{field} must be a string")),
+                "unexpected error for {field}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_sink_ir_rejects_redacted_sensitive_filename_affixes() {
+        for field in ["filename_prefix", "filename_suffix"] {
+            let mut settings = serde_json::json!({
+                "sink_name": "sink_1",
+                "pipeline_id": "pipe_1",
+                "path": "/tmp/vf-file"
+            });
+            settings
+                .as_object_mut()
+                .expect("settings object")
+                .insert(field.to_string(), serde_json::json!({ "sensitive": true }));
+
+            let err = file_sink_from_ir_settings(&settings)
+                .expect_err("redacted sensitive affix must not be restored as empty");
+            assert!(
+                err.contains(&format!("{field} contains a redacted sensitive value")),
+                "unexpected error for {field}: {err}"
+            );
+        }
     }
 
     #[test]

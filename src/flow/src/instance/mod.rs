@@ -10,6 +10,7 @@ use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::pipeline::PipelineManager;
 use crate::planner::sink::SinkConnectorConfig;
+use crate::property::PropertyContext;
 use crate::runtime::TaskSpawner;
 use crate::secret::SecretContext;
 use crate::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamRegistry};
@@ -118,6 +119,8 @@ pub struct FlowInstance {
     // Secret store + policy for resolving `SecretRef` config (VF-51). Installed
     // at startup; defaults to an empty store so inline configs keep working.
     secret_ctx: Arc<parking_lot::RwLock<SecretContext>>,
+    // Process-wide immutable properties used while applying connector configs.
+    property_ctx: Arc<parking_lot::RwLock<PropertyContext>>,
     cpu_metrics_state: Option<FlowInstanceCpuMetricsState>,
 }
 
@@ -246,6 +249,7 @@ impl FlowInstance {
             memory_pubsub_registry.clone(),
             spawner.clone(),
         );
+        let property_ctx = context.property_context_handle();
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
             context,
@@ -273,6 +277,7 @@ impl FlowInstance {
             eventtime_type_registry: registries.eventtime_type_registry,
             merger_registry: registries.merger_registry,
             secret_ctx: Arc::new(parking_lot::RwLock::new(SecretContext::empty())),
+            property_ctx,
             cpu_metrics_state: None,
         }
     }
@@ -291,6 +296,16 @@ impl FlowInstance {
     /// encrypted store with the configured root key provider).
     pub fn set_secret_context(&self, ctx: SecretContext) {
         *self.secret_ctx.write() = ctx;
+    }
+
+    /// Snapshot of the process-wide static properties.
+    pub fn property_context(&self) -> PropertyContext {
+        self.property_ctx.read().clone()
+    }
+
+    /// Install the process-wide static property snapshot during startup.
+    pub fn set_property_context(&self, ctx: PropertyContext) {
+        *self.property_ctx.write() = ctx;
     }
 
     pub fn shared_registries(&self) -> FlowInstanceSharedRegistries {

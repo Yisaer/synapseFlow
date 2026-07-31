@@ -37,8 +37,13 @@ MQTT sink definitions currently accept:
 - sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
   props)
 
-Manager validates `topic` as required. `broker_url` is required only when `connector_key` is
+Manager validates `topic` as required. The topic may use static property
+templates such as `vehicle/{{ prop("vin") }}/telemetry`; it is rendered once
+during pipeline apply and validated as an MQTT publish topic. `broker_url` is required only when `connector_key` is
 absent. `retain` defaults to `false`, and `qos` falls back to the manager default when omitted.
+
+No other MQTT sink property supports connector templates. See
+[connector property templates](../../../syntax/connectors/property_templates.md).
 
 Flow runtime fills a default standalone client id when none is provided:
 

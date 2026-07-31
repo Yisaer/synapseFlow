@@ -33,7 +33,7 @@ those sections are easier to review and maintain in versioned config files.
 
 ## Supported Fields
 
-Only the following environment variables are recognized:
+The following fixed environment variables are recognized:
 
 | Config path | Environment variable |
 | --- | --- |
@@ -52,6 +52,10 @@ Only the following environment variables are recognized:
 | `profiling.cpu_profile_freq_hz` | `VELOFLUX_PROFILING__CPU_PROFILE_FREQ_HZ` |
 | `metrics.poll_interval_secs` | `VELOFLUX_METRICS__POLL_INTERVAL_SECS` |
 | `server.manager_addr` | `VELOFLUX_SERVER__MANAGER_ADDR` |
+
+Static properties additionally use the dynamic
+`VELOFLUX_PROPERTIES__<KEY>` family. For example,
+`VELOFLUX_PROPERTIES__SITE_CODE` overrides `properties.site_code`.
 
 All other `config.yaml` fields remain file-only configuration.
 
@@ -74,6 +78,7 @@ Examples:
 - `logging.syslog.network` -> `VELOFLUX_LOGGING__SYSLOG__NETWORK`
 - `logging.syslog.address` -> `VELOFLUX_LOGGING__SYSLOG__ADDRESS`
 - `metrics.poll_interval_secs` -> `VELOFLUX_METRICS__POLL_INTERVAL_SECS`
+- `properties.site_code` -> `VELOFLUX_PROPERTIES__SITE_CODE`
 
 ## Merge Priority
 
@@ -111,6 +116,7 @@ export VELOFLUX_PROFILING__ENABLED=false
 export VELOFLUX_PROFILING__ADDR=0.0.0.0:16060
 export VELOFLUX_METRICS__POLL_INTERVAL_SECS=30
 export VELOFLUX_SERVER__MANAGER_ADDR=0.0.0.0:18080
+export VELOFLUX_PROPERTIES__VIN=L123456789
 ```
 
 ## Implementation Outline
@@ -118,7 +124,7 @@ export VELOFLUX_SERVER__MANAGER_ADDR=0.0.0.0:18080
 The implementation keeps the override surface explicit:
 
 1. Load defaults and optionally parse `config.yaml`.
-2. Apply only the documented environment-variable whitelist.
+2. Apply the documented fixed whitelist and per-key static property overrides.
 3. Convert the effective config into `ServerOptions`.
 
 The whitelist is implemented as a centralized binding table in the config loader. Adding support for
@@ -129,3 +135,5 @@ a new environment variable requires an explicit binding entry that declares:
 - the apply logic for the target field
 
 Unsupported `VELOFLUX_*` variables are ignored by the config loader and warned as unsupported.
+`VELOFLUX_PROPERTIES__*` variables are recognized dynamically and are not
+reported as unsupported.

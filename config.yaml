@@ -1,3 +1,5 @@
+properties: {}
+
 profiling:
   enabled: true
   addr: "0.0.0.0:6060"

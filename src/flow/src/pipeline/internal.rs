@@ -272,7 +272,8 @@ impl PipelineManager {
             ExplainPipelineTarget::Definition(definition) => Arc::new(definition.clone()),
         };
 
-        let sinks = build_sinks_from_definition(definition.as_ref())
+        let property_context = self.context.property_context();
+        let sinks = build_sinks_from_definition(definition.as_ref(), &property_context)
             .map_err(PipelineError::BuildFailure)?;
 
         let registries_snapshot = self.registries.read();
@@ -529,8 +530,10 @@ fn build_pipeline_runtime(
             Ok((stream_definitions, table_definitions, binding_entries))
         })?;
 
-        let sinks =
-            build_log.run_phase("build_sinks", || build_sinks_from_definition(definition))?;
+        let property_context = context.property_context();
+        let sinks = build_log.run_phase("build_sinks", || {
+            build_sinks_from_definition(definition, &property_context)
+        })?;
         let source_inputs: HashMap<String, crate::pipeline::SourceInputConfig> = definition
             .sources()
             .iter()
@@ -674,9 +677,14 @@ fn build_pipeline_runtime(
 
 fn build_sinks_from_definition(
     definition: &PipelineDefinition,
+    property_context: &crate::PropertyContext,
 ) -> Result<Vec<PipelineSink>, String> {
     let mut sinks = Vec::with_capacity(definition.sinks().len());
     for sink in definition.sinks() {
+        let encoder = sink
+            .encoder
+            .clone()
+            .with_property_context(property_context.clone());
         match sink.sink_type {
             SinkType::Mqtt => {
                 let props = match &sink.props {
@@ -692,7 +700,7 @@ fn build_sinks_from_definition(
                     sink.sink_id.clone(),
                     props.broker_url.clone(),
                     if props.topic.is_empty() {
-                        DEFAULT_SINK_TOPIC.to_string()
+                        crate::ConnectorString::plain(DEFAULT_SINK_TOPIC)
                     } else {
                         props.topic.clone()
                     },
@@ -713,7 +721,7 @@ fn build_sinks_from_definition(
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Mqtt(config),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -738,7 +746,7 @@ fn build_sinks_from_definition(
                     SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig {
                         log: props.log,
                     }),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -772,7 +780,7 @@ fn build_sinks_from_definition(
                         addr: props.addr.clone(),
                         vss_path: props.vss_path.clone(),
                     }),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -806,7 +814,7 @@ fn build_sinks_from_definition(
                         addr: props.addr.clone(),
                         mapping_path: props.mapping_path.clone(),
                     }),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -872,7 +880,7 @@ fn build_sinks_from_definition(
                         },
                         rolling,
                     }),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -908,7 +916,7 @@ fn build_sinks_from_definition(
                         topic.to_string(),
                         kind,
                     )),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -947,7 +955,7 @@ fn build_sinks_from_definition(
                             max_file_age_days: props.retention.max_file_age_days,
                         },
                     }),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -981,7 +989,7 @@ fn build_sinks_from_definition(
                     let connector = PipelineSinkConnector::new(
                         sink.sink_id.clone(),
                         SinkConnectorConfig::NngPubSub(config),
-                        sink.encoder.clone(),
+                        encoder.clone(),
                     )
                     .with_compression(sink.compression.clone())
                     .with_encryption(sink.encryption.clone());
@@ -1029,7 +1037,7 @@ fn build_sinks_from_definition(
                     http_cfg = http_cfg.with_timeout(Duration::from_secs(timeout_secs));
                 }
                 for (key, value) in &props.headers {
-                    http_cfg = http_cfg.with_header(key, value);
+                    http_cfg = http_cfg.with_header(key, value.clone());
                 }
                 if let Some(ref ct) = props.content_type {
                     http_cfg = http_cfg.with_content_type(ct);
@@ -1041,7 +1049,7 @@ fn build_sinks_from_definition(
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Http(http_cfg),
-                    sink.encoder.clone(),
+                    encoder.clone(),
                 )
                 .with_compression(sink.compression.clone())
                 .with_encryption(sink.encryption.clone());
@@ -1237,7 +1245,8 @@ mod file_sink_tests {
     fn file_sink_lowering_preserves_config_and_common_props() {
         let definition = file_sink_definition(SinkEncoderConfig::json());
 
-        let sinks = build_sinks_from_definition(&definition).expect("build sinks");
+        let sinks = build_sinks_from_definition(&definition, &crate::PropertyContext::default())
+            .expect("build sinks");
 
         assert_eq!(sinks.len(), 1);
         assert_eq!(sinks[0].common.batch_count, Some(1000));
@@ -1251,8 +1260,8 @@ mod file_sink_tests {
         assert_eq!(config.sink_name, "sink_1");
         assert_eq!(config.pipeline_id, "pipe_1");
         assert_eq!(config.path, "/tmp/vf-file");
-        assert_eq!(config.filename_prefix, "speed_");
-        assert_eq!(config.filename_suffix, ".json");
+        assert_eq!(config.filename_prefix.expose(), "speed_");
+        assert_eq!(config.filename_suffix.expose(), ".json");
         assert_eq!(config.retention.max_file_count, 10);
         assert_eq!(config.retention.max_file_age_days, 7);
     }
@@ -1264,7 +1273,8 @@ mod file_sink_tests {
             JsonMap::new(),
         ));
 
-        let err = build_sinks_from_definition(&definition).expect_err("encoder none should fail");
+        let err = build_sinks_from_definition(&definition, &crate::PropertyContext::default())
+            .expect_err("encoder none should fail");
 
         assert!(
             err.contains("expected encoded bytes for file"),

@@ -2,6 +2,7 @@
 
 use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use crate::pipeline::HttpBodyConfig;
+use crate::template::ConnectorString;
 use async_trait::async_trait;
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, Method, StatusCode};
@@ -20,7 +21,7 @@ pub struct HttpSinkConfig {
     /// Per-request timeout.
     pub timeout: Duration,
     /// Custom headers to include in every request.
-    pub headers: HashMap<String, String>,
+    pub headers: HashMap<String, ConnectorString>,
     /// Explicit Content-Type header value. When `None`, the value is inferred
     /// from the pipeline encoder kind during plan building.
     pub content_type: Option<String>,
@@ -58,7 +59,11 @@ impl HttpSinkConfig {
     }
 
     /// Add a custom header.
-    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn with_header(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<ConnectorString>,
+    ) -> Self {
         self.headers.insert(key.into(), value.into());
         self
     }
@@ -91,6 +96,11 @@ impl HttpSinkConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        for (name, value) in &self.headers {
+            reqwest::header::HeaderValue::from_str(value.expose())
+                .map_err(|_| format!("http header `{name}` has an invalid value"))?;
+        }
+
         let HttpBodyConfig::Multipart(config) = &self.body else {
             return Ok(());
         };
@@ -246,7 +256,7 @@ impl HttpSinkConnector {
         let mut request = client.request(config.method.to_reqwest(), &config.url);
 
         for (key, value) in &config.headers {
-            request = request.header(key.as_str(), value.as_str());
+            request = request.header(key.as_str(), value.expose());
         }
 
         match &config.body {
@@ -268,7 +278,7 @@ impl HttpSinkConnector {
                     })?;
                 let mut form = Form::new().part(config.file_field_name.clone(), file_part);
                 for (name, value) in &config.fields {
-                    form = form.text(name.clone(), value.clone());
+                    form = form.text(name.clone(), value.expose().to_string());
                 }
                 request = request.multipart(form);
             }
@@ -400,7 +410,7 @@ impl SinkConnector for HttpSinkConnector {
 mod tests {
     use super::*;
     use crate::pipeline::HttpMultipartConfig;
-    use axum::{extract::Multipart, routing::post, Router};
+    use axum::{extract::Multipart, http::HeaderMap, routing::post, Router};
     use std::collections::BTreeMap;
 
     #[test]
@@ -426,7 +436,9 @@ mod tests {
         assert_eq!(cfg.method, HttpMethod::Put);
         assert_eq!(cfg.timeout, Duration::from_secs(10));
         assert_eq!(
-            cfg.headers.get("Authorization").map(String::as_str),
+            cfg.headers
+                .get("Authorization")
+                .map(ConnectorString::expose),
             Some("Bearer token")
         );
         assert_eq!(cfg.content_type.as_deref(), Some("application/json"));
@@ -518,7 +530,13 @@ mod tests {
     async fn multipart_sends_file_and_static_text_fields() {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        async fn receive(mut multipart: Multipart) {
+        async fn receive(headers: HeaderMap, mut multipart: Multipart) {
+            assert_eq!(
+                headers
+                    .get("x-vehicle-id")
+                    .and_then(|value| value.to_str().ok()),
+                Some("VIN-123")
+            );
             let mut file_seen = false;
             let mut text_fields = BTreeMap::new();
 
@@ -538,7 +556,7 @@ mod tests {
             }
 
             assert!(file_seen);
-            assert_eq!(text_fields.get("rid").map(String::as_str), Some("cold"));
+            assert_eq!(text_fields.get("rid").map(String::as_str), Some("VIN-123"));
             assert_eq!(text_fields.get("tp").map(String::as_str), Some("1"));
         }
 
@@ -550,16 +568,16 @@ mod tests {
         });
 
         let fields = BTreeMap::from([
-            ("rid".to_string(), "cold".to_string()),
-            ("tp".to_string(), "1".to_string()),
+            ("rid".to_string(), ConnectorString::sensitive("VIN-123")),
+            ("tp".to_string(), ConnectorString::plain("1")),
         ]);
-        let config = HttpSinkConfig::new(format!("http://{address}/upload")).with_body(
-            HttpBodyConfig::Multipart(HttpMultipartConfig {
+        let config = HttpSinkConfig::new(format!("http://{address}/upload"))
+            .with_header("x-vehicle-id", ConnectorString::sensitive("VIN-123"))
+            .with_body(HttpBodyConfig::Multipart(HttpMultipartConfig {
                 file_field_name: "d".to_string(),
                 file_name: "payload.bin".to_string(),
                 fields,
-            }),
-        );
+            }));
         let mut connector = HttpSinkConnector::new("multipart-test", config);
         connector.ready().await.unwrap();
         connector.start_delivery().await.unwrap();

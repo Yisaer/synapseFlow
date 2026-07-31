@@ -1,3 +1,7 @@
+properties:
+  vin: "L123456789"
+  site_code: "cn"
+
 logging:
   output: stdout
   level: info

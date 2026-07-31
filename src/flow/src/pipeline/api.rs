@@ -2,6 +2,7 @@ use crate::catalog::Catalog;
 use crate::codec::{CompressionCodec, SinkEncryptionConfig};
 pub use crate::planner::sink::SinkRetryConfig;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkOutputConfig};
+use crate::template::ConnectorString;
 use crate::PipelineRegistries;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -107,7 +108,7 @@ pub enum PipelineStopMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MqttSinkProps {
     pub broker_url: String,
-    pub topic: String,
+    pub topic: ConnectorString,
     pub qos: u8,
     pub retain: bool,
     pub client_id: Option<String>,
@@ -145,8 +146,8 @@ pub struct MemorySinkProps {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSinkProps {
     pub path: String,
-    pub filename_prefix: String,
-    pub filename_suffix: String,
+    pub filename_prefix: ConnectorString,
+    pub filename_suffix: ConnectorString,
     pub retention: FileRetentionConfig,
 }
 
@@ -185,7 +186,7 @@ pub struct HttpSinkProps {
     /// Request timeout in seconds, defaults to 30.
     pub timeout_secs: Option<u64>,
     /// Additional headers to include in every request.
-    pub headers: HashMap<String, String>,
+    pub headers: HashMap<String, ConnectorString>,
     /// Explicit Content-Type. When `None`, inferred from the encoder kind.
     pub content_type: Option<String>,
     /// Maximum single-delivery body size in bytes, defaults to 64 MiB.
@@ -212,7 +213,7 @@ pub struct HttpMultipartConfig {
     /// Filename reported in the file part's Content-Disposition header.
     pub file_name: String,
     /// Static UTF-8 text fields included in every request.
-    pub fields: BTreeMap<String, String>,
+    pub fields: BTreeMap<String, ConnectorString>,
 }
 
 impl HttpSinkProps {
@@ -242,7 +243,11 @@ impl HttpSinkProps {
     }
 
     /// Add a custom header.
-    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn with_header(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<ConnectorString>,
+    ) -> Self {
         self.headers.insert(key.into(), value.into());
         self
     }
@@ -293,16 +298,16 @@ impl MemorySinkProps {
 }
 
 impl FileSinkProps {
-    pub fn new(path: impl Into<String>, filename_prefix: impl Into<String>) -> Self {
+    pub fn new(path: impl Into<String>, filename_prefix: impl Into<ConnectorString>) -> Self {
         Self {
             path: path.into(),
             filename_prefix: filename_prefix.into(),
-            filename_suffix: String::new(),
+            filename_suffix: ConnectorString::plain(""),
             retention: FileRetentionConfig::default(),
         }
     }
 
-    pub fn with_filename_suffix(mut self, filename_suffix: impl Into<String>) -> Self {
+    pub fn with_filename_suffix(mut self, filename_suffix: impl Into<ConnectorString>) -> Self {
         self.filename_suffix = filename_suffix.into();
         self
     }
@@ -381,7 +386,7 @@ pub fn is_hls_video_url(raw_url: &str) -> bool {
 }
 
 impl MqttSinkProps {
-    pub fn new(broker_url: impl Into<String>, topic: impl Into<String>, qos: u8) -> Self {
+    pub fn new(broker_url: impl Into<String>, topic: impl Into<ConnectorString>, qos: u8) -> Self {
         Self {
             broker_url: broker_url.into(),
             topic: topic.into(),

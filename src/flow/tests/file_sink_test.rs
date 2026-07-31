@@ -4,8 +4,8 @@ use flow::connector::{MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{FileSinkProps, PipelineDefinition};
 use flow::planner::sink::CommonSinkProps;
 use flow::{
-    CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition, SinkEncoderConfig,
-    SinkProps, SinkType,
+    ConnectorString, CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition,
+    SinkEncoderConfig, SinkProps, SinkType,
 };
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use std::fs;
@@ -87,8 +87,11 @@ async fn memory_source_feeds_file_sink_pipeline() {
         "file_sink",
         SinkType::File,
         SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "speed_")
-                .with_filename_suffix(".json"),
+            FileSinkProps::new(
+                output_dir.path().to_string_lossy(),
+                ConnectorString::sensitive("VIN-123_"),
+            )
+            .with_filename_suffix(ConnectorString::sensitive(".json")),
         ),
     );
     let pipeline = PipelineDefinition::new(
@@ -128,7 +131,7 @@ async fn memory_source_feeds_file_sink_pipeline() {
         .file_name()
         .and_then(|value| value.to_str())
         .expect("file name");
-    assert!(file_name.starts_with("speed_"));
+    assert!(file_name.starts_with("VIN-123_"));
     assert!(file_name.ends_with("_000001.json"));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&fs::read(file_path).expect("read file"))

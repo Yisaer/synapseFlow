@@ -90,17 +90,34 @@ fn build_video_sink_props(
     Ok(props)
 }
 
-fn build_file_sink_props(req: FileSinkPropsRequest) -> Result<FileSinkProps, String> {
+fn build_file_sink_props(
+    req: FileSinkPropsRequest,
+    properties: &flow::PropertyContext,
+    pipeline_id: &str,
+    sink_id: &str,
+) -> Result<FileSinkProps, String> {
     let path = req
         .path
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "file sink requires props.path".to_string())?;
-    let filename_prefix = req.filename_prefix.unwrap_or_default();
-    let filename_suffix = req.filename_suffix.unwrap_or_default();
-    validate_file_name_part("filename_prefix", &filename_prefix)?;
-    validate_file_name_part("filename_suffix", &filename_suffix)?;
-    if matches!(filename_suffix.as_str(), "." | "..") {
+    let filename_prefix = render_connector_string(
+        properties,
+        &req.filename_prefix.unwrap_or_default(),
+        pipeline_id,
+        sink_id,
+        "props.filename_prefix",
+    )?;
+    let filename_suffix = render_connector_string(
+        properties,
+        &req.filename_suffix.unwrap_or_default(),
+        pipeline_id,
+        sink_id,
+        "props.filename_suffix",
+    )?;
+    validate_file_name_part("filename_prefix", filename_prefix.expose())?;
+    validate_file_name_part("filename_suffix", filename_suffix.expose())?;
+    if matches!(filename_suffix.expose(), "." | "..") {
         return Err("file sink filename_suffix must not be `.` or `..`".to_string());
     }
     let retention = FileRetentionConfig {
@@ -126,6 +143,41 @@ fn normalized_optional_string(value: Option<String>) -> Option<String> {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
+}
+
+fn render_connector_string(
+    properties: &flow::PropertyContext,
+    raw: &str,
+    pipeline_id: &str,
+    sink_id: &str,
+    field: &str,
+) -> Result<flow::ConnectorString, String> {
+    properties.render(raw).map_err(|err| {
+        format!("pipeline `{pipeline_id}` sink `{sink_id}` failed to resolve {field}: {err}")
+    })
+}
+
+fn render_http_body(
+    body: flow::HttpBodyConfig,
+    properties: &flow::PropertyContext,
+    pipeline_id: &str,
+    sink_id: &str,
+) -> Result<flow::HttpBodyConfig, String> {
+    match body {
+        flow::HttpBodyConfig::Raw => Ok(flow::HttpBodyConfig::Raw),
+        flow::HttpBodyConfig::Multipart(mut multipart) => {
+            for (name, value) in &mut multipart.fields {
+                *value = render_connector_string(
+                    properties,
+                    value.expose(),
+                    pipeline_id,
+                    sink_id,
+                    &format!("props.body.fields.{name}"),
+                )?;
+            }
+            Ok(flow::HttpBodyConfig::Multipart(multipart))
+        }
+    }
 }
 
 pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
@@ -306,6 +358,7 @@ pub(crate) fn build_pipeline_definition(
     let select_stmt = parse_pipeline_select_stmt(req, instance)?;
     let sources = build_source_definitions(req, instance, &select_stmt)?;
     let secret_ctx = instance.secret_context();
+    let property_ctx = instance.property_context();
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
         let sink_id = sink_req
@@ -328,10 +381,23 @@ pub(crate) fn build_pipeline_definition(
                 if connector_key.is_none() && broker.is_none() {
                     return Err("mqtt sink requires broker_url".to_string());
                 }
-                let topic = mqtt_props
+                let raw_topic = mqtt_props
                     .topic
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| "mqtt sink requires topic".to_string())?;
+                let topic = render_connector_string(
+                    &property_ctx,
+                    &raw_topic,
+                    &req.id,
+                    &sink_id,
+                    "props.topic",
+                )?;
+                flow::validate_mqtt_publish_topic(&topic).map_err(|err| {
+                    format!(
+                        "pipeline `{}` sink `{sink_id}` has invalid props.topic: {err}",
+                        req.id
+                    )
+                })?;
                 let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
                 let retain = mqtt_props.retain.unwrap_or(false);
 
@@ -426,7 +492,7 @@ pub(crate) fn build_pipeline_definition(
                 let file_props: FileSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid file sink props: {err}"))?;
-                let props = build_file_sink_props(file_props)?;
+                let props = build_file_sink_props(file_props, &property_ctx, &req.id, &sink_id)?;
                 SinkDefinition::new(sink_id.clone(), SinkType::File, SinkProps::File(props))
             }
             "video" => {
@@ -468,7 +534,12 @@ pub(crate) fn build_pipeline_definition(
                         .map_err(|err| format!("invalid http sink props: {err}"))?;
                 http_props.reject_sensitive_plain_headers()?;
                 let resolved_secret_headers = http_props.resolve_secret_headers(&secret_ctx)?;
-                let body = http_props.to_body_config()?;
+                let body = render_http_body(
+                    http_props.to_body_config()?,
+                    &property_ctx,
+                    &req.id,
+                    &sink_id,
+                )?;
                 let url = http_props
                     .url
                     .filter(|value| !value.trim().is_empty())
@@ -482,13 +553,26 @@ pub(crate) fn build_pipeline_definition(
                 }
                 if let Some(ref headers) = http_props.headers {
                     for (key, value) in headers {
-                        props = props.with_header(key, value);
+                        let value = render_connector_string(
+                            &property_ctx,
+                            value,
+                            &req.id,
+                            &sink_id,
+                            &format!("props.headers.{key}"),
+                        )?;
+                        reqwest::header::HeaderValue::from_str(value.expose()).map_err(|_| {
+                            format!(
+                                "pipeline `{}` sink `{sink_id}` has invalid props.headers.{key}",
+                                req.id
+                            )
+                        })?;
+                        props = props.with_header(key.as_str(), value);
                     }
                 }
                 // Structured auth + secret headers resolved from the store (runtime
                 // only; the request JSON keeps the `SecretRef` pointers).
                 for (key, value) in resolved_secret_headers {
-                    props = props.with_header(key, value);
+                    props = props.with_header(key, flow::ConnectorString::sensitive(value));
                 }
                 if let Some(ref ct) = http_props.content_type.filter(|v| !v.trim().is_empty()) {
                     props = props.with_content_type(ct);
@@ -677,8 +761,10 @@ mod tests {
     use flow::FlowInstance;
     use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
     use flow::connector::{DEFAULT_MEMORY_PUBSUB_CAPACITY, MemoryTopicKind};
+    use flow::secret::SecretString;
     use flow::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn test_instance() -> FlowInstance {
@@ -751,6 +837,80 @@ mod tests {
             sink.encoder.transform_template(),
             Some("{\"x\":{{ json(.row.a) }} }")
         );
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_renders_supported_connector_properties() {
+        let instance = test_instance();
+        instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([
+            ("vin".to_string(), SecretString::new("VIN-123".to_string())),
+            ("cs".to_string(), SecretString::new("CS-9".to_string())),
+        ])));
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_properties",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "mqtt_sink",
+                    "type": "mqtt",
+                    "props": {
+                        "broker_url": "mqtt://localhost:1883",
+                        "topic": "vehicles/{{ prop(\"vin\") }}"
+                    },
+                    "encoder": { "type": "json" }
+                },
+                {
+                    "id": "http_sink",
+                    "type": "http",
+                    "props": {
+                        "url": "http://localhost/upload",
+                        "headers": {
+                            "x-device": "{{ prop(\"vin\") }}-{{ prop(\"cs\") }}"
+                        },
+                        "body": {
+                            "type": "multipart",
+                            "file_field_name": "payload",
+                            "fields": {
+                                "vehicle": "{{ prop(\"vin\") }}"
+                            }
+                        }
+                    },
+                    "encoder": { "type": "json" }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+
+        let SinkProps::Mqtt(mqtt) = &definition.sinks()[0].props else {
+            panic!("expected MQTT sink");
+        };
+        assert_eq!(mqtt.topic.expose(), "vehicles/VIN-123");
+        assert!(mqtt.topic.is_sensitive());
+
+        let SinkProps::Http(http) = &definition.sinks()[1].props else {
+            panic!("expected HTTP sink");
+        };
+        let header = http.headers.get("x-device").expect("rendered header");
+        assert_eq!(header.expose(), "VIN-123-CS-9");
+        assert!(header.is_sensitive());
+        let flow::HttpBodyConfig::Multipart(multipart) = &http.body else {
+            panic!("expected multipart body");
+        };
+        let field = multipart.fields.get("vehicle").expect("rendered field");
+        assert_eq!(field.expose(), "VIN-123");
+        assert!(field.is_sensitive());
     }
 
     #[tokio::test]
@@ -1114,7 +1274,7 @@ mod tests {
             panic!("expected mqtt sink props");
         };
         assert_eq!(mqtt.broker_url, "");
-        assert_eq!(mqtt.topic, "out/topic");
+        assert_eq!(mqtt.topic.expose(), "out/topic");
         assert_eq!(mqtt.connector_key.as_deref(), Some("shared_mqtt"));
     }
 
@@ -1203,10 +1363,93 @@ mod tests {
             panic!("expected file sink props");
         };
         assert_eq!(file.path, "/tmp/veloflux-file-sink-test");
-        assert_eq!(file.filename_prefix, "speed_");
-        assert_eq!(file.filename_suffix, ".json");
+        assert_eq!(file.filename_prefix.expose(), "speed_");
+        assert_eq!(file.filename_suffix.expose(), ".json");
         assert_eq!(file.retention.max_file_count, 10);
         assert_eq!(file.retention.max_file_age_days, 7);
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_renders_file_name_properties() {
+        let instance = test_instance();
+        instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([
+            ("vin".to_string(), SecretString::new("VIN-123".to_string())),
+            ("format".to_string(), SecretString::new("json".to_string())),
+        ])));
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_properties",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "file_sink",
+                "type": "file",
+                "props": {
+                    "path": "/tmp/veloflux-file-properties",
+                    "filename_prefix": "vehicle_{{ prop(\"vin\") }}_",
+                    "filename_suffix": ".{{ prop(\"format\") }}"
+                },
+                "encoder": { "type": "json" }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let SinkProps::File(file) = &definition.sinks()[0].props else {
+            panic!("expected file sink");
+        };
+
+        assert_eq!(file.filename_prefix.expose(), "vehicle_VIN-123_");
+        assert_eq!(file.filename_suffix.expose(), ".json");
+        assert!(file.filename_prefix.is_sensitive());
+        assert!(file.filename_suffix.is_sensitive());
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_validates_rendered_file_name_properties() {
+        let instance = test_instance();
+        instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([(
+            "vin".to_string(),
+            SecretString::new("bad/name".to_string()),
+        )])));
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_invalid_file_properties",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "file_sink",
+                "type": "file",
+                "props": {
+                    "path": "/tmp/veloflux-file-properties",
+                    "filename_prefix": "{{ prop(\"vin\") }}_",
+                    "filename_suffix": ".json"
+                },
+                "encoder": { "type": "json" }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let err =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("rendered path separator should fail");
+
+        assert!(err.contains("filename_prefix must not contain path separators"));
+        assert!(!err.contains("bad/name"));
     }
 
     #[tokio::test]

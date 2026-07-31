@@ -943,8 +943,11 @@ fn plan_explain_with_sinks_table_driven() {
                                 file_field_name: "d".to_string(),
                                 file_name: "payload.bin".to_string(),
                                 fields: BTreeMap::from([
-                                    ("rid".to_string(), "customer-secret".to_string()),
-                                    ("tp".to_string(), "1".to_string()),
+                                    (
+                                        "rid".to_string(),
+                                        flow::ConnectorString::plain("customer-secret"),
+                                    ),
+                                    ("tp".to_string(), flow::ConnectorString::plain("1")),
                                 ]),
                             }),
                         ),

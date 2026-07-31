@@ -1,6 +1,10 @@
 use crate::server::ServerOptions;
+use flow::secret::SecretString;
+use flow::{validate_property_key, PropertyContext};
 use manager::FlowInstanceSpec;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -11,6 +15,7 @@ type ConfigResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub properties: PropertiesConfig,
     pub logging: LoggingConfig,
     pub profiling: ProfilingConfig,
     pub metrics: MetricsConfig,
@@ -20,6 +25,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            properties: PropertiesConfig::default(),
             logging: LoggingConfig::default(),
             profiling: ProfilingConfig {
                 enabled: None,
@@ -31,6 +37,46 @@ impl Default for AppConfig {
             },
             server: ServerConfig::default(),
         }
+    }
+}
+
+/// Plaintext-on-input static properties with redacted in-memory diagnostics.
+#[derive(Clone, Default)]
+pub struct PropertiesConfig {
+    values: BTreeMap<String, SecretString>,
+}
+
+impl PropertiesConfig {
+    pub(crate) fn insert_env(&mut self, key: String, value: String) {
+        self.values.insert(key, SecretString::new(value));
+    }
+
+    fn context(&self) -> PropertyContext {
+        PropertyContext::new(self.values.clone())
+    }
+}
+
+impl fmt::Debug for PropertiesConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PropertiesConfig")
+            .field("keys", &self.values.keys().collect::<Vec<_>>())
+            .field("count", &self.values.len())
+            .finish()
+    }
+}
+
+impl<'de> Deserialize<'de> for PropertiesConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values = BTreeMap::<String, String>::deserialize(deserializer)?;
+        let mut properties = BTreeMap::new();
+        for (key, value) in values {
+            validate_property_key(&key).map_err(serde::de::Error::custom)?;
+            properties.insert(key, SecretString::new(value));
+        }
+        Ok(Self { values: properties })
     }
 }
 
@@ -232,6 +278,7 @@ impl AppConfig {
             opts.manager_addr = Some(addr.clone());
         }
         opts.flow_instances = self.server.flow_instances.clone();
+        opts.property_context = self.properties.context();
     }
 
     pub fn to_server_options(&self) -> ServerOptions {

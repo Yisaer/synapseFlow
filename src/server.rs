@@ -128,6 +128,8 @@ pub struct ServerOptions {
     pub pipeline_patrol_interval_secs: Option<u64>,
     /// Declared flow instances loaded from config.
     pub flow_instances: Vec<manager::FlowInstanceSpec>,
+    /// Process-wide static properties shared by every flow instance.
+    pub property_context: flow::PropertyContext,
 }
 
 /// Runtime context returned by [`init`] and consumed by [`start`].
@@ -166,6 +168,7 @@ pub async fn init(
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
     let init_phase = StartupPhase::new("manager", "default", "server_init", None);
     flow::init_process_once();
+    instance.set_property_context(opts.property_context.clone());
     veloflux_metrics::set_default_flow_instance_id("default");
     log_allocator();
 

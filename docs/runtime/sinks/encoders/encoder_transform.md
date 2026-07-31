@@ -144,10 +144,21 @@ The row template produces:
 
 The JSON encoder then appends that item into the outer collection payload.
 
-The runtime template engine is `upon`, and the current implementation exposes a
-single helper:
+The runtime template engine is `upon`. The encoder profile exposes:
 
 - `json(value)`: render a value as a JSON literal inside the template output
+- `prop("key")`: read one process-wide static property
+
+For example:
+
+```text
+{"vin":{{ prop("vin") | json }},"value":{{ json(.row.a) }} }
+```
+
+The template is compiled while the pipeline is built. `.row` is supplied for
+each encoded item, while the property snapshot is fixed for that pipeline
+build. A missing property is reported as an encoder error under the current
+sink error policy.
 
 ## Execution Semantics
 

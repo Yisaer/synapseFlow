@@ -16,13 +16,14 @@ use url::Url;
 use crate::connector::mask_url_userinfo;
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttClient};
 use crate::runtime::TaskSpawner;
+use crate::template::ConnectorString;
 
 /// Basic MQTT configuration for sinks.
 #[derive(Debug, Clone)]
 pub struct MqttSinkConfig {
     pub sink_name: String,
     pub broker_url: String,
-    pub topic: String,
+    pub topic: ConnectorString,
     pub qos: u8,
     pub retain: bool,
     pub client_id: Option<String>,
@@ -34,7 +35,7 @@ impl MqttSinkConfig {
     pub fn new(
         sink_name: impl Into<String>,
         broker_url: impl Into<String>,
-        topic: impl Into<String>,
+        topic: impl Into<ConnectorString>,
         qos: u8,
     ) -> Self {
         Self {
@@ -342,7 +343,7 @@ impl SinkConnector for MqttSinkConnector {
                 .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                 .inc();
             client
-                .publish(&self.config.topic, qos, self.config.retain, payload)
+                .publish(self.config.topic.expose(), qos, self.config.retain, payload)
                 .await
                 .map(|_| {
                     veloflux_metrics::mqtt_sink_records_out_total()
@@ -491,6 +492,7 @@ mod tests {
     async fn mqtt_sink_connector_publishes_bytes_to_embedded_broker() {
         let broker = EmbeddedMqttBroker::start().await;
         let topic = broker.scoped_topic("sink/out");
+        let expected_topic = topic.clone();
 
         let mut options = MqttOptions::new(
             "mqtt_sink_output_subscriber",
@@ -504,7 +506,7 @@ mod tests {
         let (subscriber, mut event_loop) = AsyncClient::new(options, 8);
         let (connack_tx, connack_rx) = oneshot::channel();
         let (suback_tx, suback_rx) = oneshot::channel();
-        let (payload_tx, mut payload_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (publish_tx, mut publish_rx) = mpsc::channel::<(String, Vec<u8>)>(1);
         let subscriber_task = tokio::spawn(async move {
             let mut connack_tx = Some(connack_tx);
             let mut suback_tx = Some(suback_tx);
@@ -521,7 +523,11 @@ mod tests {
                         }
                     }
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
-                        if payload_tx.send(publish.payload.to_vec()).await.is_err() {
+                        if publish_tx
+                            .send((publish.topic, publish.payload.to_vec()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -547,7 +553,12 @@ mod tests {
         let spawner = TaskSpawner::from_handle(Handle::current());
         let mut connector = MqttSinkConnector::new(
             "mqtt_sink_output",
-            MqttSinkConfig::new("mqtt_sink_output", broker.broker_url(), topic, 1),
+            MqttSinkConfig::new(
+                "mqtt_sink_output",
+                broker.broker_url(),
+                ConnectorString::sensitive(topic),
+                1,
+            ),
             Arc::<str>::from("default"),
             MqttClientManager::new("default", spawner.clone()),
             spawner,
@@ -575,11 +586,12 @@ mod tests {
             }
         }
 
-        let received = timeout(Duration::from_secs(5), payload_rx.recv())
+        let (received_topic, received_payload) = timeout(Duration::from_secs(5), publish_rx.recv())
             .await
             .expect("mqtt sink output payload timeout")
             .expect("mqtt sink output payload");
-        assert_eq!(received, expected_payload);
+        assert_eq!(received_topic, expected_topic);
+        assert_eq!(received_payload, expected_payload);
 
         connector.close().await.expect("close mqtt sink connector");
         let _ = subscriber.disconnect().await;

@@ -3,6 +3,7 @@
 use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -17,8 +18,8 @@ pub struct FileSinkConfig {
     pub sink_name: String,
     pub pipeline_id: String,
     pub path: String,
-    pub filename_prefix: String,
-    pub filename_suffix: String,
+    pub filename_prefix: crate::ConnectorString,
+    pub filename_suffix: crate::ConnectorString,
     pub retention: FileRetentionConfig,
 }
 
@@ -66,8 +67,11 @@ impl FileSinkConnector {
 
     fn validate_config(&self) -> Result<(), SinkConnectorError> {
         validate_file_sink_path(&self.config.path)?;
-        validate_file_name_affixes(&self.config.filename_prefix, &self.config.filename_suffix)
-            .map_err(SinkConnectorError::Other)?;
+        validate_file_name_affixes(
+            self.config.filename_prefix.expose(),
+            self.config.filename_suffix.expose(),
+        )
+        .map_err(SinkConnectorError::Other)?;
         Ok(())
     }
 
@@ -201,7 +205,7 @@ impl FileSinkConnector {
                         "file sink `{}` cannot finalize tmp file `{}` to `{}` across devices: {err}",
                         self.id,
                         tmp_path.display(),
-                        final_path.display()
+                        self.final_path_for_diagnostics(&final_path)
                     )));
                 }
                 Err(err) => {
@@ -209,7 +213,7 @@ impl FileSinkConnector {
                         "file sink `{}` failed to finalize tmp file `{}` to `{}`: {err}",
                         self.id,
                         tmp_path.display(),
-                        final_path.display()
+                        self.final_path_for_diagnostics(&final_path)
                     )));
                 }
             }
@@ -224,8 +228,20 @@ impl FileSinkConnector {
     fn final_path(&self, ts_ms: u128, seq: u32) -> PathBuf {
         self.output_dir().join(format!(
             "{}{}_{:06}{}",
-            self.config.filename_prefix, ts_ms, seq, self.config.filename_suffix
+            self.config.filename_prefix.expose(),
+            ts_ms,
+            seq,
+            self.config.filename_suffix.expose()
         ))
+    }
+
+    fn final_path_for_diagnostics<'a>(&self, path: &'a Path) -> Cow<'a, str> {
+        if self.config.filename_prefix.is_sensitive() || self.config.filename_suffix.is_sensitive()
+        {
+            Cow::Borrowed("<redacted>")
+        } else {
+            Cow::Owned(path.display().to_string())
+        }
     }
 
     fn apply_retention(&self) -> Result<(), SinkConnectorError> {
@@ -265,7 +281,7 @@ impl FileSinkConnector {
                 Err(err) => {
                     tracing::warn!(
                         connector_id = %self.id,
-                        path = %path.display(),
+                        path = %self.final_path_for_diagnostics(&path),
                         error = %err,
                         "file sink retention skipped file with unreadable modified time"
                     );
@@ -314,8 +330,8 @@ impl FileSinkConnector {
     }
 
     fn generated_filename_parts(&self, file_name: &str) -> Option<(u128, u32)> {
-        let rest = file_name.strip_prefix(&self.config.filename_prefix)?;
-        let middle = rest.strip_suffix(&self.config.filename_suffix)?;
+        let rest = file_name.strip_prefix(self.config.filename_prefix.expose())?;
+        let middle = rest.strip_suffix(self.config.filename_suffix.expose())?;
         let (ts, seq) = middle.rsplit_once('_')?;
         if ts.is_empty()
             || !ts.bytes().all(|byte| byte.is_ascii_digit())
@@ -660,8 +676,8 @@ mod tests {
             sink_name: "file_sink".to_string(),
             pipeline_id: "pipe_1".to_string(),
             path: path.to_string_lossy().into_owned(),
-            filename_prefix: "speed_".to_string(),
-            filename_suffix: ".json".to_string(),
+            filename_prefix: "speed_".into(),
+            filename_suffix: ".json".into(),
             retention: FileRetentionConfig::default(),
         }
     }
@@ -744,8 +760,8 @@ mod tests {
     async fn file_sink_empty_prefix_and_suffix_are_supported() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = config(dir.path());
-        cfg.filename_prefix.clear();
-        cfg.filename_suffix.clear();
+        cfg.filename_prefix = "".into();
+        cfg.filename_suffix = "".into();
         let mut connector = FileSinkConnector::new("sink_1", cfg);
 
         connector.ready().await.expect("ready");
@@ -756,6 +772,27 @@ mod tests {
         let name = files[0].file_name().unwrap().to_str().unwrap();
         assert!(name.ends_with("_000001"));
         assert_eq!(fs::read(&files[0]).expect("read file"), b"bytes");
+    }
+
+    #[tokio::test]
+    async fn file_sink_exposes_sensitive_affixes_only_for_file_operations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config(dir.path());
+        cfg.filename_prefix = crate::ConnectorString::sensitive("VIN-123_");
+        cfg.filename_suffix = crate::ConnectorString::sensitive(".json");
+        let mut connector = FileSinkConnector::new("sink_1", cfg);
+
+        connector.ready().await.expect("ready");
+        deliver(&mut connector, b"bytes").await;
+
+        let files = final_files(dir.path());
+        let name = files[0].file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("VIN-123_"));
+        assert!(name.ends_with(".json"));
+        assert_eq!(
+            connector.final_path_for_diagnostics(&files[0]),
+            "<redacted>"
+        );
     }
 
     #[tokio::test]
