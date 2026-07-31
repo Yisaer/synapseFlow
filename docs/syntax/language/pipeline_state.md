@@ -7,6 +7,8 @@ quantities that are not derived from any single input row but rather reflect the
 history of data flowing through the pipeline. Examples include:
 
 - How many rows have been delivered to the sink so far (`last_hit_count`).
+- How many non-empty aggregate result collections have passed `HAVING` so far
+  (`last_agg_hit_count`).
 - The timestamp of the most recent row that reached the sink (`last_hit_ts`).
 - (Future) The number of rows currently in-flight between two processors.
 
@@ -55,15 +57,15 @@ configurations.
 
 ### The Idea
 
-Each processor that needs to read pipeline state (Filter for WHERE, Project for SELECT)
-holds its own local `ProcessorState` containing a shared `AtomicU64` counter. The counter is:
+Each processor that needs to read pipeline state (Filter for WHERE/HAVING, Project for SELECT)
+holds its own local `ProcessorState` containing shared `AtomicU64` counters. A counter is:
 
 - **Read** by `ScalarExpr` during expression evaluation (lock-free, via `AtomicU64::load`).
-- **Written** by the processor after each row it accepts (via `AtomicU64::fetch_add`).
+- **Written** by the processor at the function-specific hit boundary
+  (via `AtomicU64::fetch_add`).
 
-Because the ScalarExpr and the processor share the same `Arc<AtomicU64>`, a row N+1 in the
-same batch immediately sees the counter incremented by row N — no ack, no serialization,
-no cross-processor coordination.
+Because the ScalarExpr and the processor share the same `Arc<AtomicU64>`, later evaluations in the
+same processor can observe updates without sink ack, serialization, or cross-processor coordination.
 
 ### The Two Premises That Make the Approximation Exact
 
@@ -93,25 +95,27 @@ state functions when these configurations are active.
 
 Therefore, in all **supported** configurations: every row that survives Filter reaches Sink.
 
-#### Premise 2: Pipeline state functions are only allowed in SELECT and WHERE
+#### Premise 2: Pipeline state functions are only allowed at their owning processor positions
 
 | Allowed context | Processor | What the counter means |
 |---|---|---|
-| `SELECT` fields | Project | Rows that produced output (post-projection) |
-| `WHERE` conditions | Filter | Rows that passed the filter condition |
+| `SELECT` fields (`last_hit_count`) | Project | Rows that produced output (post-projection) |
+| `WHERE` conditions (`last_hit_count`) | Filter | Rows that passed the filter condition |
+| `HAVING` conditions (`last_agg_hit_count`) | Filter after aggregation | Non-empty aggregate result collections that passed `HAVING` |
 
 All other SQL clauses are rejected:
 
 | Rejected context | Reason |
 |---|---|
-| `HAVING` (separate processor) | Sits on a different evaluation path |
+| `HAVING` for `last_hit_count` | Uses aggregate-result collections instead of row hits |
+| `SELECT` / `WHERE` for `last_agg_hit_count` | Not evaluated by the aggregate-result filter |
 | `ORDER BY` expressions | Only reorders, counter update meaningless |
 | `GROUP BY` expressions | Before Filter, would count pre-filter rows |
 | Stateful function arguments / FILTER / PARTITION BY | StatefulFunction processor runs before Filter |
-| Aggregate function arguments | Aggregation runs before Filter |
+| Aggregate function arguments | Aggregation runs before the `HAVING` filter |
 
-The restriction guarantees that pipeline state is only read/written at processors that lie
-on the single non-dropping path from Filter to Sink.
+The restriction guarantees that each pipeline state function is only read and written by the
+processor that owns its hit semantics.
 
 ### Why Separate Counters Per Processor
 
@@ -148,16 +152,58 @@ fields to `ProcessorState` and new variants to `ProcStateField`.
 
 ---
 
+## HAVING Consumer: `last_agg_hit_count()`
+
+`last_agg_hit_count()` reads aggregate-filter pipeline state. It returns the number of previous
+non-empty collections emitted by the `HAVING` filter.
+
+Syntax:
+
+```sql
+SELECT sum(a)
+FROM stream
+GROUP BY countwindow(4)
+HAVING last_agg_hit_count() < 3
+```
+
+- Zero arguments.
+- No `OVER (PARTITION BY ...)` or `FILTER (WHERE ...)`.
+- Allowed only in `HAVING`.
+- Not an aggregate function and not registered in the aggregate function registry.
+- Counts non-empty filtered collections, not rows inside those collections.
+
+For grouped aggregate output, one window can produce multiple rows in the same aggregate result
+collection. If that collection remains non-empty after `HAVING`, `last_agg_hit_count` increments by
+one regardless of how many grouped rows passed.
+
+Example:
+
+```sql
+SELECT sum(a) AS s, device_id
+FROM stream
+GROUP BY countwindow(4), device_id
+HAVING last_agg_hit_count() < 1
+```
+
+If the first finalized window produces two `device_id` groups and both pass `HAVING`, both rows are
+emitted and the counter increments from `0` to `1` only after the collection is filtered. The next
+aggregate result collection sees `last_agg_hit_count() = 1` and fails the predicate above.
+
+---
+
 ## Layer Design
 
 ### 1. Parser Layer
 
-`last_hit_count()` is recognized as a built-in scalar function with zero arguments.
-Unlike stateful functions, it is **not** rewritten into a placeholder column — it passes
-through as an unmodified `Expr::Function` node.
+`last_hit_count()` and `last_agg_hit_count()` are recognized as built-in pipeline state functions
+with zero arguments.
+Unlike stateful functions, they are **not** rewritten into placeholder columns — they pass through as
+unmodified `Expr::Function` nodes.
 
-The parser validates that the function appears only in allowed contexts (`SELECT` fields,
-`WHERE` conditions) and rejects it elsewhere.
+The planner validates that each function appears only in its allowed context:
+
+- `last_hit_count()` in `SELECT` fields and `WHERE` conditions.
+- `last_agg_hit_count()` in `HAVING`.
 
 ### 2. Eval Layer (`ScalarExpr`)
 
@@ -168,6 +214,7 @@ The parser validates that the function appears only in allowed contexts (`SELECT
 
 pub struct ProcessorState {
     pub last_hit_count: Arc<AtomicU64>,
+    pub last_agg_hit_count: Arc<AtomicU64>,
 }
 ```
 
@@ -176,6 +223,7 @@ pub struct ProcessorState {
 
 pub enum ProcStateField {
     LastHitCount,
+    LastAggHitCount,
 }
 
 pub enum ScalarExpr {
@@ -202,33 +250,36 @@ ScalarExpr::ProcessorState { state, field } => match field {
     ProcStateField::LastHitCount => {
         Ok(Value::Uint64(state.last_hit_count.load(Ordering::Relaxed)))
     }
+    ProcStateField::LastAggHitCount => {
+        Ok(Value::Uint64(state.last_agg_hit_count.load(Ordering::Relaxed)))
+    }
 },
 ```
 
 The `&self` receiver is sufficient — `AtomicU64::load` is lock-free.
 
-#### 2.3 Placeholder → Injection Strategy
+#### 2.3 PipelineState → Injection Strategy
 
-`ProcessorState` is created during physical plan building, but `last_hit_count()` must
+`ProcessorState` is created during physical plan building, but pipeline state functions must
 first pass through SQL-to-ScalarExpr conversion (`sql_conversion`), which has no access to
 `ProcessorState`. We solve this with a two-step approach:
 
-**Step 1 — `sql_conversion`:** Convert `last_hit_count()` to a temporary placeholder.
+**Step 1 — `sql_conversion`:** Convert the SQL function into an unresolved pipeline-state read.
 
 ```rust
-ScalarExpr::Placeholder
+ScalarExpr::PipelineState { field }
 ```
 
 **Step 2 — `physical_plan_builder`:** After creating `ProcessorState`, walk the expression
-tree and replace every placeholder with the real variant.
+tree and replace every unresolved pipeline-state read with the real variant.
 
 ```rust
 fn inject_processor_state(expr: &mut ScalarExpr, state: &Arc<ProcessorState>) {
     match expr {
-        ScalarExpr::Placeholder => {
+        ScalarExpr::PipelineState { field } => {
             *expr = ScalarExpr::ProcessorState {
                 state: Arc::clone(state),
-                field: ProcStateField::LastHitCount,
+                field: field.clone(),
             };
         }
         ScalarExpr::CallBinary { expr1, expr2, .. } => {
@@ -262,22 +313,21 @@ pub struct PhysicalProject {
 ```
 
 Each receives an independent `ProcessorState`. The builder creates `ProcessorState` when it
-detects `ScalarExpr::Placeholder` in the Filter predicate or Project expressions.
+detects `ScalarExpr::PipelineState` in the Filter predicate or Project expressions.
 
 #### 3.3 Builder checks
 
 - Create `ProcessorState`, inject into expressions via `inject_processor_state`.
 - Store `ProcessorState` in the corresponding `PhysicalFilter` / `PhysicalProject` node.
 - Reject the query if the sink uses `output.mode=delta` or `output.omit_if_empty=true`.
-- Reject if `last_hit_count()` appears in unsupported clauses (parsed but caught at plan
-  time if parser missed it).
+- Reject if a pipeline state function appears in an unsupported clause.
 
 ### 4. Processor Layer
 
 #### 4.1 FilterProcessor
 
-When `processor_state` is `Some`, switch from bulk `collection.apply_filter()` to
-row-by-row iteration:
+When the filter predicate references `last_hit_count()`, switch from bulk
+`collection.apply_filter()` to row-by-row iteration and increment after each accepted row:
 
 ```rust
 fn apply_filter_with_state(
@@ -297,6 +347,24 @@ fn apply_filter_with_state(
 ```
 
 Row-level precision: row N+1 reads the counter already incremented by row N.
+
+When the filter predicate references `last_agg_hit_count()`, the processor also uses row-by-row
+predicate evaluation, but increments at collection scope:
+
+```rust
+let mut kept = Vec::with_capacity(input.num_rows());
+for tuple in input.rows() {
+    if matches!(predicate.eval_with_tuple(tuple)?, Value::Bool(true)) {
+        kept.push(tuple.clone());
+    }
+}
+if !kept.is_empty() {
+    state.last_agg_hit_count.fetch_add(1, Ordering::Relaxed);
+}
+```
+
+All rows in the same aggregate result collection read the same pre-collection value. The counter is
+updated only after the filtered collection is known to be non-empty.
 
 #### 4.2 ProjectProcessor
 
@@ -352,7 +420,8 @@ Both counters converge to `3` after the batch completes.
 |---|---|
 | Sink config | Reject `output.mode=delta` (RowDiff drops rows after Filter) |
 | Sink config | Reject `output.omit_if_empty=true` (EmptySuppress drops collections) |
-| SQL context | Only `SELECT` fields and `WHERE` conditions allowed |
+| SQL context | `last_hit_count()` is allowed only in `SELECT` fields and `WHERE` conditions |
+| SQL context | `last_agg_hit_count()` is allowed only in `HAVING` |
 | Syntax | No `OVER (PARTITION BY ...)` or `FILTER (WHERE ...)` |
 | Lifecycle | Counter resets to 0 on pipeline (re)start |
 

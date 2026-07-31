@@ -11,12 +11,13 @@ SELECT <projection>
 FROM <source_name>
 [WHERE <expr>]
 [GROUP BY <expr> [, <expr> ...]]
+[HAVING <expr>]
 ```
 
 Notes:
 
 - Window declarations are written inside `GROUP BY` (see `user_docs/sql/window.md`).
-- `HAVING` is intentionally not documented here (not currently supported).
+- `HAVING` filters aggregate results after grouping/windowing.
 - `<source_name>` can be a stream or a registered table.
 
 ## Projection
@@ -66,7 +67,7 @@ Current limitations for table sources:
 
 - table aliases are not supported
 - stream-table joins are not supported
-- aggregate functions over table scans are not supported
+- aggregate functions over table scans require `GROUP BY eoswindow()`
 
 ## WHERE
 
@@ -94,6 +95,34 @@ SELECT a FROM s GROUP BY a
 SELECT * FROM s GROUP BY tumblingwindow('ss', 10)
 SELECT * FROM s GROUP BY tumblingwindow('ss', 10), device_id
 ```
+
+## HAVING
+
+`HAVING <expr>`
+
+Filters aggregate result rows after `GROUP BY` windowing and aggregation. `HAVING` requires a
+windowed aggregation query.
+
+Examples:
+
+```sql
+SELECT sum(a) AS s
+FROM s
+GROUP BY countwindow(4)
+HAVING sum(a) > 10
+
+SELECT sum(a) AS s
+FROM s
+GROUP BY countwindow(4)
+HAVING last_agg_hit_count() < 3
+```
+
+Constraints:
+
+- `HAVING` may reference aggregate expressions such as `sum(a)`.
+- `HAVING` may reference `last_agg_hit_count()`.
+- Raw non-aggregate input columns are not allowed in `HAVING`.
+- Projection aliases are not currently supported in `HAVING`.
 
 ## Validation workflow
 

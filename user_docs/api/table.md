@@ -180,7 +180,7 @@ Current table-scan limitations:
 
 - table aliases are not supported
 - stream-table joins are not supported
-- aggregate functions over table scans are not supported
+- aggregate functions over table scans require `GROUP BY eoswindow()`
 - a table scan reads all matching history input currently visible to the datasource and then ends
 
 ## Export / Import
