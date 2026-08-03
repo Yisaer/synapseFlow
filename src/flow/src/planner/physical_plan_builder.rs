@@ -21,7 +21,7 @@ use crate::planner::physical::{
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
     PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
     PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
-    PhysicalTableScan, PhysicalTableScanSpec, StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalTableScan, PhysicalTableScanSpec, StatefulCall, WatermarkConfig,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -699,24 +699,14 @@ fn create_physical_window_with_builder(
     let physical = match &logical_window.spec {
         LogicalWindowSpec::Tumbling { time_unit, length } => {
             let watermark_index = builder.allocate_index();
-            let strategy = if options.eventtime_enabled {
-                WatermarkStrategy::EventTime {
-                    late_tolerance: options.eventtime_late_tolerance,
-                }
-            } else {
-                WatermarkStrategy::ProcessingTime {
-                    time_unit: *time_unit,
-                    interval: *length,
-                }
-            };
             let watermark_config = WatermarkConfig::Tumbling {
                 time_unit: *time_unit,
                 length: *length,
-                strategy,
             };
             let watermark_plan = if options.eventtime_enabled {
                 PhysicalPlan::EventtimeWatermark(PhysicalEventtimeWatermark::new(
-                    watermark_config,
+                    options.eventtime_late_tolerance,
+                    Some(watermark_config),
                     physical_children,
                     watermark_index,
                 ))
@@ -737,6 +727,8 @@ fn create_physical_window_with_builder(
             PhysicalPlan::TumblingWindow(tumbling)
         }
         LogicalWindowSpec::Count { count } => {
+            let physical_children =
+                wrap_eventtime_lifecycle_children(physical_children, options, builder);
             let index = builder.allocate_index();
             let count_window = crate::planner::physical::PhysicalCountWindow::new(
                 *count,
@@ -751,25 +743,15 @@ fn create_physical_window_with_builder(
             lookahead,
         } => {
             let watermark_index = builder.allocate_index();
-            let strategy = if options.eventtime_enabled {
-                WatermarkStrategy::EventTime {
-                    late_tolerance: options.eventtime_late_tolerance,
-                }
-            } else {
-                WatermarkStrategy::ProcessingTime {
-                    time_unit: *time_unit,
-                    interval: 1,
-                }
-            };
             let watermark_config = WatermarkConfig::Sliding {
                 time_unit: *time_unit,
                 lookback: *lookback,
                 lookahead: *lookahead,
-                strategy,
             };
             let watermark_plan = if options.eventtime_enabled {
                 PhysicalPlan::EventtimeWatermark(PhysicalEventtimeWatermark::new(
-                    watermark_config,
+                    options.eventtime_late_tolerance,
+                    Some(watermark_config),
                     physical_children,
                     watermark_index,
                 ))
@@ -797,6 +779,8 @@ fn create_physical_window_with_builder(
             emit,
             partition_by,
         } => {
+            let physical_children =
+                wrap_eventtime_lifecycle_children(physical_children, options, builder);
             let open_scalar = convert_expr_to_scalar_with_bindings_and_custom_registry(
                 open.as_ref(),
                 bindings,
@@ -836,6 +820,8 @@ fn create_physical_window_with_builder(
             PhysicalPlan::StateWindow(Box::new(state))
         }
         LogicalWindowSpec::Eos => {
+            let physical_children =
+                wrap_eventtime_lifecycle_children(physical_children, options, builder);
             let index = builder.allocate_index();
             let eos = crate::planner::physical::PhysicalEosWindow::new(physical_children, index);
             PhysicalPlan::EosWindow(eos)
@@ -843,6 +829,26 @@ fn create_physical_window_with_builder(
     };
 
     Ok(Arc::new(physical))
+}
+
+fn wrap_eventtime_lifecycle_children(
+    physical_children: Vec<Arc<PhysicalPlan>>,
+    options: &PhysicalPlanBuildOptions,
+    builder: &mut PhysicalPlanBuilder,
+) -> Vec<Arc<PhysicalPlan>> {
+    if !options.eventtime_enabled {
+        return physical_children;
+    }
+
+    let watermark_index = builder.allocate_index();
+    vec![Arc::new(PhysicalPlan::EventtimeWatermark(
+        PhysicalEventtimeWatermark::new(
+            options.eventtime_late_tolerance,
+            None,
+            physical_children,
+            watermark_index,
+        ),
+    ))]
 }
 
 fn create_physical_aggregation_with_builder(

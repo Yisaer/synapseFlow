@@ -1378,6 +1378,26 @@ fn plan_explain_pipeline_state_table_driven() {
 }
 
 #[test]
+fn plan_explain_window_metadata_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![Case {
+        name: "window_metadata_tumbling_select",
+        sql: "SELECT window_start(), window_end(), sum(a) FROM stream GROUP BY tumblingwindow('ss', 10)",
+        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=tumbling","unit=Seconds","length=10"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[window_start(); window_end(); col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=tumbling","unit=Seconds","length=10","mode=processing_time","interval=10"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","window=tumbling","unit=Seconds","length=10"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[window_start(); window_end(); col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+    }];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn plan_explain_last_agg_hit_count_table_driven() {
     struct Case {
         name: &'static str,

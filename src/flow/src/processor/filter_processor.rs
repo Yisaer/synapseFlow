@@ -184,9 +184,10 @@ fn apply_filter(
             if state_update.collection_hit_count && !kept.is_empty() {
                 state.last_agg_hit_count.fetch_add(1, Ordering::Relaxed);
             }
-            Ok(Box::new(RecordBatch::new(kept).map_err(|e| {
-                ProcessorError::ProcessingError(e.to_string())
-            })?))
+            Ok(Box::new(
+                RecordBatch::new_with_metadata_from(kept, input_collection)
+                    .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?,
+            ))
         }
         _ => input_collection
             .apply_filter(filter_expr)

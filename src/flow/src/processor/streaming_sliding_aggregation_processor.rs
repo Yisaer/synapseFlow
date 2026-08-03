@@ -1,12 +1,12 @@
 use super::{build_group_by_meta, create_accumulators_static, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::model::RecordBatch;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -58,6 +58,20 @@ struct WindowGroupState {
 struct IncAggWindow {
     start_secs: u64,
     groups: HashMap<String, WindowGroupState>,
+}
+
+#[derive(Clone, Copy)]
+struct SlidingWindowBounds {
+    length_secs: u64,
+    delay_secs: u64,
+}
+
+impl SlidingWindowBounds {
+    fn end_secs(self, start_secs: u64) -> u64 {
+        start_secs
+            .saturating_add(self.length_secs)
+            .saturating_add(self.delay_secs)
+    }
 }
 
 impl StreamingSlidingAggregationProcessor {
@@ -174,6 +188,10 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let group_by_meta = self.group_by_meta.clone();
         let length_secs = self.length_secs;
         let delay_secs = self.delay_secs;
+        let bounds = SlidingWindowBounds {
+            length_secs,
+            delay_secs,
+        };
         let stats = Arc::clone(&self.stats);
 
         ProcessorStart::ready(spawner.spawn(async move {
@@ -272,6 +290,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 physical: &PhysicalStreamingAggregation,
                 group_by_meta: &[GroupByMeta],
                 windows: &VecDeque<IncAggWindow>,
+                bounds: SlidingWindowBounds,
                 stats: &Arc<ProcessorStats>,
             ) -> Result<(), ProcessorError> {
                 let Some(window) = windows.front() else {
@@ -313,8 +332,11 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     return Ok(());
                 }
                 stats.record_out(out_rows.len() as u64);
-                let batch = RecordBatch::new(out_rows)
-                    .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+                let batch = window_metadata::record_batch_from_epoch_secs(
+                    out_rows,
+                    window.start_secs,
+                    bounds.end_secs(window.start_secs),
+                )?;
                 send_with_backpressure(
                     output,
                     data_channel_capacity,
@@ -331,6 +353,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 physical: &PhysicalStreamingAggregation,
                 group_by_meta: &[GroupByMeta],
                 windows: &VecDeque<IncAggWindow>,
+                bounds: SlidingWindowBounds,
                 stats: &Arc<ProcessorStats>,
             ) -> Result<(), ProcessorError> {
                 for window in windows {
@@ -373,8 +396,11 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     }
 
                     stats.record_out(out_rows.len() as u64);
-                    let batch = RecordBatch::new(out_rows)
-                        .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+                    let batch = window_metadata::record_batch_from_epoch_secs(
+                        out_rows,
+                        window.start_secs,
+                        bounds.end_secs(window.start_secs),
+                    )?;
                     send_with_backpressure(
                         output,
                         data_channel_capacity,
@@ -449,6 +475,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                                 &physical,
                                                 &group_by_meta,
                                                 &windows,
+                                                bounds,
                                                 &stats,
                                             )
                                             .await?;
@@ -469,7 +496,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 gc_windows(&mut windows, now_secs, length_secs, delay_secs);
                                 if let Some(front) = windows.front() {
                                     if front.start_secs.saturating_add(delay_secs) <= now_secs {
-                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, &stats)
+                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, bounds, &stats)
                                             .await?;
                                     }
                                 }
@@ -485,6 +512,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                             &physical,
                                             &group_by_meta,
                                             &windows,
+                                            bounds,
                                             &stats,
                                         )
                                             .await?;

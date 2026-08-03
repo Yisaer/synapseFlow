@@ -14,6 +14,7 @@ use parquet::file::properties::WriterProperties;
 use serde_json::Value as JsonValue;
 use std::fs::File;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{timeout, Duration};
@@ -186,6 +187,25 @@ fn json_sort_key(row: &JsonValue, field: &str) -> String {
             other => format!("x:{other}"),
         })
         .unwrap_or_default()
+}
+
+fn system_time_epoch_micros(time: SystemTime) -> i128 {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .expect("test timestamp should be after Unix epoch");
+    i128::from(duration.as_secs()) * 1_000_000 + i128::from(duration.subsec_micros())
+}
+
+fn parse_rfc3339_epoch_micros(value: &JsonValue, field: &str) -> i128 {
+    let text = value
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .unwrap_or_else(|| panic!("missing string field `{field}` in {value}"));
+    i128::from(
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap_or_else(|err| panic!("invalid RFC3339 timestamp `{text}`: {err}"))
+            .timestamp_micros(),
+    )
 }
 
 async fn run_table_scan_case(case: TableScanCase) {
@@ -452,4 +472,105 @@ async fn pipeline_table_scan_table_driven() {
     for case in cases {
         run_table_scan_case(case).await;
     }
+}
+
+// coverage-covers: expr.window_metadata, source.table.history_scan, stream.window.eos, sink.connector.memory_output
+#[tokio::test]
+async fn table_scan_eos_window_projects_lifecycle_metadata() {
+    let case_name = "table_scan_eos_window_projects_lifecycle_metadata";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (_, output_topic) = make_memory_topics("pipeline_table_scan", case_name);
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output memory topic");
+
+    let table_name = "history_table";
+    let topic = "vehicle";
+    let dir = tempfile::tempdir().expect("create temp history dir");
+    write_history_parquet_file(
+        &dir,
+        topic,
+        1,
+        &[
+            HistoryPayloadRow {
+                ts: 1,
+                json: r#"{"ts":1,"vehicle_id":"v1","speed":1}"#,
+            },
+            HistoryPayloadRow {
+                ts: 4,
+                json: r#"{"ts":4,"vehicle_id":"v1","speed":4}"#,
+            },
+            HistoryPayloadRow {
+                ts: 7,
+                json: r#"{"ts":7,"vehicle_id":"v1","speed":7}"#,
+            },
+        ],
+    );
+    create_history_table(&instance, table_name, &dir, topic).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT window_start() AS ws, window_end() AS we, sum(speed) AS s FROM history_table GROUP BY eoswindow()",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create table scan pipeline");
+    let before_start_micros = system_time_epoch_micros(SystemTime::now());
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start table scan pipeline");
+
+    let timeout_duration = Duration::from_secs(5);
+    let actual = collect_json_rows(&mut output, 1, timeout_duration).await;
+    let after_output_micros = system_time_epoch_micros(SystemTime::now());
+    let rows = actual
+        .as_array()
+        .expect("table scan output should be an array");
+    assert_eq!(rows.len(), 1, "expected one eos output row");
+    let row = &rows[0];
+    assert_eq!(row.get("s"), Some(&JsonValue::from(12)));
+
+    let window_start_micros = parse_rfc3339_epoch_micros(row, "ws");
+    let window_end_micros = parse_rfc3339_epoch_micros(row, "we");
+    assert!(
+        window_start_micros <= window_end_micros,
+        "window_start should not be after window_end: {row}"
+    );
+    assert!(
+        before_start_micros <= window_start_micros && window_end_micros <= after_output_micros,
+        "eos lifecycle metadata should be produced during the table scan run: {row}"
+    );
+    assert_no_extra_json_output(&mut output, Duration::from_millis(200)).await;
+
+    match instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+    {
+        Ok(()) => {}
+        Err(PipelineError::Runtime(err)) if err.contains("Timeout waiting for data") => {}
+        Err(err) => panic!("stop table scan pipeline: {err}"),
+    }
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete table scan pipeline");
 }

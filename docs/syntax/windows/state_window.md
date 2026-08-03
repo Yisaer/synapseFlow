@@ -2,7 +2,8 @@
 
 This document describes `statewindow` semantics and syntax extensions.
 
-See also: `docs/syntax/windows/README.md` and `docs/syntax/windows/syntax.md`.
+See also: `docs/syntax/windows/README.md`, `docs/syntax/windows/syntax.md`, and
+`docs/syntax/windows/window_metadata.md`.
 
 ## Syntax
 
@@ -35,6 +36,11 @@ For a given partition (see below), the state machine is:
 - When inactive and `open_expr == true`, start buffering (do not emit even if `emit_expr == true`).
 - When active, buffer every incoming row. If `emit_expr == true`, emit the buffered batch and close (become inactive).
 - When inactive and `emit_expr == true`, ignore.
+- `window_start()` returns the processor wall-clock time when `open_expr` opens the state window.
+- `window_end()` returns the processor wall-clock time when `emit_expr` closes and emits the state
+  window.
+- In event-time mode, these metadata values remain processor wall-clock lifecycle boundaries because
+  `statewindow` is not an event-time interval.
 
 ### Partitioned Semantics (`OVER (PARTITION BY ...)`)
 

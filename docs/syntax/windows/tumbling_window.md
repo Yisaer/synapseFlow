@@ -2,7 +2,8 @@
 
 `tumblingwindow(time_unit, length)` defines fixed, non-overlapping time windows.
 
-See also: `docs/syntax/windows/syntax.md` and `docs/syntax/windows/watermarks.md`.
+See also: `docs/syntax/windows/syntax.md`, `docs/syntax/windows/window_metadata.md`, and
+`docs/syntax/windows/watermarks.md`.
 
 ## Semantics
 
@@ -11,6 +12,9 @@ See also: `docs/syntax/windows/syntax.md` and `docs/syntax/windows/watermarks.md
 - Tuples are assigned to exactly one tumbling window by their timestamps.
 - Window closure and emission are driven by incoming watermarks:
   - When a watermark advances past a window end boundary, that window is eligible to flush.
+- `window_start()` returns the fixed logical bucket start.
+- `window_end()` returns the fixed logical bucket end.
+- In event-time mode, the logical bucket is computed from the tuple event timestamp.
 
 ## Example
 

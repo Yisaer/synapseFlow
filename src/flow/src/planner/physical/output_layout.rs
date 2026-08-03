@@ -3,7 +3,7 @@ use crate::expr::scalar::ColumnRef;
 use crate::expr::ScalarExpr;
 use crate::model::Tuple;
 use crate::planner::physical::PhysicalPlan;
-use datatypes::{BooleanType, ConcreteDatatype, Value};
+use datatypes::{BooleanType, ConcreteDatatype, TimestampType, Value};
 use std::sync::Arc;
 
 static NULL_VALUE: Value = Value::Null;
@@ -592,6 +592,7 @@ fn infer_scalar_type(expr: &ScalarExpr, input: &PlanLayout) -> Option<ConcreteDa
         | ScalarExpr::CallFunc { .. }
         | ScalarExpr::PipelineState { .. }
         | ScalarExpr::ProcessorState { .. } => None,
+        ScalarExpr::WindowMetadata { .. } => Some(ConcreteDatatype::Timestamp(TimestampType)),
     }
 }
 

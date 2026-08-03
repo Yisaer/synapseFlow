@@ -11,13 +11,13 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
+use crate::processor::window_metadata;
+use crate::processor::{ControlSignal, Processor, ProcessorStart, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::SystemTime;
 #[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -25,6 +25,7 @@ use tokio_stream::StreamExt;
 
 struct PartitionState {
     active: bool,
+    opened_at: Option<SystemTime>,
     rows: VecDeque<crate::model::Tuple>,
 }
 
@@ -166,6 +167,7 @@ impl Processor for StateWindowProcessor {
                                         partitions.entry(partition_key).or_insert_with(|| {
                                             PartitionState {
                                                 active: false,
+                                                opened_at: None,
                                                 rows: VecDeque::new(),
                                             }
                                         });
@@ -205,11 +207,13 @@ impl Processor for StateWindowProcessor {
                                     if !state.active {
                                         if open {
                                             state.active = true;
+                                            state.opened_at = Some(tuple.timestamp);
                                             state.rows.push_back(tuple);
                                         }
                                         continue;
                                     }
 
+                                    let tuple_timestamp = tuple.timestamp;
                                     state.rows.push_back(tuple);
                                     if emit {
                                         if state.rows.is_empty() {
@@ -218,9 +222,12 @@ impl Processor for StateWindowProcessor {
                                         }
                                         let batch_rows: Vec<_> = state.rows.drain(..).collect();
                                         stats.record_out(batch_rows.len() as u64);
-                                        let batch = match crate::model::RecordBatch::new(batch_rows)
-                                            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))
-                                        {
+                                        let closed_at = tuple_timestamp;
+                                        let batch = match window_metadata::record_batch_from_system_time(
+                                            batch_rows,
+                                            state.opened_at.unwrap_or(closed_at),
+                                            closed_at,
+                                        ) {
                                             Ok(batch) => batch,
                                             Err(e) => {
                                                 stats.record_handle_duration(handle_start.elapsed());
@@ -239,6 +246,7 @@ impl Processor for StateWindowProcessor {
                                             return Err(e);
                                         }
                                         state.active = false;
+                                        state.opened_at = None;
                                     }
                                 }
                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -260,11 +268,22 @@ impl Processor for StateWindowProcessor {
                                     if is_graceful {
                                         for state in partitions.values_mut() {
                                             if state.active && !state.rows.is_empty() {
+                                                let closed_at = state
+                                                    .rows
+                                                    .back()
+                                                    .map(|tuple| tuple.timestamp)
+                                                    .unwrap_or_else(|| {
+                                                        state.opened_at.unwrap_or(SystemTime::UNIX_EPOCH)
+                                                    });
                                                 let batch_rows: Vec<_> =
                                                     state.rows.drain(..).collect();
                                                 stats.record_out(batch_rows.len() as u64);
-                                                let batch = crate::model::RecordBatch::new(batch_rows)
-                                                    .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+                                                let batch =
+                                                    window_metadata::record_batch_from_system_time(
+                                                        batch_rows,
+                                                        state.opened_at.unwrap_or(closed_at),
+                                                        closed_at,
+                                                    )?;
                                                 send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
@@ -273,6 +292,7 @@ impl Processor for StateWindowProcessor {
                                                 )
                                                 .await?;
                                                 state.active = false;
+                                                state.opened_at = None;
                                             }
                                         }
                                     }

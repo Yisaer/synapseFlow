@@ -6,6 +6,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -345,6 +346,11 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
+                let batch = window_metadata::attach_from_epoch_secs(
+                    batch,
+                    state.start_secs,
+                    state.end_secs,
+                )?;
                 stats.record_out(batch.num_rows() as u64);
                 send_with_backpressure(
                     output,
@@ -370,6 +376,11 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
+                let batch = window_metadata::attach_from_epoch_secs(
+                    batch,
+                    state.start_secs,
+                    state.end_secs,
+                )?;
                 stats.record_out(batch.num_rows() as u64);
                 send_with_backpressure(
                     output,

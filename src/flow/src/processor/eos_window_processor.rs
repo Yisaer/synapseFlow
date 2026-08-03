@@ -1,11 +1,12 @@
 //! EosWindowProcessor - buffers all rows until data-path graceful end.
 
-use crate::model::{Collection, RecordBatch, Tuple};
+use crate::model::{Collection, Tuple};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStart,
     ProcessorStats, StreamData,
@@ -13,6 +14,7 @@ use crate::processor::{
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// EOS window implementation for non-incremental aggregation plans.
@@ -193,6 +195,8 @@ impl Processor for EosWindowProcessor {
 
 struct EosWindowState {
     rows: Vec<Tuple>,
+    opened_at: Option<SystemTime>,
+    last_seen_at: Option<SystemTime>,
     stats: Arc<ProcessorStats>,
     rows_buffered: GaugeHandle,
 }
@@ -207,6 +211,8 @@ impl EosWindowState {
         rows_buffered.set(0);
         Self {
             rows: Vec::new(),
+            opened_at: None,
+            last_seen_at: None,
             stats,
             rows_buffered,
         }
@@ -216,6 +222,12 @@ impl EosWindowState {
         let rows = collection.into_rows().map_err(|err| {
             ProcessorError::ProcessingError(format!("failed to extract rows: {err}"))
         })?;
+        if !rows.is_empty() && self.opened_at.is_none() {
+            self.opened_at = rows.first().map(|tuple| tuple.timestamp);
+        }
+        if let Some(last) = rows.last() {
+            self.last_seen_at = Some(last.timestamp);
+        }
         self.rows.extend(rows);
         self.rows_buffered.set(self.rows.len() as u64);
         Ok(())
@@ -233,8 +245,16 @@ impl EosWindowState {
         let rows = std::mem::take(&mut self.rows);
         let row_count = rows.len() as u64;
         self.rows_buffered.set(0);
-        let collection = RecordBatch::new(rows)
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+        let closed_at = self
+            .last_seen_at
+            .take()
+            .or(self.opened_at)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let collection = window_metadata::record_batch_from_system_time(
+            rows,
+            self.opened_at.take().unwrap_or(closed_at),
+            closed_at,
+        )?;
         self.stats.record_out(row_count);
         send_with_backpressure(
             output,
@@ -247,6 +267,8 @@ impl EosWindowState {
 
     fn clear(&mut self) {
         self.rows.clear();
+        self.opened_at = None;
+        self.last_seen_at = None;
         self.rows_buffered.set(0);
     }
 }

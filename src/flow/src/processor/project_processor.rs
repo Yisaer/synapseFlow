@@ -2,7 +2,7 @@
 //!
 //! This processor evaluates projection expressions and produces output with projected fields.
 
-use crate::expr::ScalarExpr;
+use crate::expr::{EvalRowContext, ScalarExpr};
 use crate::model::{Collection, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
 use crate::processor::base::{
@@ -110,9 +110,13 @@ fn apply_projection(
             ) {
                 continue;
             }
+            let context = EvalRowContext {
+                tuple,
+                collection_metadata: input_collection.metadata(),
+            };
             let value = field
                 .compiled_expr
-                .eval_with_tuple(tuple)
+                .eval_with_context(&context)
                 .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?;
             projected_tuple
                 .add_affiliate_column(Arc::new(field.field_name.as_ref().to_string()), value);
@@ -123,7 +127,7 @@ fn apply_projection(
         }
     }
 
-    RecordBatch::new(projected_rows)
+    RecordBatch::new_with_metadata_from(projected_rows, input_collection)
         .map(|batch| Box::new(batch) as Box<dyn Collection>)
         .map_err(|error| ProcessorError::ProcessingError(error.to_string()))
 }

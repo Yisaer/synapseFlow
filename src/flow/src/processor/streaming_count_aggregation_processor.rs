@@ -7,32 +7,46 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// Tracks progress for a count-based window.
 struct CountWindowState {
     target: u64,
     seen: u64,
+    opened_at: Option<SystemTime>,
 }
 
 impl CountWindowState {
     fn new(target: u64) -> Self {
-        Self { target, seen: 0 }
+        Self {
+            target,
+            seen: 0,
+            opened_at: None,
+        }
     }
 
-    fn register_row_and_check_finalize(&mut self) -> bool {
+    fn register_row_and_check_finalize(&mut self, now: SystemTime) -> Option<SystemTime> {
+        if self.seen == 0 {
+            self.opened_at = Some(now);
+        }
         self.seen += 1;
-        self.seen >= self.target
+        if self.seen >= self.target {
+            return Some(self.opened_at.take().unwrap_or(now));
+        }
+        None
     }
 
     fn reset(&mut self) {
         self.seen = 0;
+        self.opened_at = None;
     }
 }
 
@@ -103,11 +117,15 @@ impl StreamingCountAggregationProcessor {
     ) -> Result<Vec<Box<dyn Collection>>, String> {
         let mut outputs = Vec::new();
         for row in collection.rows() {
+            let now = row.timestamp;
             worker.update_groups(row)?;
 
-            if window_state.register_row_and_check_finalize() {
+            if let Some(opened_at) = window_state.register_row_and_check_finalize(now) {
                 if let Some(batch) = worker.finalize_current_window()? {
-                    outputs.push(batch);
+                    outputs.push(
+                        window_metadata::attach_from_system_time(batch, opened_at, now)
+                            .map_err(|err| err.to_string())?,
+                    );
                 }
                 window_state.reset();
             }

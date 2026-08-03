@@ -8,6 +8,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStart,
     ProcessorStats, StreamData,
@@ -298,8 +299,11 @@ impl ProcessingState {
                 continue;
             }
             self.stats.record_out(current_rows.len() as u64);
-            let batch = crate::model::RecordBatch::new(current_rows)
-                .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+            let batch = window_metadata::record_batch_from_epoch_secs(
+                current_rows,
+                window_start,
+                window_start.saturating_add(self.len_secs),
+            )?;
             send_with_backpressure(
                 &self.output,
                 self.data_channel_capacity,
@@ -332,8 +336,11 @@ impl ProcessingState {
                 continue;
             }
             self.stats.record_out(current_rows.len() as u64);
-            let batch = crate::model::RecordBatch::new(current_rows)
-                .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+            let batch = window_metadata::record_batch_from_epoch_secs(
+                current_rows,
+                window_start,
+                window_start.saturating_add(self.len_secs),
+            )?;
             send_with_backpressure(
                 &self.output,
                 self.data_channel_capacity,

@@ -10,6 +10,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -366,8 +367,7 @@ impl ProcessingWithoutLookaheadState {
             rows.push(row.clone());
         }
         self.stats.record_out(rows.len() as u64);
-        let batch = crate::model::RecordBatch::new(rows)
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        let batch = window_metadata::record_batch_from_system_time(rows, start, end)?;
         send_with_backpressure(
             &self.output,
             self.data_channel_capacity,
@@ -474,8 +474,7 @@ impl ProcessingWithLookaheadState {
             rows.push(row.clone());
         }
         self.stats.record_out(rows.len() as u64);
-        let batch = crate::model::RecordBatch::new(rows)
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        let batch = window_metadata::record_batch_from_system_time(rows, start, end)?;
         send_with_backpressure(
             &self.output,
             self.data_channel_capacity,

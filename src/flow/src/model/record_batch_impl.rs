@@ -182,6 +182,10 @@ impl Collection for RecordBatch {
         self.rows()
     }
 
+    fn metadata(&self) -> &crate::model::CollectionMetadata {
+        self.metadata()
+    }
+
     fn slice(&self, start: usize, end: usize) -> Result<Box<dyn Collection>, CollectionError> {
         if start > end || end > self.num_rows() {
             return Err(CollectionError::InvalidSliceRange {
@@ -191,12 +195,15 @@ impl Collection for RecordBatch {
             });
         }
         let new_rows = self.rows()[start..end].to_vec();
-        Ok(Box::new(RecordBatch::new(new_rows)?))
+        Ok(Box::new(RecordBatch::new_with_metadata(
+            new_rows,
+            self.metadata().clone(),
+        )?))
     }
 
     fn take(&self, indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError> {
         if indices.is_empty() {
-            let new_batch = RecordBatch::new(Vec::new())?;
+            let new_batch = RecordBatch::new_with_metadata(Vec::new(), self.metadata().clone())?;
             return Ok(Box::new(new_batch));
         }
 
@@ -213,7 +220,10 @@ impl Collection for RecordBatch {
         for &idx in indices {
             new_rows.push(self.rows()[idx].clone());
         }
-        Ok(Box::new(RecordBatch::new(new_rows)?))
+        Ok(Box::new(RecordBatch::new_with_metadata(
+            new_rows,
+            self.metadata().clone(),
+        )?))
     }
 
     fn apply_projection(
@@ -246,7 +256,10 @@ impl Collection for RecordBatch {
             projected_rows.push(apply_projection_for_tuple(tuple, fields, partial_messages)?);
         }
 
-        Ok(Box::new(RecordBatch::new(projected_rows)?))
+        Ok(Box::new(RecordBatch::new_with_metadata(
+            projected_rows,
+            self.metadata().clone(),
+        )?))
     }
 
     fn apply_filter(
@@ -276,11 +289,14 @@ impl Collection for RecordBatch {
         }
 
         if selected_rows.is_empty() {
-            let empty_batch = RecordBatch::new(Vec::new())?;
+            let empty_batch = RecordBatch::new_with_metadata(Vec::new(), self.metadata().clone())?;
             return Ok(Box::new(empty_batch));
         }
 
-        Ok(Box::new(RecordBatch::new(selected_rows)?))
+        Ok(Box::new(RecordBatch::new_with_metadata(
+            selected_rows,
+            self.metadata().clone(),
+        )?))
     }
 
     fn clone_box(&self) -> Box<dyn Collection> {

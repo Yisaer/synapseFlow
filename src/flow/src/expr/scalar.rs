@@ -1,6 +1,6 @@
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
-use crate::model::{Collection, Tuple};
+use crate::model::{Collection, CollectionMetadata, Tuple};
 use crate::processor::processor_state::ProcessorState;
 use datatypes::{ConcreteDatatype, StructField, StructType, StructValue, Value};
 use std::sync::atomic::Ordering;
@@ -71,6 +71,8 @@ pub enum ScalarExpr {
         state: Arc<ProcessorState>,
         field: ProcStateField,
     },
+    /// Reads metadata attached to the current logical window emission.
+    WindowMetadata { field: WindowMetadataField },
 }
 
 /// Identifies which field of [`ProcessorState`] a [`ScalarExpr::ProcessorState`] reads.
@@ -78,6 +80,13 @@ pub enum ScalarExpr {
 pub enum ProcStateField {
     LastHitCount,
     LastAggHitCount,
+}
+
+/// Identifies which field of window metadata a [`ScalarExpr::WindowMetadata`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowMetadataField {
+    Start,
+    End,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -91,6 +100,12 @@ pub enum ColumnRef {
     },
 }
 
+/// Row-level expression evaluation context.
+pub struct EvalRowContext<'a> {
+    pub tuple: &'a Tuple,
+    pub collection_metadata: &'a CollectionMetadata,
+}
+
 impl ScalarExpr {
     /// Evaluate this expression against a collection row by row.
     pub fn eval_with_collection(
@@ -99,13 +114,28 @@ impl ScalarExpr {
     ) -> Result<Vec<Value>, EvalError> {
         let mut results = Vec::with_capacity(collection.num_rows());
         for row in collection.rows() {
-            results.push(self.eval_with_tuple(row)?);
+            let context = EvalRowContext {
+                tuple: row,
+                collection_metadata: collection.metadata(),
+            };
+            results.push(self.eval_with_context(&context)?);
         }
         Ok(results)
     }
 
     /// Evaluate this expression against a single tuple (row).
     pub fn eval_with_tuple(&self, tuple: &Tuple) -> Result<Value, EvalError> {
+        let metadata = CollectionMetadata::default();
+        let context = EvalRowContext {
+            tuple,
+            collection_metadata: &metadata,
+        };
+        self.eval_with_context(&context)
+    }
+
+    /// Evaluate this expression against a row with collection-level metadata.
+    pub fn eval_with_context(&self, context: &EvalRowContext<'_>) -> Result<Value, EvalError> {
+        let tuple = context.tuple;
         match self {
             ScalarExpr::Column(column_ref) => match column_ref {
                 ColumnRef::ByIndex {
@@ -161,16 +191,16 @@ impl ScalarExpr {
             }
             ScalarExpr::Literal(val, _) => Ok(val.clone()),
             ScalarExpr::CallUnary { func, expr } => {
-                let arg = expr.eval_with_tuple(tuple)?;
+                let arg = expr.eval_with_context(context)?;
                 func.eval_unary(arg)
             }
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
-                let left = expr1.eval_with_tuple(tuple)?;
-                let right = expr2.eval_with_tuple(tuple)?;
+                let left = expr1.eval_with_context(context)?;
+                let right = expr2.eval_with_context(context)?;
                 func.eval_binary(left, right)
             }
             ScalarExpr::FieldAccess { expr, field_name } => {
-                let struct_val = expr.eval_with_tuple(tuple)?;
+                let struct_val = expr.eval_with_context(context)?;
                 if let Value::Struct(struct_val) = struct_val {
                     struct_val.get_field(field_name).cloned().ok_or_else(|| {
                         EvalError::FieldNotFound {
@@ -186,8 +216,8 @@ impl ScalarExpr {
                 }
             }
             ScalarExpr::ListIndex { expr, index_expr } => {
-                let list_val = expr.eval_with_tuple(tuple)?;
-                let index_val = index_expr.eval_with_tuple(tuple)?;
+                let list_val = expr.eval_with_context(context)?;
+                let index_val = index_expr.eval_with_context(context)?;
 
                 match (list_val, index_val) {
                     (Value::List(list), Value::Int64(index)) => {
@@ -217,7 +247,7 @@ impl ScalarExpr {
             ScalarExpr::CallFunc { func, args } => {
                 let mut row_args = Vec::with_capacity(args.len());
                 for arg_expr in args {
-                    row_args.push(arg_expr.eval_with_tuple(tuple)?);
+                    row_args.push(arg_expr.eval_with_context(context)?);
                 }
                 func.validate_row(&row_args)?;
                 func.eval_row(&row_args)
@@ -228,20 +258,20 @@ impl ScalarExpr {
                 else_expr,
             } => {
                 let operand_value = match operand.as_ref() {
-                    Some(expr) => Some(expr.eval_with_tuple(tuple)?),
+                    Some(expr) => Some(expr.eval_with_context(context)?),
                     None => None,
                 };
 
                 for (when_expr, then_expr) in when_then {
                     let matched = match operand_value.as_ref() {
                         Some(operand_value) => {
-                            let when_value = when_expr.eval_with_tuple(tuple)?;
+                            let when_value = when_expr.eval_with_context(context)?;
                             let eq =
                                 BinaryFunc::Eq.eval_binary(operand_value.clone(), when_value)?;
                             matches!(eq, Value::Bool(true))
                         }
                         None => {
-                            let cond = when_expr.eval_with_tuple(tuple)?;
+                            let cond = when_expr.eval_with_context(context)?;
                             match cond {
                                 Value::Bool(true) => true,
                                 Value::Bool(false) | Value::Null => false,
@@ -256,12 +286,12 @@ impl ScalarExpr {
                     };
 
                     if matched {
-                        return then_expr.eval_with_tuple(tuple);
+                        return then_expr.eval_with_context(context);
                     }
                 }
 
                 match else_expr.as_ref() {
-                    Some(expr) => expr.eval_with_tuple(tuple),
+                    Some(expr) => expr.eval_with_context(context),
                     None => Ok(Value::Null),
                 }
             }
@@ -276,6 +306,18 @@ impl ScalarExpr {
                     state.last_agg_hit_count.load(Ordering::Relaxed),
                 )),
             },
+            ScalarExpr::WindowMetadata { field } => {
+                let window = context.collection_metadata.window.as_ref().ok_or_else(|| {
+                    EvalError::NotImplemented {
+                        feature: "window metadata is not available in this evaluation context"
+                            .to_string(),
+                    }
+                })?;
+                match field {
+                    WindowMetadataField::Start => Ok(Value::Timestamp(window.start)),
+                    WindowMetadataField::End => Ok(Value::Timestamp(window.end)),
+                }
+            }
         }
     }
 
@@ -433,6 +475,9 @@ impl std::fmt::Debug for ScalarExpr {
             ScalarExpr::ProcessorState { field, .. } => {
                 write!(f, "ProcessorState({:?})", field)
             }
+            ScalarExpr::WindowMetadata { field } => {
+                write!(f, "WindowMetadata({:?})", field)
+            }
         }
     }
 }
@@ -517,6 +562,10 @@ impl PartialEq for ScalarExpr {
             (
                 ScalarExpr::ProcessorState { field: fa, .. },
                 ScalarExpr::ProcessorState { field: fb, .. },
+            ) => fa == fb,
+            (
+                ScalarExpr::WindowMetadata { field: fa },
+                ScalarExpr::WindowMetadata { field: fb },
             ) => fa == fb,
             _ => false,
         }

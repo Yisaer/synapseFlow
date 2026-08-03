@@ -3,50 +3,29 @@ use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Watermark emission strategy.
-#[derive(Debug, Clone)]
-pub enum WatermarkStrategy {
-    /// Emit watermarks based on wall clock/ticker.
-    ProcessingTime { time_unit: TimeUnit, interval: u64 },
-    /// Event-time progression driven by upstream watermarks.
-    EventTime { late_tolerance: Duration },
-}
-
-impl WatermarkStrategy {
-    pub fn interval_duration(&self) -> Option<Duration> {
-        match self {
-            WatermarkStrategy::ProcessingTime {
-                time_unit,
-                interval,
-            } => match time_unit {
-                TimeUnit::Seconds => Some(Duration::from_secs(*interval)),
-            },
-            WatermarkStrategy::EventTime { .. } => None,
-        }
-    }
-}
-
 /// Watermark configuration per downstream window/operator kind.
 #[derive(Debug, Clone)]
 pub enum WatermarkConfig {
     Tumbling {
         time_unit: TimeUnit,
         length: u64,
-        strategy: WatermarkStrategy,
     },
     Sliding {
         time_unit: TimeUnit,
         lookback: u64,
         lookahead: Option<u64>,
-        strategy: WatermarkStrategy,
     },
 }
 
 impl WatermarkConfig {
-    pub fn strategy(&self) -> &WatermarkStrategy {
+    pub fn interval_duration(&self) -> Duration {
         match self {
-            WatermarkConfig::Tumbling { strategy, .. } => strategy,
-            WatermarkConfig::Sliding { strategy, .. } => strategy,
+            WatermarkConfig::Tumbling { time_unit, length } => match time_unit {
+                TimeUnit::Seconds => Duration::from_secs((*length).max(1)),
+            },
+            WatermarkConfig::Sliding { time_unit, .. } => match time_unit {
+                TimeUnit::Seconds => Duration::from_secs(1),
+            },
         }
     }
 }

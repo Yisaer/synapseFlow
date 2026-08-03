@@ -7,12 +7,14 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// EOS-driven streaming aggregation implementation.
@@ -73,8 +75,14 @@ impl StreamingEosAggregationProcessor {
     fn process_collection(
         worker: &mut AggregationWorker,
         collection: &dyn Collection,
+        opened_at: &mut Option<SystemTime>,
+        last_seen_at: &mut Option<SystemTime>,
     ) -> Result<(), String> {
         for row in collection.rows() {
+            if opened_at.is_none() {
+                *opened_at = Some(row.timestamp);
+            }
+            *last_seen_at = Some(row.timestamp);
             worker.update_groups(row)?;
         }
         Ok(())
@@ -85,10 +93,18 @@ impl StreamingEosAggregationProcessor {
         output: &LinkOutput<StreamData>,
         channel_capacity: usize,
         stats: &ProcessorStats,
+        opened_at: Option<SystemTime>,
+        last_seen_at: Option<SystemTime>,
     ) -> Result<(), ProcessorError> {
         if let Some(collection) = worker.finalize_current_window().map_err(|err| {
             ProcessorError::ProcessingError(format!("Failed to finalize EOS aggregation: {err}"))
         })? {
+            let closed_at = last_seen_at.or(opened_at).unwrap_or(SystemTime::UNIX_EPOCH);
+            let collection = window_metadata::attach_from_system_time(
+                collection,
+                opened_at.unwrap_or(closed_at),
+                closed_at,
+            )?;
             stats.record_out(collection.num_rows() as u64);
             send_with_backpressure(
                 output,
@@ -131,6 +147,8 @@ impl Processor for StreamingEosAggregationProcessor {
 
         ProcessorStart::ready(spawner.spawn(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
+            let mut opened_at: Option<SystemTime> = None;
+            let mut last_seen_at: Option<SystemTime> = None;
 
             loop {
                 tokio::select! {
@@ -160,6 +178,8 @@ impl Processor for StreamingEosAggregationProcessor {
                                         let result = Self::process_collection(
                                             &mut worker,
                                             collection.as_ref(),
+                                            &mut opened_at,
+                                            &mut last_seen_at,
                                         );
                                         stats.record_handle_duration(handle_start.elapsed());
                                         if let Err(err) = result {
@@ -178,6 +198,8 @@ impl Processor for StreamingEosAggregationProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     stats.as_ref(),
+                                                    opened_at.take(),
+                                                    last_seen_at.take(),
                                                 )
                                                 .await?;
                                             }

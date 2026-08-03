@@ -5,6 +5,7 @@ in the `GROUP BY` clause.
 
 This directory documents:
 - Syntax rules and parser behavior: `docs/syntax/windows/syntax.md`
+- SQL-visible window metadata semantics: `docs/syntax/windows/window_metadata.md`
 - Window semantics: `docs/syntax/windows/tumbling_window.md`, `docs/syntax/windows/sliding_window.md`,
   `docs/syntax/windows/count_window.md`, `docs/syntax/windows/state_window.md`
 - Watermark-driven execution model: `docs/syntax/windows/watermarks.md`

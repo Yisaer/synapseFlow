@@ -166,14 +166,17 @@ impl OrderProcessor {
         physical_order: &PhysicalOrder,
         collection: Box<dyn Collection>,
     ) -> Result<Box<dyn Collection>, ProcessorError> {
+        let metadata = collection.metadata().clone();
         let mut rows = collection.into_rows().map_err(|e| {
             ProcessorError::ProcessingError(format!("Failed to materialize rows: {}", e))
         })?;
 
         if rows.is_empty() || physical_order.keys.is_empty() {
-            return Ok(Box::new(RecordBatch::new(rows).map_err(|e| {
-                ProcessorError::ProcessingError(format!("Failed to build record batch: {}", e))
-            })?));
+            return Ok(Box::new(
+                RecordBatch::new_with_metadata(rows, metadata).map_err(|e| {
+                    ProcessorError::ProcessingError(format!("Failed to build record batch: {}", e))
+                })?,
+            ));
         }
 
         let accessors = build_accessors(&physical_order.keys, &rows)?;
@@ -198,7 +201,7 @@ impl OrderProcessor {
                 return Err(ProcessorError::ProcessingError(e));
             }
 
-            let batch = RecordBatch::new(rows)
+            let batch = RecordBatch::new_with_metadata(rows, metadata)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             return Ok(Box::new(batch));
         }
@@ -225,8 +228,8 @@ impl OrderProcessor {
 
         Self::reorder_rows_in_place(rows.as_mut_slice(), &indices);
 
-        let batch =
-            RecordBatch::new(rows).map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        let batch = RecordBatch::new_with_metadata(rows, metadata)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
     }
 }

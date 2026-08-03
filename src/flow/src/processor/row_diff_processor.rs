@@ -214,6 +214,7 @@ fn apply_row_diff(
     tracked_flags: &[bool],
     state: &mut RowDiffState,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
+    let metadata = input_collection.metadata().clone();
     let input_rows = input_collection.into_rows().map_err(|err| {
         ProcessorError::ProcessingError(format!("Failed to materialize row diff input: {err}"))
     })?;
@@ -237,7 +238,7 @@ fn apply_row_diff(
         ));
     }
 
-    let output = RecordBatch::new(output_rows).map_err(|err| {
+    let output = RecordBatch::new_with_metadata(output_rows, metadata).map_err(|err| {
         ProcessorError::ProcessingError(format!("Failed to build row diff output: {err}"))
     })?;
     Ok(Box::new(output))

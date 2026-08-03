@@ -196,6 +196,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
     let mut select_stmt = select_stmt;
 
     validate_group_by_requires_aggregates(&select_stmt)?;
+    validate_window_metadata_function_placement(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
     validate_last_agg_hit_count_placement(&select_stmt)?;
     validate_relation_aliases_unsupported(&select_stmt)?;
@@ -1292,6 +1293,104 @@ fn validate_having_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_window_metadata_function_placement(select_stmt: &SelectStmt) -> Result<(), String> {
+    let uses_window_metadata = select_stmt
+        .select_fields
+        .iter()
+        .any(|field| expr_contains_window_metadata_function(&field.expr))
+        || select_stmt
+            .where_condition
+            .as_ref()
+            .is_some_and(expr_contains_window_metadata_function)
+        || select_stmt
+            .having
+            .as_ref()
+            .is_some_and(expr_contains_window_metadata_function)
+        || select_stmt
+            .order_by
+            .iter()
+            .any(|item| expr_contains_window_metadata_function(&item.expr))
+        || select_stmt
+            .group_by_exprs
+            .iter()
+            .any(expr_contains_window_metadata_function)
+        || select_stmt
+            .aggregate_mappings
+            .values()
+            .any(expr_contains_window_metadata_function)
+        || select_stmt
+            .window
+            .as_ref()
+            .is_some_and(window_contains_window_metadata_function);
+
+    if uses_window_metadata && select_stmt.window.is_none() {
+        return Err(
+            "window metadata functions `window_start` and `window_end` require a windowed query"
+                .to_string(),
+        );
+    }
+
+    for field in &select_stmt.select_fields {
+        validate_window_metadata_function_calls(&field.expr)?;
+    }
+
+    if let Some(expr) = &select_stmt.where_condition {
+        if expr_contains_window_metadata_function(expr) {
+            return Err(
+                "window metadata functions `window_start` and `window_end` are only allowed in SELECT fields"
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(expr) = &select_stmt.having {
+        if expr_contains_window_metadata_function(expr) {
+            return Err(
+                "window metadata functions `window_start` and `window_end` are only allowed in SELECT fields"
+                    .to_string(),
+            );
+        }
+    }
+
+    for item in &select_stmt.order_by {
+        if expr_contains_window_metadata_function(&item.expr) {
+            return Err(
+                "window metadata functions `window_start` and `window_end` are only allowed in SELECT fields"
+                    .to_string(),
+            );
+        }
+    }
+
+    for expr in &select_stmt.group_by_exprs {
+        if expr_contains_window_metadata_function(expr) {
+            return Err(
+                "window metadata functions `window_start` and `window_end` are only allowed in SELECT fields"
+                    .to_string(),
+            );
+        }
+    }
+
+    for expr in select_stmt.aggregate_mappings.values() {
+        if expr_contains_window_metadata_function(expr) {
+            return Err(
+                "window metadata functions `window_start` and `window_end` are only allowed in SELECT fields"
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(window) = select_stmt.window.as_ref() {
+        if window_contains_window_metadata_function(window) {
+            return Err(
+                "window metadata functions `window_start` and `window_end` are only allowed in SELECT fields"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_last_agg_hit_count_placement(select_stmt: &SelectStmt) -> Result<(), String> {
     for field in &select_stmt.select_fields {
         if expr_contains_last_agg_hit_count(&field.expr) {
@@ -1363,6 +1462,10 @@ fn validate_aggregation_projection(select_stmt: &SelectStmt) -> Result<(), Strin
 
     for field in &select_stmt.select_fields {
         if group_by_exprs.contains(&field.expr.to_string()) {
+            continue;
+        }
+
+        if expr_contains_window_metadata_function(&field.expr) {
             continue;
         }
 
@@ -1714,6 +1817,141 @@ fn expr_contains_last_agg_hit_count(expr: &sqlparser::ast::Expr) -> bool {
     expr_contains_function_name(expr, "last_agg_hit_count")
 }
 
+fn expr_contains_window_metadata_function(expr: &sqlparser::ast::Expr) -> bool {
+    expr_contains_function_name(expr, "window_start")
+        || expr_contains_function_name(expr, "window_end")
+}
+
+fn is_window_metadata_function_name(function_name: &str) -> bool {
+    function_name.eq_ignore_ascii_case("window_start")
+        || function_name.eq_ignore_ascii_case("window_end")
+}
+
+fn validate_window_metadata_function_calls(expr: &sqlparser::ast::Expr) -> Result<(), String> {
+    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
+
+    match expr {
+        Expr::Function(func) => {
+            let func_name = func.name.to_string();
+            if is_window_metadata_function_name(&func_name) {
+                if !func.args.is_empty() {
+                    return Err(format!(
+                        "window metadata function `{func_name}` takes zero arguments"
+                    ));
+                }
+                if func.filter.is_some() {
+                    return Err(format!(
+                        "window metadata function `{func_name}` does not support FILTER"
+                    ));
+                }
+                if func.over.is_some() {
+                    return Err(format!(
+                        "window metadata function `{func_name}` does not support OVER"
+                    ));
+                }
+                if !func.order_by.is_empty() {
+                    return Err(format!(
+                        "window metadata function `{func_name}` does not support ORDER BY"
+                    ));
+                }
+            }
+
+            for arg in &func.args {
+                match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                        validate_window_metadata_function_calls(expr)?
+                    }
+                    FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(expr),
+                        ..
+                    } => validate_window_metadata_function_calls(expr)?,
+                    _ => {}
+                }
+            }
+            if let Some(filter) = func.filter.as_ref() {
+                validate_window_metadata_function_calls(filter)?;
+            }
+            if let Some(window_type) = func.over.as_ref() {
+                validate_window_type_metadata_function_calls(window_type)?;
+            }
+            for item in &func.order_by {
+                validate_window_metadata_function_calls(&item.expr)?;
+            }
+            Ok(())
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            validate_window_metadata_function_calls(left)?;
+            validate_window_metadata_function_calls(right)
+        }
+        Expr::UnaryOp { expr, .. } => validate_window_metadata_function_calls(expr),
+        Expr::Nested(expr) => validate_window_metadata_function_calls(expr),
+        Expr::Cast { expr, .. } => validate_window_metadata_function_calls(expr),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            validate_window_metadata_function_calls(expr)?;
+            validate_window_metadata_function_calls(low)?;
+            validate_window_metadata_function_calls(high)
+        }
+        Expr::InList { expr, list, .. } => {
+            validate_window_metadata_function_calls(expr)?;
+            for item in list {
+                validate_window_metadata_function_calls(item)?;
+            }
+            Ok(())
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(operand) = operand.as_ref() {
+                validate_window_metadata_function_calls(operand)?;
+            }
+            for condition in conditions {
+                validate_window_metadata_function_calls(condition)?;
+            }
+            for result in results {
+                validate_window_metadata_function_calls(result)?;
+            }
+            if let Some(else_result) = else_result.as_ref() {
+                validate_window_metadata_function_calls(else_result)?;
+            }
+            Ok(())
+        }
+        Expr::JsonAccess { left, right, .. } => {
+            validate_window_metadata_function_calls(left)?;
+            validate_window_metadata_function_calls(right)
+        }
+        Expr::MapAccess { column, keys } => {
+            validate_window_metadata_function_calls(column)?;
+            for key in keys {
+                validate_window_metadata_function_calls(key)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_window_type_metadata_function_calls(
+    window_type: &sqlparser::ast::WindowType,
+) -> Result<(), String> {
+    match window_type {
+        sqlparser::ast::WindowType::WindowSpec(spec) => {
+            for expr in &spec.partition_by {
+                validate_window_metadata_function_calls(expr)?;
+            }
+            for item in &spec.order_by {
+                validate_window_metadata_function_calls(&item.expr)?;
+            }
+            Ok(())
+        }
+        sqlparser::ast::WindowType::NamedWindow(_) => Ok(()),
+    }
+}
+
 fn expr_contains_function_name(expr: &sqlparser::ast::Expr, target_name: &str) -> bool {
     use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
 
@@ -1833,6 +2071,32 @@ fn window_contains_last_agg_hit_count(window: &parser_window::Window) -> bool {
                 || filter
                     .as_deref()
                     .is_some_and(expr_contains_last_agg_hit_count)
+        }
+    }
+}
+
+fn window_contains_window_metadata_function(window: &parser_window::Window) -> bool {
+    match window {
+        parser_window::Window::Tumbling { filter, .. }
+        | parser_window::Window::Count { filter, .. }
+        | parser_window::Window::Sliding { filter, .. }
+        | parser_window::Window::Eos { filter } => filter
+            .as_deref()
+            .is_some_and(expr_contains_window_metadata_function),
+        parser_window::Window::State {
+            open,
+            emit,
+            partition_by,
+            filter,
+        } => {
+            expr_contains_window_metadata_function(open)
+                || expr_contains_window_metadata_function(emit)
+                || partition_by
+                    .iter()
+                    .any(expr_contains_window_metadata_function)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_window_metadata_function)
         }
     }
 }

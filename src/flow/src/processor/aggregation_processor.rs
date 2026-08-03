@@ -152,7 +152,7 @@ impl AggregationProcessor {
                 &[],
                 &group_by.meta,
             )?;
-            let collection = RecordBatch::new(vec![tuple])
+            let collection = RecordBatch::new_with_metadata_from(vec![tuple], collection)
                 .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
             return Ok(Box::new(collection));
         }
@@ -171,7 +171,7 @@ impl AggregationProcessor {
             output_tuples.push(tuple);
         }
 
-        let collection = RecordBatch::new(output_tuples)
+        let collection = RecordBatch::new_with_metadata_from(output_tuples, collection)
             .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
         Ok(Box::new(collection))
     }

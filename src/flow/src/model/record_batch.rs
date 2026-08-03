@@ -1,4 +1,4 @@
-use crate::model::{CollectionError, Column, Message, Tuple};
+use crate::model::{CollectionError, CollectionMetadata, Column, Message, Tuple};
 use datatypes::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,15 +7,36 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct RecordBatch {
     rows: Vec<Tuple>,
+    metadata: CollectionMetadata,
 }
 
 impl RecordBatch {
     pub fn new(rows: Vec<Tuple>) -> Result<Self, CollectionError> {
-        Ok(Self { rows })
+        Ok(Self {
+            rows,
+            metadata: CollectionMetadata::default(),
+        })
+    }
+
+    pub fn new_with_metadata(
+        rows: Vec<Tuple>,
+        metadata: CollectionMetadata,
+    ) -> Result<Self, CollectionError> {
+        Ok(Self { rows, metadata })
+    }
+
+    pub fn new_with_metadata_from(
+        rows: Vec<Tuple>,
+        input: &dyn crate::model::Collection,
+    ) -> Result<Self, CollectionError> {
+        Self::new_with_metadata(rows, input.metadata().clone())
     }
 
     pub fn empty() -> Self {
-        Self { rows: Vec::new() }
+        Self {
+            rows: Vec::new(),
+            metadata: CollectionMetadata::default(),
+        }
     }
 
     pub fn rows(&self) -> &[Tuple] {
@@ -30,6 +51,14 @@ impl RecordBatch {
         self.rows.len()
     }
 
+    pub fn metadata(&self) -> &CollectionMetadata {
+        &self.metadata
+    }
+
+    pub fn into_parts(self) -> (Vec<Tuple>, CollectionMetadata) {
+        (self.rows, self.metadata)
+    }
+
     pub(crate) fn into_rows(self) -> Vec<Tuple> {
         self.rows
     }
@@ -39,6 +68,7 @@ impl Clone for RecordBatch {
     fn clone(&self) -> Self {
         Self {
             rows: self.rows.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 }

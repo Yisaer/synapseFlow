@@ -105,6 +105,149 @@ async fn publish_json_row(instance: &FlowInstance, input_topic: &str, row: serde
         .expect("publish bytes row");
 }
 
+struct WindowMetadataCase {
+    name: &'static str,
+    sql: &'static str,
+    input_rows: Vec<serde_json::Value>,
+    stop_before_expect: bool,
+    expected: serde_json::Value,
+}
+
+async fn run_window_metadata_case(case: WindowMetadataCase) {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_eventtime", case.name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_eventtime_stream(&instance, &input_topic, "stream_eventtime").await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    );
+    let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink])
+        .with_options(eventtime_pipeline_options(7_000));
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create eventtime pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start eventtime pipeline");
+
+    for row in case.input_rows {
+        publish_json_row(&instance, &input_topic, row).await;
+    }
+
+    if case.stop_before_expect {
+        instance
+            .stop_pipeline(
+                &pipeline_id,
+                PipelineStopMode::Graceful,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("gracefully stop eventtime pipeline");
+    }
+
+    let actual = recv_next_json(&mut output, Duration::from_secs(5)).await;
+    assert_eq!(actual, case.expected, "wrong output for {}", case.name);
+
+    if !case.stop_before_expect {
+        instance
+            .stop_pipeline(
+                &pipeline_id,
+                PipelineStopMode::Quick,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("stop eventtime pipeline");
+    }
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete eventtime pipeline");
+}
+
+// coverage-covers: expr.window_metadata, pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling, stream.window.count, stream.window.state
+#[tokio::test]
+async fn eventtime_window_metadata_table_driven() {
+    let cases = vec![
+        WindowMetadataCase {
+            name: "eventtime_tumbling_window_projects_window_metadata",
+            sql: "SELECT window_start() AS ws, window_end() AS we, sum(a) AS s FROM stream_eventtime GROUP BY tumblingwindow('ss', 10)",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "event_ts": 1000}),
+                serde_json::json!({"a": 4, "event_ts": 4000}),
+                serde_json::json!({"a": 7, "event_ts": 7000}),
+                serde_json::json!({"a": 17, "event_ts": 17000}),
+            ],
+            stop_before_expect: false,
+            expected: serde_json::json!([{
+                "ws": "1970-01-01T00:00:00.000000Z",
+                "we": "1970-01-01T00:00:10.000000Z",
+                "s": 12,
+            }]),
+        },
+        WindowMetadataCase {
+            name: "eventtime_count_window_projects_lifecycle_metadata",
+            sql: "SELECT window_start() AS ws, window_end() AS we, sum(a) AS s FROM stream_eventtime GROUP BY countwindow(3)",
+            input_rows: vec![
+                serde_json::json!({"a": 7, "event_ts": 7000}),
+                serde_json::json!({"a": 1, "event_ts": 1000}),
+                serde_json::json!({"a": 4, "event_ts": 4000}),
+                serde_json::json!({"a": 17, "event_ts": 17000}),
+            ],
+            stop_before_expect: false,
+            expected: serde_json::json!([{
+                "ws": "1970-01-01T00:00:01.000000Z",
+                "we": "1970-01-01T00:00:07.000000Z",
+                "s": 12,
+            }]),
+        },
+        WindowMetadataCase {
+            name: "eventtime_state_window_projects_lifecycle_metadata",
+            sql: "SELECT window_start() AS ws, window_end() AS we, sum(a) AS s FROM stream_eventtime GROUP BY statewindow(a = 1, a = 3)",
+            input_rows: vec![
+                serde_json::json!({"a": 3, "event_ts": 3000}),
+                serde_json::json!({"a": 1, "event_ts": 1000}),
+                serde_json::json!({"a": 2, "event_ts": 2000}),
+                serde_json::json!({"a": 12, "event_ts": 12000}),
+            ],
+            stop_before_expect: false,
+            expected: serde_json::json!([{
+                "ws": "1970-01-01T00:00:01.000000Z",
+                "we": "1970-01-01T00:00:03.000000Z",
+                "s": 6,
+            }]),
+        },
+    ];
+
+    for case in cases {
+        run_window_metadata_case(case).await;
+    }
+}
+
 // coverage-covers: pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
 #[tokio::test]
 async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {

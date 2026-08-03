@@ -3,7 +3,7 @@
 //! Unlike Project, Compute preserves upstream messages and appends/overwrites derived columns
 //! in the tuple affiliate row.
 
-use crate::expr::ScalarExpr;
+use crate::expr::{EvalRowContext, ScalarExpr};
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{PhysicalCompute, PhysicalPlan};
 use crate::processor::base::{
@@ -100,9 +100,13 @@ fn apply_compute(
         for field in fields {
             // Evaluate against the current tuple so compute fields can reference
             // earlier computed fields in the same node.
+            let context = EvalRowContext {
+                tuple: &out_tuple,
+                collection_metadata: input_collection.metadata(),
+            };
             let value = field
                 .expr
-                .eval_with_tuple(&out_tuple)
+                .eval_with_context(&context)
                 .map_err(|eval_error| {
                     ProcessorError::ProcessingError(format!(
                         "Failed to evaluate expression for field '{}': {}",
@@ -114,9 +118,10 @@ fn apply_compute(
         out_rows.push(out_tuple);
     }
 
-    let out_batch = RecordBatch::new(out_rows).map_err(|err| {
-        ProcessorError::ProcessingError(format!("Failed to build compute output: {err}"))
-    })?;
+    let out_batch =
+        RecordBatch::new_with_metadata_from(out_rows, input_collection).map_err(|err| {
+            ProcessorError::ProcessingError(format!("Failed to build compute output: {err}"))
+        })?;
     Ok(Box::new(out_batch))
 }
 

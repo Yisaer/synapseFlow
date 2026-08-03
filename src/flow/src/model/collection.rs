@@ -1,7 +1,39 @@
 use crate::model::Tuple;
 use crate::planner::physical::PhysicalProjectField;
-use datatypes::Value;
+use datatypes::{TimestampValue, Value};
 use std::any::Any;
+use std::sync::Arc;
+
+/// Metadata describing the logical window emission that produced a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMetadata {
+    pub start: TimestampValue,
+    pub end: TimestampValue,
+}
+
+impl WindowMetadata {
+    pub fn new(start: TimestampValue, end: TimestampValue) -> Self {
+        Self { start, end }
+    }
+}
+
+/// Collection-level metadata shared by all rows in the collection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CollectionMetadata {
+    pub window: Option<Arc<WindowMetadata>>,
+}
+
+impl CollectionMetadata {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn with_window(window: WindowMetadata) -> Self {
+        Self {
+            window: Some(Arc::new(window)),
+        }
+    }
+}
 
 /// Collection trait defines the interface for multi-row data structures
 ///
@@ -13,6 +45,9 @@ pub trait Collection: Send + Sync + Any {
 
     /// Get a view of the rows stored in this collection
     fn rows(&self) -> &[Tuple];
+
+    /// Get collection-level metadata shared by all rows.
+    fn metadata(&self) -> &CollectionMetadata;
 
     /// Check if the collection is empty
     fn is_empty(&self) -> bool {

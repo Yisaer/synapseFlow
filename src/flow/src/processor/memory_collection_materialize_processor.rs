@@ -100,7 +100,7 @@ fn materialize_collection(
         rows.push(output_tuple);
     }
 
-    let batch = RecordBatch::new(rows)
+    let batch = RecordBatch::new_with_metadata_from(rows, input)
         .map_err(|err| ProcessorError::ProcessingError(format!("invalid record batch: {err}")))?;
     Ok(Box::new(batch))
 }

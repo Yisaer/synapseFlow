@@ -2,7 +2,6 @@
 
 use crate::planner::physical::{
     PhysicalEventtimeWatermark, PhysicalPlan, PhysicalProcessTimeWatermark, WatermarkConfig,
-    WatermarkStrategy,
 };
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
@@ -262,12 +261,10 @@ impl TumblingWatermarkProcessor {
         &self.id
     }
 
-    fn build_interval(strategy: &WatermarkStrategy) -> Option<Interval> {
-        strategy.interval_duration().map(|duration| {
-            let mut ticker = interval(duration);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            ticker
-        })
+    fn build_interval(config: &WatermarkConfig) -> Option<Interval> {
+        let mut ticker = interval(config.interval_duration());
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        Some(ticker)
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -289,7 +286,7 @@ impl Processor for TumblingWatermarkProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let mut ticker = Self::build_interval(self.physical.config.strategy());
+        let mut ticker = Self::build_interval(&self.physical.config);
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "watermark processor starting");
 
@@ -459,12 +456,8 @@ impl SlidingWatermarkProcessor {
             channel_capacities.control,
         );
         let id = id.into();
-        let (lookahead, strategy) = match &physical.config {
-            WatermarkConfig::Sliding {
-                lookahead,
-                strategy,
-                ..
-            } => (*lookahead, strategy),
+        let lookahead = match &physical.config {
+            WatermarkConfig::Sliding { lookahead, .. } => *lookahead,
             _ => {
                 return Err(ProcessorError::InvalidConfiguration(format!(
                     "SlidingWatermarkProcessor requires WatermarkConfig::Sliding for processor '{}'",
@@ -473,15 +466,12 @@ impl SlidingWatermarkProcessor {
             }
         };
         let lookahead = lookahead.map(Duration::from_secs);
-        let ticker = strategy.interval_duration().map(|duration| {
-            let mut ticker = interval(duration);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            ticker
-        });
+        let mut ticker = interval(physical.config.interval_duration());
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Ok(Self {
             id,
             lookahead,
-            ticker,
+            ticker: Some(ticker),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -782,11 +772,6 @@ impl EventtimeWatermarkProcessor {
             channel_capacities.control,
         );
 
-        let late_tolerance = match physical.config.strategy() {
-            WatermarkStrategy::EventTime { late_tolerance } => *late_tolerance,
-            WatermarkStrategy::ProcessingTime { .. } => Duration::ZERO,
-        };
-
         Self {
             id: id.into(),
             inputs: Vec::new(),
@@ -794,7 +779,7 @@ impl EventtimeWatermarkProcessor {
             output,
             control_output,
             channel_capacities,
-            state: EventtimeWatermarkState::new(late_tolerance),
+            state: EventtimeWatermarkState::new(physical.late_tolerance),
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -1171,12 +1156,6 @@ mod tests {
                 time_unit: TimeUnit::Seconds,
                 lookback: 10,
                 lookahead: Some(1),
-                strategy: WatermarkStrategy::ProcessingTime {
-                    time_unit: TimeUnit::Seconds,
-                    // Use a long tick interval so the deadline emission is observable and not
-                    // dominated by periodic tick watermarks.
-                    interval: 10,
-                },
             },
             Vec::new(),
             0,
@@ -1230,10 +1209,6 @@ mod tests {
                 time_unit: TimeUnit::Seconds,
                 lookback: 10,
                 lookahead: None,
-                strategy: WatermarkStrategy::ProcessingTime {
-                    time_unit: TimeUnit::Seconds,
-                    interval: 1,
-                },
             },
             Vec::new(),
             0,
@@ -1261,17 +1236,7 @@ mod tests {
     #[tokio::test]
     async fn eventtime_watermark_sorts_and_emits_monotonic_watermarks() {
         let spawner = test_spawner();
-        let physical = PhysicalEventtimeWatermark::new(
-            WatermarkConfig::Tumbling {
-                time_unit: TimeUnit::Seconds,
-                length: 10,
-                strategy: WatermarkStrategy::EventTime {
-                    late_tolerance: Duration::from_secs(1),
-                },
-            },
-            Vec::new(),
-            0,
-        );
+        let physical = PhysicalEventtimeWatermark::new(Duration::from_secs(1), None, Vec::new(), 0);
 
         let mut processor = EventtimeWatermarkProcessor::new("ewm", Arc::new(physical));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
@@ -1438,10 +1403,6 @@ mod tests {
             WatermarkConfig::Tumbling {
                 time_unit: TimeUnit::Seconds,
                 length: 10,
-                strategy: WatermarkStrategy::ProcessingTime {
-                    time_unit: TimeUnit::Seconds,
-                    interval: 1,
-                },
             },
             Vec::new(),
             0,

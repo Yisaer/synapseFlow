@@ -99,7 +99,7 @@ fn normalize_collection(
     processor_id: &str,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     if input.is_empty() {
-        let batch = RecordBatch::new(Vec::new()).map_err(|err| {
+        let batch = RecordBatch::new_with_metadata_from(Vec::new(), input).map_err(|err| {
             ProcessorError::ProcessingError(format!("invalid record batch: {err}"))
         })?;
         return Ok(Box::new(batch));
@@ -204,7 +204,7 @@ fn normalize_collection(
         );
     }
 
-    let batch = RecordBatch::new(rows)
+    let batch = RecordBatch::new_with_metadata_from(rows, input)
         .map_err(|err| ProcessorError::ProcessingError(format!("invalid record batch: {err}")))?;
     Ok(Box::new(batch))
 }

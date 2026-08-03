@@ -162,6 +162,7 @@ impl StatefulFunctionProcessor {
         partition_groups: &[PartitionGroup],
         calls: &mut [StatefulProcessorCall],
     ) -> Result<Box<dyn Collection>, ProcessorError> {
+        let metadata = collection.metadata().clone();
         let mut rows = collection.into_rows().map_err(|e| {
             ProcessorError::ProcessingError(format!("Failed to materialize rows: {}", e))
         })?;
@@ -241,8 +242,8 @@ impl StatefulFunctionProcessor {
             }
         }
 
-        let batch =
-            RecordBatch::new(rows).map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        let batch = RecordBatch::new_with_metadata(rows, metadata)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
     }
 

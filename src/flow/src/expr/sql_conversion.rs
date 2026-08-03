@@ -2,7 +2,7 @@ use super::custom_func::string_func::maybe_specialize_literal_regex_func;
 use super::custom_func::CustomFuncRegistry;
 use super::func::{BinaryFunc, UnaryFunc};
 use super::internal_columns::is_internal_derived;
-use super::scalar::ScalarExpr;
+use super::scalar::{ScalarExpr, WindowMetadataField};
 use crate::expr::ProcStateField;
 use crate::processor::processor_state::is_pipeline_state_function;
 use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
@@ -261,7 +261,8 @@ fn convert_expr_to_scalar_internal(
         }
 
         // Function calls like CONCAT(a, b), UPPER(name)
-        Expr::Function(Function { name, args, .. }) => {
+        Expr::Function(function) => {
+            let Function { name, args, .. } = function;
             let function_name = name
                 .0
                 .last()
@@ -287,6 +288,20 @@ fn convert_expr_to_scalar_internal(
                     }
                 };
                 return Ok(ScalarExpr::PipelineState { field });
+            }
+
+            if is_window_metadata_function(&function_name) {
+                validate_window_metadata_function(function, &function_name)?;
+                let field = match function_name.as_str() {
+                    "window_start" => WindowMetadataField::Start,
+                    "window_end" => WindowMetadataField::End,
+                    _ => {
+                        return Err(ConversionError::UnsupportedExpression(format!(
+                            "unknown window metadata function {function_name}()"
+                        )));
+                    }
+                };
+                return Ok(ScalarExpr::WindowMetadata { field });
             }
 
             convert_function_call(name, args, bindings, custom_func_registry)
@@ -344,6 +359,38 @@ fn convert_expr_to_scalar_internal(
             expr
         ))),
     }
+}
+
+fn is_window_metadata_function(function_name: &str) -> bool {
+    function_name.eq_ignore_ascii_case("window_start")
+        || function_name.eq_ignore_ascii_case("window_end")
+}
+
+fn validate_window_metadata_function(
+    function: &Function,
+    function_name: &str,
+) -> Result<(), ConversionError> {
+    if !function.args.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() takes zero arguments"
+        )));
+    }
+    if function.filter.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support FILTER"
+        )));
+    }
+    if function.over.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support OVER"
+        )));
+    }
+    if !function.order_by.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support ORDER BY"
+        )));
+    }
+    Ok(())
 }
 
 /// Convert simple Identifier to Column reference

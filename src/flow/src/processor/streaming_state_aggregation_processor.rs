@@ -7,6 +7,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
+use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -16,12 +17,15 @@ use futures::stream::StreamExt;
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 #[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 struct PartitionAggState {
     active: bool,
+    opened_at: Option<SystemTime>,
+    last_seen_at: Option<SystemTime>,
     worker: AggregationWorker,
 }
 
@@ -136,6 +140,15 @@ impl StreamingStateAggregationProcessor {
             match state.worker.finalize_current_window() {
                 Ok(Some(batch)) => {
                     stats.record_out(batch.num_rows() as u64);
+                    let closed_at = state
+                        .last_seen_at
+                        .or(state.opened_at)
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let batch = window_metadata::attach_from_system_time(
+                        batch,
+                        state.opened_at.unwrap_or(closed_at),
+                        closed_at,
+                    )?;
                     send_with_backpressure(
                         output,
                         channel_capacities.data,
@@ -153,6 +166,8 @@ impl StreamingStateAggregationProcessor {
                 }
             }
             state.active = false;
+            state.opened_at = None;
+            state.last_seen_at = None;
         }
 
         Ok(())
@@ -238,6 +253,8 @@ impl Processor for StreamingStateAggregationProcessor {
                                     let entry = partitions.entry(partition_key).or_insert_with(|| {
                                         PartitionAggState {
                                             active: false,
+                                            opened_at: None,
+                                            last_seen_at: None,
                                             worker: AggregationWorker::new(
                                                 Arc::clone(&physical),
                                                 Arc::clone(&aggregate_registry),
@@ -285,6 +302,8 @@ impl Processor for StreamingStateAggregationProcessor {
                                     if !entry.active {
                                         if open {
                                             entry.active = true;
+                                            entry.opened_at = Some(tuple.timestamp);
+                                            entry.last_seen_at = Some(tuple.timestamp);
                                             if let Err(e) = entry.worker.update_groups(&tuple) {
                                                 stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                             }
@@ -296,11 +315,18 @@ impl Processor for StreamingStateAggregationProcessor {
                                         stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                         continue;
                                     }
+                                    entry.last_seen_at = Some(tuple.timestamp);
 
                                     if emit {
                                         match entry.worker.finalize_current_window() {
                                             Ok(Some(batch)) => {
                                                 stats.record_out(batch.num_rows() as u64);
+                                                let closed_at = tuple.timestamp;
+                                                let batch = window_metadata::attach_from_system_time(
+                                                    batch,
+                                                    entry.opened_at.unwrap_or(closed_at),
+                                                    closed_at,
+                                                )?;
                                                 let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
@@ -319,6 +345,8 @@ impl Processor for StreamingStateAggregationProcessor {
                                             }
                                         }
                                         entry.active = false;
+                                        entry.opened_at = None;
+                                        entry.last_seen_at = None;
                                     }
                                 }
                                 stats.record_handle_duration(handle_start.elapsed());

@@ -20,6 +20,16 @@ only. The parser recognizes these functions and records the single allowed windo
   open/emit window.
 - `eoswindow()` — bounded table-scan window that closes when the source reaches end-of-stream.
 
+## Window Metadata Functions
+
+SQL-visible window metadata functions are documented in
+`docs/syntax/windows/window_metadata.md`.
+
+- `window_start()` exposes the start boundary metadata for the current logical window emission.
+- `window_end()` exposes the end boundary metadata for the current logical window emission.
+- Time windows use logical time. In event-time mode, that logical time is the tuple event time.
+- Non-time windows use processor lifecycle wall-clock time for the window instance.
+
 ## Parameter Rules
 
 For `tumblingwindow`, `slidingwindow`, and `countwindow`:

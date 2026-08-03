@@ -58,6 +58,10 @@ impl Collection for SharedCollection {
         self.0.rows()
     }
 
+    fn metadata(&self) -> &crate::model::CollectionMetadata {
+        self.0.metadata()
+    }
+
     fn slice(
         &self,
         start: usize,

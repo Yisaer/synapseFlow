@@ -2,7 +2,8 @@
 
 `slidingwindow(time_unit, lookback [, lookahead])` defines per-row triggered time ranges.
 
-See also: `docs/syntax/windows/syntax.md`, `docs/syntax/windows/watermarks.md`, and `docs/syntax/windows/sliding_window_rfc.md`.
+See also: `docs/syntax/windows/syntax.md`, `docs/syntax/windows/window_metadata.md`,
+`docs/syntax/windows/watermarks.md`, and `docs/syntax/windows/sliding_window_rfc.md`.
 
 ## Parameters
 
@@ -17,9 +18,15 @@ Each incoming tuple is a trigger point with timestamp `t`:
 - `slidingwindow('ss', lookback)`:
   - range: `[t - lookback, t]`
   - emission: immediate (on receiving the trigger tuple)
+  - `window_start()`: `t - lookback`
+  - `window_end()`: `t`
 - `slidingwindow('ss', lookback, lookahead)`:
   - range: `[t - lookback, t + lookahead]`
   - emission: delayed until the operator observes a watermark `>= t + lookahead`
+  - `window_start()`: `t - lookback`
+  - `window_end()`: `t + lookahead`
+
+In event-time mode, `t` is the trigger tuple event timestamp.
 
 ### Watermark contract for lookahead
 

@@ -63,7 +63,7 @@ pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_table_scan::{PhysicalTableScan, PhysicalTableScanSpec};
-pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
+pub use physical_watermark::{PhysicalWatermark, WatermarkConfig};
 pub use physical_window::{
     PhysicalCountWindow, PhysicalEosWindow, PhysicalSlidingWindow, PhysicalStateWindow,
     PhysicalTumblingWindow,
@@ -264,71 +264,5 @@ impl PhysicalPlan {
         for child in self.children() {
             child.print_topology(indent + 1);
         }
-    }
-
-    fn children_mut(&mut self) -> &mut Vec<Arc<PhysicalPlan>> {
-        match self {
-            PhysicalPlan::DataSource(plan) => &mut plan.base.children,
-            PhysicalPlan::TableScan(plan) => &mut plan.base.children,
-            PhysicalPlan::Decoder(plan) => &mut plan.base.children,
-            PhysicalPlan::CollectionLayoutNormalize(plan) => &mut plan.base.children,
-            PhysicalPlan::MemoryCollectionMaterialize(plan) => &mut plan.base.children,
-            PhysicalPlan::StatefulFunction(plan) => &mut plan.base.children,
-            PhysicalPlan::Filter(plan) => &mut plan.base.children,
-            PhysicalPlan::Compute(plan) => &mut plan.base.children,
-            PhysicalPlan::Order(plan) => &mut plan.base.children,
-            PhysicalPlan::Project(plan) => &mut plan.base.children,
-            PhysicalPlan::RowDiff(plan) => &mut plan.base.children,
-            PhysicalPlan::ColumnFilter(plan) => &mut plan.base.children,
-            PhysicalPlan::EmptySuppress(plan) => &mut plan.base.children,
-            PhysicalPlan::Aggregation(plan) => &mut plan.base.children,
-            PhysicalPlan::SharedStream(plan) => &mut plan.base.children,
-            PhysicalPlan::SourceChangeGate(plan) => &mut plan.base.children,
-            PhysicalPlan::Batch(plan) => &mut plan.base.children,
-            PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => {
-                &mut plan.base.children
-            }
-            PhysicalPlan::SinkEncoder(plan) => &mut plan.base.children,
-
-            PhysicalPlan::IncSinkEncoder(plan) => &mut plan.base.children,
-            PhysicalPlan::SinkCompress(plan) => &mut plan.base.children,
-            PhysicalPlan::SinkEncrypt(plan) => &mut plan.base.children,
-
-            PhysicalPlan::StreamingAggregation(plan) => &mut plan.base.children,
-            PhysicalPlan::ResultCollect(plan) => &mut plan.base.children,
-            PhysicalPlan::Barrier(plan) => &mut plan.base.children,
-            PhysicalPlan::TumblingWindow(plan) => &mut plan.base.children,
-            PhysicalPlan::CountWindow(plan) => &mut plan.base.children,
-            PhysicalPlan::SlidingWindow(plan) => &mut plan.base.children,
-            PhysicalPlan::StateWindow(plan) => &mut plan.base.children,
-            PhysicalPlan::EosWindow(plan) => &mut plan.base.children,
-            PhysicalPlan::ProcessTimeWatermark(plan) => &mut plan.base.children,
-            PhysicalPlan::EventtimeWatermark(plan) => &mut plan.base.children,
-            PhysicalPlan::Watermark(plan) => &mut plan.base.children,
-            PhysicalPlan::Sampler(plan) => &mut plan.base.children,
-        }
-    }
-}
-
-pub fn rewrite_watermark_strategy(plan: &mut Arc<PhysicalPlan>, strategy: WatermarkStrategy) {
-    let plan_mut = Arc::make_mut(plan);
-    for child in plan_mut.children_mut() {
-        rewrite_watermark_strategy(child, strategy.clone());
-    }
-
-    match plan_mut {
-        PhysicalPlan::ProcessTimeWatermark(watermark) => match &mut watermark.config {
-            WatermarkConfig::Tumbling { strategy: s, .. } => *s = strategy,
-            WatermarkConfig::Sliding { strategy: s, .. } => *s = strategy,
-        },
-        PhysicalPlan::EventtimeWatermark(watermark) => match &mut watermark.config {
-            WatermarkConfig::Tumbling { strategy: s, .. } => *s = strategy,
-            WatermarkConfig::Sliding { strategy: s, .. } => *s = strategy,
-        },
-        PhysicalPlan::Watermark(watermark) => match &mut watermark.config {
-            WatermarkConfig::Tumbling { strategy: s, .. } => *s = strategy,
-            WatermarkConfig::Sliding { strategy: s, .. } => *s = strategy,
-        },
-        _ => {}
     }
 }
