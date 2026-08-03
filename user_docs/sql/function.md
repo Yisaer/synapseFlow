@@ -44,6 +44,13 @@ This document describes the built-in SQL-visible functions in veloFlux.
 
 - `lag(x: any) -> any`: previous row’s value (by processing order).
 
+### Pipeline state functions
+
+- `last_hit_count() -> uint64`: number of previous rows accepted at the current pipeline state
+  position.
+- `last_agg_hit_count() -> uint64`: number of previous non-empty collections emitted by the
+  `HAVING` filter.
+
 ## Function details
 
 ### `concat(a, b)`
@@ -333,6 +340,51 @@ Examples:
 ```sql
 SELECT lag(x) AS prev_x, x FROM s
 SELECT * FROM s WHERE lag(speed) > 0
+```
+
+### `last_hit_count()`
+
+- Kind: pipeline state
+- Allowed clauses: `SELECT`, `WHERE`
+- Semantics: returns the number of previous rows accepted at the current processor position.
+- Constraints:
+  - Requires zero arguments.
+  - Not allowed in `HAVING`, `GROUP BY`, `ORDER BY`, aggregate arguments, or stateful function
+    contexts.
+  - The counter resets when the pipeline starts.
+
+Examples:
+
+```sql
+SELECT a FROM s WHERE last_hit_count() < 3
+SELECT last_hit_count() FROM s WHERE a > 10
+```
+
+### `last_agg_hit_count()`
+
+- Kind: pipeline state
+- Allowed clauses: `HAVING`
+- Semantics: returns the number of previous non-empty collections emitted by the `HAVING` filter.
+- Constraints:
+  - Requires zero arguments.
+  - Requires a windowed aggregation query.
+  - Not an aggregate function and not allowed in `SELECT`, `WHERE`, `GROUP BY`, `ORDER BY`,
+    aggregate arguments, or stateful function contexts.
+  - Counts non-empty filtered collections, not rows inside a collection.
+  - The counter resets when the pipeline starts.
+
+Examples:
+
+```sql
+SELECT sum(a) AS s
+FROM s
+GROUP BY countwindow(4)
+HAVING last_agg_hit_count() < 3
+
+SELECT sum(a) AS s, device_id
+FROM s
+GROUP BY countwindow(4), device_id
+HAVING sum(a) > 10 AND last_agg_hit_count() < 3
 ```
 
 ## Math functions

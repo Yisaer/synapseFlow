@@ -35,6 +35,18 @@ struct TestCase {
     column_checks: Vec<ColumnCheck>, // checks for specific columns by name
 }
 
+struct ExpectedJsonOutput {
+    expected_rows: usize,
+    column_checks: Vec<ColumnCheck>,
+}
+
+struct MultiOutputTestCase {
+    name: &'static str,
+    sql: &'static str,
+    input_data: Vec<(String, Vec<Value>)>,
+    expected_outputs: Vec<ExpectedJsonOutput>,
+}
+
 async fn run_test_case(test_case: TestCase) {
     println!("Running test: {}", test_case.name);
 
@@ -109,6 +121,85 @@ async fn run_test_case(test_case: TestCase) {
         "Wrong output JSON for test: {}",
         test_case.name
     );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", test_case.name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", test_case.name));
+}
+
+async fn run_multi_output_test_case(test_case: MultiOutputTestCase) {
+    println!("Running test: {}", test_case.name);
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_multi_output_queries", test_case.name);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &test_case.input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        test_case.sql,
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
+
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", test_case.name));
+
+    let columns = test_case
+        .input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+
+    let test_batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", test_case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(test_batch),
+        timeout_duration,
+    )
+    .await;
+
+    for expected_output in test_case.expected_outputs {
+        let expected = build_expected_json(
+            expected_output.expected_rows,
+            &expected_output.column_checks,
+        );
+        let actual = recv_next_json(&mut output, timeout_duration).await;
+        assert_eq!(
+            normalize_json(actual),
+            normalize_json(expected),
+            "Wrong output JSON for test: {}",
+            test_case.name
+        );
+    }
+
+    assert_no_json_output(&mut output, timeout_duration).await;
 
     instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
@@ -1365,6 +1456,85 @@ async fn pipeline_table_driven_queries() {
 
     for test_case in test_cases {
         run_test_case(test_case).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_last_agg_hit_count_table_driven() {
+    let test_cases = vec![
+        MultiOutputTestCase {
+            name: "last_agg_hit_count_counts_non_empty_having_collections",
+            sql: "SELECT sum(a) AS s, b FROM stream GROUP BY countwindow(4), b HAVING last_agg_hit_count() < 1 ORDER BY b",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedJsonOutput {
+                expected_rows: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "s".to_string(),
+                        expected_values: vec![Value::Int64(2), Value::Int64(2)],
+                    },
+                    ColumnCheck {
+                        expected_name: "b".to_string(),
+                        expected_values: vec![Value::Int64(1), Value::Int64(2)],
+                    },
+                ],
+            }],
+        },
+        MultiOutputTestCase {
+            name: "last_agg_hit_count_ignores_empty_having_collections",
+            sql: "SELECT sum(a) AS s FROM stream GROUP BY countwindow(4) HAVING sum(a) > 10 AND last_agg_hit_count() < 1",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(1),
+                    Value::Int64(1),
+                    Value::Int64(1),
+                    Value::Int64(1),
+                    Value::Int64(5),
+                    Value::Int64(5),
+                    Value::Int64(5),
+                    Value::Int64(5),
+                ],
+            )],
+            expected_outputs: vec![ExpectedJsonOutput {
+                expected_rows: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "s".to_string(),
+                    expected_values: vec![Value::Int64(20)],
+                }],
+            }],
+        },
+    ];
+
+    for test_case in test_cases {
+        run_multi_output_test_case(test_case).await;
     }
 }
 

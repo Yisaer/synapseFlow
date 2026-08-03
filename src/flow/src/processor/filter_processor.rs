@@ -2,6 +2,7 @@
 //!
 //! This processor evaluates filter expressions and produces output with filtered records.
 
+use crate::expr::{ProcStateField, ScalarExpr};
 use crate::model::Collection;
 use crate::model::RecordBatch;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
@@ -94,32 +95,100 @@ impl FilterProcessor {
     }
 }
 
-/// Apply filter to a collection, optionally tracking per-row pipeline state.
+#[derive(Clone, Copy, Debug, Default)]
+struct FilterStateUpdate {
+    row_hit_count: bool,
+    collection_hit_count: bool,
+}
+
+impl FilterStateUpdate {
+    fn from_expr(expr: &ScalarExpr) -> Self {
+        let mut update = Self::default();
+        collect_filter_state_update(expr, &mut update);
+        update
+    }
+
+    fn requires_stateful_iteration(self) -> bool {
+        self.row_hit_count || self.collection_hit_count
+    }
+}
+
+fn collect_filter_state_update(expr: &ScalarExpr, update: &mut FilterStateUpdate) {
+    match expr {
+        ScalarExpr::PipelineState { field } | ScalarExpr::ProcessorState { field, .. } => {
+            match field {
+                ProcStateField::LastHitCount => update.row_hit_count = true,
+                ProcStateField::LastAggHitCount => update.collection_hit_count = true,
+            }
+        }
+        ScalarExpr::CallUnary { expr, .. } => collect_filter_state_update(expr, update),
+        ScalarExpr::CallBinary { expr1, expr2, .. } => {
+            collect_filter_state_update(expr1, update);
+            collect_filter_state_update(expr2, update);
+        }
+        ScalarExpr::FieldAccess { expr, .. } => collect_filter_state_update(expr, update),
+        ScalarExpr::ListIndex { expr, index_expr } => {
+            collect_filter_state_update(expr, update);
+            collect_filter_state_update(index_expr, update);
+        }
+        ScalarExpr::CallFunc { args, .. } => {
+            for arg in args {
+                collect_filter_state_update(arg, update);
+            }
+        }
+        ScalarExpr::Case {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(expr) = operand {
+                collect_filter_state_update(expr, update);
+            }
+            for (when, then) in when_then {
+                collect_filter_state_update(when, update);
+                collect_filter_state_update(then, update);
+            }
+            if let Some(expr) = else_expr {
+                collect_filter_state_update(expr, update);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply filter to a collection, optionally tracking pipeline state updates.
 ///
-/// When `state` is `Some`, each accepted row increments the hit count so that
-/// later rows in the same batch see the updated counter during expression evaluation.
+/// `last_hit_count()` is row-scoped and increments after each accepted row.
+/// `last_agg_hit_count()` is collection-scoped and increments once after a
+/// non-empty filtered collection is produced.
 fn apply_filter(
     input_collection: &dyn Collection,
-    filter_expr: &crate::expr::ScalarExpr,
+    filter_expr: &ScalarExpr,
     state: Option<&ProcessorState>,
+    state_update: FilterStateUpdate,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    match state {
-        Some(state) => {
+    match (state, state_update.requires_stateful_iteration()) {
+        (Some(state), true) => {
             let mut kept = Vec::with_capacity(input_collection.num_rows());
             for tuple in input_collection.rows() {
                 let result = filter_expr
                     .eval_with_tuple(tuple)
                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                 if matches!(result, Value::Bool(true)) {
-                    state.last_hit_count.fetch_add(1, Ordering::Relaxed);
+                    if state_update.row_hit_count {
+                        state.last_hit_count.fetch_add(1, Ordering::Relaxed);
+                    }
                     kept.push(tuple.clone());
                 }
+            }
+            if state_update.collection_hit_count && !kept.is_empty() {
+                state.last_agg_hit_count.fetch_add(1, Ordering::Relaxed);
             }
             Ok(Box::new(RecordBatch::new(kept).map_err(|e| {
                 ProcessorError::ProcessingError(e.to_string())
             })?))
         }
-        None => input_collection
+        _ => input_collection
             .apply_filter(filter_expr)
             .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply filter: {}", e))),
     }
@@ -143,6 +212,7 @@ impl Processor for FilterProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let filter_expr = self.physical_filter.scalar_predicate.clone();
+        let state_update = FilterStateUpdate::from_expr(&filter_expr);
         let processor_state = self.processor_state.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
@@ -190,6 +260,7 @@ impl Processor for FilterProcessor {
                                             collection.as_ref(),
                                             &filter_expr,
                                             processor_state.as_deref(),
+                                            state_update,
                                         );
                                         match result {
                                             Ok(filtered_collection) => {

@@ -125,6 +125,20 @@ preserved, so `sum(a) + 1` becomes `col_1 + 1` instead of collapsing to a plain 
 `HAVING` is rewritten after projection fields. Aggregates referenced only in `HAVING` still receive
 placeholder mappings and become part of the aggregate stage even if they are not projected.
 
+`last_agg_hit_count()` is not an aggregate function and is not extracted into
+`SelectStmt.aggregate_mappings`. It may appear in `HAVING` as a pipeline state function. Aggregate
+calls in the same `HAVING` expression are still rewritten normally:
+
+```sql
+HAVING sum(a) > 10 AND last_agg_hit_count() < 3
+```
+
+becomes:
+
+```sql
+HAVING col_1 > 10 AND last_agg_hit_count() < 3
+```
+
 ### `ORDER BY`
 
 `ORDER BY` participates in the same deduplication set as `SELECT` and `HAVING`. An aggregate that
@@ -171,7 +185,8 @@ Logical validation assumes:
 
 - `GROUP BY` without aggregates is rejected
 - `HAVING` requires a windowed aggregation context
-- `HAVING` must reference aggregate placeholders and must not reference raw non-aggregate columns
+- `HAVING` must reference aggregate placeholders or `last_agg_hit_count()`, and must not reference
+  raw non-aggregate columns
 - in aggregate queries, `SELECT` and `ORDER BY` expressions must either be aggregate-derived or
   appear in `GROUP BY`
 - when aggregation is present, `ORDER BY` must not reference stateful placeholders
@@ -214,7 +229,7 @@ Cover these dimensions when adding parser or planner tests:
 - `HAVING`-only aggregates still appear in `aggregate_mappings`
 - aggregate queries reject raw non-grouped columns in `SELECT`
 - aggregate queries reject raw non-grouped columns in `ORDER BY`
-- `HAVING` without aggregate placeholders is rejected
+- `HAVING` without aggregate placeholders is rejected unless it references `last_agg_hit_count()`
 - stateful placeholders in `ORDER BY` are rejected when aggregation is present
 - qualified wildcard and named aggregate arguments fail during physical compilation
 

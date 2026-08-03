@@ -77,6 +77,7 @@ pub enum ScalarExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcStateField {
     LastHitCount,
+    LastAggHitCount,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -271,6 +272,9 @@ impl ScalarExpr {
                 ProcStateField::LastHitCount => {
                     Ok(Value::Uint64(state.last_hit_count.load(Ordering::Relaxed)))
                 }
+                ProcStateField::LastAggHitCount => Ok(Value::Uint64(
+                    state.last_agg_hit_count.load(Ordering::Relaxed),
+                )),
             },
         }
     }

@@ -103,6 +103,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free runner disk space
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          df -h
+
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
@@ -126,7 +135,13 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          cargo llvm-cov --workspace --features default --fail-under-lines ${{ env.COVERAGE_THRESHOLD }} --lcov --output-path lcov.info
+          (
+            source <(cargo llvm-cov show-env --sh)
+            cargo llvm-cov clean --workspace
+            cargo build --bin veloflux --features default --target-dir target/llvm-cov-target
+          )
+          export CARGO_BIN_EXE_veloflux="$PWD/target/llvm-cov-target/debug/veloflux"
+          cargo llvm-cov --no-clean --workspace --features default --fail-under-lines ${{ env.COVERAGE_THRESHOLD }} --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         if: always()
