@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use storage::StorageError;
 use tokio::sync::TryAcquireError;
 
+use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::storage_bridge::{mqtt_config_from_stored, stored_mqtt_from_config};
@@ -78,8 +79,16 @@ pub async fn create_shared_mqtt_client_handler(
     State(state): State<AppState>,
     Json(resource): Json<SharedMqttClientResource>,
 ) -> impl IntoResponse {
+    let revision = resource.revision;
     let req = resource.definition;
+    let audit = ResourceMutationLog::new(
+        "shared_mqtt_client",
+        "create",
+        req.key.as_str(),
+        Some(revision),
+    );
     if let Err(err) = validate_shared_mqtt_config(&req) {
+        audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
@@ -101,38 +110,30 @@ pub async fn create_shared_mqtt_client_handler(
 
     match state.storage.get_mqtt_config(&key) {
         Ok(Some(_)) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("shared mqtt client {key} already exists"),
-            )
-                .into_response();
+            let err = format!("shared mqtt client {key} already exists");
+            audit.log_failure(&err);
+            return (StatusCode::CONFLICT, err).into_response();
         }
         Ok(None) => match state
             .storage
-            .create_mqtt_config(stored_mqtt_from_config(&req, resource.revision))
+            .create_mqtt_config(stored_mqtt_from_config(&req, revision))
         {
             Ok(()) => {}
             Err(StorageError::AlreadyExists(_)) => {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("shared mqtt client {key} already exists"),
-                )
-                    .into_response();
+                let err = format!("shared mqtt client {key} already exists");
+                audit.log_failure(&err);
+                return (StatusCode::CONFLICT, err).into_response();
             }
             Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to persist shared mqtt client {key}: {err}"),
-                )
-                    .into_response();
+                let err = format!("failed to persist shared mqtt client {key}: {err}");
+                audit.log_failure(&err);
+                return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
             }
         },
         Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read shared mqtt client {key}: {err}"),
-            )
-                .into_response();
+            let err = format!("failed to read shared mqtt client {key}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     }
 
@@ -144,13 +145,11 @@ pub async fn create_shared_mqtt_client_handler(
                     let _ = created.drop_shared_mqtt_client(&key);
                 }
                 let _ = state.storage.delete_mqtt_config(&key);
-                return (
-                    StatusCode::CONFLICT,
-                    format!(
-                        "shared mqtt client {key} already exists in runtime instance {instance_id} with different config"
-                    ),
-                )
-                    .into_response();
+                let err = format!(
+                    "shared mqtt client {key} already exists in runtime instance {instance_id} with different config"
+                );
+                audit.log_failure(&err);
+                return (StatusCode::CONFLICT, err).into_response();
             }
             continue;
         }
@@ -159,19 +158,19 @@ pub async fn create_shared_mqtt_client_handler(
                 let _ = created.drop_shared_mqtt_client(&key);
             }
             let _ = state.storage.delete_mqtt_config(&key);
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("create shared mqtt client {key} in runtime instance {instance_id}: {err}"),
-            )
-                .into_response();
+            let err =
+                format!("create shared mqtt client {key} in runtime instance {instance_id}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
         }
         created_instances.push(instance);
     }
 
+    audit.log_success();
     (
         StatusCode::CREATED,
         Json(SharedMqttClientResource {
-            revision: resource.revision,
+            revision,
             definition: req,
         }),
     )
@@ -250,9 +249,9 @@ pub async fn delete_shared_mqtt_client_handler(
         }
     };
 
-    match state.storage.delete_mqtt_config(&key) {
-        Ok(()) => {}
-        Err(StorageError::NotFound(_)) => {
+    let stored = match state.storage.get_mqtt_config(&key) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 format!("shared mqtt client {key} not found"),
@@ -262,9 +261,29 @@ pub async fn delete_shared_mqtt_client_handler(
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to delete shared mqtt client {key}: {err}"),
+                format!("failed to read shared mqtt client {key}: {err}"),
             )
                 .into_response();
+        }
+    };
+    let audit = ResourceMutationLog::new(
+        "shared_mqtt_client",
+        "delete",
+        key.as_str(),
+        Some(stored.revision),
+    );
+
+    match state.storage.delete_mqtt_config(&key) {
+        Ok(()) => {}
+        Err(StorageError::NotFound(_)) => {
+            let err = format!("shared mqtt client {key} not found");
+            audit.log_failure(&err);
+            return (StatusCode::NOT_FOUND, err).into_response();
+        }
+        Err(err) => {
+            let err = format!("failed to delete shared mqtt client {key}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     }
 
@@ -285,6 +304,7 @@ pub async fn delete_shared_mqtt_client_handler(
         }
     }
 
+    audit.log_success();
     StatusCode::NO_CONTENT.into_response()
 }
 

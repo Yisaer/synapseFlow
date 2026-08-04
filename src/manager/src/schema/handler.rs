@@ -74,7 +74,7 @@ async fn create_schema_locked(
     req: CreateSchemaRequest,
     include_type: bool,
 ) -> Response {
-    let audit = ResourceMutationLog::new("schema", "create", req.name.as_str(), None);
+    let audit = ResourceMutationLog::new("schema", "create", req.name.as_str(), Some(req.revision));
     if let Err(err) = validate_resource_id(ResourceIdKind::SchemaName, &req.name) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
@@ -432,7 +432,7 @@ pub async fn delete_schema_handler(
             return (StatusCode::INTERNAL_SERVER_ERROR, "operation guard closed").into_response();
         }
     };
-    let audit = ResourceMutationLog::new("schema", "delete", &name, None);
+    let mut audit = ResourceMutationLog::new("schema", "delete", &name, None);
     let stored_schema = match state.storage.get_schema(&name) {
         Ok(stored) => stored,
         Err(err) => {
@@ -443,6 +443,9 @@ pub async fn delete_schema_handler(
                 .into_response();
         }
     };
+    if let Some(stored) = &stored_schema {
+        audit.set_revision(Some(stored.revision));
+    }
 
     // Check if any persisted stream or table references this schema.
     let (referencing_streams, referencing_tables) =

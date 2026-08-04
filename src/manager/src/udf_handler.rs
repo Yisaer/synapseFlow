@@ -9,6 +9,7 @@ use std::sync::Arc;
 use storage::StoredUdf;
 use udf::WasmEngine;
 
+use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
 
@@ -91,46 +92,43 @@ pub async fn upload_udf_handler(
                 .into_response();
         }
     };
+    let audit = ResourceMutationLog::new("udf", "upload", name.as_str(), Some(revision));
 
     // Validate the WASM module
     let engine = match WasmEngine::new() {
         Ok(e) => e,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to initialize WASM engine: {e}"),
-            )
-                .into_response();
+            let err = format!("failed to initialize WASM engine: {e}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     };
 
     let metadata = match engine.validate(&wasm_bytes) {
         Ok(m) => m,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid WASM module: {e}")).into_response();
+            let err = format!("invalid WASM module: {e}");
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
         }
     };
 
     if metadata.name != name {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "name mismatch: UDF metadata name is '{}', but upload name is '{name}'",
-                metadata.name
-            ),
-        )
-            .into_response();
+        let err = format!(
+            "name mismatch: UDF metadata name is '{}', but upload name is '{name}'",
+            metadata.name
+        );
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
     // Check for name collision with built-in functions before persisting
     let instance = state.instances.default_instance();
     let current_registry = instance.custom_func_registry();
     if current_registry.is_registered(&name) {
-        return (
-            StatusCode::CONFLICT,
-            format!("function name '{name}' conflicts with an existing built-in or UDF"),
-        )
-            .into_response();
+        let err = format!("function name '{name}' conflicts with an existing built-in or UDF");
+        audit.log_failure(&err);
+        return (StatusCode::CONFLICT, err).into_response();
     }
 
     let sha256 = sha256_hex(&wasm_bytes);
@@ -141,11 +139,9 @@ pub async fn upload_udf_handler(
     if !wasm_path.exists()
         && let Err(e) = std::fs::write(&wasm_path, &wasm_bytes)
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to write WASM file: {e}"),
-        )
-            .into_response();
+        let err = format!("failed to write WASM file: {e}");
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
 
     let stored = StoredUdf {
@@ -158,14 +154,14 @@ pub async fn upload_udf_handler(
     match state.storage.create_udf(stored) {
         Ok(()) => {}
         Err(storage::StorageError::AlreadyExists(_)) => {
-            return (StatusCode::CONFLICT, format!("UDF '{name}' already exists")).into_response();
+            let err = format!("UDF '{name}' already exists");
+            audit.log_failure(&err);
+            return (StatusCode::CONFLICT, err).into_response();
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist UDF: {e}"),
-            )
-                .into_response();
+            let err = format!("failed to persist UDF: {e}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     }
 
@@ -186,6 +182,7 @@ pub async fn upload_udf_handler(
         Err(e) => format!("persisted (instantiation failed: {e})"),
     };
 
+    audit.log_success();
     (
         StatusCode::OK,
         Json(UploadUdfResponse {
@@ -295,10 +292,12 @@ pub async fn delete_udf_handler(
         }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    let audit = ResourceMutationLog::new("udf", "delete", name.as_str(), Some(stored.revision));
 
     // Drop the stored record. The UDF stays registered in the running instance
     // until the next restart.
     if let Err(e) = state.storage.delete_udf(&name) {
+        audit.log_failure(&e);
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
@@ -317,6 +316,7 @@ pub async fn delete_udf_handler(
         let _ = std::fs::remove_file(&wasm_path);
     }
 
+    audit.log_success();
     (StatusCode::OK, Json(serde_json::json!({"deleted": name}))).into_response()
 }
 

@@ -525,7 +525,7 @@ pub async fn create_stream_handler(
 ) -> impl IntoResponse {
     let mut req = req;
     req.normalize();
-    let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), None);
+    let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), Some(req.revision));
     if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &req.name) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
@@ -874,7 +874,7 @@ pub async fn upsert_stream_handler(
     if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let audit = ResourceMutationLog::new("stream", "update", name.as_str(), None);
+    let audit = ResourceMutationLog::new("stream", "update", name.as_str(), Some(req.revision));
     let _permit = match state.try_acquire_stream_op(&name).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return stream_busy_response(&name),
@@ -1136,7 +1136,7 @@ pub async fn delete_stream_handler(
     if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let audit = ResourceMutationLog::new("stream", "delete", name.as_str(), None);
+    let mut audit = ResourceMutationLog::new("stream", "delete", name.as_str(), None);
     let _permit = match state.try_acquire_stream_op(&name).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return stream_busy_response(&name),
@@ -1167,6 +1167,21 @@ pub async fn delete_stream_handler(
         audit.log_failure(&err);
         return (StatusCode::CONFLICT, err).into_response();
     }
+
+    let stored = match state.storage.get_stream(&name) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            let err = format!("stream {name} not found");
+            audit.log_failure(&err);
+            return (StatusCode::NOT_FOUND, err).into_response();
+        }
+        Err(err) => {
+            let err = format!("failed to read stream {name} from storage: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+    audit.set_revision(Some(stored.revision));
 
     for (_, instance) in state.instances.instances_snapshot() {
         match instance.delete_stream(&name).await {

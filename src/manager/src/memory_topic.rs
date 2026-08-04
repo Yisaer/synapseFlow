@@ -1,3 +1,4 @@
+use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -50,7 +51,14 @@ pub async fn create_memory_topic_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateMemoryTopicRequest>,
 ) -> impl IntoResponse {
+    let audit = ResourceMutationLog::new(
+        "memory_topic",
+        "create",
+        req.topic.as_str(),
+        Some(req.revision),
+    );
     if let Err(err) = validate_resource_id(ResourceIdKind::MemoryTopic, &req.topic) {
+        audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let topic = req.topic.clone();
@@ -62,26 +70,22 @@ pub async fn create_memory_topic_handler(
     for (_, instance) in state.instances.instances_snapshot() {
         if let Some(kind) = instance.memory_topic_kind(&topic) {
             if kind != req.kind.as_flow_kind() {
-                return (
-                    StatusCode::CONFLICT,
-                    format!(
-                        "memory topic {topic} kind mismatch: expected {}, got {}",
-                        kind,
-                        req.kind.as_flow_kind()
-                    ),
-                )
-                    .into_response();
+                let err = format!(
+                    "memory topic {topic} kind mismatch: expected {}, got {}",
+                    kind,
+                    req.kind.as_flow_kind()
+                );
+                audit.log_failure(&err);
+                return (StatusCode::CONFLICT, err).into_response();
             }
             if let Some(actual_capacity) = instance.memory_topic_capacity(&topic)
                 && actual_capacity != capacity
             {
-                return (
-                    StatusCode::CONFLICT,
-                    format!(
-                        "memory topic {topic} capacity mismatch: expected {actual_capacity}, got {capacity}"
-                    ),
-                )
-                    .into_response();
+                let err = format!(
+                    "memory topic {topic} capacity mismatch: expected {actual_capacity}, got {capacity}"
+                );
+                audit.log_failure(&err);
+                return (StatusCode::CONFLICT, err).into_response();
             }
         }
     }
@@ -96,18 +100,14 @@ pub async fn create_memory_topic_handler(
     match state.storage.create_memory_topic(stored.clone()) {
         Ok(()) => {}
         Err(StorageError::AlreadyExists(_)) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("memory topic {topic} already exists"),
-            )
-                .into_response();
+            let err = format!("memory topic {topic} already exists");
+            audit.log_failure(&err);
+            return (StatusCode::CONFLICT, err).into_response();
         }
         Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist memory topic {topic}: {err}"),
-            )
-                .into_response();
+            let err = format!("failed to persist memory topic {topic}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     }
 
@@ -131,10 +131,12 @@ pub async fn create_memory_topic_handler(
                     (StatusCode::CONFLICT, err.to_string())
                 }
             };
+            audit.log_failure(&message);
             return (status, message).into_response();
         }
     }
 
+    audit.log_success();
     (
         StatusCode::CREATED,
         Json(MemoryTopicInfo {

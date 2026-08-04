@@ -1,73 +1,52 @@
-use std::fmt::Display;
-use std::time::Instant;
-
 pub(crate) struct ResourceMutationLog {
-    resource_kind: &'static str,
+    kind: &'static str,
     action: &'static str,
-    resource_id: String,
-    flow_instance_id: Option<String>,
-    started_at: Instant,
+    name: String,
+    revision: Option<u64>,
 }
 
 impl ResourceMutationLog {
     pub(crate) fn new(
-        resource_kind: &'static str,
+        kind: &'static str,
         action: &'static str,
-        resource_id: impl Into<String>,
-        flow_instance_id: Option<&str>,
+        name: impl Into<String>,
+        revision: Option<u64>,
     ) -> Self {
-        let log = Self {
-            resource_kind,
+        Self {
+            kind,
             action,
-            resource_id: resource_id.into(),
-            flow_instance_id: flow_instance_id.map(ToOwned::to_owned),
-            started_at: Instant::now(),
-        };
-        tracing::info!(
-            resource_kind = log.resource_kind,
-            resource_id = %log.resource_id,
-            action = log.action,
-            flow_instance_id = log.flow_instance_id(),
-            result = "requested",
-            "resource mutation"
-        );
-        log
+            name: name.into(),
+            revision,
+        }
     }
 
-    pub(crate) fn flow_instance_id(&self) -> &str {
-        self.flow_instance_id.as_deref().unwrap_or("<unset>")
-    }
-
-    pub(crate) fn set_flow_instance_id(&mut self, flow_instance_id: Option<&str>) {
-        self.flow_instance_id = flow_instance_id.map(ToOwned::to_owned);
-    }
-
-    pub(crate) fn elapsed_ms(&self) -> u128 {
-        self.started_at.elapsed().as_millis()
+    pub(crate) fn set_revision(&mut self, revision: Option<u64>) {
+        self.revision = revision;
     }
 
     pub(crate) fn log_success(&self) {
+        let Some(revision) = self.revision else {
+            return;
+        };
         tracing::info!(
-            resource_kind = self.resource_kind,
-            resource_id = %self.resource_id,
+            kind = self.kind,
+            name = %self.name,
             action = self.action,
-            flow_instance_id = self.flow_instance_id(),
-            result = "succeeded",
-            elapsed_ms = self.elapsed_ms(),
-            "resource mutation"
+            revision,
+            "rest api audit"
         );
     }
 
-    pub(crate) fn log_failure(&self, error: &(impl Display + ?Sized)) {
+    pub(crate) fn log_failure(&self, _error: &(impl std::fmt::Display + ?Sized)) {
+        let Some(revision) = self.revision else {
+            return;
+        };
         tracing::error!(
-            resource_kind = self.resource_kind,
-            resource_id = %self.resource_id,
+            kind = self.kind,
+            name = %self.name,
             action = self.action,
-            flow_instance_id = self.flow_instance_id(),
-            result = "failed",
-            elapsed_ms = self.elapsed_ms(),
-            error = %error,
-            "resource mutation"
+            revision,
+            "rest api audit failed"
         );
     }
 }

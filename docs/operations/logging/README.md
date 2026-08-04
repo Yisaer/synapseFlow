@@ -302,6 +302,7 @@ direct process stderr output when required.
 
 ## Related Documents
 
+- `audit.md`
 - `syslog.md`
 - `../config/env_overrides.md`
 - `../../runtime/instances/flow_instances.md`

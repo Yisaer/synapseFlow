@@ -143,7 +143,7 @@ pub async fn create_table_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateTableRequest>,
 ) -> impl IntoResponse {
-    let audit = ResourceMutationLog::new("table", "create", req.name.as_str(), None);
+    let audit = ResourceMutationLog::new("table", "create", req.name.as_str(), Some(req.revision));
     if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &req.name) {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
@@ -310,7 +310,7 @@ pub async fn delete_table_handler(
     if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let audit = ResourceMutationLog::new("table", "delete", name.as_str(), None);
+    let mut audit = ResourceMutationLog::new("table", "delete", name.as_str(), None);
     let _storage_permit = match state.try_acquire_storage_operation() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => {
@@ -339,6 +339,21 @@ pub async fn delete_table_handler(
                 .into_response();
         }
     };
+
+    let stored = match state.storage.get_table(&name) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            let err = format!("table {name} not found");
+            audit.log_failure(&err);
+            return (StatusCode::NOT_FOUND, err).into_response();
+        }
+        Err(err) => {
+            let err = format!("failed to read table {name} from storage: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+    audit.set_revision(Some(stored.revision));
 
     for (_, instance) in state.instances.instances_snapshot() {
         match instance.delete_table(&name).await {

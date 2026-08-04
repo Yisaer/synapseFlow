@@ -225,12 +225,7 @@ pub async fn create_pipeline_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     req.flow_instance_id = Some(flow_instance_id.clone());
-    let audit = ResourceMutationLog::new(
-        "pipeline",
-        "create",
-        req.id.as_str(),
-        Some(&flow_instance_id),
-    );
+    let audit = ResourceMutationLog::new("pipeline", "create", req.id.as_str(), Some(req.revision));
 
     if let Err(err) = validate_create_request(&req) {
         audit.log_failure(&err);
@@ -531,7 +526,7 @@ pub async fn upsert_pipeline_handler(
         .clone()
         .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
     let audit =
-        ResourceMutationLog::new("pipeline", "update", id.as_str(), Some(&flow_instance_id));
+        ResourceMutationLog::new("pipeline", "update", id.as_str(), Some(create_req.revision));
     if !state.is_declared_instance(&flow_instance_id) {
         let err = format!("flow instance {flow_instance_id} is not declared by config");
         audit.log_failure(&err);
@@ -903,7 +898,12 @@ pub async fn start_pipeline_handler(
         Ok(result) => result,
         Err(resp) => return resp,
     };
-    let audit = ResourceMutationLog::new("pipeline", "start", id.as_str(), Some(&flow_instance_id));
+    let audit = ResourceMutationLog::new(
+        "pipeline",
+        "start",
+        id.as_str(),
+        Some(pipeline_req.revision),
+    );
 
     if pipeline_req.options.schedule.is_some() {
         let err = format!(
@@ -990,7 +990,8 @@ pub async fn stop_pipeline_handler(
         Ok(result) => result,
         Err(resp) => return resp,
     };
-    let audit = ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(&flow_instance_id));
+    let audit =
+        ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(pipeline_req.revision));
 
     if pipeline_req.options.schedule.is_some() {
         let err = format!(
@@ -1075,6 +1076,7 @@ pub async fn delete_pipeline_handler(
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     };
+    audit.set_revision(Some(stored.revision));
     let flow_instance_id = match storage_bridge::pipeline_request_from_stored(&stored) {
         Ok(req) => match defaulted_flow_instance_id(req.flow_instance_id.as_deref()) {
             Ok(id) => Some(id),
@@ -1088,8 +1090,6 @@ pub async fn delete_pipeline_handler(
             None
         }
     };
-    audit.set_flow_instance_id(flow_instance_id.as_deref());
-
     if let Some(flow_instance_id) = flow_instance_id.as_deref() {
         if let Some(instance) = state.local_instance(flow_instance_id) {
             match instance.delete_pipeline(&id).await {
