@@ -1,6 +1,7 @@
 //! TumblingWindowProcessor - buffers rows by tumbling windows and flushes on watermarks.
 //!
 
+use crate::expr::ScalarExpr;
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalTumblingWindow};
 use crate::processor::base::{
@@ -9,12 +10,13 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::window_metadata;
+use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 use crate::processor::{
     ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStart,
     ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
@@ -25,6 +27,7 @@ use tokio_stream::StreamExt;
 pub struct TumblingWindowProcessor {
     id: String,
     window_length: Duration,
+    partition_by_scalars: Vec<ScalarExpr>,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -51,9 +54,11 @@ impl TumblingWindowProcessor {
         let length = match physical.time_unit {
             TimeUnit::Seconds => Duration::from_secs(physical.length),
         };
+        let partition_by_scalars = physical.partition_by_scalars.clone();
         Self {
             id: id.into(),
             window_length: length,
+            partition_by_scalars,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -90,11 +95,13 @@ impl Processor for TumblingWindowProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
+        let partition_by_scalars = self.partition_by_scalars.clone();
 
         // Local state captured by the task.
         let len_secs = self.window_length.as_secs().max(1);
-        let mut state = ProcessingState::new(
+        let mut state = PartitionedProcessingState::new(
             len_secs,
+            partition_by_scalars,
             output.clone(),
             channel_capacities.data,
             Arc::clone(&stats),
@@ -144,7 +151,7 @@ impl Processor for TumblingWindowProcessor {
                                     if is_graceful {
                                         state.flush_all().await?;
                                     } else {
-                                        state.rows_buffered.set(0);
+                                        state.drop_all();
                                     }
                                     send_with_backpressure(
                                         &output,
@@ -175,7 +182,7 @@ impl Processor for TumblingWindowProcessor {
                                 .await?;
                                 if is_terminal {
                                     // Non-graceful end on data path: drop buffered rows.
-                                    state.rows_buffered.set(0);
+                                    state.drop_all();
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
@@ -186,7 +193,7 @@ impl Processor for TumblingWindowProcessor {
                             }
                             None => {
                                 // Upstream ended without control signal: drop buffered rows.
-                                state.rows_buffered.set(0);
+                                state.drop_all();
                                 tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
@@ -220,19 +227,21 @@ impl Processor for TumblingWindowProcessor {
     }
 }
 
-/// Processing-time window state: assumes timestamps are non-decreasing, buffers rows in order.
-struct ProcessingState {
-    rows: VecDeque<crate::model::Tuple>,
+struct PartitionedProcessingState {
+    state_ids: HashMap<PartitionKey, usize>,
+    states: Vec<ProcessingState>,
     len_secs: u64,
+    partition_by_scalars: Vec<ScalarExpr>,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
     rows_buffered: GaugeHandle,
 }
 
-impl ProcessingState {
+impl PartitionedProcessingState {
     fn new(
         len_secs: u64,
+        partition_by_scalars: Vec<ScalarExpr>,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -244,17 +253,15 @@ impl ProcessingState {
         });
         rows_buffered.set(0);
         Self {
-            rows: VecDeque::new(),
+            state_ids: HashMap::new(),
+            states: Vec::new(),
             len_secs,
+            partition_by_scalars,
             output,
             data_channel_capacity,
             stats,
             rows_buffered,
         }
-    }
-
-    fn update_rows_buffered(&self) {
-        self.rows_buffered.set(self.rows.len() as u64);
     }
 
     async fn add_collection(
@@ -265,10 +272,91 @@ impl ProcessingState {
             .into_rows()
             .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
         for tuple in rows {
-            self.rows.push_back(tuple);
+            let partition_key =
+                eval_partition_key(&self.partition_by_scalars, &tuple, "tumblingwindow")
+                    .map_err(ProcessorError::ProcessingError)?;
+            self.state_for(partition_key).add_tuple(tuple);
         }
         self.update_rows_buffered();
         Ok(())
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        for state in &mut self.states {
+            state.flush_up_to(watermark).await?;
+        }
+        self.update_rows_buffered();
+        Ok(())
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        for state in &mut self.states {
+            state.flush_all().await?;
+        }
+        self.update_rows_buffered();
+        Ok(())
+    }
+
+    fn drop_all(&mut self) {
+        for state in &mut self.states {
+            state.rows.clear();
+        }
+        self.update_rows_buffered();
+    }
+
+    fn update_rows_buffered(&self) {
+        let total = self
+            .states
+            .iter()
+            .map(|state| state.rows.len() as u64)
+            .sum();
+        self.rows_buffered.set(total);
+    }
+
+    fn state_for(&mut self, key: PartitionKey) -> &mut ProcessingState {
+        if let Some(id) = self.state_ids.get(&key).copied() {
+            return &mut self.states[id];
+        }
+
+        let id = self.states.len();
+        self.state_ids.insert(key, id);
+        self.states.push(ProcessingState::new(
+            self.len_secs,
+            self.output.clone(),
+            self.data_channel_capacity,
+            Arc::clone(&self.stats),
+        ));
+        &mut self.states[id]
+    }
+}
+
+/// Processing-time window state: assumes timestamps are non-decreasing, buffers rows in order.
+struct ProcessingState {
+    rows: VecDeque<crate::model::Tuple>,
+    len_secs: u64,
+    output: LinkOutput<StreamData>,
+    data_channel_capacity: usize,
+    stats: Arc<ProcessorStats>,
+}
+
+impl ProcessingState {
+    fn new(
+        len_secs: u64,
+        output: LinkOutput<StreamData>,
+        data_channel_capacity: usize,
+        stats: Arc<ProcessorStats>,
+    ) -> Self {
+        Self {
+            rows: VecDeque::new(),
+            len_secs,
+            output,
+            data_channel_capacity,
+            stats,
+        }
+    }
+
+    fn add_tuple(&mut self, tuple: crate::model::Tuple) {
+        self.rows.push_back(tuple);
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
@@ -311,7 +399,6 @@ impl ProcessingState {
                 Some(self.stats.as_ref()),
             )
             .await?;
-            self.update_rows_buffered();
         }
         Ok(())
     }
@@ -348,7 +435,6 @@ impl ProcessingState {
                 Some(self.stats.as_ref()),
             )
             .await?;
-            self.update_rows_buffered();
         }
         Ok(())
     }

@@ -433,17 +433,8 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
                 }
             }
             LogicalPlan::Window(window) => {
-                if let crate::planner::logical::LogicalWindowSpec::State {
-                    open,
-                    emit,
-                    partition_by,
-                } = &window.spec
-                {
-                    visit_expr(open.as_ref(), max_id);
-                    visit_expr(emit.as_ref(), max_id);
-                    for e in partition_by {
-                        visit_expr(e, max_id);
-                    }
+                for expr in window.spec.expression_inputs() {
+                    visit_expr(expr, max_id);
                 }
             }
             _ => {}
@@ -1413,17 +1404,8 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 }
             }
             LogicalPlan::Window(window) => {
-                if let crate::planner::logical::LogicalWindowSpec::State {
-                    open,
-                    emit,
-                    partition_by,
-                } = &window.spec
-                {
-                    self.collect_expr_ast(open.as_ref());
-                    self.collect_expr_ast(emit.as_ref());
-                    for expr in partition_by {
-                        self.collect_expr_ast(expr);
-                    }
+                for expr in window.spec.expression_inputs() {
+                    self.collect_expr_ast(expr);
                 }
             }
             LogicalPlan::DataSource(ds) => {
@@ -1855,17 +1837,8 @@ impl<'a> StructFieldUsageCollector<'a> {
                 }
             }
             LogicalPlan::Window(window) => {
-                if let crate::planner::logical::LogicalWindowSpec::State {
-                    open,
-                    emit,
-                    partition_by,
-                } = &window.spec
-                {
-                    self.collect_expr_ast(open.as_ref());
-                    self.collect_expr_ast(emit.as_ref());
-                    for expr in partition_by {
-                        self.collect_expr_ast(expr);
-                    }
+                for expr in window.spec.expression_inputs() {
+                    self.collect_expr_ast(expr);
                 }
             }
             LogicalPlan::DataSource(ds) => {
@@ -2143,17 +2116,8 @@ impl<'a> ListElementUsageCollector<'a> {
                 }
             }
             LogicalPlan::Window(window) => {
-                if let crate::planner::logical::LogicalWindowSpec::State {
-                    open,
-                    emit,
-                    partition_by,
-                } = &window.spec
-                {
-                    self.collect_expr_ast(open.as_ref());
-                    self.collect_expr_ast(emit.as_ref());
-                    for expr in partition_by {
-                        self.collect_expr_ast(expr);
-                    }
+                for expr in window.spec.expression_inputs() {
+                    self.collect_expr_ast(expr);
                 }
             }
             LogicalPlan::DataSource(_) => {}

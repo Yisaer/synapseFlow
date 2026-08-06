@@ -496,12 +496,36 @@ fn validate_expression_types(
         if let Some(filter) = window.filter() {
             validate_expr_against_sources(filter, &sources)?;
         }
+        for expr in parser_window_expression_inputs(window) {
+            validate_expr_against_sources(expr, &sources)?;
+        }
     }
     for item in &select_stmt.order_by {
         validate_expr_against_sources(&item.expr, &sources)?;
     }
 
     Ok(())
+}
+
+fn parser_window_expression_inputs(window: &parser_window::Window) -> Vec<&Expr> {
+    match window {
+        parser_window::Window::Tumbling { partition_by, .. }
+        | parser_window::Window::Count { partition_by, .. }
+        | parser_window::Window::Sliding { partition_by, .. } => partition_by.iter().collect(),
+        parser_window::Window::State {
+            open,
+            emit,
+            partition_by,
+            ..
+        } => {
+            let mut exprs = Vec::with_capacity(2 + partition_by.len());
+            exprs.push(open.as_ref());
+            exprs.push(emit.as_ref());
+            exprs.extend(partition_by);
+            exprs
+        }
+        parser_window::Window::Eos { .. } => Vec::new(),
+    }
 }
 
 fn validate_select_alias_names(
@@ -611,26 +635,31 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
                 return Err("aliases in window FILTER are not supported yet".to_string());
             }
         }
+        if window_definition_references_any_alias(window, &all_aliases) {
+            return Err("aliases in window definitions are not supported yet".to_string());
+        }
+    }
+
+    fn window_definition_references_any_alias(window: &Window, aliases: &HashSet<String>) -> bool {
         match window {
+            Window::Tumbling { partition_by, .. }
+            | Window::Count { partition_by, .. }
+            | Window::Sliding { partition_by, .. } => partition_by
+                .iter()
+                .any(|expr| expr_references_any_alias(expr, aliases)),
             Window::State {
                 open,
                 emit,
                 partition_by,
                 ..
             } => {
-                if expr_references_any_alias(open.as_ref(), &all_aliases)
-                    || expr_references_any_alias(emit.as_ref(), &all_aliases)
+                expr_references_any_alias(open.as_ref(), aliases)
+                    || expr_references_any_alias(emit.as_ref(), aliases)
                     || partition_by
                         .iter()
-                        .any(|expr| expr_references_any_alias(expr, &all_aliases))
-                {
-                    return Err("aliases in window definitions are not supported yet".to_string());
-                }
+                        .any(|expr| expr_references_any_alias(expr, aliases))
             }
-            Window::Tumbling { .. }
-            | Window::Count { .. }
-            | Window::Sliding { .. }
-            | Window::Eos { .. } => {}
+            Window::Eos { .. } => false,
         }
     }
 
@@ -2053,10 +2082,27 @@ fn window_type_contains_function_name(
 
 fn window_contains_last_agg_hit_count(window: &parser_window::Window) -> bool {
     match window {
-        parser_window::Window::Tumbling { filter, .. }
-        | parser_window::Window::Count { filter, .. }
-        | parser_window::Window::Sliding { filter, .. }
-        | parser_window::Window::Eos { filter } => filter
+        parser_window::Window::Tumbling {
+            partition_by,
+            filter,
+            ..
+        }
+        | parser_window::Window::Count {
+            partition_by,
+            filter,
+            ..
+        }
+        | parser_window::Window::Sliding {
+            partition_by,
+            filter,
+            ..
+        } => {
+            partition_by.iter().any(expr_contains_last_agg_hit_count)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_last_agg_hit_count)
+        }
+        parser_window::Window::Eos { filter } => filter
             .as_deref()
             .is_some_and(expr_contains_last_agg_hit_count),
         parser_window::Window::State {
@@ -2077,10 +2123,29 @@ fn window_contains_last_agg_hit_count(window: &parser_window::Window) -> bool {
 
 fn window_contains_window_metadata_function(window: &parser_window::Window) -> bool {
     match window {
-        parser_window::Window::Tumbling { filter, .. }
-        | parser_window::Window::Count { filter, .. }
-        | parser_window::Window::Sliding { filter, .. }
-        | parser_window::Window::Eos { filter } => filter
+        parser_window::Window::Tumbling {
+            partition_by,
+            filter,
+            ..
+        }
+        | parser_window::Window::Count {
+            partition_by,
+            filter,
+            ..
+        }
+        | parser_window::Window::Sliding {
+            partition_by,
+            filter,
+            ..
+        } => {
+            partition_by
+                .iter()
+                .any(expr_contains_window_metadata_function)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_window_metadata_function)
+        }
+        parser_window::Window::Eos { filter } => filter
             .as_deref()
             .is_some_and(expr_contains_window_metadata_function),
         parser_window::Window::State {
@@ -2199,7 +2264,10 @@ fn split_window_filter(window: parser_window::Window) -> (parser_window::Window,
 fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpec, String> {
     match window {
         parser_window::Window::Tumbling {
-            time_unit, length, ..
+            time_unit,
+            length,
+            partition_by,
+            ..
         } => {
             let unit = match time_unit {
                 parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
@@ -2207,13 +2275,22 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             Ok(LogicalWindowSpec::Tumbling {
                 time_unit: unit,
                 length,
+                partition_by,
             })
         }
-        parser_window::Window::Count { count, .. } => Ok(LogicalWindowSpec::Count { count }),
+        parser_window::Window::Count {
+            count,
+            partition_by,
+            ..
+        } => Ok(LogicalWindowSpec::Count {
+            count,
+            partition_by,
+        }),
         parser_window::Window::Sliding {
             time_unit,
             lookback,
             lookahead,
+            partition_by,
             ..
         } => {
             let unit = match time_unit {
@@ -2223,6 +2300,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
                 time_unit: unit,
                 lookback,
                 lookahead,
+                partition_by,
             })
         }
         parser_window::Window::State {

@@ -65,7 +65,7 @@ impl StreamingAggregationProcessor {
     ) -> Result<Self, ProcessorError> {
         let window = physical.window.clone();
         match window {
-            StreamingWindowSpec::Count { count } => Ok(StreamingAggregationProcessor::Count(
+            StreamingWindowSpec::Count { count, .. } => Ok(StreamingAggregationProcessor::Count(
                 StreamingCountAggregationProcessor::new_with_channel_capacities(
                     id,
                     Arc::clone(&physical),
@@ -74,10 +74,7 @@ impl StreamingAggregationProcessor {
                     channel_capacities,
                 ),
             )),
-            StreamingWindowSpec::Tumbling {
-                time_unit: _,
-                length: _,
-            } => {
+            StreamingWindowSpec::Tumbling { .. } => {
                 // Currently only seconds are supported at the logical level.
                 Ok(StreamingAggregationProcessor::Tumbling(
                     StreamingTumblingAggregationProcessor::new_with_channel_capacities(

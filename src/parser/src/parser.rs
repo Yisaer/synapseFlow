@@ -542,6 +542,58 @@ mod source_info_tests {
     }
 
     #[test]
+    fn parse_group_by_tumbling_window_over_partition_by() {
+        let parser = StreamSqlParser::new();
+        let sql =
+            "SELECT * FROM stream GROUP BY tumblingwindow('ss', 10) OVER (PARTITION BY k1, k2)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+
+        match select_stmt.window {
+            Some(Window::Tumbling {
+                time_unit,
+                length,
+                partition_by,
+                ..
+            }) => {
+                assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
+                assert_eq!(length, 10);
+                assert_eq!(partition_by.len(), 2);
+                assert_eq!(partition_by[0].to_string(), "k1");
+                assert_eq!(partition_by[1].to_string(), "k2");
+            }
+            other => panic!("expected tumbling window, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_count_window_over_partition_by() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY countwindow(3) OVER (PARTITION BY k)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+
+        match select_stmt.window {
+            Some(Window::Count {
+                count,
+                partition_by,
+                ..
+            }) => {
+                assert_eq!(count, 3);
+                assert_eq!(partition_by.len(), 1);
+                assert_eq!(partition_by[0].to_string(), "k");
+            }
+            other => panic!("expected count window, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parse_group_by_sliding_window() {
         let parser = StreamSqlParser::new();
         let result = parser.parse("SELECT * FROM stream GROUP BY slidingwindow('ss', 10)");
@@ -567,6 +619,34 @@ mod source_info_tests {
     }
 
     #[test]
+    fn parse_group_by_sliding_window_over_partition_by() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10, 15) OVER (PARTITION BY k)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                partition_by,
+                ..
+            }) => {
+                assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, Some(15));
+                assert_eq!(partition_by.len(), 1);
+                assert_eq!(partition_by[0].to_string(), "k");
+            }
+            other => panic!("expected sliding window, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parse_group_by_eos_window() {
         let parser = StreamSqlParser::new();
         let result = parser.parse("SELECT sum(a) FROM history_table GROUP BY eoswindow()");
@@ -575,6 +655,35 @@ mod source_info_tests {
         let select_stmt = result.unwrap();
         assert_eq!(select_stmt.group_by_exprs.len(), 0);
         assert_eq!(select_stmt.window, Some(Window::eos()));
+    }
+
+    #[test]
+    fn reject_eos_window_over_partition_by() {
+        let parser = StreamSqlParser::new();
+        let result = parser
+            .parse("SELECT sum(a) FROM history_table GROUP BY eoswindow() OVER (PARTITION BY k)");
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("eoswindow does not support OVER"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn reject_window_over_order_by() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT * FROM stream GROUP BY countwindow(3) OVER (ORDER BY k)");
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("countwindow OVER does not support ORDER BY"),
+            "unexpected error: {}",
+            msg
+        );
     }
 
     #[test]

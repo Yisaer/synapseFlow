@@ -97,14 +97,20 @@ pub enum WindowIR {
     Tumbling {
         time_unit: TimeUnitIR,
         length: u64,
+        #[serde(default)]
+        partition_by: Vec<Expr>,
     },
     Count {
         count: u64,
+        #[serde(default)]
+        partition_by: Vec<Expr>,
     },
     Sliding {
         time_unit: TimeUnitIR,
         lookback: u64,
         lookahead: Option<u64>,
+        #[serde(default)]
+        partition_by: Vec<Expr>,
     },
     State {
         open: Box<Expr>,
@@ -746,23 +752,32 @@ fn window_ir_to_spec(
     window: &WindowIR,
 ) -> Result<crate::planner::logical::LogicalWindowSpec, String> {
     Ok(match window {
-        WindowIR::Tumbling { time_unit, length } => {
-            crate::planner::logical::LogicalWindowSpec::Tumbling {
-                time_unit: time_unit_ir_to_time_unit(*time_unit),
-                length: *length,
-            }
-        }
-        WindowIR::Count { count } => {
-            crate::planner::logical::LogicalWindowSpec::Count { count: *count }
-        }
+        WindowIR::Tumbling {
+            time_unit,
+            length,
+            partition_by,
+        } => crate::planner::logical::LogicalWindowSpec::Tumbling {
+            time_unit: time_unit_ir_to_time_unit(*time_unit),
+            length: *length,
+            partition_by: partition_by.clone(),
+        },
+        WindowIR::Count {
+            count,
+            partition_by,
+        } => crate::planner::logical::LogicalWindowSpec::Count {
+            count: *count,
+            partition_by: partition_by.clone(),
+        },
         WindowIR::Sliding {
             time_unit,
             lookback,
             lookahead,
+            partition_by,
         } => crate::planner::logical::LogicalWindowSpec::Sliding {
             time_unit: time_unit_ir_to_time_unit(*time_unit),
             lookback: *lookback,
             lookahead: *lookahead,
+            partition_by: partition_by.clone(),
         },
         WindowIR::State {
             open,
@@ -1113,27 +1128,36 @@ fn connector_string_to_ir(value: &crate::ConnectorString) -> JsonValue {
 
 fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> WindowIR {
     match spec {
-        crate::planner::logical::LogicalWindowSpec::Tumbling { time_unit, length } => {
-            WindowIR::Tumbling {
-                time_unit: match time_unit {
-                    crate::planner::logical::TimeUnit::Seconds => TimeUnitIR::Seconds,
-                },
-                length: *length,
-            }
-        }
-        crate::planner::logical::LogicalWindowSpec::Count { count } => {
-            WindowIR::Count { count: *count }
-        }
+        crate::planner::logical::LogicalWindowSpec::Tumbling {
+            time_unit,
+            length,
+            partition_by,
+        } => WindowIR::Tumbling {
+            time_unit: match time_unit {
+                crate::planner::logical::TimeUnit::Seconds => TimeUnitIR::Seconds,
+            },
+            length: *length,
+            partition_by: partition_by.clone(),
+        },
+        crate::planner::logical::LogicalWindowSpec::Count {
+            count,
+            partition_by,
+        } => WindowIR::Count {
+            count: *count,
+            partition_by: partition_by.clone(),
+        },
         crate::planner::logical::LogicalWindowSpec::Sliding {
             time_unit,
             lookback,
             lookahead,
+            partition_by,
         } => WindowIR::Sliding {
             time_unit: match time_unit {
                 crate::planner::logical::TimeUnit::Seconds => TimeUnitIR::Seconds,
             },
             lookback: *lookback,
             lookahead: *lookahead,
+            partition_by: partition_by.clone(),
         },
         crate::planner::logical::LogicalWindowSpec::State {
             open,

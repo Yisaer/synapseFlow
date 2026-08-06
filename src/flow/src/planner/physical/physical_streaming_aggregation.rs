@@ -13,14 +13,20 @@ pub enum StreamingWindowSpec {
     Tumbling {
         time_unit: TimeUnit,
         length: u64,
+        partition_by_exprs: Vec<Expr>,
+        partition_by_scalars: Vec<ScalarExpr>,
     },
     Count {
         count: u64,
+        partition_by_exprs: Vec<Expr>,
+        partition_by_scalars: Vec<ScalarExpr>,
     },
     Sliding {
         time_unit: TimeUnit,
         lookback: u64,
         lookahead: Option<u64>,
+        partition_by_exprs: Vec<Expr>,
+        partition_by_scalars: Vec<ScalarExpr>,
     },
     State {
         open_expr: Expr,

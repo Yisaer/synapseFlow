@@ -366,19 +366,29 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("sink_count={}", tail.base.children.len()));
         }
         LogicalPlan::Window(window) => match &window.spec {
-            LogicalWindowSpec::Tumbling { time_unit, length } => {
+            LogicalWindowSpec::Tumbling {
+                time_unit,
+                length,
+                partition_by,
+            } => {
                 info.push("kind=tumbling".to_string());
                 info.push(format!("unit={:?}", time_unit));
                 info.push(format!("length={}", length));
+                push_partition_by_info(partition_by, &mut info);
             }
-            LogicalWindowSpec::Count { count } => {
+            LogicalWindowSpec::Count {
+                count,
+                partition_by,
+            } => {
                 info.push("kind=count".to_string());
                 info.push(format!("count={}", count));
+                push_partition_by_info(partition_by, &mut info);
             }
             LogicalWindowSpec::Sliding {
                 time_unit,
                 lookback,
                 lookahead,
+                partition_by,
             } => {
                 info.push("kind=sliding".to_string());
                 info.push(format!("unit={:?}", time_unit));
@@ -387,6 +397,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
                     None => info.push("lookahead=none".to_string()),
                 }
+                push_partition_by_info(partition_by, &mut info);
             }
             LogicalWindowSpec::State {
                 open,
@@ -396,12 +407,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 info.push("kind=state".to_string());
                 info.push(format!("open={}", format_expr_for_explain(open.as_ref())));
                 info.push(format!("emit={}", format_expr_for_explain(emit.as_ref())));
-                if !partition_by.is_empty() {
-                    info.push(format!(
-                        "partition_by={}",
-                        format_expr_csv(partition_by, EXPLAIN_MAX_LIST_ITEMS)
-                    ));
-                }
+                push_partition_by_info(partition_by, &mut info);
             }
             LogicalWindowSpec::Eos => {
                 info.push("kind=eos".to_string());
@@ -480,6 +486,15 @@ fn format_expr_list(exprs: &[Expr], max_items: usize) -> String {
 fn format_expr_csv(exprs: &[Expr], max_items: usize) -> String {
     let mut format_item = format_expr_for_explain;
     format_items_joined(exprs, max_items, ",", &mut format_item)
+}
+
+fn push_partition_by_info(partition_by: &[Expr], info: &mut Vec<String>) {
+    if !partition_by.is_empty() {
+        info.push(format!(
+            "partition_by={}",
+            format_expr_csv(partition_by, EXPLAIN_MAX_LIST_ITEMS)
+        ));
+    }
 }
 
 fn format_expr_for_explain(expr: &Expr) -> String {
@@ -1016,19 +1031,32 @@ fn build_physical_node_with_prefix(
                 ));
             }
             match &aggregation.window {
-                crate::planner::physical::StreamingWindowSpec::Tumbling { time_unit, length } => {
+                crate::planner::physical::StreamingWindowSpec::Tumbling {
+                    time_unit,
+                    length,
+                    partition_by_exprs,
+                    ..
+                } => {
                     info.push("window=tumbling".to_string());
                     info.push(format!("unit={:?}", time_unit));
                     info.push(format!("length={}", length));
+                    push_partition_by_info(partition_by_exprs, &mut info);
                 }
-                crate::planner::physical::StreamingWindowSpec::Count { count } => {
+                crate::planner::physical::StreamingWindowSpec::Count {
+                    count,
+                    partition_by_exprs,
+                    ..
+                } => {
                     info.push("window=count".to_string());
                     info.push(format!("count={}", count));
+                    push_partition_by_info(partition_by_exprs, &mut info);
                 }
                 crate::planner::physical::StreamingWindowSpec::Sliding {
                     time_unit,
                     lookback,
                     lookahead,
+                    partition_by_exprs,
+                    ..
                 } => {
                     info.push("window=sliding".to_string());
                     info.push(format!("unit={:?}", time_unit));
@@ -1037,6 +1065,7 @@ fn build_physical_node_with_prefix(
                         Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
                         None => info.push("lookahead=none".to_string()),
                     }
+                    push_partition_by_info(partition_by_exprs, &mut info);
                 }
                 crate::planner::physical::StreamingWindowSpec::State {
                     open_expr,
@@ -1047,12 +1076,7 @@ fn build_physical_node_with_prefix(
                     info.push("window=state".to_string());
                     info.push(format!("open={}", format_expr_for_explain(open_expr)));
                     info.push(format!("emit={}", format_expr_for_explain(emit_expr)));
-                    if !partition_by_exprs.is_empty() {
-                        info.push(format!(
-                            "partition_by={}",
-                            format_expr_csv(partition_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
-                        ));
-                    }
+                    push_partition_by_info(partition_by_exprs, &mut info);
                 }
                 crate::planner::physical::StreamingWindowSpec::Eos => {
                     info.push("window=eos".to_string());
@@ -1167,10 +1191,12 @@ fn build_physical_node_with_prefix(
             info.push("kind=tumbling".to_string());
             info.push(format!("unit={:?}", window.time_unit));
             info.push(format!("length={}", window.length));
+            push_partition_by_info(&window.partition_by_exprs, &mut info);
         }
         PhysicalPlan::CountWindow(window) => {
             info.push("kind=count".to_string());
             info.push(format!("count={}", window.count));
+            push_partition_by_info(&window.partition_by_exprs, &mut info);
         }
         PhysicalPlan::SlidingWindow(window) => {
             info.push("kind=sliding".to_string());
@@ -1180,6 +1206,7 @@ fn build_physical_node_with_prefix(
                 Some(lookahead) => info.push(format!("lookahead={}", lookahead)),
                 None => info.push("lookahead=none".to_string()),
             }
+            push_partition_by_info(&window.partition_by_exprs, &mut info);
         }
         PhysicalPlan::StateWindow(window) => {
             info.push("kind=state".to_string());
@@ -1191,12 +1218,7 @@ fn build_physical_node_with_prefix(
                 "emit={}",
                 format_expr_for_explain(&window.emit_expr)
             ));
-            if !window.partition_by_exprs.is_empty() {
-                info.push(format!(
-                    "partition_by={}",
-                    format_expr_csv(&window.partition_by_exprs, EXPLAIN_MAX_LIST_ITEMS)
-                ));
-            }
+            push_partition_by_info(&window.partition_by_exprs, &mut info);
         }
         PhysicalPlan::Sampler(sampler) => {
             info.push(format!("interval={:?}", sampler.interval));

@@ -10,11 +10,17 @@ pub enum Window {
     Tumbling {
         time_unit: TimeUnit,
         length: u64,
+        /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
+        /// When empty, the window is global (single partition).
+        partition_by: Vec<Expr>,
         filter: Option<Box<Expr>>,
     },
     /// Fixed-size window defined by number of rows
     Count {
         count: u64,
+        /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
+        /// When empty, the window is global (single partition).
+        partition_by: Vec<Expr>,
         filter: Option<Box<Expr>>,
     },
     /// Sliding window triggered by each received record.
@@ -26,6 +32,9 @@ pub enum Window {
         time_unit: TimeUnit,
         lookback: u64,
         lookahead: Option<u64>,
+        /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
+        /// When empty, the window is global (single partition).
+        partition_by: Vec<Expr>,
         filter: Option<Box<Expr>>,
     },
     /// State window driven by two boolean conditions:
@@ -53,25 +62,45 @@ pub enum TimeUnit {
 
 impl Window {
     pub fn tumbling(time_unit: TimeUnit, length: u64) -> Self {
+        Window::tumbling_partitioned(time_unit, length, Vec::new())
+    }
+
+    pub fn tumbling_partitioned(time_unit: TimeUnit, length: u64, partition_by: Vec<Expr>) -> Self {
         Window::Tumbling {
             time_unit,
             length,
+            partition_by,
             filter: None,
         }
     }
 
     pub fn count(count: u64) -> Self {
+        Window::count_partitioned(count, Vec::new())
+    }
+
+    pub fn count_partitioned(count: u64, partition_by: Vec<Expr>) -> Self {
         Window::Count {
             count,
+            partition_by,
             filter: None,
         }
     }
 
     pub fn sliding(time_unit: TimeUnit, lookback: u64, lookahead: Option<u64>) -> Self {
+        Window::sliding_partitioned(time_unit, lookback, lookahead, Vec::new())
+    }
+
+    pub fn sliding_partitioned(
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+        partition_by: Vec<Expr>,
+    ) -> Self {
         Window::Sliding {
             time_unit,
             lookback,
             lookahead,
+            partition_by,
             filter: None,
         }
     }
@@ -96,22 +125,36 @@ impl Window {
     pub fn with_filter(self, filter: Option<Box<Expr>>) -> Self {
         match self {
             Window::Tumbling {
-                time_unit, length, ..
+                time_unit,
+                length,
+                partition_by,
+                ..
             } => Window::Tumbling {
                 time_unit,
                 length,
+                partition_by,
                 filter,
             },
-            Window::Count { count, .. } => Window::Count { count, filter },
+            Window::Count {
+                count,
+                partition_by,
+                ..
+            } => Window::Count {
+                count,
+                partition_by,
+                filter,
+            },
             Window::Sliding {
                 time_unit,
                 lookback,
                 lookahead,
+                partition_by,
                 ..
             } => Window::Sliding {
                 time_unit,
                 lookback,
                 lookahead,
+                partition_by,
                 filter,
             },
             Window::State {
@@ -211,7 +254,12 @@ pub fn window_to_expr(window: &Window) -> Expr {
     };
 
     let over = match window {
-        Window::State { partition_by, .. } if !partition_by.is_empty() => {
+        Window::Tumbling { partition_by, .. }
+        | Window::Count { partition_by, .. }
+        | Window::Sliding { partition_by, .. }
+        | Window::State { partition_by, .. }
+            if !partition_by.is_empty() =>
+        {
             Some(WindowType::WindowSpec(WindowSpec {
                 partition_by: partition_by.clone(),
                 order_by: Vec::new(),
@@ -234,7 +282,6 @@ pub fn window_to_expr(window: &Window) -> Expr {
 }
 
 fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
-    ensure_no_over(function, "tumblingwindow")?;
     if function.args.len() != 2 {
         return Err(ParserError::ParserError(
             "tumblingwindow requires 2 arguments: (time_unit, length)".to_string(),
@@ -245,12 +292,15 @@ fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
     let length = parse_number_arg(&function.args[1], "tumblingwindow", "length")?;
 
     let time_unit = TimeUnit::try_from_str(&time_unit)?;
+    let partition_by = parse_over_partition_by(function, "tumblingwindow")?;
 
-    Ok(Window::tumbling(time_unit, length).with_filter(function.filter.clone()))
+    Ok(
+        Window::tumbling_partitioned(time_unit, length, partition_by)
+            .with_filter(function.filter.clone()),
+    )
 }
 
 fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
-    ensure_no_over(function, "countwindow")?;
     if function.args.len() != 1 {
         return Err(ParserError::ParserError(
             "countwindow requires 1 argument: (count)".to_string(),
@@ -258,11 +308,11 @@ fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
     }
 
     let count = parse_number_arg(&function.args[0], "countwindow", "count")?;
-    Ok(Window::count(count).with_filter(function.filter.clone()))
+    let partition_by = parse_over_partition_by(function, "countwindow")?;
+    Ok(Window::count_partitioned(count, partition_by).with_filter(function.filter.clone()))
 }
 
 fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
-    ensure_no_over(function, "slidingwindow")?;
     if function.args.len() != 2 && function.args.len() != 3 {
         return Err(ParserError::ParserError(
             "slidingwindow requires 2 or 3 arguments: (time_unit, lookback [, lookahead])"
@@ -283,8 +333,12 @@ fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
     };
 
     let time_unit = TimeUnit::try_from_str(&time_unit)?;
+    let partition_by = parse_over_partition_by(function, "slidingwindow")?;
 
-    Ok(Window::sliding(time_unit, lookback, lookahead).with_filter(function.filter.clone()))
+    Ok(
+        Window::sliding_partitioned(time_unit, lookback, lookahead, partition_by)
+            .with_filter(function.filter.clone()),
+    )
 }
 
 fn parse_state_window(function: &Function) -> Result<Window, ParserError> {
@@ -544,6 +598,17 @@ mod tests {
         })
     }
 
+    fn over_partition_by(keys: Vec<&str>) -> WindowType {
+        WindowType::WindowSpec(WindowSpec {
+            partition_by: keys
+                .into_iter()
+                .map(|key| Expr::Identifier(Ident::new(key)))
+                .collect(),
+            order_by: Vec::new(),
+            window_frame: None,
+        })
+    }
+
     fn eos_expr() -> Expr {
         Expr::Function(Function {
             name: ObjectName(vec![Ident::new("eoswindow")]),
@@ -581,9 +646,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_tumbling_window_expr_partitioned_by() {
+        let mut expr = tumbling_expr();
+        if let Expr::Function(function) = &mut expr {
+            function.over = Some(over_partition_by(vec!["k1", "k2"]));
+        }
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(
+            parsed,
+            Some(Window::tumbling_partitioned(
+                TimeUnit::Seconds,
+                10,
+                vec![
+                    Expr::Identifier(Ident::new("k1")),
+                    Expr::Identifier(Ident::new("k2")),
+                ],
+            ))
+        );
+    }
+
+    #[test]
     fn parse_count_window_expr() {
         let parsed = parse_window_expr(&count_expr()).unwrap();
         assert_eq!(parsed, Some(Window::count(5)));
+    }
+
+    #[test]
+    fn parse_count_window_expr_partitioned_by() {
+        let mut expr = count_expr();
+        if let Expr::Function(function) = &mut expr {
+            function.over = Some(over_partition_by(vec!["k"]));
+        }
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(
+            parsed,
+            Some(Window::count_partitioned(
+                5,
+                vec![Expr::Identifier(Ident::new("k"))],
+            ))
+        );
     }
 
     #[test]
@@ -598,6 +699,24 @@ mod tests {
         assert_eq!(
             parsed,
             Some(Window::sliding(TimeUnit::Seconds, 10, Some(15)))
+        );
+    }
+
+    #[test]
+    fn parse_sliding_window_expr_partitioned_by() {
+        let mut expr = sliding_expr(Some(15));
+        if let Expr::Function(function) = &mut expr {
+            function.over = Some(over_partition_by(vec!["k"]));
+        }
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(
+            parsed,
+            Some(Window::sliding_partitioned(
+                TimeUnit::Seconds,
+                10,
+                Some(15),
+                vec![Expr::Identifier(Ident::new("k"))],
+            ))
         );
     }
 
@@ -674,8 +793,41 @@ mod tests {
     }
 
     #[test]
+    fn tumbling_window_round_trip_back_to_expr_partitioned_by() {
+        let window = Window::tumbling_partitioned(
+            TimeUnit::Seconds,
+            25,
+            vec![Expr::Identifier(Ident::new("k"))],
+        );
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn count_window_round_trip_back_to_expr_partitioned_by() {
+        let window = Window::count_partitioned(5, vec![Expr::Identifier(Ident::new("k"))]);
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
     fn sliding_window_round_trip_back_to_expr() {
         let window = Window::sliding(TimeUnit::Seconds, 10, None);
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn sliding_window_round_trip_back_to_expr_partitioned_by() {
+        let window = Window::sliding_partitioned(
+            TimeUnit::Seconds,
+            10,
+            Some(15),
+            vec![Expr::Identifier(Ident::new("k"))],
+        );
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));

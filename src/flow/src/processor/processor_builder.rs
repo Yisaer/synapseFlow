@@ -1415,10 +1415,11 @@ fn create_processor_from_plan_node(
         )),
         PhysicalPlan::CountWindow(count_window) => {
             BatchProcessor::validate_batch_config(Some(count_window.count as usize), None)?;
-            let processor = BatchProcessor::new_with_channel_capacities(
+            let processor = BatchProcessor::new_partitioned_with_channel_capacities(
                 processor_id.clone(),
                 Some(count_window.count as usize),
                 None,
+                count_window.partition_by_scalars.clone(),
                 channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(

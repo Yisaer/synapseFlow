@@ -130,6 +130,8 @@ impl StreamingAggregationRewrite {
                 let spec = StreamingWindowSpec::Tumbling {
                     time_unit: window.time_unit,
                     length: window.length,
+                    partition_by_exprs: window.partition_by_exprs.clone(),
+                    partition_by_scalars: window.partition_by_scalars.clone(),
                 };
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)
@@ -137,6 +139,8 @@ impl StreamingAggregationRewrite {
             PhysicalPlan::CountWindow(window) => {
                 let spec = StreamingWindowSpec::Count {
                     count: window.count,
+                    partition_by_exprs: window.partition_by_exprs.clone(),
+                    partition_by_scalars: window.partition_by_scalars.clone(),
                 };
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)
@@ -146,6 +150,8 @@ impl StreamingAggregationRewrite {
                     time_unit: window.time_unit,
                     lookback: window.lookback,
                     lookahead: window.lookahead,
+                    partition_by_exprs: window.partition_by_exprs.clone(),
+                    partition_by_scalars: window.partition_by_scalars.clone(),
                 };
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)

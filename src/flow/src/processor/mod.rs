@@ -46,6 +46,7 @@ pub mod table_scan_processor;
 pub mod tumbling_window_processor;
 pub mod watermark_processor;
 pub(crate) mod window_metadata;
+pub(crate) mod window_partition;
 
 pub use aggregation_processor::AggregationProcessor;
 pub use barrier_processor::BarrierProcessor;

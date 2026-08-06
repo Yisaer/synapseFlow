@@ -29,6 +29,7 @@ use crate::processor::processor_state::ProcessorState;
 use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
 use datatypes::{ConcreteDatatype, Schema};
+use sqlparser::ast::Expr;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -697,7 +698,11 @@ fn create_physical_window_with_builder(
     }
 
     let physical = match &logical_window.spec {
-        LogicalWindowSpec::Tumbling { time_unit, length } => {
+        LogicalWindowSpec::Tumbling {
+            time_unit,
+            length,
+            partition_by,
+        } => {
             let watermark_index = builder.allocate_index();
             let watermark_config = WatermarkConfig::Tumbling {
                 time_unit: *time_unit,
@@ -718,20 +723,31 @@ fn create_physical_window_with_builder(
                 ))
             };
             let index = builder.allocate_index();
-            let tumbling = crate::planner::physical::PhysicalTumblingWindow::new(
+            let partition_by_scalars =
+                compile_window_partition_by(partition_by, bindings, registries)?;
+            let tumbling = crate::planner::physical::PhysicalTumblingWindow::new_partitioned(
                 *time_unit,
                 *length,
+                partition_by.clone(),
+                partition_by_scalars,
                 vec![Arc::new(watermark_plan)],
                 index,
             );
             PhysicalPlan::TumblingWindow(tumbling)
         }
-        LogicalWindowSpec::Count { count } => {
+        LogicalWindowSpec::Count {
+            count,
+            partition_by,
+        } => {
             let physical_children =
                 wrap_eventtime_lifecycle_children(physical_children, options, builder);
             let index = builder.allocate_index();
-            let count_window = crate::planner::physical::PhysicalCountWindow::new(
+            let partition_by_scalars =
+                compile_window_partition_by(partition_by, bindings, registries)?;
+            let count_window = crate::planner::physical::PhysicalCountWindow::new_partitioned(
                 *count,
+                partition_by.clone(),
+                partition_by_scalars,
                 physical_children,
                 index,
             );
@@ -741,6 +757,7 @@ fn create_physical_window_with_builder(
             time_unit,
             lookback,
             lookahead,
+            partition_by,
         } => {
             let watermark_index = builder.allocate_index();
             let watermark_config = WatermarkConfig::Sliding {
@@ -764,11 +781,15 @@ fn create_physical_window_with_builder(
             };
             let sliding_children = vec![Arc::new(watermark_plan)];
             let index = builder.allocate_index();
+            let partition_by_scalars =
+                compile_window_partition_by(partition_by, bindings, registries)?;
 
-            let sliding = crate::planner::physical::PhysicalSlidingWindow::new(
+            let sliding = crate::planner::physical::PhysicalSlidingWindow::new_partitioned(
                 *time_unit,
                 *lookback,
                 *lookahead,
+                partition_by.clone(),
+                partition_by_scalars,
                 sliding_children,
                 index,
             );
@@ -794,17 +815,8 @@ fn create_physical_window_with_builder(
             )
             .map_err(|err| err.to_string())?;
 
-            let mut partition_by_scalars = Vec::with_capacity(partition_by.len());
-            for expr in partition_by {
-                partition_by_scalars.push(
-                    convert_expr_to_scalar_with_bindings_and_custom_registry(
-                        expr,
-                        bindings,
-                        registries.custom_func_registry().as_ref(),
-                    )
-                    .map_err(|err| err.to_string())?,
-                );
-            }
+            let partition_by_scalars =
+                compile_window_partition_by(partition_by, bindings, registries)?;
 
             let index = builder.allocate_index();
             let state = crate::planner::physical::PhysicalStateWindow::new(
@@ -849,6 +861,25 @@ fn wrap_eventtime_lifecycle_children(
             watermark_index,
         ),
     ))]
+}
+
+fn compile_window_partition_by(
+    partition_by: &[Expr],
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+) -> Result<Vec<ScalarExpr>, String> {
+    let mut scalars = Vec::with_capacity(partition_by.len());
+    for expr in partition_by {
+        scalars.push(
+            convert_expr_to_scalar_with_bindings_and_custom_registry(
+                expr,
+                bindings,
+                registries.custom_func_registry().as_ref(),
+            )
+            .map_err(|err| err.to_string())?,
+        );
+    }
+    Ok(scalars)
 }
 
 fn create_physical_aggregation_with_builder(

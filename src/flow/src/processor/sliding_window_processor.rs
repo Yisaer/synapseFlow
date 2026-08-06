@@ -3,6 +3,7 @@
 //! Processing-time mode assumes tuple timestamps are non-decreasing.
 //! Window flushing for lookahead windows is driven by incoming watermarks.
 
+use crate::expr::ScalarExpr;
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
 use crate::processor::base::{
@@ -11,11 +12,12 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::window_metadata;
+use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 #[cfg(test)]
@@ -27,6 +29,7 @@ pub struct SlidingWindowProcessor {
     id: String,
     lookback: Duration,
     lookahead: Option<Duration>,
+    partition_by_scalars: Vec<ScalarExpr>,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -56,10 +59,12 @@ impl SlidingWindowProcessor {
         let lookahead = match physical.time_unit {
             TimeUnit::Seconds => physical.lookahead.map(Duration::from_secs),
         };
+        let partition_by_scalars = physical.partition_by_scalars.clone();
         Self {
             id: id.into(),
             lookback,
             lookahead,
+            partition_by_scalars,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -98,11 +103,13 @@ impl Processor for SlidingWindowProcessor {
 
         let lookback = self.lookback;
         let lookahead = self.lookahead;
+        let partition_by_scalars = self.partition_by_scalars.clone();
 
         let stats = Arc::clone(&self.stats);
-        let mut state = ProcessingState::new(
+        let mut state = PartitionedProcessingState::new(
             lookback,
             lookahead,
+            partition_by_scalars,
             output.clone(),
             channel_capacities.data,
             Arc::clone(&stats),
@@ -222,6 +229,90 @@ impl Processor for SlidingWindowProcessor {
     }
 }
 
+struct PartitionedProcessingState {
+    state_ids: HashMap<PartitionKey, usize>,
+    states: Vec<ProcessingState>,
+    lookback: Duration,
+    lookahead: Option<Duration>,
+    partition_by_scalars: Vec<ScalarExpr>,
+    output: LinkOutput<StreamData>,
+    data_channel_capacity: usize,
+    stats: Arc<ProcessorStats>,
+}
+
+impl PartitionedProcessingState {
+    fn new(
+        lookback: Duration,
+        lookahead: Option<Duration>,
+        partition_by_scalars: Vec<ScalarExpr>,
+        output: LinkOutput<StreamData>,
+        data_channel_capacity: usize,
+        stats: Arc<ProcessorStats>,
+    ) -> Self {
+        Self {
+            state_ids: HashMap::new(),
+            states: Vec::new(),
+            lookback,
+            lookahead,
+            partition_by_scalars,
+            output,
+            data_channel_capacity,
+            stats,
+        }
+    }
+
+    fn record_in(&self, rows: u64) {
+        self.stats.record_in(rows);
+    }
+
+    async fn add_collection(
+        &mut self,
+        collection: Box<dyn crate::model::Collection>,
+    ) -> Result<(), ProcessorError> {
+        let rows = collection
+            .into_rows()
+            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
+        for tuple in rows {
+            let partition_key =
+                eval_partition_key(&self.partition_by_scalars, &tuple, "slidingwindow")
+                    .map_err(ProcessorError::ProcessingError)?;
+            self.state_for(partition_key).add_tuple(tuple).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
+        for state in &mut self.states {
+            state.flush_up_to(watermark).await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
+        for state in &mut self.states {
+            state.flush_all().await?;
+        }
+        Ok(())
+    }
+
+    fn state_for(&mut self, key: PartitionKey) -> &mut ProcessingState {
+        if let Some(id) = self.state_ids.get(&key).copied() {
+            return &mut self.states[id];
+        }
+
+        let id = self.states.len();
+        self.state_ids.insert(key, id);
+        self.states.push(ProcessingState::new(
+            self.lookback,
+            self.lookahead,
+            self.output.clone(),
+            self.data_channel_capacity,
+            Arc::clone(&self.stats),
+        ));
+        &mut self.states[id]
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WindowRequest {
     start: SystemTime,
@@ -259,20 +350,10 @@ impl ProcessingState {
         }
     }
 
-    fn record_in(&self, rows: u64) {
+    async fn add_tuple(&mut self, tuple: crate::model::Tuple) -> Result<(), ProcessorError> {
         match self {
-            ProcessingState::WithLookahead(state) => state.stats.record_in(rows),
-            ProcessingState::WithoutLookahead(state) => state.stats.record_in(rows),
-        }
-    }
-
-    async fn add_collection(
-        &mut self,
-        collection: Box<dyn crate::model::Collection>,
-    ) -> Result<(), ProcessorError> {
-        match self {
-            ProcessingState::WithLookahead(state) => state.add_collection(collection).await,
-            ProcessingState::WithoutLookahead(state) => state.add_collection(collection).await,
+            ProcessingState::WithLookahead(state) => state.add_tuple(tuple).await,
+            ProcessingState::WithoutLookahead(state) => state.add_tuple(tuple).await,
         }
     }
 
@@ -315,22 +396,13 @@ impl ProcessingWithoutLookaheadState {
         }
     }
 
-    async fn add_collection(
-        &mut self,
-        collection: Box<dyn crate::model::Collection>,
-    ) -> Result<(), ProcessorError> {
-        let rows = collection
-            .into_rows()
-            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
-        for tuple in rows {
-            let t = tuple.timestamp;
-            self.rows.push_back(tuple);
-            let start = t
-                .checked_sub(self.lookback)
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            self.emit_window(start, t).await?;
-        }
-        Ok(())
+    async fn add_tuple(&mut self, tuple: crate::model::Tuple) -> Result<(), ProcessorError> {
+        let t = tuple.timestamp;
+        self.rows.push_back(tuple);
+        let start = t
+            .checked_sub(self.lookback)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        self.emit_window(start, t).await
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
@@ -408,22 +480,14 @@ impl ProcessingWithLookaheadState {
         }
     }
 
-    async fn add_collection(
-        &mut self,
-        collection: Box<dyn crate::model::Collection>,
-    ) -> Result<(), ProcessorError> {
-        let rows = collection
-            .into_rows()
-            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
-        for tuple in rows {
-            let t = tuple.timestamp;
-            self.rows.push_back(tuple);
-            let start = t
-                .checked_sub(self.lookback)
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let end = t + self.lookahead;
-            self.pending.push_back(WindowRequest { start, end });
-        }
+    async fn add_tuple(&mut self, tuple: crate::model::Tuple) -> Result<(), ProcessorError> {
+        let t = tuple.timestamp;
+        self.rows.push_back(tuple);
+        let start = t
+            .checked_sub(self.lookback)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let end = t + self.lookahead;
+        self.pending.push_back(WindowRequest { start, end });
         Ok(())
     }
 

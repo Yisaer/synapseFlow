@@ -12,12 +12,14 @@ use crate::processor::{
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 
 /// Time-driven tumbling window implementation.
 pub struct StreamingTumblingAggregationProcessor {
@@ -30,6 +32,7 @@ pub struct StreamingTumblingAggregationProcessor {
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
+    partition_by_scalars: Vec<crate::expr::ScalarExpr>,
     len_secs: u64,
     stats: Arc<ProcessorStats>,
 }
@@ -56,6 +59,13 @@ impl StreamingTumblingAggregationProcessor {
     ) -> Result<Self, ProcessorError> {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        let partition_by_scalars = match &physical.window {
+            StreamingWindowSpec::Tumbling {
+                partition_by_scalars,
+                ..
+            } => partition_by_scalars.clone(),
+            _ => Vec::new(),
+        };
         let len_secs = Self::extract_window_length(physical.as_ref())?;
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
@@ -72,6 +82,7 @@ impl StreamingTumblingAggregationProcessor {
             control_output,
             channel_capacities,
             group_by_meta,
+            partition_by_scalars,
             len_secs,
             stats: Arc::new(ProcessorStats::default()),
         })
@@ -84,6 +95,7 @@ impl StreamingTumblingAggregationProcessor {
             StreamingWindowSpec::Tumbling {
                 time_unit: _,
                 length,
+                ..
             } => Ok(*length),
             other => Err(ProcessorError::InvalidConfiguration(format!(
                 "streaming tumbling aggregation requires tumbling window spec, got {other:?}",
@@ -117,15 +129,17 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
+        let partition_by_scalars = self.partition_by_scalars.clone();
         let stats = Arc::clone(&self.stats);
         let len_secs = self.len_secs;
 
         ProcessorStart::ready(spawner.spawn(async move {
-            let mut window_state = ProcessingWindowState::new(
+            let mut window_state = PartitionedProcessingWindowState::new(
                 len_secs,
                 Arc::clone(&physical),
                 Arc::clone(&aggregate_registry),
                 group_by_meta.clone(),
+                partition_by_scalars,
             );
 
             loop {
@@ -395,6 +409,86 @@ impl ProcessingWindowState {
     }
 }
 
+struct PartitionedProcessingWindowState {
+    state_ids: HashMap<PartitionKey, usize>,
+    states: Vec<ProcessingWindowState>,
+    len_secs: u64,
+    physical: Arc<PhysicalStreamingAggregation>,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
+    group_by_meta: Vec<GroupByMeta>,
+    partition_by_scalars: Vec<crate::expr::ScalarExpr>,
+}
+
+impl PartitionedProcessingWindowState {
+    fn new(
+        len_secs: u64,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        group_by_meta: Vec<GroupByMeta>,
+        partition_by_scalars: Vec<crate::expr::ScalarExpr>,
+    ) -> Self {
+        Self {
+            state_ids: HashMap::new(),
+            states: Vec::new(),
+            len_secs,
+            physical,
+            aggregate_registry,
+            group_by_meta,
+            partition_by_scalars,
+        }
+    }
+
+    fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), String> {
+        let partition_key = eval_partition_key(&self.partition_by_scalars, row, "tumblingwindow")?;
+        self.get_or_insert(partition_key).add_row(row)
+    }
+
+    async fn flush_until(
+        &mut self,
+        watermark: SystemTime,
+        output: &LinkOutput<StreamData>,
+        data_channel_capacity: usize,
+        stats: &Arc<ProcessorStats>,
+    ) -> Result<(), ProcessorError> {
+        for state in &mut self.states {
+            state
+                .flush_until(watermark, output, data_channel_capacity, stats)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_all(
+        &mut self,
+        output: &LinkOutput<StreamData>,
+        data_channel_capacity: usize,
+        stats: &Arc<ProcessorStats>,
+    ) -> Result<(), ProcessorError> {
+        for state in &mut self.states {
+            state
+                .flush_all(output, data_channel_capacity, stats)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn get_or_insert(&mut self, key: PartitionKey) -> &mut ProcessingWindowState {
+        if let Some(id) = self.state_ids.get(&key).copied() {
+            return &mut self.states[id];
+        }
+
+        let id = self.states.len();
+        self.state_ids.insert(key, id);
+        self.states.push(ProcessingWindowState::new(
+            self.len_secs,
+            Arc::clone(&self.physical),
+            Arc::clone(&self.aggregate_registry),
+            self.group_by_meta.clone(),
+        ));
+        &mut self.states[id]
+    }
+}
+
 fn window_start_secs_str(ts: SystemTime, len_secs: u64) -> Result<u64, String> {
     let secs = ts
         .duration_since(UNIX_EPOCH)
@@ -480,6 +574,8 @@ mod tests {
             StreamingWindowSpec::Tumbling {
                 time_unit: TimeUnit::Seconds,
                 length: 10,
+                partition_by_exprs: Vec::new(),
+                partition_by_scalars: Vec::new(),
             },
             mappings,
             vec![Expr::Nested(Box::new(Expr::Identifier(Ident::new("b"))))],

@@ -1,7 +1,7 @@
 use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::Collection;
-use crate::planner::physical::PhysicalStreamingAggregation;
+use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
@@ -13,9 +13,12 @@ use crate::processor::{
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 
 /// Tracks progress for a count-based window.
 struct CountWindowState {
@@ -61,6 +64,7 @@ pub struct StreamingCountAggregationProcessor {
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
+    partition_by_scalars: Vec<crate::expr::ScalarExpr>,
     target: u64,
     stats: Arc<ProcessorStats>,
 }
@@ -90,6 +94,13 @@ impl StreamingCountAggregationProcessor {
     ) -> Self {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        let partition_by_scalars = match &physical.window {
+            StreamingWindowSpec::Count {
+                partition_by_scalars,
+                ..
+            } => partition_by_scalars.clone(),
+            _ => Vec::new(),
+        };
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -105,6 +116,7 @@ impl StreamingCountAggregationProcessor {
             control_output,
             channel_capacities,
             group_by_meta,
+            partition_by_scalars,
             target,
             stats: Arc::new(ProcessorStats::default()),
         }
@@ -128,6 +140,41 @@ impl StreamingCountAggregationProcessor {
                     );
                 }
                 window_state.reset();
+            }
+        }
+        Ok(outputs)
+    }
+
+    fn process_partitioned_collection(
+        physical: &Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: &Arc<AggregateFunctionRegistry>,
+        group_by_meta: &[GroupByMeta],
+        partition_by_scalars: &[crate::expr::ScalarExpr],
+        target: u64,
+        partitions: &mut PartitionedCountAggregationState,
+        collection: &dyn Collection,
+    ) -> Result<Vec<Box<dyn Collection>>, String> {
+        let mut outputs = Vec::new();
+        for row in collection.rows() {
+            let partition_key = eval_partition_key(partition_by_scalars, row, "countwindow")?;
+            let state = partitions.get_or_insert(
+                partition_key,
+                target,
+                Arc::clone(physical),
+                Arc::clone(aggregate_registry),
+                group_by_meta.to_vec(),
+            );
+            let now = row.timestamp;
+            state.worker.update_groups(row)?;
+
+            if let Some(opened_at) = state.window.register_row_and_check_finalize(now) {
+                if let Some(batch) = state.worker.finalize_current_window()? {
+                    outputs.push(
+                        window_metadata::attach_from_system_time(batch, opened_at, now)
+                            .map_err(|err| err.to_string())?,
+                    );
+                }
+                state.window.reset();
             }
         }
         Ok(outputs)
@@ -159,12 +206,14 @@ impl Processor for StreamingCountAggregationProcessor {
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
+        let partition_by_scalars = self.partition_by_scalars.clone();
         let target = self.target;
         let stats = Arc::clone(&self.stats);
 
         ProcessorStart::ready(spawner.spawn(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
             let mut window_state = CountWindowState::new(target);
+            let mut partitioned_state = PartitionedCountAggregationState::new();
 
             loop {
                 tokio::select! {
@@ -192,11 +241,24 @@ impl Processor for StreamingCountAggregationProcessor {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
-                                        match StreamingCountAggregationProcessor::process_collection(
-                                            &mut worker,
-                                            &mut window_state,
-                                            collection.as_ref(),
-                                        ) {
+                                        let outputs_result = if partition_by_scalars.is_empty() {
+                                            StreamingCountAggregationProcessor::process_collection(
+                                                &mut worker,
+                                                &mut window_state,
+                                                collection.as_ref(),
+                                            )
+                                        } else {
+                                            StreamingCountAggregationProcessor::process_partitioned_collection(
+                                                &worker.physical,
+                                                &worker.aggregate_registry,
+                                                &worker.group_by_meta,
+                                                &partition_by_scalars,
+                                                target,
+                                                &mut partitioned_state,
+                                                collection.as_ref(),
+                                            )
+                                        };
+                                        match outputs_result {
                                             Ok(outputs) => {
                                                 for out in outputs {
                                                     stats.record_out(out.num_rows() as u64);
@@ -286,5 +348,45 @@ impl Processor for StreamingCountAggregationProcessor {
         R: Into<LinkReceiver<ControlSignal>>,
     {
         self.control_inputs.push(receiver.into());
+    }
+}
+
+struct PartitionCountAggregationState {
+    window: CountWindowState,
+    worker: AggregationWorker,
+}
+
+struct PartitionedCountAggregationState {
+    state_ids: HashMap<PartitionKey, usize>,
+    states: Vec<PartitionCountAggregationState>,
+}
+
+impl PartitionedCountAggregationState {
+    fn new() -> Self {
+        Self {
+            state_ids: HashMap::new(),
+            states: Vec::new(),
+        }
+    }
+
+    fn get_or_insert(
+        &mut self,
+        key: PartitionKey,
+        target: u64,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        group_by_meta: Vec<GroupByMeta>,
+    ) -> &mut PartitionCountAggregationState {
+        if let Some(id) = self.state_ids.get(&key).copied() {
+            return &mut self.states[id];
+        }
+
+        let id = self.states.len();
+        self.state_ids.insert(key, id);
+        self.states.push(PartitionCountAggregationState {
+            window: CountWindowState::new(target),
+            worker: AggregationWorker::new(physical, aggregate_registry, group_by_meta),
+        });
+        &mut self.states[id]
     }
 }

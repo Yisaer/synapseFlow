@@ -10,6 +10,9 @@ only. The parser recognizes these functions and records the single allowed windo
 - Only one window function is allowed per statement.
 - Window function names are case-insensitive.
 - Non-window `GROUP BY` expressions are preserved in `SelectStmt.group_by_exprs`.
+- Window-level `OVER (PARTITION BY ...)` expressions belong to the window spec and affect window
+  formation before aggregation. Regular `GROUP BY` keys are applied after a window has been formed.
+  See `docs/syntax/windows/window_partitioning.md`.
 
 ## Supported Window Functions
 
@@ -19,6 +22,10 @@ only. The parser recognizes these functions and records the single allowed windo
 - `statewindow(<open_expr>, <emit_expr>) [OVER (PARTITION BY <expr> [, <expr> ...])]` — stateful
   open/emit window.
 - `eoswindow()` — bounded table-scan window that closes when the source reaches end-of-stream.
+
+Target window partitioning support extends `OVER (PARTITION BY ...)` to `tumblingwindow`,
+`countwindow`, and `slidingwindow`. Current runtime support is limited to `statewindow` until the
+parser, planner, and processor rollout is complete.
 
 ## Window Metadata Functions
 
@@ -42,6 +49,13 @@ For `statewindow`:
 - `open_expr` and `emit_expr` are general SQL expressions (typically boolean conditions).
 - `OVER` is optional. When present, it supports **only** `PARTITION BY <expr> [, <expr> ...]`.
 - `ORDER BY`, window frames, named windows, and other `OVER` features are not supported.
+
+For target general window partitioning:
+- `OVER (PARTITION BY <expr> [, <expr> ...])` creates independent window state per partition key.
+- The partition key is evaluated before rows are assigned to count, time, sliding, or state windows.
+- Partition keys are not projected automatically. Select them explicitly when they are needed in the
+  output.
+- Regular `GROUP BY` keys still group aggregate results inside each emitted window.
 
 For `eoswindow`:
 - No arguments are accepted.
@@ -74,6 +88,16 @@ SELECT * FROM stream GROUP BY slidingwindow('ss', 10, 15);
 SELECT user_id, sum(amount)
 FROM payments
 GROUP BY user_id, tumblingwindow('ss', 10);
+
+-- Target semantics: partitioned count windows form independently per user_id
+SELECT user_id, count(*)
+FROM payments
+GROUP BY countwindow(500) OVER (PARTITION BY user_id);
+
+-- Target semantics: window partitioning and aggregation grouping are separate stages
+SELECT region, count(*)
+FROM payments
+GROUP BY tumblingwindow('ss', 10) OVER (PARTITION BY user_id), region;
 
 -- Partitioned state window
 SELECT *

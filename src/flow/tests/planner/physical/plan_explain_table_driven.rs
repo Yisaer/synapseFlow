@@ -750,6 +750,63 @@ fn explain_json_string(sql: &str) -> String {
 }
 
 #[test]
+fn plan_explain_window_group_by_and_over_partition_by_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "count_window_group_by_only_streaming",
+            sql: "SELECT k2, sum(a) FROM stream GROUP BY countwindow(4), k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[k2]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[k2; col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[k2]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[k2; col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "count_window_over_partition_by_only_streaming",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4) OVER (PARTITION BY k1)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4","partition_by=k1"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4","partition_by=k1"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "count_window_group_by_and_over_partition_by_streaming",
+            sql: "SELECT k2, sum(a) FROM stream GROUP BY countwindow(4) OVER (PARTITION BY k1), k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4","partition_by=k1"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[k2]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[k2; col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[k2]","window=count","count=4","partition_by=k1"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[k2; col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "count_window_group_by_and_over_partition_by_non_streaming",
+            sql: "SELECT k2, ndv(a) FROM stream GROUP BY countwindow(4) OVER (PARTITION BY k1), k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4","partition_by=k1"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[ndv(a) -> col_1]","group_by=[k2]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[k2; col_1 as ndv(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalCountWindow_2","info":["kind=count","count=4","partition_by=k1"],"operator":"PhysicalCountWindow"}],"id":"PhysicalAggregation_3","info":["calls=[ndv(a) -> col_1]","group_by=[k2]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_4","info":["fields=[k2; col_1 as ndv(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "tumbling_window_group_by_and_over_partition_by_streaming",
+            sql: "SELECT k2, sum(a) FROM stream GROUP BY tumblingwindow('ss', 10) OVER (PARTITION BY k1), k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=tumbling","unit=Seconds","length=10","partition_by=k1"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[k2]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[k2; col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=tumbling","unit=Seconds","length=10","mode=processing_time","interval=10"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[k2]","window=tumbling","unit=Seconds","length=10","partition_by=k1"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[k2; col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "sliding_window_group_by_and_over_partition_by_streaming",
+            sql: "SELECT k2, sum(a) FROM stream GROUP BY slidingwindow('ss', 10, 15) OVER (PARTITION BY k1), k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=15","partition_by=k1"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[k2]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[k2; col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=15","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[k2]","window=sliding","unit=Seconds","lookback=10","lookahead=15","partition_by=k1"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[k2; col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+
+    let sql = "SELECT k1 AS k, sum(a) FROM stream GROUP BY countwindow(4) OVER (PARTITION BY k)";
+    let err =
+        explain_json_result(sql, vec![]).expect_err("window partition alias must be rejected");
+    println!("{sql}");
+    println!("{err}");
+    assert!(
+        err.contains("aliases in window definitions are not supported yet"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn plan_explain_table_scan_table_driven() {
     struct Case {
         name: &'static str,
