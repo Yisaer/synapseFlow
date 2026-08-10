@@ -1,5 +1,6 @@
 use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Location, Token, TokenWithLocation, Tokenizer};
 
 use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use crate::aggregate_transformer::transform_aggregate_functions;
@@ -9,6 +10,7 @@ use crate::select_stmt::{OrderByItem, SelectField, SelectStmt};
 use crate::stateful_registry::{StatefulRegistry, default_stateful_registry};
 use crate::stateful_transformer::transform_stateful_functions;
 use crate::visitor::TableInfoVisitor;
+use crate::window::Window;
 use std::sync::Arc;
 
 /// SQL Parser based on StreamDialect
@@ -44,9 +46,11 @@ impl StreamSqlParser {
     /// This is the main entry point for parsing SQL with StreamDialect
     /// Automatically transforms aggregate functions during parsing
     pub fn parse(&self, sql: &str) -> Result<SelectStmt, String> {
+        let sliding_over = preprocess_sliding_window_over(sql, &self.dialect)?;
+
         // Create a parser with StreamDialect
-        let parser =
-            Parser::parse_sql(&self.dialect, sql).map_err(|e| format!("Parse error: {}", e))?;
+        let parser = Parser::parse_sql(&self.dialect, &sliding_over.sql)
+            .map_err(|e| format!("Parse error: {}", e))?;
 
         if parser.len() != 1 {
             return Err("Expected exactly one SQL statement".to_string());
@@ -55,8 +59,28 @@ impl StreamSqlParser {
         let statement = &parser[0];
 
         // Collect window + non-window GROUP BY expressions before we move on
-        let (window, group_by_exprs) = crate::dialect::collect_window_and_group_by_exprs(statement)
-            .map_err(|e| format!("Dialect processing error: {}", e))?;
+        let (mut window, group_by_exprs) =
+            crate::dialect::collect_window_and_group_by_exprs(statement)
+                .map_err(|e| format!("Dialect processing error: {}", e))?;
+        if let Some(trigger_condition) = sliding_over.trigger_condition {
+            window = match window {
+                Some(sliding @ Window::Sliding { .. }) => {
+                    Some(sliding.with_sliding_trigger_condition(Some(Box::new(trigger_condition))))
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "slidingwindow OVER WHEN was parsed but no GROUP BY slidingwindow was found; found {:?}",
+                        other,
+                    ));
+                }
+                None => {
+                    return Err(
+                        "slidingwindow OVER WHEN was parsed but no GROUP BY window function was found"
+                            .to_string(),
+                    );
+                }
+            };
+        }
 
         // Extract raw select fields from the statement (before transformation)
         let mut select_stmt = self.extract_select_fields(statement)?;
@@ -181,6 +205,254 @@ fn projection_field_name(expr: &Expr) -> String {
             .join("."),
         _ => expr.to_string(),
     }
+}
+
+struct SlidingOverPreprocessResult {
+    sql: String,
+    trigger_condition: Option<Expr>,
+}
+
+struct Replacement {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// Preprocess SQL to extract `OVER (WHEN <expr>)` from slidingwindow and remove it
+/// from the SQL text so the standard parser can handle the rest.
+///
+/// Handles three cases:
+/// - `slidingwindow(...) OVER (WHEN <expr> PARTITION BY ...)` → extracts WHEN, keeps PARTITION BY
+/// - `slidingwindow(...) OVER (WHEN <expr>)` → extracts WHEN, removes entire OVER clause
+/// - `slidingwindow(...)` (no OVER, or OVER without WHEN) → no-op
+fn preprocess_sliding_window_over(
+    sql: &str,
+    dialect: &StreamDialect,
+) -> Result<SlidingOverPreprocessResult, String> {
+    let mut tokenizer = Tokenizer::new(dialect, sql);
+    let tokens = tokenizer
+        .tokenize_with_location()
+        .map_err(|err| format!("Parse error: {err}"))?;
+    let non_ws = non_whitespace_token_indexes(&tokens);
+    let mut replacements = Vec::new();
+    let mut trigger_condition = None;
+
+    for &token_idx in &non_ws {
+        if !is_word(&tokens[token_idx].token, "slidingwindow") {
+            continue;
+        }
+
+        let Some(fn_lparen) = next_non_whitespace(&tokens, token_idx + 1) else {
+            continue;
+        };
+        if !matches!(tokens[fn_lparen].token, Token::LParen) {
+            continue;
+        }
+        let fn_rparen = matching_rparen(&tokens, fn_lparen)?;
+
+        let mut cursor = next_non_whitespace(&tokens, fn_rparen + 1);
+        if let Some(filter_idx) = cursor
+            && is_word(&tokens[filter_idx].token, "filter")
+        {
+            let Some(filter_lparen) = next_non_whitespace(&tokens, filter_idx + 1) else {
+                return Err("slidingwindow FILTER requires parentheses".to_string());
+            };
+            if !matches!(tokens[filter_lparen].token, Token::LParen) {
+                return Err("slidingwindow FILTER requires parentheses".to_string());
+            }
+            let filter_rparen = matching_rparen(&tokens, filter_lparen)?;
+            cursor = next_non_whitespace(&tokens, filter_rparen + 1);
+        }
+
+        let Some(over_idx) = cursor else {
+            continue;
+        };
+        if !is_word(&tokens[over_idx].token, "over") {
+            continue;
+        }
+        let Some(over_lparen) = next_non_whitespace(&tokens, over_idx + 1) else {
+            return Err("slidingwindow OVER requires parentheses".to_string());
+        };
+        if !matches!(tokens[over_lparen].token, Token::LParen) {
+            return Err("slidingwindow OVER requires parentheses".to_string());
+        }
+        let over_rparen = matching_rparen(&tokens, over_lparen)?;
+        let Some(first_over_token) = next_non_whitespace(&tokens, over_lparen + 1) else {
+            continue;
+        };
+        if !is_word(&tokens[first_over_token].token, "when") {
+            continue;
+        }
+        if trigger_condition.is_some() {
+            return Err("Only one slidingwindow OVER WHEN clause is allowed".to_string());
+        }
+
+        let Some(expr_start_token) = next_non_whitespace(&tokens, first_over_token + 1) else {
+            return Err("slidingwindow OVER WHEN requires an expression".to_string());
+        };
+        if expr_start_token >= over_rparen {
+            return Err("slidingwindow OVER WHEN requires an expression".to_string());
+        }
+
+        let partition_token = find_top_level_partition_by(&tokens, expr_start_token, over_rparen)?;
+        let expr_end_token = partition_token.unwrap_or(over_rparen);
+        let expr_start = token_start_offset(sql, &tokens[expr_start_token])?;
+        let expr_end = token_start_offset(sql, &tokens[expr_end_token])?;
+        let expr_sql = sql
+            .get(expr_start..expr_end)
+            .ok_or_else(|| "failed to slice slidingwindow OVER WHEN expression".to_string())?
+            .trim();
+        if expr_sql.is_empty() {
+            return Err("slidingwindow OVER WHEN requires an expression".to_string());
+        }
+        trigger_condition = Some(parse_over_when_expr(expr_sql, dialect)?);
+
+        if partition_token.is_some() {
+            // Remove `WHEN <expr>` portion (including the WHEN keyword),
+            // leaving `OVER (PARTITION BY ...)` intact.
+            let when_start = token_start_offset(sql, &tokens[first_over_token])?;
+            replacements.push(Replacement {
+                start: when_start,
+                end: expr_end,
+                text: String::new(),
+            });
+        } else {
+            // Remove entire `OVER (WHEN <expr>)`
+            let over_start = token_start_offset(sql, &tokens[over_idx])?;
+            let over_end = token_start_offset(sql, &tokens[over_rparen])?.saturating_add(1);
+            replacements.push(Replacement {
+                start: over_start,
+                end: over_end,
+                text: String::new(),
+            });
+        }
+    }
+
+    let mut normalized = sql.to_string();
+    for replacement in replacements.iter().rev() {
+        normalized.replace_range(replacement.start..replacement.end, &replacement.text);
+    }
+
+    Ok(SlidingOverPreprocessResult {
+        sql: normalized,
+        trigger_condition,
+    })
+}
+
+fn parse_over_when_expr(expr_sql: &str, dialect: &StreamDialect) -> Result<Expr, String> {
+    let sql = format!("SELECT {expr_sql}");
+    let statements =
+        Parser::parse_sql(dialect, &sql).map_err(|err| format!("Parse error: {err}"))?;
+    let Some(Statement::Query(query)) = statements.first() else {
+        return Err("failed to parse slidingwindow OVER WHEN expression".to_string());
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Err("failed to parse slidingwindow OVER WHEN expression".to_string());
+    };
+    let Some(item) = select.projection.first() else {
+        return Err("failed to parse slidingwindow OVER WHEN expression".to_string());
+    };
+    match item {
+        SelectItem::UnnamedExpr(expr) => Ok(expr.clone()),
+        _ => Err("slidingwindow OVER WHEN must be a scalar expression".to_string()),
+    }
+}
+
+fn non_whitespace_token_indexes(tokens: &[TokenWithLocation]) -> Vec<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, token)| (!is_whitespace(&token.token)).then_some(idx))
+        .collect()
+}
+
+fn next_non_whitespace(tokens: &[TokenWithLocation], start: usize) -> Option<usize> {
+    tokens
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(idx, token)| (!is_whitespace(&token.token)).then_some(idx))
+}
+
+fn is_whitespace(token: &Token) -> bool {
+    matches!(token, Token::Whitespace(_))
+}
+
+fn is_word(token: &Token, expected: &str) -> bool {
+    match token {
+        Token::Word(word) => word.value.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
+}
+
+fn matching_rparen(tokens: &[TokenWithLocation], lparen: usize) -> Result<usize, String> {
+    let mut depth = 0usize;
+    for (idx, token) in tokens.iter().enumerate().skip(lparen) {
+        match token.token {
+            Token::LParen => depth = depth.saturating_add(1),
+            Token::RParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("unclosed parentheses in slidingwindow clause".to_string())
+}
+
+fn find_top_level_partition_by(
+    tokens: &[TokenWithLocation],
+    start: usize,
+    end: usize,
+) -> Result<Option<usize>, String> {
+    let mut depth = 0usize;
+    let mut idx = start;
+    while idx < end {
+        match tokens[idx].token {
+            Token::LParen | Token::LBracket | Token::LBrace => depth = depth.saturating_add(1),
+            Token::RParen | Token::RBracket | Token::RBrace => depth = depth.saturating_sub(1),
+            _ => {
+                if depth == 0 && is_word(&tokens[idx].token, "partition") {
+                    let Some(by_idx) = next_non_whitespace(tokens, idx + 1) else {
+                        return Ok(None);
+                    };
+                    if by_idx < end && is_word(&tokens[by_idx].token, "by") {
+                        return Ok(Some(idx));
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+    Ok(None)
+}
+
+fn token_start_offset(sql: &str, token: &TokenWithLocation) -> Result<usize, String> {
+    location_to_byte_offset(sql, token.location).ok_or_else(|| {
+        format!(
+            "failed to resolve SQL token location at line {}, column {}",
+            token.location.line, token.location.column
+        )
+    })
+}
+
+fn location_to_byte_offset(sql: &str, location: Location) -> Option<usize> {
+    let mut line = 1u64;
+    let mut column = 1u64;
+    for (offset, ch) in sql.char_indices() {
+        if line == location.line && column == location.column {
+            return Some(offset);
+        }
+        if ch == '\n' {
+            line = line.saturating_add(1);
+            column = 1;
+        } else {
+            column = column.saturating_add(1);
+        }
+    }
+    (line == location.line && column == location.column).then_some(sql.len())
 }
 
 /// Convenience function to parse SQL and return SelectStmt
@@ -858,6 +1130,190 @@ mod source_info_tests {
                 assert_eq!(partition_by[1].to_string(), "k2");
             }
             other => panic!("expected state window, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_sliding_window_over_when() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 1)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+        assert!(select_stmt.group_by_exprs.is_empty());
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                lookback,
+                lookahead,
+                partition_by,
+                trigger_condition,
+                ..
+            }) => {
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, None);
+                assert!(partition_by.is_empty());
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+            }
+            other => panic!("expected sliding window with trigger condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_sliding_window_over_when_partition_by() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 1 PARTITION BY k)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+        assert!(select_stmt.group_by_exprs.is_empty());
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                lookback,
+                lookahead,
+                partition_by,
+                trigger_condition,
+                ..
+            }) => {
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, None);
+                assert_eq!(partition_by.len(), 1);
+                assert_eq!(partition_by[0].to_string(), "k");
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+            }
+            other => panic!(
+                "expected sliding window with trigger condition and partition, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_sliding_window_over_when_complex_expr() {
+        let parser = StreamSqlParser::new();
+        let sql =
+            "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 1 AND b = 0)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                trigger_condition, ..
+            }) => {
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1 AND b = 0".to_string()),
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_sliding_window_over_when_no_expr() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_err(), "expected error for empty WHEN expression");
+        assert!(result.unwrap_err().contains("requires an expression"));
+    }
+
+    #[test]
+    fn parse_sliding_window_over_when_with_lookahead() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10, 15) OVER (WHEN a > 1 PARTITION BY k1, k2)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                lookback,
+                lookahead,
+                partition_by,
+                trigger_condition,
+                ..
+            }) => {
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, Some(15));
+                assert_eq!(partition_by.len(), 2);
+                assert_eq!(partition_by[0].to_string(), "k1");
+                assert_eq!(partition_by[1].to_string(), "k2");
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+            }
+            other => panic!(
+                "expected sliding window with lookahead, trigger, and partition, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn parse_sliding_window_with_filter_and_over_when() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) FILTER (WHERE x > 0) OVER (WHEN a > 1)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                trigger_condition,
+                filter,
+                ..
+            }) => {
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+                assert_eq!(
+                    filter.as_ref().map(|e| e.to_string()),
+                    Some("x > 0".to_string()),
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_sliding_window_over_partition_by_without_when() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10, 15) OVER (PARTITION BY k)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                lookback,
+                lookahead,
+                partition_by,
+                trigger_condition,
+                ..
+            }) => {
+                assert_eq!(lookback, 10);
+                assert_eq!(lookahead, Some(15));
+                assert_eq!(partition_by.len(), 1);
+                assert_eq!(partition_by[0].to_string(), "k");
+                assert!(trigger_condition.is_none());
+            }
+            other => panic!("expected sliding window with partition, got {:?}", other),
         }
     }
 }

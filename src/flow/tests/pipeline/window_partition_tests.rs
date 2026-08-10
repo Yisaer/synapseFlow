@@ -527,3 +527,132 @@ async fn state_window_group_and_partition_pipeline_table_driven() {
         run_collection_window_partition_case(case).await;
     }
 }
+
+// coverage-covers: parser.window.sliding.over_when, pipeline.window.when, stream.window.sliding
+#[tokio::test]
+async fn sliding_window_when_pipeline_table_driven() {
+    let cases = vec![
+        WindowPartitionCase {
+            name: "sliding_when_non_trigger_in_buffer",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN a > 5)",
+            input_rows: vec![
+                serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 10, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![serde_json::json!([{"s": 13}])],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_only_trigger_emits",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN a > 5)",
+            input_rows: vec![
+                serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 4, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_partition_by",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN a > 5 PARTITION BY k1)",
+            input_rows: vec![
+                serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 10, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+                serde_json::json!({"a": 4, "k1": 2, "k2": 10, "m": 0, "event_ts": 5000}),
+                serde_json::json!({"a": 20, "k1": 2, "k2": 10, "m": 0, "event_ts": 7000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![
+                serde_json::json!([{"s": 13}]),
+                serde_json::json!([{"s": 24}]),
+            ],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_group_by",
+            sql: "SELECT k2, sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN a > 5), k2 ORDER BY k2",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "k1": 1, "k2": 1, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 10, "k1": 1, "k2": 2, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![serde_json::json!([{"k2": 1, "s": 1}, {"k2": 2, "s": 10}])],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_all_trigger",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN a > 0)",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 2, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![
+                serde_json::json!([{"s": 3}]),
+                serde_json::json!([{"s": 3}]),
+            ],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_lookback_only_non_trigger_in_buffer",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 5)",
+            input_rows: vec![
+                serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 10, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![serde_json::json!([{"s": 13}])],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_lookback_only_all_trigger",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 0)",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 2, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![
+                serde_json::json!([{"s": 1}]),
+                serde_json::json!([{"s": 3}]),
+            ],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_lookback_only_partition_by",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 5 PARTITION BY k1)",
+            input_rows: vec![
+                serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 10, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+                serde_json::json!({"a": 4, "k1": 2, "k2": 10, "m": 0, "event_ts": 5000}),
+                serde_json::json!({"a": 20, "k1": 2, "k2": 10, "m": 0, "event_ts": 7000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![
+                serde_json::json!([{"s": 13}]),
+                serde_json::json!([{"s": 24}]),
+            ],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
+            name: "sliding_when_lookback_only_group_by",
+            sql: "SELECT k2, sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 5), k2 ORDER BY k2",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "k1": 1, "k2": 1, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 10, "k1": 1, "k2": 2, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![serde_json::json!([
+                {"k2": 1, "s": 1},
+                {"k2": 2, "s": 10},
+            ])],
+            assert_no_extra_output: true,
+        },
+    ];
+
+    for case in cases {
+        run_window_partition_case(case).await;
+    }
+}

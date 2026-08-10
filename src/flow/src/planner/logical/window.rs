@@ -31,6 +31,9 @@ pub enum LogicalWindowSpec {
         /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
         /// When empty, the window is global (single partition).
         partition_by: Vec<Expr>,
+        /// Optional trigger condition extracted from `OVER (WHEN ...)`.
+        /// When absent, every input row triggers a sliding window emission.
+        trigger_condition: Option<Box<Expr>>,
     },
     State {
         open: Box<Expr>,
@@ -59,6 +62,12 @@ impl LogicalWindowSpec {
             LogicalWindowSpec::State { open, emit, .. } => {
                 exprs.push(open.as_ref());
                 exprs.push(emit.as_ref());
+            }
+            LogicalWindowSpec::Sliding {
+                trigger_condition: Some(cond),
+                ..
+            } => {
+                exprs.push(cond.as_ref());
             }
             LogicalWindowSpec::Tumbling { .. }
             | LogicalWindowSpec::Count { .. }

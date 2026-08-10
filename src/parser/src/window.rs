@@ -35,6 +35,9 @@ pub enum Window {
         /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
         /// When empty, the window is global (single partition).
         partition_by: Vec<Expr>,
+        /// Optional trigger condition extracted from `OVER (WHEN ...)`.
+        /// When absent, every input row triggers a sliding window emission.
+        trigger_condition: Option<Box<Expr>>,
         filter: Option<Box<Expr>>,
     },
     /// State window driven by two boolean conditions:
@@ -101,6 +104,7 @@ impl Window {
             lookback,
             lookahead,
             partition_by,
+            trigger_condition: None,
             filter: None,
         }
     }
@@ -149,12 +153,14 @@ impl Window {
                 lookback,
                 lookahead,
                 partition_by,
+                trigger_condition,
                 ..
             } => Window::Sliding {
                 time_unit,
                 lookback,
                 lookahead,
                 partition_by,
+                trigger_condition,
                 filter,
             },
             Window::State {
@@ -169,6 +175,27 @@ impl Window {
                 filter,
             },
             Window::Eos { .. } => Window::Eos { filter },
+        }
+    }
+
+    pub fn with_sliding_trigger_condition(self, trigger_condition: Option<Box<Expr>>) -> Self {
+        match self {
+            Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                partition_by,
+                filter,
+                ..
+            } => Window::Sliding {
+                time_unit,
+                lookback,
+                lookahead,
+                partition_by,
+                trigger_condition,
+                filter,
+            },
+            other => other,
         }
     }
 
@@ -873,5 +900,104 @@ mod tests {
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn sliding_window_with_trigger_condition() {
+        let window = Window::sliding(TimeUnit::Seconds, 10, None).with_sliding_trigger_condition(
+            Some(Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident::new("a"))),
+                op: sqlparser::ast::BinaryOperator::Gt,
+                right: Box::new(Expr::Value(Value::Number("1".to_string(), false))),
+            })),
+        );
+
+        match &window {
+            Window::Sliding {
+                trigger_condition, ..
+            } => {
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sliding_window_with_trigger_condition_and_partition_by() {
+        let window = Window::sliding_partitioned(
+            TimeUnit::Seconds,
+            10,
+            Some(15),
+            vec![Expr::Identifier(Ident::new("k"))],
+        )
+        .with_sliding_trigger_condition(Some(Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Identifier(Ident::new("a"))),
+            op: sqlparser::ast::BinaryOperator::Gt,
+            right: Box::new(Expr::Value(Value::Number("1".to_string(), false))),
+        })));
+
+        match &window {
+            Window::Sliding {
+                lookback,
+                lookahead,
+                partition_by,
+                trigger_condition,
+                ..
+            } => {
+                assert_eq!(*lookback, 10);
+                assert_eq!(*lookahead, Some(15));
+                assert_eq!(partition_by.len(), 1);
+                assert_eq!(partition_by[0].to_string(), "k");
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_sliding_trigger_condition_noop_on_non_sliding() {
+        let window = Window::tumbling(TimeUnit::Seconds, 10)
+            .with_sliding_trigger_condition(Some(Box::new(Expr::Identifier(Ident::new("a")))));
+
+        assert!(matches!(window, Window::Tumbling { .. }));
+    }
+
+    #[test]
+    fn sliding_window_with_filter_and_trigger_condition() {
+        let window = Window::sliding(TimeUnit::Seconds, 10, None)
+            .with_sliding_trigger_condition(Some(Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident::new("a"))),
+                op: sqlparser::ast::BinaryOperator::Gt,
+                right: Box::new(Expr::Value(Value::Number("1".to_string(), false))),
+            })))
+            .with_filter(Some(Box::new(Expr::BinaryOp {
+                left: Box::new(Expr::Identifier(Ident::new("x"))),
+                op: sqlparser::ast::BinaryOperator::Gt,
+                right: Box::new(Expr::Value(Value::Number("0".to_string(), false))),
+            })));
+
+        match &window {
+            Window::Sliding {
+                trigger_condition,
+                filter,
+                ..
+            } => {
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > 1".to_string()),
+                );
+                assert_eq!(
+                    filter.as_ref().map(|e| e.to_string()),
+                    Some("x > 0".to_string()),
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
     }
 }

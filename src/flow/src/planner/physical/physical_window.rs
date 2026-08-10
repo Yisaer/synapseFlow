@@ -80,6 +80,8 @@ pub struct PhysicalSlidingWindow {
     pub lookahead: Option<u64>,
     pub partition_by_exprs: Vec<Expr>,
     pub partition_by_scalars: Vec<ScalarExpr>,
+    pub trigger_condition_expr: Option<Expr>,
+    pub trigger_condition_scalar: Option<ScalarExpr>,
 }
 
 impl PhysicalSlidingWindow {
@@ -110,6 +112,31 @@ impl PhysicalSlidingWindow {
         children: Vec<Arc<PhysicalPlan>>,
         index: i64,
     ) -> Self {
+        Self::new_with_trigger(
+            time_unit,
+            lookback,
+            lookahead,
+            partition_by_exprs,
+            partition_by_scalars,
+            None,
+            None,
+            children,
+            index,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_trigger(
+        time_unit: TimeUnit,
+        lookback: u64,
+        lookahead: Option<u64>,
+        partition_by_exprs: Vec<Expr>,
+        partition_by_scalars: Vec<ScalarExpr>,
+        trigger_condition_expr: Option<Expr>,
+        trigger_condition_scalar: Option<ScalarExpr>,
+        children: Vec<Arc<PhysicalPlan>>,
+        index: i64,
+    ) -> Self {
         let base = BasePhysicalPlan::new(children, index);
         Self {
             base,
@@ -118,6 +145,8 @@ impl PhysicalSlidingWindow {
             lookahead,
             partition_by_exprs,
             partition_by_scalars,
+            trigger_condition_expr,
+            trigger_condition_scalar,
         }
     }
 }

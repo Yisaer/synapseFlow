@@ -758,6 +758,7 @@ fn create_physical_window_with_builder(
             lookback,
             lookahead,
             partition_by,
+            trigger_condition,
         } => {
             let watermark_index = builder.allocate_index();
             let watermark_config = WatermarkConfig::Sliding {
@@ -783,13 +784,28 @@ fn create_physical_window_with_builder(
             let index = builder.allocate_index();
             let partition_by_scalars =
                 compile_window_partition_by(partition_by, bindings, registries)?;
+            let (trigger_condition_expr, trigger_condition_scalar) =
+                match trigger_condition.as_ref() {
+                    Some(cond) => {
+                        let scalar = convert_expr_to_scalar_with_bindings_and_custom_registry(
+                            cond.as_ref(),
+                            bindings,
+                            registries.custom_func_registry().as_ref(),
+                        )
+                        .map_err(|err| err.to_string())?;
+                        (Some(cond.as_ref().clone()), Some(scalar))
+                    }
+                    None => (None, None),
+                };
 
-            let sliding = crate::planner::physical::PhysicalSlidingWindow::new_partitioned(
+            let sliding = crate::planner::physical::PhysicalSlidingWindow::new_with_trigger(
                 *time_unit,
                 *lookback,
                 *lookahead,
                 partition_by.clone(),
                 partition_by_scalars,
+                trigger_condition_expr,
+                trigger_condition_scalar,
                 sliding_children,
                 index,
             );

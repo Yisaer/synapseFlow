@@ -36,6 +36,7 @@ pub mod sink_encoder_processor;
 pub mod sink_encrypt_processor;
 pub mod sink_processor;
 pub mod sliding_window_processor;
+pub(crate) mod sliding_window_runtime;
 pub mod source_change_gate_processor;
 pub mod state_window_processor;
 pub mod stateful_function_processor;

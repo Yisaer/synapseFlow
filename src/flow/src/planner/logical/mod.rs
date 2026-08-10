@@ -2291,6 +2291,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             lookback,
             lookahead,
             partition_by,
+            trigger_condition,
             ..
         } => {
             let unit = match time_unit {
@@ -2301,6 +2302,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
                 lookback,
                 lookahead,
                 partition_by,
+                trigger_condition,
             })
         }
         parser_window::Window::State {

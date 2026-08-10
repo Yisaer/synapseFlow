@@ -27,6 +27,8 @@ pub enum StreamingWindowSpec {
         lookahead: Option<u64>,
         partition_by_exprs: Vec<Expr>,
         partition_by_scalars: Vec<ScalarExpr>,
+        trigger_condition_expr: Option<Expr>,
+        trigger_condition_scalar: Option<ScalarExpr>,
     },
     State {
         open_expr: Expr,

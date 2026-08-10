@@ -21,6 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+use crate::processor::sliding_window_runtime::evaluate_trigger_condition;
 use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 
 /// Streaming sliding aggregation processor (incremental).
@@ -47,6 +48,7 @@ pub struct StreamingSlidingAggregationProcessor {
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     partition_by_scalars: Vec<crate::expr::ScalarExpr>,
+    trigger_condition_scalar: Option<crate::expr::ScalarExpr>,
     length_secs: u64,
     delay_secs: u64,
     stats: Arc<ProcessorStats>,
@@ -106,6 +108,13 @@ impl StreamingSlidingAggregationProcessor {
             } => partition_by_scalars.clone(),
             _ => Vec::new(),
         };
+        let trigger_condition_scalar = match &physical.window {
+            StreamingWindowSpec::Sliding {
+                trigger_condition_scalar,
+                ..
+            } => trigger_condition_scalar.clone(),
+            _ => None,
+        };
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -125,6 +134,7 @@ impl StreamingSlidingAggregationProcessor {
             channel_capacities,
             group_by_meta,
             partition_by_scalars,
+            trigger_condition_scalar,
             length_secs,
             delay_secs,
             stats: Arc::new(ProcessorStats::default()),
@@ -199,6 +209,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let group_by_meta = self.group_by_meta.clone();
         let partition_by_scalars = self.partition_by_scalars.clone();
+        let trigger_condition_scalar = self.trigger_condition_scalar.clone();
         let length_secs = self.length_secs;
         let delay_secs = self.delay_secs;
         let bounds = SlidingWindowBounds {
@@ -208,7 +219,10 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let stats = Arc::clone(&self.stats);
 
         ProcessorStart::ready(spawner.spawn(async move {
-            let mut partitioned_windows = PartitionedSlidingWindows::new(partition_by_scalars);
+            let mut partitioned_windows =
+                PartitionedSlidingWindows::new(partition_by_scalars.clone());
+            let mut triggered_partitioned_windows =
+                PartitionedTriggeredSlidingWindows::new(partition_by_scalars);
 
             fn to_epoch_secs(ts: SystemTime) -> Result<u64, ProcessorError> {
                 Ok(ts
@@ -297,18 +311,15 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 Ok(())
             }
 
-            async fn emit_oldest_window(
+            async fn emit_window(
                 output: &LinkOutput<StreamData>,
                 data_channel_capacity: usize,
                 physical: &PhysicalStreamingAggregation,
                 group_by_meta: &[GroupByMeta],
-                windows: &VecDeque<IncAggWindow>,
+                window: &IncAggWindow,
                 bounds: SlidingWindowBounds,
                 stats: &Arc<ProcessorStats>,
             ) -> Result<(), ProcessorError> {
-                let Some(window) = windows.front() else {
-                    return Ok(());
-                };
                 if window.groups.is_empty() {
                     return Ok(());
                 }
@@ -360,6 +371,30 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 Ok(())
             }
 
+            async fn emit_oldest_window(
+                output: &LinkOutput<StreamData>,
+                data_channel_capacity: usize,
+                physical: &PhysicalStreamingAggregation,
+                group_by_meta: &[GroupByMeta],
+                windows: &VecDeque<IncAggWindow>,
+                bounds: SlidingWindowBounds,
+                stats: &Arc<ProcessorStats>,
+            ) -> Result<(), ProcessorError> {
+                let Some(window) = windows.front() else {
+                    return Ok(());
+                };
+                emit_window(
+                    output,
+                    data_channel_capacity,
+                    physical,
+                    group_by_meta,
+                    window,
+                    bounds,
+                    stats,
+                )
+                .await
+            }
+
             async fn emit_all_windows(
                 output: &LinkOutput<StreamData>,
                 data_channel_capacity: usize,
@@ -371,63 +406,119 @@ impl Processor for StreamingSlidingAggregationProcessor {
             ) -> Result<(), ProcessorError> {
                 for windows in partitioned_windows.windows() {
                     for window in windows {
-                        if window.groups.is_empty() {
-                            continue;
-                        }
-
-                        let mut out_rows = Vec::with_capacity(window.groups.len());
-                        for state in window.groups.values() {
-                            let mut affiliate_entries = Vec::new();
-                            for (call, accumulator) in physical
-                                .aggregate_calls
-                                .iter()
-                                .zip(state.accumulators.iter())
-                            {
-                                affiliate_entries.push((
-                                    Arc::new(call.output_column.clone()),
-                                    accumulator.finalize(),
-                                ));
-                            }
-                            for (idx, value) in state.key_values.iter().enumerate() {
-                                if let Some(meta) = group_by_meta.get(idx) {
-                                    if !meta.is_simple {
-                                        affiliate_entries.push((
-                                            Arc::new(meta.output_name.clone()),
-                                            value.clone(),
-                                        ));
-                                    }
-                                }
-                            }
-
-                            let mut tuple = crate::model::Tuple::with_timestamp(
-                                state.last_tuple.messages.clone(),
-                                state.last_tuple.timestamp,
-                            );
-                            tuple.add_affiliate_columns(affiliate_entries);
-                            out_rows.push(tuple);
-                        }
-
-                        if out_rows.is_empty() {
-                            continue;
-                        }
-
-                        stats.record_out(out_rows.len() as u64);
-                        let batch = window_metadata::record_batch_from_epoch_secs(
-                            out_rows,
-                            window.start_secs,
-                            bounds.end_secs(window.start_secs),
-                        )?;
-                        send_with_backpressure(
+                        emit_window(
                             output,
                             data_channel_capacity,
-                            StreamData::collection(Box::new(batch)),
-                            Some(stats.as_ref()),
+                            physical,
+                            group_by_meta,
+                            window,
+                            bounds,
+                            stats,
                         )
                         .await?;
                     }
                 }
                 Ok(())
             }
+
+            fn trim_trigger_rows(
+                rows: &mut VecDeque<crate::model::Tuple>,
+                now_secs: u64,
+                lookback_secs: u64,
+            ) -> Result<(), ProcessorError> {
+                let min_start = now_secs.saturating_sub(lookback_secs);
+                while let Some(front) = rows.front() {
+                    if to_epoch_secs(front.timestamp)? >= min_start {
+                        break;
+                    }
+                    rows.pop_front();
+                }
+                Ok(())
+            }
+
+            fn update_triggered_windows_with_tuple(
+                physical: &PhysicalStreamingAggregation,
+                aggregate_registry: &AggregateFunctionRegistry,
+                group_by_meta: &[GroupByMeta],
+                windows: &mut VecDeque<IncAggWindow>,
+                tuple: &crate::model::Tuple,
+                now_secs: u64,
+                bounds: SlidingWindowBounds,
+            ) -> Result<(), ProcessorError> {
+                for window in windows.iter_mut() {
+                    if window.start_secs <= now_secs
+                        && bounds.end_secs(window.start_secs) >= now_secs
+                    {
+                        update_window_with_tuple(
+                            physical,
+                            aggregate_registry,
+                            group_by_meta,
+                            window,
+                            tuple,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+
+            fn build_triggered_window_from_rows(
+                physical: &PhysicalStreamingAggregation,
+                aggregate_registry: &AggregateFunctionRegistry,
+                group_by_meta: &[GroupByMeta],
+                rows: &VecDeque<crate::model::Tuple>,
+                start_secs: u64,
+                end_secs: u64,
+            ) -> Result<IncAggWindow, ProcessorError> {
+                let mut window = IncAggWindow {
+                    start_secs,
+                    groups: HashMap::new(),
+                };
+                for row in rows {
+                    let row_secs = to_epoch_secs(row.timestamp)?;
+                    if row_secs < start_secs {
+                        continue;
+                    }
+                    if row_secs > end_secs {
+                        break;
+                    }
+                    update_window_with_tuple(
+                        physical,
+                        aggregate_registry,
+                        group_by_meta,
+                        &mut window,
+                        row,
+                    )?;
+                }
+                Ok(window)
+            }
+
+            async fn emit_all_triggered_windows(
+                output: &LinkOutput<StreamData>,
+                data_channel_capacity: usize,
+                physical: &PhysicalStreamingAggregation,
+                group_by_meta: &[GroupByMeta],
+                partitioned_windows: &mut PartitionedTriggeredSlidingWindows,
+                bounds: SlidingWindowBounds,
+                stats: &Arc<ProcessorStats>,
+            ) -> Result<(), ProcessorError> {
+                for state in partitioned_windows.states_mut() {
+                    while let Some(window) = state.windows.pop_front() {
+                        emit_window(
+                            output,
+                            data_channel_capacity,
+                            physical,
+                            group_by_meta,
+                            &window,
+                            bounds,
+                            stats,
+                        )
+                        .await?;
+                    }
+                }
+                Ok(())
+            }
+
+            let has_trigger_condition = trigger_condition_scalar.is_some();
 
             loop {
                 tokio::select! {
@@ -460,44 +551,110 @@ impl Processor for StreamingSlidingAggregationProcessor {
 
                                     for tuple in rows {
                                         let now_secs = to_epoch_secs(tuple.timestamp)?;
-                                        let windows =
-                                            partitioned_windows.windows_for_tuple(&tuple)?;
-                                        gc_windows(windows, now_secs, length_secs, delay_secs);
+                                        if has_trigger_condition {
+                                            let state = triggered_partitioned_windows
+                                                .state_for_tuple(&tuple)?;
+                                            state.rows.push_back(tuple);
+                                            let tuple_ref = state.rows.back().expect("just pushed");
 
-                                        windows.push_back(IncAggWindow {
-                                            start_secs: now_secs,
-                                            groups: HashMap::new(),
-                                        });
+                                            update_triggered_windows_with_tuple(
+                                                &physical,
+                                                aggregate_registry.as_ref(),
+                                                &group_by_meta,
+                                                &mut state.windows,
+                                                tuple_ref,
+                                                now_secs,
+                                                bounds,
+                                            )?;
 
-                                        for window in windows.iter_mut() {
-                                            if window.start_secs <= now_secs
-                                                && window
-                                                    .start_secs
-                                                    .saturating_add(length_secs)
-                                                    .saturating_add(delay_secs)
-                                                    > now_secs
-                                            {
-                                                update_window_with_tuple(
+                                            let should_trigger = match evaluate_trigger_condition(
+                                                trigger_condition_scalar.as_ref(),
+                                                tuple_ref,
+                                                "slidingwindow trigger condition",
+                                            ) {
+                                                Ok(v) => v,
+                                                Err(err) => {
+                                                    stats.record_error_logged(
+                                                        "streaming sliding aggregation error",
+                                                        err.to_string(),
+                                                    );
+                                                    false
+                                                }
+                                            };
+
+                                            if should_trigger {
+                                                let start_secs = now_secs.saturating_sub(length_secs);
+                                                let end_secs = bounds.end_secs(start_secs);
+                                                let window = build_triggered_window_from_rows(
                                                     &physical,
                                                     aggregate_registry.as_ref(),
                                                     &group_by_meta,
-                                                    window,
-                                                    &tuple,
+                                                    &state.rows,
+                                                    start_secs,
+                                                    end_secs,
                                                 )?;
-                                            }
-                                        }
 
-                                        if delay_secs == 0 {
-                                            emit_oldest_window(
-                                                &output,
-                                                channel_capacities.data,
-                                                &physical,
-                                                &group_by_meta,
-                                                windows,
-                                                bounds,
-                                                &stats,
-                                            )
-                                            .await?;
+                                                if delay_secs == 0 {
+                                                    emit_window(
+                                                        &output,
+                                                        channel_capacities.data,
+                                                        &physical,
+                                                        &group_by_meta,
+                                                        &window,
+                                                        bounds,
+                                                        &stats,
+                                                    )
+                                                    .await?;
+                                                } else {
+                                                    state.windows.push_back(window);
+                                                }
+                                            }
+
+                                            trim_trigger_rows(
+                                                &mut state.rows,
+                                                now_secs,
+                                                length_secs,
+                                            )?;
+                                        } else {
+                                            let windows =
+                                                partitioned_windows.windows_for_tuple(&tuple)?;
+                                            gc_windows(windows, now_secs, length_secs, delay_secs);
+
+                                            windows.push_back(IncAggWindow {
+                                                start_secs: now_secs,
+                                                groups: HashMap::new(),
+                                            });
+
+                                            for window in windows.iter_mut() {
+                                                if window.start_secs <= now_secs
+                                                    && window
+                                                        .start_secs
+                                                        .saturating_add(length_secs)
+                                                        .saturating_add(delay_secs)
+                                                        > now_secs
+                                                {
+                                                    update_window_with_tuple(
+                                                        &physical,
+                                                        aggregate_registry.as_ref(),
+                                                        &group_by_meta,
+                                                        window,
+                                                        &tuple,
+                                                    )?;
+                                                }
+                                            }
+
+                                            if delay_secs == 0 {
+                                                emit_oldest_window(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    &physical,
+                                                    &group_by_meta,
+                                                    windows,
+                                                    bounds,
+                                                    &stats,
+                                                )
+                                                .await?;
+                                            }
                                         }
                                     }
 
@@ -512,12 +669,38 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                     continue;
                                 }
                                 let now_secs = to_epoch_secs(ts)?;
-                                for windows in partitioned_windows.windows_mut() {
-                                    gc_windows(windows, now_secs, length_secs, delay_secs);
-                                    if let Some(front) = windows.front() {
-                                        if front.start_secs.saturating_add(delay_secs) <= now_secs {
-                                            emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, windows, bounds, &stats)
-                                                .await?;
+                                if has_trigger_condition {
+                                    for state in triggered_partitioned_windows.states_mut() {
+                                        while let Some(window) = state.windows.front() {
+                                            if bounds.end_secs(window.start_secs) > now_secs {
+                                                break;
+                                            }
+                                            let window = state.windows.pop_front().expect("front exists");
+                                            emit_window(
+                                                &output,
+                                                channel_capacities.data,
+                                                &physical,
+                                                &group_by_meta,
+                                                &window,
+                                                bounds,
+                                                &stats,
+                                            )
+                                            .await?;
+                                        }
+                                        trim_trigger_rows(
+                                            &mut state.rows,
+                                            now_secs,
+                                            length_secs,
+                                        )?;
+                                    }
+                                } else {
+                                    for windows in partitioned_windows.windows_mut() {
+                                        gc_windows(windows, now_secs, length_secs, delay_secs);
+                                        if let Some(front) = windows.front() {
+                                            if front.start_secs.saturating_add(delay_secs) <= now_secs {
+                                                emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, windows, bounds, &stats)
+                                                    .await?;
+                                            }
                                         }
                                     }
                                 }
@@ -527,16 +710,29 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 let is_graceful = control_signal.is_graceful_end();
                                 if is_terminal {
                                     if is_graceful {
-                                        emit_all_windows(
-                                            &output,
-                                            channel_capacities.data,
-                                            &physical,
-                                            &group_by_meta,
-                                            &partitioned_windows,
-                                            bounds,
-                                            &stats,
-                                        )
+                                        if has_trigger_condition {
+                                            emit_all_triggered_windows(
+                                                &output,
+                                                channel_capacities.data,
+                                                &physical,
+                                                &group_by_meta,
+                                                &mut triggered_partitioned_windows,
+                                                bounds,
+                                                &stats,
+                                            )
                                             .await?;
+                                        } else {
+                                            emit_all_windows(
+                                                &output,
+                                                channel_capacities.data,
+                                                &physical,
+                                                &group_by_meta,
+                                                &partitioned_windows,
+                                                bounds,
+                                                &stats,
+                                            )
+                                                .await?;
+                                        }
                                     }
                                     send_with_backpressure(
                                         &output,
@@ -643,6 +839,50 @@ impl PartitionedSlidingWindows {
     }
 }
 
+struct TriggeredSlidingPartition {
+    rows: VecDeque<crate::model::Tuple>,
+    windows: VecDeque<IncAggWindow>,
+}
+
+struct PartitionedTriggeredSlidingWindows {
+    state_ids: HashMap<PartitionKey, usize>,
+    states: Vec<TriggeredSlidingPartition>,
+    partition_by_scalars: Vec<crate::expr::ScalarExpr>,
+}
+
+impl PartitionedTriggeredSlidingWindows {
+    fn new(partition_by_scalars: Vec<crate::expr::ScalarExpr>) -> Self {
+        Self {
+            state_ids: HashMap::new(),
+            states: Vec::new(),
+            partition_by_scalars,
+        }
+    }
+
+    fn state_for_tuple(
+        &mut self,
+        tuple: &crate::model::Tuple,
+    ) -> Result<&mut TriggeredSlidingPartition, ProcessorError> {
+        let key = eval_partition_key(&self.partition_by_scalars, tuple, "slidingwindow")
+            .map_err(ProcessorError::ProcessingError)?;
+        if let Some(id) = self.state_ids.get(&key).copied() {
+            return Ok(&mut self.states[id]);
+        }
+
+        let id = self.states.len();
+        self.state_ids.insert(key, id);
+        self.states.push(TriggeredSlidingPartition {
+            rows: VecDeque::new(),
+            windows: VecDeque::new(),
+        });
+        Ok(&mut self.states[id])
+    }
+
+    fn states_mut(&mut self) -> impl Iterator<Item = &mut TriggeredSlidingPartition> {
+        self.states.iter_mut()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,6 +958,8 @@ mod tests {
                 lookahead,
                 partition_by_exprs: Vec::new(),
                 partition_by_scalars: Vec::new(),
+                trigger_condition_expr: None,
+                trigger_condition_scalar: None,
             },
             mappings,
             Vec::new(),

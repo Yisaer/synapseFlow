@@ -111,6 +111,8 @@ pub enum WindowIR {
         lookahead: Option<u64>,
         #[serde(default)]
         partition_by: Vec<Expr>,
+        #[serde(default)]
+        trigger_condition: Option<Box<Expr>>,
     },
     State {
         open: Box<Expr>,
@@ -773,11 +775,13 @@ fn window_ir_to_spec(
             lookback,
             lookahead,
             partition_by,
+            trigger_condition,
         } => crate::planner::logical::LogicalWindowSpec::Sliding {
             time_unit: time_unit_ir_to_time_unit(*time_unit),
             lookback: *lookback,
             lookahead: *lookahead,
             partition_by: partition_by.clone(),
+            trigger_condition: trigger_condition.clone(),
         },
         WindowIR::State {
             open,
@@ -1151,6 +1155,7 @@ fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> Windo
             lookback,
             lookahead,
             partition_by,
+            trigger_condition,
         } => WindowIR::Sliding {
             time_unit: match time_unit {
                 crate::planner::logical::TimeUnit::Seconds => TimeUnitIR::Seconds,
@@ -1158,6 +1163,7 @@ fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> Windo
             lookback: *lookback,
             lookahead: *lookahead,
             partition_by: partition_by.clone(),
+            trigger_condition: trigger_condition.clone(),
         },
         crate::planner::logical::LogicalWindowSpec::State {
             open,

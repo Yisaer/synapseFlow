@@ -11,6 +11,21 @@ See also: `docs/syntax/windows/syntax.md`, `docs/syntax/windows/window_metadata.
 - `lookback`: unsigned integer literal (duration).
 - `lookahead`: optional unsigned integer literal (duration).
 
+## Syntax
+
+`slidingwindow(...)` can be followed by `OVER (WHEN <expr>)` to restrict which
+input tuples create emission requests:
+
+```sql
+GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN flag > 0)
+```
+
+`WHEN` can be combined with `PARTITION BY` in the same `OVER` clause:
+
+```sql
+GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN flag > 0 PARTITION BY vehicle_id)
+```
+
 ## Semantics
 
 Each incoming tuple is a trigger point with timestamp `t`:
@@ -27,6 +42,17 @@ Each incoming tuple is a trigger point with timestamp `t`:
   - `window_end()`: `t + lookahead`
 
 In event-time mode, `t` is the trigger tuple event timestamp.
+
+### Trigger condition
+
+When `OVER (WHEN <expr>)` is present, `<expr>` is evaluated for each input tuple.
+Only tuples for which the expression evaluates to `true` create a sliding window
+emission request. Tuples for which the expression evaluates to `false` or `null`
+remain in the row buffer and can be included by later triggered windows.
+
+The trigger condition is orthogonal to `PARTITION BY`: each partition evaluates
+the condition on its own input tuples and maintains its own pending sliding
+windows.
 
 ### Watermark contract for lookahead
 

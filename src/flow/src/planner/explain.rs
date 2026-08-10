@@ -389,6 +389,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 lookback,
                 lookahead,
                 partition_by,
+                trigger_condition,
             } => {
                 info.push("kind=sliding".to_string());
                 info.push(format!("unit={:?}", time_unit));
@@ -398,6 +399,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     None => info.push("lookahead=none".to_string()),
                 }
                 push_partition_by_info(partition_by, &mut info);
+                if let Some(cond) = trigger_condition {
+                    info.push(format!(
+                        "trigger={}",
+                        format_expr_for_explain(cond.as_ref())
+                    ));
+                }
             }
             LogicalWindowSpec::State {
                 open,
@@ -1056,6 +1063,7 @@ fn build_physical_node_with_prefix(
                     lookback,
                     lookahead,
                     partition_by_exprs,
+                    trigger_condition_expr,
                     ..
                 } => {
                     info.push("window=sliding".to_string());
@@ -1066,6 +1074,9 @@ fn build_physical_node_with_prefix(
                         None => info.push("lookahead=none".to_string()),
                     }
                     push_partition_by_info(partition_by_exprs, &mut info);
+                    if let Some(cond) = trigger_condition_expr {
+                        info.push(format!("trigger={}", format_expr_for_explain(cond)));
+                    }
                 }
                 crate::planner::physical::StreamingWindowSpec::State {
                     open_expr,
@@ -1207,6 +1218,9 @@ fn build_physical_node_with_prefix(
                 None => info.push("lookahead=none".to_string()),
             }
             push_partition_by_info(&window.partition_by_exprs, &mut info);
+            if let Some(cond) = &window.trigger_condition_expr {
+                info.push(format!("trigger={}", format_expr_for_explain(cond)));
+            }
         }
         PhysicalPlan::StateWindow(window) => {
             info.push("kind=state".to_string());
