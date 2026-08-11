@@ -33,6 +33,8 @@ MQTT sink definitions currently accept:
 - optional `client_id`
 - optional `connector_key`
 - optional `max_packet_size`
+- optional `protocol_version` (`v3` or `v5`)
+- optional ordered `user_properties`
 - encoder config
 - sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
   props)
@@ -41,6 +43,24 @@ Manager validates `topic` as required. The topic may use static property
 templates such as `vehicle/{{ prop("vin") }}/telemetry`; it is rendered once
 during pipeline apply and validated as an MQTT publish topic. `broker_url` is required only when `connector_key` is
 absent. `retain` defaults to `false`, and `qos` falls back to the manager default when omitted.
+
+`protocol_version` defaults to `v3`, meaning MQTT 3.1.1. Static User Properties require effective
+protocol `v5`. Each entry has literal string `key` and `value` fields:
+
+```json
+{
+  "protocol_version": "v5",
+  "user_properties": [
+    { "key": "source", "value": "veloflux" },
+    { "key": "tag", "value": "primary" },
+    { "key": "tag", "value": "edge" }
+  ]
+}
+```
+
+The array preserves declaration order and permits duplicate keys, matching MQTT 5 wire semantics.
+Keys and values must satisfy MQTT UTF-8 String limits. Every value is currently treated as a static
+literal; row or source-property templates are not implemented.
 
 No other MQTT sink property supports connector templates. See
 [connector property templates](../../../syntax/connectors/property_templates.md).
@@ -92,6 +112,7 @@ Standalone connection ownership uses:
 - sink-local `broker_url`
 - sink-local `client_id` or the derived default
 - sink-local `max_packet_size`
+- sink-local `protocol_version`, defaulting to MQTT 3.1.1
 
 ### Shared-client-backed sink
 
@@ -103,6 +124,7 @@ In this mode:
 - connection ownership comes from the shared client resource
 - sink-local `broker_url`, `client_id`, and `max_packet_size` no longer drive the live connection
 - publish-time `topic`, `qos`, and `retain` still come from the sink definition
+- the shared resource owns `protocol_version`; a connector-local value is rejected
 
 This lets one shared client connection be reused across multiple MQTT sinks while preserving
 sink-local publish routing and retain behavior.
@@ -180,6 +202,8 @@ the connector becomes ready again.
   through upstream sink-output stages.
 - Verify runtime errors are surfaced when MQTT sink is used without a bytes-producing encoder path.
 - Verify disconnect/reconnect behavior eventually restores readiness for standalone clients.
+- Verify MQTT 5 publishes static User Properties in declaration order, including duplicate keys.
+- Verify MQTT 3.1.1 sinks reject non-empty User Properties without changing normal v3 delivery.
 
 ## Future Work
 

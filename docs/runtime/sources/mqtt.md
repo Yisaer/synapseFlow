@@ -36,6 +36,7 @@ MQTT stream definitions currently carry:
 - `qos`
 - optional `client_id`
 - optional `connector_key`
+- optional `protocol_version` (`v3` or `v5`)
 - stream-level decoder config
 - optional stream-level event-time declaration
 - optional sampler config
@@ -47,6 +48,10 @@ bound:
 
 - without `connector_key`, the stream owns its own live connection settings
 - with `connector_key`, the shared client resource becomes the live connection/subscription owner
+
+`protocol_version` defaults to `v3`, which means MQTT 3.1.1. A standalone source may explicitly
+select `v5`. When `connector_key` is present, the stream must omit `protocol_version`; the shared
+client resource owns the connection protocol.
 
 ## Connection Modes
 
@@ -60,6 +65,7 @@ Behavior:
 - derive a default client id from a generated UUID if the stream did not provide one
 - subscribe directly to the configured `topic` using the configured `qos`
 - own reconnect/backoff logic locally inside the source connector
+- use MQTT 3.1.1 by default or MQTT 5.0 when `protocol_version` is `v5`
 
 ### Shared-client-backed source
 
@@ -71,6 +77,7 @@ Behavior:
 - subscribe to the shared client's backpressured event stream instead of opening another MQTT
   connection
 - consume the shared client's payload/error/close events
+- use the protocol selected by the shared client resource
 
 In this mode, the stream-local MQTT props are no longer the live subscription owner. The shared
 client config drives broker URL, subscription topic, client id, QoS, and packet-size settings.
@@ -79,6 +86,10 @@ client config drives broker URL, subscription topic, client id, QoS, and packet-
 
 The MQTT source connector itself is byte-only. It forwards raw MQTT payload bytes downstream as
 connector events.
+
+The current implementation does not expose incoming MQTT 5 User Properties to rows or processors.
+MQTT 5 sources receive the PUBLISH payload exactly as MQTT 3.1.1 sources do; source metadata
+propagation is deferred.
 
 The later decode boundary is responsible for:
 
@@ -194,6 +205,7 @@ runtime warning.
 ## Testing Guidance
 
 - Verify standalone MQTT streams build a direct connector path and reconnect after disconnect.
+- Verify MQTT 3.1.1 remains the default and MQTT 5 sources receive the same payload bytes.
 - Verify streams using `connector_key` fail clearly when the shared client is missing from storage
   or runtime.
 - Verify shared-stream MQTT ingestion uses the same source connector model as non-shared streams.

@@ -58,7 +58,9 @@ Current built-in stream types are:
 The built-in required properties are:
 
 - `mqtt`: `topic`; `broker_url` is also required when `connector_key` is absent; `qos` defaults
-  when omitted; `client_id` and `connector_key` are optional
+  when omitted; `client_id`, `connector_key`, and `protocol_version` are optional;
+  `protocol_version` accepts `v3` (MQTT 3.1.1, the default) or `v5` and must be omitted when
+  `connector_key` is present
 - `history`: `datasource`, `topic`; optional start/end/batch/interval controls
 - `memory`: `topic`
 - `mock`: no connector props

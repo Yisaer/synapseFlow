@@ -1039,6 +1039,7 @@ mod tests {
                         client_id: format!("{mqtt_key}_client"),
                         qos: 1,
                         max_packet_size: None,
+                        protocol_version: Default::default(),
                         username: None,
                         password: None,
                         resolved_password: None,

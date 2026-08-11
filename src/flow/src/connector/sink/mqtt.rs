@@ -1,12 +1,12 @@
 //! MQTT sink connector supporting shared or standalone clients.
 
 use super::{DeliveryResult, SinkConnector, SinkConnectorError};
+use crate::connector::mqtt_protocol::{
+    MqttClient, MqttConnectionError, MqttEvent, MqttEventLoop, MqttOptions, MqttQos,
+};
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use rumqttc::{
-    AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
-    Transport,
-};
+use rumqttc::Transport;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -29,6 +29,8 @@ pub struct MqttSinkConfig {
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
     pub max_packet_size: Option<usize>,
+    pub protocol_version: Option<crate::connector::MqttProtocolVersion>,
+    pub user_properties: Vec<crate::connector::MqttUserProperty>,
 }
 
 impl MqttSinkConfig {
@@ -47,6 +49,8 @@ impl MqttSinkConfig {
             client_id: None,
             connector_key: None,
             max_packet_size: None,
+            protocol_version: None,
+            user_properties: Vec::new(),
         }
     }
 
@@ -67,6 +71,22 @@ impl MqttSinkConfig {
 
     pub fn with_max_packet_size(mut self, max_packet_size: usize) -> Self {
         self.max_packet_size = Some(max_packet_size);
+        self
+    }
+
+    pub fn with_protocol_version(
+        mut self,
+        protocol_version: crate::connector::MqttProtocolVersion,
+    ) -> Self {
+        self.protocol_version = Some(protocol_version);
+        self
+    }
+
+    pub fn with_user_properties(
+        mut self,
+        user_properties: Vec<crate::connector::MqttUserProperty>,
+    ) -> Self {
+        self.user_properties = user_properties;
         self
     }
 
@@ -96,17 +116,26 @@ impl SinkClient {
     async fn publish(
         &self,
         topic: &str,
-        qos: QoS,
+        qos: MqttQos,
         retain: bool,
         payload: Vec<u8>,
+        user_properties: &[crate::connector::MqttUserProperty],
     ) -> Result<(), SinkConnectorError> {
         match self {
             SinkClient::Shared(shared) => shared
-                .publish(topic.to_string(), qos, retain, payload)
+                .publish_with_user_properties(
+                    topic.to_string(),
+                    qos,
+                    retain,
+                    payload,
+                    user_properties,
+                )
                 .await
                 .map_err(|err| SinkConnectorError::Transient(format!("mqtt publish error: {err}"))),
             SinkClient::Standalone(standalone) => {
-                standalone.publish(topic, qos, retain, payload).await
+                standalone
+                    .publish(topic, qos, retain, payload, user_properties)
+                    .await
             }
         }
     }
@@ -120,7 +149,7 @@ impl SinkClient {
 }
 
 struct StandaloneMqttClient {
-    client: AsyncClient,
+    client: MqttClient,
     event_loop_handle: JoinHandle<()>,
     state: MqttConnectionState,
 }
@@ -159,7 +188,7 @@ impl StandaloneMqttClient {
         spawner: &TaskSpawner,
     ) -> Result<Self, SinkConnectorError> {
         let options = build_mqtt_options(config)?;
-        let (client, event_loop) = AsyncClient::new(options, 32);
+        let (client, event_loop) = MqttClient::new(options, 32);
         let state = MqttConnectionState::default();
         let event_loop_handle = spawner.spawn(run_event_loop(event_loop, state.clone()));
         Ok(Self {
@@ -172,9 +201,10 @@ impl StandaloneMqttClient {
     async fn publish(
         &self,
         topic: &str,
-        qos: QoS,
+        qos: MqttQos,
         retain: bool,
         payload: Vec<u8>,
+        user_properties: &[crate::connector::MqttUserProperty],
     ) -> Result<(), SinkConnectorError> {
         if !self.state.is_connected() {
             let message = self
@@ -186,59 +216,65 @@ impl StandaloneMqttClient {
             return Err(SinkConnectorError::Transient(message));
         }
 
-        self.client
-            .publish(topic.to_string(), qos, retain, payload)
-            .await
-            .map_err(|err| {
-                // For QoS 1 and 2, the outcome is uncertain when the publish
-                // call itself fails: the message may have been partially
-                // delivered or acknowledged.
-                if matches!(qos, QoS::AtLeastOnce | QoS::ExactlyOnce) {
-                    SinkConnectorError::Uncertain(format!(
-                        "mqtt publish error (QoS {:?}): {err}",
-                        qos
-                    ))
-                } else {
-                    SinkConnectorError::Transient(format!("mqtt publish error: {err}"))
-                }
-            })
+        let result = if user_properties.is_empty() {
+            self.client
+                .publish(topic.to_string(), qos, retain, payload)
+                .await
+        } else {
+            self.client
+                .publish_with_user_properties(
+                    topic.to_string(),
+                    qos,
+                    retain,
+                    payload,
+                    user_properties,
+                )
+                .await
+        };
+        result.map_err(|err| {
+            // For QoS 1 and 2, the outcome is uncertain when the publish
+            // call itself fails: the message may have been partially
+            // delivered or acknowledged.
+            if matches!(qos, MqttQos::Qos1 | MqttQos::Qos2) {
+                SinkConnectorError::Uncertain(format!("mqtt publish error (QoS {:?}): {err}", qos))
+            } else {
+                SinkConnectorError::Transient(format!("mqtt publish error: {err}"))
+            }
+        })
     }
 
     async fn shutdown(self) -> Result<(), SinkConnectorError> {
-        match self.client.disconnect().await {
-            Ok(()) => {}
-            Err(ClientError::Request(_) | ClientError::TryRequest(_)) => {
-                tracing::debug!("mqtt sink disconnect skipped: eventloop not available");
-            }
+        if self.client.disconnect().await.is_err() {
+            tracing::debug!("mqtt sink disconnect skipped: eventloop not available");
         }
         self.event_loop_handle.abort();
         Ok(())
     }
 }
 
-async fn run_event_loop(mut event_loop: EventLoop, state: MqttConnectionState) {
+async fn run_event_loop(mut event_loop: MqttEventLoop, state: MqttConnectionState) {
     let mut backoff = std::time::Duration::from_millis(100);
     let max_backoff = std::time::Duration::from_secs(5);
     loop {
         match event_loop.poll().await {
-            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+            Ok(MqttEvent::Connected) => {
                 state.set_connected(true);
                 backoff = std::time::Duration::from_millis(100);
             }
-            Ok(Event::Incoming(Packet::Disconnect)) => {
+            Ok(MqttEvent::Disconnected) => {
                 tracing::warn!("mqtt sink disconnected; reconnecting");
                 state.set_error("disconnect");
                 event_loop.clean();
                 backoff = std::time::Duration::from_millis(100);
             }
-            Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {
+            Ok(MqttEvent::Publish { .. }) | Ok(MqttEvent::Other) => {
                 state.set_connected(true);
                 backoff = std::time::Duration::from_millis(100);
             }
-            Err(ConnectionError::RequestsDone) => break,
-            Err(err) => {
+            Err(MqttConnectionError::RequestsDone) => break,
+            Err(MqttConnectionError::Connection(err)) => {
                 tracing::warn!(error = %err, "mqtt sink event loop error; reconnecting");
-                state.set_error(err.to_string());
+                state.set_error(err);
                 sleep(backoff).await;
                 backoff = std::cmp::min(backoff * 2, max_backoff);
             }
@@ -270,12 +306,28 @@ impl MqttSinkConnector {
             return Ok(());
         }
 
+        crate::connector::validate_mqtt_user_properties(&self.config.user_properties)
+            .map_err(SinkConnectorError::Permanent)?;
+        if self.config.connector_key.is_some() && self.config.protocol_version.is_some() {
+            return Err(SinkConnectorError::Permanent(
+                "mqtt sink protocol_version is owned by connector_key and must not be set locally"
+                    .to_string(),
+            ));
+        }
+
         if let Some(connector_key) = self.config.connector_key.clone() {
             let client = self
                 .mqtt_clients
                 .acquire_client(&connector_key)
                 .await
                 .map_err(|err| SinkConnectorError::Other(err.to_string()))?;
+            if client.protocol_version() == crate::connector::MqttProtocolVersion::V3
+                && !self.config.user_properties.is_empty()
+            {
+                return Err(SinkConnectorError::Permanent(
+                    "mqtt sink user_properties require effective protocol_version `v5`".to_string(),
+                ));
+            }
             tracing::info!(
                 connector_id = %self.id,
                 connector_key = %connector_key,
@@ -283,6 +335,14 @@ impl MqttSinkConnector {
             );
             self.client = Some(SinkClient::Shared(client));
         } else {
+            if self.config.protocol_version.unwrap_or_default()
+                == crate::connector::MqttProtocolVersion::V3
+                && !self.config.user_properties.is_empty()
+            {
+                return Err(SinkConnectorError::Permanent(
+                    "mqtt sink user_properties require protocol_version `v5`".to_string(),
+                ));
+            }
             let standalone = StandaloneMqttClient::new(&self.config, &self.spawner).await?;
             tracing::info!(connector_id = %self.id, "mqtt sink starting standalone client");
             self.client = Some(SinkClient::Standalone(standalone));
@@ -290,15 +350,8 @@ impl MqttSinkConnector {
         Ok(())
     }
 
-    fn publish_qos(&self) -> Result<QoS, SinkConnectorError> {
-        match self.config.qos {
-            0 => Ok(QoS::AtMostOnce),
-            1 => Ok(QoS::AtLeastOnce),
-            2 => Ok(QoS::ExactlyOnce),
-            other => Err(SinkConnectorError::Permanent(format!(
-                "unsupported MQTT QoS level: {other}"
-            ))),
-        }
+    fn publish_qos(&self) -> Result<MqttQos, SinkConnectorError> {
+        MqttQos::try_from(self.config.qos).map_err(SinkConnectorError::Permanent)
     }
 }
 
@@ -343,7 +396,13 @@ impl SinkConnector for MqttSinkConnector {
                 .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                 .inc();
             client
-                .publish(self.config.topic.expose(), qos, self.config.retain, payload)
+                .publish(
+                    self.config.topic.expose(),
+                    qos,
+                    self.config.retain,
+                    payload,
+                    &self.config.user_properties,
+                )
                 .await
                 .map(|_| {
                     veloflux_metrics::mqtt_sink_records_out_total()
@@ -404,8 +463,14 @@ fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnec
         })?;
 
     let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
-    let mut options = MqttOptions::new(config.client_id(), host, port);
-    options.set_max_packet_size(max_packet_size, max_packet_size);
+    let mut options = MqttOptions::new(
+        config.protocol_version.unwrap_or_default(),
+        config.client_id(),
+        host,
+        port,
+        max_packet_size,
+    )
+    .map_err(SinkConnectorError::Other)?;
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
     }
@@ -440,6 +505,13 @@ mod tests {
     use crate::runtime::TaskSpawner;
     use crate::test_support::EmbeddedMqttBroker;
     use datatypes::Value;
+    use rumqttc::v5::mqttbytes::v5::Packet as V5Packet;
+    use rumqttc::v5::mqttbytes::QoS as V5Qos;
+    use rumqttc::v5::{AsyncClient as V5Client, Event as V5Event, MqttOptions as V5Options};
+    use rumqttc::{
+        AsyncClient as V3Client, Event as V3Event, MqttOptions as V3Options, Packet as V3Packet,
+        QoS as V3Qos,
+    };
     use tokio::runtime::Handle;
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::{timeout, Duration};
@@ -494,7 +566,7 @@ mod tests {
         let topic = broker.scoped_topic("sink/out");
         let expected_topic = topic.clone();
 
-        let mut options = MqttOptions::new(
+        let mut options = V3Options::new(
             "mqtt_sink_output_subscriber",
             "127.0.0.1",
             Url::parse(&broker.broker_url())
@@ -503,7 +575,7 @@ mod tests {
                 .expect("embedded broker url should include port"),
         );
         options.set_keep_alive(Duration::from_secs(5));
-        let (subscriber, mut event_loop) = AsyncClient::new(options, 8);
+        let (subscriber, mut event_loop) = V3Client::new(options, 8);
         let (connack_tx, connack_rx) = oneshot::channel();
         let (suback_tx, suback_rx) = oneshot::channel();
         let (publish_tx, mut publish_rx) = mpsc::channel::<(String, Vec<u8>)>(1);
@@ -512,17 +584,17 @@ mod tests {
             let mut suback_tx = Some(suback_tx);
             loop {
                 match event_loop.poll().await {
-                    Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    Ok(V3Event::Incoming(V3Packet::ConnAck(_))) => {
                         if let Some(tx) = connack_tx.take() {
                             let _ = tx.send(());
                         }
                     }
-                    Ok(Event::Incoming(Packet::SubAck(_))) => {
+                    Ok(V3Event::Incoming(V3Packet::SubAck(_))) => {
                         if let Some(tx) = suback_tx.take() {
                             let _ = tx.send(());
                         }
                     }
-                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    Ok(V3Event::Incoming(V3Packet::Publish(publish))) => {
                         if publish_tx
                             .send((publish.topic, publish.payload.to_vec()))
                             .await
@@ -542,7 +614,7 @@ mod tests {
             .expect("subscriber connack timeout")
             .expect("subscriber connack channel");
         subscriber
-            .subscribe(topic.clone(), QoS::AtLeastOnce)
+            .subscribe(topic.clone(), V3Qos::AtLeastOnce)
             .await
             .expect("subscribe embedded broker topic");
         timeout(Duration::from_secs(5), suback_rx)
@@ -594,6 +666,150 @@ mod tests {
         assert_eq!(received_payload, expected_payload);
 
         connector.close().await.expect("close mqtt sink connector");
+        let _ = subscriber.disconnect().await;
+        subscriber_task.abort();
+        let _ = subscriber_task.await;
+    }
+
+    // coverage-covers: sink.connector.mqtt_v5_user_properties
+    #[tokio::test]
+    async fn mqtt_v5_sink_publishes_static_user_properties_in_order() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let topic = broker.scoped_topic("sink/v5/out");
+        let expected_topic = topic.clone();
+        let port = Url::parse(&broker.broker_url_v5())
+            .expect("parse embedded MQTT 5 broker URL")
+            .port()
+            .expect("embedded MQTT 5 broker URL should include port");
+
+        let mut options = V5Options::new("mqtt_v5_sink_subscriber", "127.0.0.1", port);
+        options.set_keep_alive(Duration::from_secs(5));
+        let (subscriber, mut event_loop) = V5Client::new(options, 8);
+        let (connack_tx, connack_rx) = oneshot::channel();
+        let (suback_tx, suback_rx) = oneshot::channel();
+        let (publish_tx, mut publish_rx) =
+            mpsc::channel::<(String, Vec<u8>, Vec<(String, String)>)>(1);
+        let subscriber_task = tokio::spawn(async move {
+            let mut connack_tx = Some(connack_tx);
+            let mut suback_tx = Some(suback_tx);
+            loop {
+                match event_loop.poll().await {
+                    Ok(V5Event::Incoming(V5Packet::ConnAck(_))) => {
+                        if let Some(tx) = connack_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    Ok(V5Event::Incoming(V5Packet::SubAck(_))) => {
+                        if let Some(tx) = suback_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    Ok(V5Event::Incoming(V5Packet::Publish(publish))) => {
+                        let topic = String::from_utf8(publish.topic.to_vec())
+                            .expect("MQTT 5 topic should be UTF-8");
+                        let user_properties = publish
+                            .properties
+                            .map(|properties| properties.user_properties)
+                            .unwrap_or_default();
+                        if publish_tx
+                            .send((topic, publish.payload.to_vec(), user_properties))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+
+        timeout(Duration::from_secs(5), connack_rx)
+            .await
+            .expect("MQTT 5 subscriber connack timeout")
+            .expect("MQTT 5 subscriber connack channel");
+        subscriber
+            .subscribe(topic.clone(), V5Qos::AtLeastOnce)
+            .await
+            .expect("subscribe MQTT 5 embedded broker topic");
+        timeout(Duration::from_secs(5), suback_rx)
+            .await
+            .expect("MQTT 5 subscriber suback timeout")
+            .expect("MQTT 5 subscriber suback channel");
+
+        let expected_properties = vec![
+            crate::connector::MqttUserProperty {
+                key: "source".to_string(),
+                value: "veloflux".to_string(),
+            },
+            crate::connector::MqttUserProperty {
+                key: "tag".to_string(),
+                value: "primary".to_string(),
+            },
+            crate::connector::MqttUserProperty {
+                key: "tag".to_string(),
+                value: "edge".to_string(),
+            },
+        ];
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let config = MqttSinkConfig::new(
+            "mqtt_v5_sink_output",
+            broker.broker_url_v5(),
+            ConnectorString::sensitive(topic),
+            1,
+        )
+        .with_protocol_version(crate::connector::MqttProtocolVersion::V5)
+        .with_user_properties(expected_properties.clone());
+        let mut connector = MqttSinkConnector::new(
+            "mqtt_v5_sink_output",
+            config,
+            Arc::<str>::from("default"),
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        connector.ready().await.expect("MQTT 5 sink ready");
+
+        let expected_payload = br#"{"version":5}"#;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match async {
+                connector.start_delivery().await?;
+                connector.write_chunk(expected_payload).await?;
+                connector.finish_delivery().await.map(|_| ())
+            }
+            .await
+            {
+                Ok(()) => break,
+                Err(err)
+                    if err.to_string().contains("mqtt not connected")
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(err) => panic!("MQTT 5 sink publish failed: {err}"),
+            }
+        }
+
+        let (received_topic, received_payload, received_properties) =
+            timeout(Duration::from_secs(5), publish_rx.recv())
+                .await
+                .expect("MQTT 5 sink output timeout")
+                .expect("MQTT 5 sink output");
+        assert_eq!(received_topic, expected_topic);
+        assert_eq!(received_payload, expected_payload);
+        assert_eq!(
+            received_properties,
+            expected_properties
+                .iter()
+                .map(|property| (property.key.clone(), property.value.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        connector
+            .close()
+            .await
+            .expect("close MQTT 5 sink connector");
         let _ = subscriber.disconnect().await;
         subscriber_task.abort();
         let _ = subscriber_task.await;

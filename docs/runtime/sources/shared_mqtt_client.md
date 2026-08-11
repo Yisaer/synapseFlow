@@ -44,18 +44,23 @@ A shared MQTT client is identified by `key` and currently stores:
 - `client_id`
 - `qos`
 - `max_packet_size`
+- `protocol_version` (`v3` or `v5`, default `v3`)
 - `username` (optional, plaintext identifier)
 - `password` (optional, a secret-store reference — see *Credentials* below)
 
 At runtime, each flow instance owns its own per-key client registry. A shared client entry contains:
 
-- one `rumqttc::AsyncClient`
+- one protocol-specific rumqttc client
 - one background event loop task
 - one backpressured fan-out hub of payload/error/close events
 - reference counting for acquired handles
 
 The resource is therefore shared within one flow instance, not across instances. `key` names the
 logical resource; each instance still creates its own network client.
+
+The protocol version is connection-owned. All source and sink handles acquired from one shared key
+use that resource's version. Connector-local `protocol_version` is rejected when `connector_key`
+is present, so one connection cannot mix MQTT 3.1.1 and MQTT 5.0.
 
 ## Credentials (VF-51)
 
@@ -92,6 +97,7 @@ userinfo would otherwise land in the startup resource manifest / redb, which sta
      "topic": "fleet/+/telemetry",
      "client_id": "veloflux-fleet",
      "qos": 0,
+     "protocol_version": "v5",
      "username": "device",
      "password": "store:my-broker-pass"
    }
@@ -173,6 +179,8 @@ This asymmetry is intentional:
   sink-local
 
 One shared key may therefore be used by both source and sink bindings in the same instance.
+An MQTT 5 shared client also supports static sink User Properties; an MQTT 3.1.1 shared client
+rejects a sink that configures them.
 
 ## Manager / Storage / Runtime Consistency
 
@@ -296,6 +304,7 @@ Important failure behaviors:
   shuts down after the last handle is released.
 - Verify busy-key conflicts reject pipeline start before desired state is mutated.
 - Verify one key can be referenced by both a source and a sink in the same pipeline/runtime.
+- Verify MQTT 3.1.1 and MQTT 5 shared keys can coexist, while each key keeps one fixed protocol.
 - Verify a slow subscriber backpressures the shared client fan-out instead of losing messages.
 - Verify runtime connection errors are delivered as non-terminal runtime errors and do not emit
   end-of-stream.

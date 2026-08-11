@@ -199,6 +199,7 @@ pub fn mqtt_config_from_stored(stored: &StoredMqttClientConfig) -> SharedMqttCli
         client_id: String::new(),
         qos: 0,
         max_packet_size: None,
+        protocol_version: Default::default(),
         username: None,
         password: None,
         resolved_password: None,
@@ -593,6 +594,47 @@ mod tests {
     use flow::FlowInstance;
     use serde_json::{Map as JsonMap, Value as JsonValue, json};
     use tempfile::tempdir;
+
+    #[test]
+    fn stored_shared_mqtt_config_without_protocol_defaults_to_v3() {
+        let stored = StoredMqttClientConfig {
+            key: "legacy".to_string(),
+            revision: 1,
+            raw_json: serde_json::json!({
+                "key": "legacy",
+                "broker_url": "tcp://127.0.0.1:1883",
+                "topic": "in",
+                "client_id": "legacy-client",
+                "qos": 0,
+                "max_packet_size": null
+            })
+            .to_string(),
+        };
+
+        let config = mqtt_config_from_stored(&stored);
+        assert_eq!(config.protocol_version, flow::MqttProtocolVersion::V3);
+    }
+
+    #[test]
+    fn stored_shared_mqtt_config_roundtrip_preserves_v5() {
+        let config = SharedMqttClientConfig {
+            key: "mqtt_v5".to_string(),
+            broker_url: "tcp://127.0.0.1:1883".to_string(),
+            topic: "in".to_string(),
+            client_id: "mqtt-v5-client".to_string(),
+            qos: 1,
+            max_packet_size: None,
+            protocol_version: flow::MqttProtocolVersion::V5,
+            username: None,
+            password: None,
+            resolved_password: None,
+        };
+
+        let stored = stored_mqtt_from_config(&config, 7);
+        let decoded = mqtt_config_from_stored(&stored);
+        assert_eq!(decoded.protocol_version, flow::MqttProtocolVersion::V5);
+        assert_eq!(stored.revision, 7);
+    }
 
     fn sample_stream_request(name: &str) -> CreateStreamRequest {
         let schema_props: JsonMap<String, JsonValue> = json!({

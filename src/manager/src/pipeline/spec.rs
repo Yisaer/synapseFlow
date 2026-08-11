@@ -372,6 +372,12 @@ pub(crate) fn build_pipeline_definition(
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid mqtt sink props: {err}"))?;
                 let connector_key = normalized_optional_string(mqtt_props.connector_key);
+                if connector_key.is_some() && mqtt_props.protocol_version.is_some() {
+                    return Err(
+                        "mqtt sink protocol_version is owned by connector_key and must not be set locally"
+                            .to_string(),
+                    );
+                }
                 if let Some(key) = &connector_key {
                     validate_resource_id(ResourceIdKind::SharedMqttClientKey, key).map_err(
                         |err| format!("mqtt sink references invalid connector_key: {err}"),
@@ -400,9 +406,33 @@ pub(crate) fn build_pipeline_definition(
                 })?;
                 let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
                 let retain = mqtt_props.retain.unwrap_or(false);
+                flow::connector::validate_mqtt_user_properties(&mqtt_props.user_properties)
+                    .map_err(|err| format!("invalid mqtt sink user_properties: {err}"))?;
+                if !mqtt_props.user_properties.is_empty() {
+                    let effective_protocol = if let Some(key) = &connector_key {
+                        instance
+                            .get_shared_mqtt_client(key)
+                            .ok_or_else(|| {
+                                format!("mqtt sink references unknown connector_key `{key}`")
+                            })?
+                            .protocol_version
+                    } else {
+                        mqtt_props.protocol_version.unwrap_or_default()
+                    };
+                    if effective_protocol == flow::MqttProtocolVersion::V3 {
+                        return Err(
+                            "mqtt sink user_properties require effective protocol_version `v5`"
+                                .to_string(),
+                        );
+                    }
+                }
 
                 let mut props =
                     MqttSinkProps::new(broker.unwrap_or_default(), topic, qos).with_retain(retain);
+                if let Some(protocol_version) = mqtt_props.protocol_version {
+                    props = props.with_protocol_version(protocol_version);
+                }
+                props = props.with_user_properties(mqtt_props.user_properties);
                 if let Some(client_id) = mqtt_props.client_id {
                     props = props.with_client_id(client_id);
                 }
@@ -1276,6 +1306,104 @@ mod tests {
         assert_eq!(mqtt.broker_url, "");
         assert_eq!(mqtt.topic.expose(), "out/topic");
         assert_eq!(mqtt.connector_key.as_deref(), Some("shared_mqtt"));
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_accepts_static_mqtt_v5_user_properties() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_mqtt_v5_properties",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "mqtt",
+                "props": {
+                    "broker_url": "tcp://127.0.0.1:1883",
+                    "topic": "out/topic",
+                    "qos": 1,
+                    "protocol_version": "v5",
+                    "user_properties": [
+                        { "key": "tag", "value": "primary" },
+                        { "key": "tag", "value": "edge" }
+                    ]
+                }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
+            }
+        }))
+        .expect("deserialize MQTT 5 pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build MQTT 5 pipeline definition");
+        let flow::pipeline::SinkProps::Mqtt(mqtt) = &definition.sinks()[0].props else {
+            panic!("expected MQTT sink props");
+        };
+        assert_eq!(mqtt.protocol_version, Some(flow::MqttProtocolVersion::V5));
+        assert_eq!(mqtt.user_properties.len(), 2);
+        assert_eq!(mqtt.user_properties[0].value, "primary");
+        assert_eq!(mqtt.user_properties[1].value, "edge");
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_user_properties_for_mqtt_v3() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_mqtt_v3_properties",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "mqtt",
+                "props": {
+                    "broker_url": "tcp://127.0.0.1:1883",
+                    "topic": "out/topic",
+                    "user_properties": [{ "key": "source", "value": "veloflux" }]
+                }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
+            }
+        }))
+        .expect("deserialize MQTT v3 pipeline request");
+
+        let error =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("MQTT v3 User Properties must be rejected");
+        assert!(error.contains("require effective protocol_version `v5`"));
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_local_protocol_with_connector_key() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_shared_mqtt_protocol",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "mqtt",
+                "props": {
+                    "topic": "out/topic",
+                    "connector_key": "shared_mqtt",
+                    "protocol_version": "v5"
+                }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
+            }
+        }))
+        .expect("deserialize shared MQTT pipeline request");
+
+        let error =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("connector-local protocol version must be rejected");
+        assert!(error.contains("protocol_version is owned by connector_key"));
     }
 
     #[tokio::test]

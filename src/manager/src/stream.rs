@@ -392,6 +392,7 @@ pub struct MqttStreamPropsRequest {
     pub qos: Option<u8>,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+    pub protocol_version: Option<flow::MqttProtocolVersion>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -1352,6 +1353,18 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
                     JsonValue::String(connector_key.clone()),
                 );
             }
+            if let Some(protocol_version) = mqtt.protocol_version {
+                map.insert(
+                    "protocol_version".to_string(),
+                    JsonValue::String(
+                        match protocol_version {
+                            flow::MqttProtocolVersion::V3 => "v3",
+                            flow::MqttProtocolVersion::V5 => "v5",
+                        }
+                        .to_string(),
+                    ),
+                );
+            }
             JsonValue::Object(map)
         }
         StreamProps::Memory(memory) => {
@@ -1495,6 +1508,12 @@ pub(crate) fn build_stream_props(
             let mqtt_props: MqttStreamPropsRequest = serde_json::from_value(props.to_value())
                 .map_err(|err| format!("invalid mqtt props: {}", err))?;
             let connector_key = normalized_optional_string(mqtt_props.connector_key);
+            if connector_key.is_some() && mqtt_props.protocol_version.is_some() {
+                return Err(
+                    "mqtt stream protocol_version is owned by connector_key and must not be set locally"
+                        .to_string(),
+                );
+            }
             let broker = normalized_optional_string(mqtt_props.broker_url);
             if connector_key.is_none() && broker.is_none() {
                 return Err("mqtt stream requires broker_url".to_string());
@@ -1510,6 +1529,7 @@ pub(crate) fn build_stream_props(
                 qos,
                 client_id: mqtt_props.client_id,
                 connector_key,
+                protocol_version: mqtt_props.protocol_version,
             }))
         }
         "video" => {

@@ -4,13 +4,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
+use rumqttc::Transport;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use url::Url;
 
 use crate::backpressure_hub::BackpressureHub;
+use crate::connector::mqtt_protocol::{
+    MqttClient, MqttConnectionError, MqttEvent, MqttOptions, MqttQos,
+};
 use crate::connector::{mask_url_userinfo, url_has_userinfo, ConnectorError};
 use crate::runtime::TaskSpawner;
 use crate::secret::{SecretRef, SecretString};
@@ -24,6 +27,8 @@ pub struct SharedMqttClientConfig {
     pub client_id: String,
     pub qos: u8,
     pub max_packet_size: Option<usize>,
+    #[serde(default)]
+    pub protocol_version: crate::connector::MqttProtocolVersion,
     /// MQTT username (non-secret identifier, plaintext). VF-51 §7.3.
     #[serde(default)]
     pub username: Option<String>,
@@ -120,12 +125,28 @@ impl SharedMqttClient {
         self.entry.connected.load(Ordering::Acquire)
     }
 
+    pub fn protocol_version(&self) -> crate::connector::MqttProtocolVersion {
+        self.entry.config.protocol_version
+    }
+
     pub async fn publish(
         &self,
         topic: String,
-        qos: QoS,
+        qos: rumqttc::QoS,
         retain: bool,
         payload: Vec<u8>,
+    ) -> Result<(), ConnectorError> {
+        self.publish_with_user_properties(topic, qos.into(), retain, payload, &[])
+            .await
+    }
+
+    pub(crate) async fn publish_with_user_properties(
+        &self,
+        topic: String,
+        qos: MqttQos,
+        retain: bool,
+        payload: Vec<u8>,
+        user_properties: &[crate::connector::MqttUserProperty],
     ) -> Result<(), ConnectorError> {
         if !self.is_connected() {
             self.entry
@@ -137,11 +158,15 @@ impl SharedMqttClient {
             return Err(ConnectorError::Connection(message));
         }
 
-        self.entry
-            .client()
-            .await?
-            .publish(topic, qos, retain, payload)
-            .await
+        let client = self.entry.client().await?;
+        let publish_result = if user_properties.is_empty() {
+            client.publish(topic, qos, retain, payload).await
+        } else {
+            client
+                .publish_with_user_properties(topic, qos, retain, payload, user_properties)
+                .await
+        };
+        publish_result
             .map(|_| self.entry.record_tx_message_metric())
             .map_err(|err| {
                 self.entry
@@ -158,7 +183,7 @@ impl Drop for SharedMqttClient {
 }
 
 struct MqttClientRuntime {
-    client: AsyncClient,
+    client: MqttClient,
     events_hub: Arc<BackpressureHub<Result<SharedMqttEvent, ConnectorError>>>,
     shutdown_tx: watch::Sender<bool>,
     join_handle: JoinHandle<()>,
@@ -259,7 +284,7 @@ impl MqttClientEntry {
             .map_err(|_| ConnectorError::ResourceBusy("shared mqtt client is closed".to_string()))
     }
 
-    async fn client(self: &Arc<Self>) -> Result<AsyncClient, ConnectorError> {
+    async fn client(self: &Arc<Self>) -> Result<MqttClient, ConnectorError> {
         self.ensure_runtime_started().await?;
         let runtime = self.runtime.lock().await;
         runtime
@@ -290,7 +315,7 @@ impl MqttClientEntry {
         let qos = map_qos(config.qos)?;
         let topic = config.topic.clone();
 
-        let (client, mut event_loop) = AsyncClient::new(options, 64);
+        let (client, mut event_loop) = MqttClient::new(options, 64);
         client.subscribe(topic.clone(), qos).await.map_err(|err| {
             self.record_error_metric(MQTT_SHARED_CLIENT_ERROR_SUBSCRIBE);
             ConnectorError::Connection(err.to_string())
@@ -312,17 +337,17 @@ impl MqttClientEntry {
                 tokio::select! {
                     _ = shutdown_rx.changed() => break,
                     event = event_loop.poll() => match event {
-                        Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        Ok(MqttEvent::Publish { topic: publish_topic, payload }) => {
                             entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
-                            if mqtt_topic_matches(&topic, &publish.topic) {
+                            if mqtt_topic_matches(&topic, &publish_topic) {
                                 entry_for_task.record_rx_message_metric();
                                 let _ = events_hub_for_task
-                                    .send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())))
+                                    .send(Ok(SharedMqttEvent::Payload(payload.to_vec())))
                                     .await;
                             }
                         }
-                        Ok(Event::Incoming(Packet::Disconnect)) => {
+                        Ok(MqttEvent::Disconnected) => {
                             entry_for_task.connected.store(false, Ordering::Release);
                             entry_for_task.set_connected_metric(false);
                             entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_DISCONNECT);
@@ -330,7 +355,7 @@ impl MqttClientEntry {
                             tracing::warn!("shared mqtt client disconnected; reconnecting");
                             event_loop.clean();
                         }
-                        Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                        Ok(MqttEvent::Connected) => {
                             let was_connected = entry_for_task.connected.swap(true, Ordering::AcqRel);
                             entry_for_task.set_connected_metric(true);
                             if seen_connected && !was_connected {
@@ -341,8 +366,8 @@ impl MqttClientEntry {
                             backoff = Duration::from_millis(100);
                             let _ = client_for_task.subscribe(topic.clone(), qos).await;
                         }
-                        Ok(_) => {}
-                        Err(ConnectionError::RequestsDone) => {
+                        Ok(MqttEvent::Other) => {}
+                        Err(MqttConnectionError::RequestsDone) => {
                             entry_for_task.connected.store(false, Ordering::Release);
                             entry_for_task.set_connected_metric(false);
                             if entry_for_task.closing.load(Ordering::Acquire) {
@@ -357,13 +382,13 @@ impl MqttClientEntry {
                             sleep(backoff).await;
                             backoff = std::cmp::min(backoff * 2, max_backoff);
                         }
-                        Err(err) => {
+                        Err(MqttConnectionError::Connection(err)) => {
                             entry_for_task.connected.store(false, Ordering::Release);
                             entry_for_task.set_connected_metric(false);
                             entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_POLL);
-                            *entry_for_task.last_error.write() = Some(err.to_string());
+                            *entry_for_task.last_error.write() = Some(err.clone());
                             let _ = events_hub_for_task
-                                .send(Err(ConnectorError::Connection(err.to_string())))
+                                .send(Err(ConnectorError::Connection(err)))
                                 .await;
                             sleep(backoff).await;
                             backoff = std::cmp::min(backoff * 2, max_backoff);
@@ -577,9 +602,15 @@ fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, Co
             ))
         })?;
 
-    let mut options = MqttOptions::new(config.client_id.clone(), host, port);
     let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
-    options.set_max_packet_size(max_packet_size, max_packet_size);
+    let mut options = MqttOptions::new(
+        config.protocol_version,
+        config.client_id.clone(),
+        host,
+        port,
+        max_packet_size,
+    )
+    .map_err(ConnectorError::Connection)?;
 
     // Wire MQTT credentials (previously dropped). Password is already resolved
     // from the secret store before reaching the runtime config.
@@ -599,15 +630,8 @@ fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, Co
     Ok(options)
 }
 
-fn map_qos(qos: u8) -> Result<QoS, ConnectorError> {
-    match qos {
-        0 => Ok(QoS::AtMostOnce),
-        1 => Ok(QoS::AtLeastOnce),
-        2 => Ok(QoS::ExactlyOnce),
-        other => Err(ConnectorError::Other(format!(
-            "unsupported MQTT QoS level: {other}"
-        ))),
-    }
+fn map_qos(qos: u8) -> Result<MqttQos, ConnectorError> {
+    MqttQos::try_from(qos).map_err(ConnectorError::Other)
 }
 
 fn default_port_for_scheme(scheme: &str) -> Option<u16> {
@@ -628,6 +652,7 @@ mod tests {
         build_mqtt_options, mqtt_topic_matches, MqttClientManager, SharedMqttClientConfig,
         SharedMqttEvent,
     };
+    use crate::connector::mqtt_protocol::MqttQos;
     use crate::connector::ConnectorError;
     use crate::runtime::TaskSpawner;
     use crate::test_support::EmbeddedMqttBroker;
@@ -685,6 +710,7 @@ mod tests {
             client_id: "client_shared".to_string(),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
@@ -725,6 +751,7 @@ mod tests {
             client_id: "client_lazy".to_string(),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
@@ -776,6 +803,7 @@ mod tests {
             client_id: "client_embedded".to_string(),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
@@ -793,6 +821,7 @@ mod tests {
             .subscribe()
             .await
             .expect("subscribe shared mqtt events");
+        sleep(Duration::from_millis(300)).await;
 
         broker
             .publish("fleet/device_a/telemetry", b"first-payload".to_vec())
@@ -835,6 +864,90 @@ mod tests {
         drop(held);
     }
 
+    // coverage-covers: source.shared_mqtt_client.v5_runtime
+    #[tokio::test]
+    async fn shared_mqtt_v5_client_receives_and_publishes_payloads() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let manager =
+            MqttClientManager::new("default", TaskSpawner::from_handle(Handle::current()));
+        let topic_filter = broker.scoped_filter("fleet/+/telemetry");
+        let cfg = SharedMqttClientConfig {
+            key: "embedded_v5".to_string(),
+            broker_url: broker.broker_url_v5(),
+            topic: topic_filter,
+            client_id: "client_embedded_v5".to_string(),
+            qos: 1,
+            max_packet_size: None,
+            protocol_version: crate::connector::MqttProtocolVersion::V5,
+            username: None,
+            password: None,
+            resolved_password: None,
+        };
+
+        manager
+            .create_client(cfg)
+            .await
+            .expect("create shared MQTT 5 client");
+        let held = manager
+            .acquire_client("embedded_v5")
+            .await
+            .expect("acquire shared MQTT 5 client");
+        let mut events = held
+            .subscribe()
+            .await
+            .expect("subscribe shared MQTT 5 events");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !held.is_connected() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "shared MQTT 5 client did not connect"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        broker
+            .publish_v5("fleet/device_a/telemetry", b"from-mqtt-v5-broker".to_vec())
+            .await
+            .expect("publish inbound MQTT 5 payload");
+        let inbound = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("receive inbound MQTT 5 payload timeout")
+            .expect("inbound MQTT 5 event should exist");
+        match inbound {
+            Ok(SharedMqttEvent::Payload(payload)) => {
+                assert_eq!(payload, b"from-mqtt-v5-broker".to_vec());
+            }
+            other => panic!("expected inbound MQTT 5 payload, got {other:?}"),
+        }
+
+        let user_properties = vec![crate::connector::MqttUserProperty {
+            key: "source".to_string(),
+            value: "shared-client".to_string(),
+        }];
+        held.publish_with_user_properties(
+            broker.scoped_topic("fleet/device_b/telemetry"),
+            MqttQos::Qos1,
+            false,
+            b"through-shared-mqtt-v5".to_vec(),
+            &user_properties,
+        )
+        .await
+        .expect("publish through shared MQTT 5 client");
+        let outbound = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("receive shared MQTT 5 published payload timeout")
+            .expect("shared MQTT 5 published event should exist");
+        match outbound {
+            Ok(SharedMqttEvent::Payload(payload)) => {
+                assert_eq!(payload, b"through-shared-mqtt-v5".to_vec());
+            }
+            other => panic!("expected shared MQTT 5 published payload, got {other:?}"),
+        }
+
+        drop(held);
+    }
+
     #[test]
     fn shared_mqtt_build_mqtt_options_uses_shared_client_packet_limit() {
         let config = SharedMqttClientConfig {
@@ -844,6 +957,7 @@ mod tests {
             client_id: "shared_client".to_string(),
             qos: 1,
             max_packet_size: Some(16384),
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
@@ -869,6 +983,7 @@ mod tests {
             client_id: "shared_tls_client".to_string(),
             qos: 1,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
@@ -894,11 +1009,15 @@ mod tests {
             client_id: "c".to_string(),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
         };
-        let err = build_mqtt_options(&config).unwrap_err().to_string();
+        let err = build_mqtt_options(&config)
+            .err()
+            .expect("userinfo-bearing broker URL should fail")
+            .to_string();
         assert!(err.contains("must not embed credentials"), "{err}");
         assert!(!err.contains("s3cr3t"), "error leaked password: {err}");
     }
@@ -918,6 +1037,7 @@ mod tests {
             client_id: "c".to_string(),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: Some("alice".to_string()),
             password: Some(SecretRef::store("mqtt-pass")),
             resolved_password: None,

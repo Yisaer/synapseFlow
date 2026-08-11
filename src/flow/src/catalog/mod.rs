@@ -134,6 +134,7 @@ pub struct MqttStreamProps {
     pub qos: u8,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+    pub protocol_version: Option<crate::connector::MqttProtocolVersion>,
 }
 
 impl MqttStreamProps {
@@ -144,6 +145,7 @@ impl MqttStreamProps {
             qos,
             client_id: None,
             connector_key: None,
+            protocol_version: None,
         }
     }
 
@@ -154,6 +156,14 @@ impl MqttStreamProps {
 
     pub fn with_connector_key(mut self, key: impl Into<String>) -> Self {
         self.connector_key = Some(key.into());
+        self
+    }
+
+    pub fn with_protocol_version(
+        mut self,
+        protocol_version: crate::connector::MqttProtocolVersion,
+    ) -> Self {
+        self.protocol_version = Some(protocol_version);
         self
     }
 }

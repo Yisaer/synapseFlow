@@ -43,6 +43,7 @@ pub use codec::{
     ProtoDescriptorBundle, ProtoFieldInfo, ProtobufDecoder, RecordDecoder, SecretBytes,
     SecretEncoding, SinkEncoder, SinkEncoderFactory, SinkEncryptionConfig,
 };
+pub use connector::{MqttProtocolVersion, MqttUserProperty};
 pub use datatypes::{
     BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type,
     Int32Type, Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType,

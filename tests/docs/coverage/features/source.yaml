@@ -35,6 +35,13 @@ features:
       - docs/runtime/sources/mqtt.md
     status: active
 
+  - id: source.mqtt.v5_ingest
+    title: MQTT 5 source ingest
+    summary: Consume MQTT 5 PUBLISH payload bytes through the source connector path.
+    doc_refs:
+      - docs/runtime/sources/mqtt.md
+    status: active
+
   - id: source.nng_pubsub.bytes_input
     title: NNG pub/sub source bytes input
     summary: Consume NNG pub/sub framed bytes through the documented source runtime contract.
@@ -59,6 +66,13 @@ features:
   - id: source.shared_mqtt_client.lifecycle
     title: Shared MQTT client lifecycle
     summary: Manage shared MQTT client runtime lifecycle and reuse semantics.
+    doc_refs:
+      - docs/runtime/sources/shared_mqtt_client.md
+    status: active
+
+  - id: source.shared_mqtt_client.v5_runtime
+    title: Shared MQTT 5 client runtime
+    summary: Receive and publish through a shared client whose connection protocol is MQTT 5.
     doc_refs:
       - docs/runtime/sources/shared_mqtt_client.md
     status: active

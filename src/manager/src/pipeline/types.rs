@@ -615,6 +615,8 @@ pub struct MqttSinkPropsRequest {
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
     pub max_packet_size: Option<usize>,
+    pub protocol_version: Option<flow::MqttProtocolVersion>,
+    pub user_properties: Vec<flow::MqttUserProperty>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]

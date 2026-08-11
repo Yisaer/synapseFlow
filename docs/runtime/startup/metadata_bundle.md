@@ -33,7 +33,8 @@ Every entry requires a `revision` in `1..=9007199254740991`.
         "broker_url": "tcp://127.0.0.1:1883",
         "topic": "vehicle/telemetry",
         "client_id": "vehicle_reader",
-        "qos": 1
+        "qos": 1,
+        "protocol_version": "v5"
       }
     ],
     "schemas": [

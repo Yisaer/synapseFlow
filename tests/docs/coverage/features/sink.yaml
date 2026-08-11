@@ -14,6 +14,13 @@ features:
       - docs/runtime/sinks/connectors/mqtt.md
     status: active
 
+  - id: sink.connector.mqtt_v5_user_properties
+    title: MQTT 5 static User Properties
+    summary: Publish ordered static User Properties, including duplicate keys, through MQTT 5.
+    doc_refs:
+      - docs/runtime/sinks/connectors/mqtt.md
+    status: active
+
   - id: sink.connector.nng_pubsub_output
     title: NNG pub/sub sink connector
     summary: Emit encoded pipeline output through the documented NNG pub/sub sink connector contract.

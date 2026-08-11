@@ -1,5 +1,32 @@
 # Pipeline API
 
+## MQTT 5 Sink Properties
+
+An MQTT sink may set `props.protocol_version` to `v5` and provide static User Properties as an
+ordered array. MQTT 3.1.1 remains the default when the version is omitted.
+
+```json
+{
+  "id": "mqtt_output",
+  "type": "mqtt",
+  "props": {
+    "broker_url": "tcp://127.0.0.1:1883",
+    "topic": "processed/telemetry",
+    "protocol_version": "v5",
+    "user_properties": [
+      { "key": "source", "value": "veloflux" },
+      { "key": "tag", "value": "primary" },
+      { "key": "tag", "value": "edge" }
+    ]
+  }
+}
+```
+
+Each item must contain string `key` and `value` fields. Order and duplicate keys are preserved.
+Dynamic templates are not supported in this PR. With `connector_key`, omit connector-local
+`protocol_version`; the referenced shared MQTT client owns the version. User Properties require
+that effective shared version to be `v5`.
+
 ## Schedule Options
 
 Pipeline schedules are declared inside `options.schedule` when creating or upserting a pipeline.

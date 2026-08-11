@@ -3,7 +3,9 @@ use super::{
     write_schema_zip,
 };
 use reqwest::StatusCode;
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::v5::mqttbytes::v5::Packet;
+use rumqttc::v5::mqttbytes::QoS;
+use rumqttc::v5::{AsyncClient, Event, MqttOptions};
 use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -35,7 +37,7 @@ impl EmbeddedMqttBroker {
                 initialized_filters: None,
                 shared_subscriptions_strategy: Default::default(),
             },
-            v4: Some(HashMap::from([(
+            v5: Some(HashMap::from([(
                 "test".to_string(),
                 ServerSettings {
                     name: "mqtt-test".to_string(),
@@ -203,7 +205,8 @@ async fn stream_with_protobuf_decoder_decodes_and_pipelines_data() {
                 "props": {
                     "broker_url": broker_url,
                     "topic": mqtt_topic,
-                    "qos": 0
+                    "qos": 0,
+                    "protocol_version": "v5"
                 },
                 "encoder": { "type": "json", "props": {} }
             }]

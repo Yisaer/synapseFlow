@@ -114,6 +114,8 @@ pub struct MqttSinkProps {
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
     pub max_packet_size: Option<usize>,
+    pub protocol_version: Option<crate::connector::MqttProtocolVersion>,
+    pub user_properties: Vec<crate::connector::MqttUserProperty>,
 }
 
 /// Concrete Nop sink configuration.
@@ -395,6 +397,8 @@ impl MqttSinkProps {
             client_id: None,
             connector_key: None,
             max_packet_size: None,
+            protocol_version: None,
+            user_properties: Vec::new(),
         }
     }
 
@@ -415,6 +419,22 @@ impl MqttSinkProps {
 
     pub fn with_max_packet_size(mut self, max_packet_size: usize) -> Self {
         self.max_packet_size = Some(max_packet_size);
+        self
+    }
+
+    pub fn with_protocol_version(
+        mut self,
+        protocol_version: crate::connector::MqttProtocolVersion,
+    ) -> Self {
+        self.protocol_version = Some(protocol_version);
+        self
+    }
+
+    pub fn with_user_properties(
+        mut self,
+        user_properties: Vec<crate::connector::MqttUserProperty>,
+    ) -> Self {
+        self.user_properties = user_properties;
         self
     }
 }

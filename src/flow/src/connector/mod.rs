@@ -10,6 +10,7 @@ use crate::model::Collection;
 
 pub mod memory_pubsub;
 pub mod mqtt_client;
+mod mqtt_protocol;
 pub mod nng_pubsub;
 pub mod redact;
 pub mod registry;
@@ -87,6 +88,7 @@ pub use memory_pubsub::{
 };
 pub(crate) use mqtt_client::MqttClientManager;
 pub use mqtt_client::SharedMqttClientConfig;
+pub use mqtt_protocol::{validate_mqtt_user_properties, MqttProtocolVersion, MqttUserProperty};
 pub use nng_pubsub::{NngPubSubSinkConfig, NngPubSubSourceConfig};
 pub use registry::ConnectorRegistry;
 pub use sink::file::FileSinkConfig;

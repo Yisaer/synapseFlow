@@ -3,7 +3,9 @@ use super::{
     write_schema_zip,
 };
 use reqwest::StatusCode;
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::v5::mqttbytes::v5::Packet;
+use rumqttc::v5::mqttbytes::QoS;
+use rumqttc::v5::{AsyncClient, Event, MqttOptions};
 use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,7 +36,7 @@ impl EmbeddedMqttBroker {
                 initialized_filters: None,
                 shared_subscriptions_strategy: Default::default(),
             },
-            v4: Some(HashMap::from([(
+            v5: Some(HashMap::from([(
                 "test".to_string(),
                 ServerSettings {
                     name: "mqtt-test".to_string(),
@@ -255,7 +257,13 @@ async fn protobuf_encoder_covers_all_value_types() {
                 "props": {
                     "broker_url": broker_url,
                     "topic": mqtt_topic,
-                    "qos": 0
+                    "qos": 0,
+                    "protocol_version": "v5",
+                    "user_properties": [
+                        { "key": "format", "value": "protobuf" },
+                        { "key": "tag", "value": "primary" },
+                        { "key": "tag", "value": "edge" }
+                    ]
                 },
                 "encoder": {
                     "type": "protobuf",
@@ -307,7 +315,7 @@ async fn protobuf_encoder_covers_all_value_types() {
         .expect("subscribe to mqtt topic");
 
     let (connack_tx, connack_rx) = tokio::sync::oneshot::channel();
-    let received: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+    let received: std::sync::Arc<std::sync::Mutex<Option<(Vec<u8>, Vec<(String, String)>)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let received_clone = received.clone();
     tokio::spawn(async move {
@@ -320,7 +328,12 @@ async fn protobuf_encoder_covers_all_value_types() {
                     }
                 }
                 Ok(Event::Incoming(Packet::Publish(publish))) => {
-                    *received_clone.lock().unwrap() = Some(publish.payload.to_vec());
+                    let user_properties = publish
+                        .properties
+                        .map(|properties| properties.user_properties)
+                        .unwrap_or_default();
+                    *received_clone.lock().unwrap() =
+                        Some((publish.payload.to_vec(), user_properties));
                     return;
                 }
                 Ok(_) => {}
@@ -366,11 +379,21 @@ async fn protobuf_encoder_covers_all_value_types() {
         }
     }
 
-    let output_bytes = received
+    let (output_bytes, user_properties) = received
         .lock()
         .unwrap()
         .take()
         .expect("timed out waiting for mqtt protobuf output after retries");
+
+    assert_eq!(
+        user_properties,
+        vec![
+            ("format".to_string(), "protobuf".to_string()),
+            ("tag".to_string(), "primary".to_string()),
+            ("tag".to_string(), "edge".to_string()),
+        ],
+        "MQTT 5 User Properties should preserve declaration order and duplicate keys"
+    );
 
     let _ = sub_client.disconnect().await;
 

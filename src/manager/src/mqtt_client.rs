@@ -63,6 +63,7 @@ pub(crate) fn shared_mqtt_config_eq(
         && left.client_id == right.client_id
         && left.qos == right.qos
         && left.max_packet_size == right.max_packet_size
+        && left.protocol_version == right.protocol_version
         && left.username == right.username
         && left.password == right.password
 }
@@ -348,6 +349,7 @@ mod tests {
             client_id: format!("client_{key}"),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,

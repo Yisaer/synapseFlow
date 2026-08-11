@@ -663,6 +663,34 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         .get("max_packet_size")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
+    let protocol_version = obj
+        .get("protocol_version")
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value::<crate::connector::MqttProtocolVersion>(value.clone()))
+        .transpose()
+        .map_err(|err| format!("mqtt sink settings invalid protocol_version: {err}"))?;
+    if connector_key.is_some() && protocol_version.is_some() {
+        return Err(
+            "mqtt sink protocol_version is owned by connector_key and must not be set locally"
+                .to_string(),
+        );
+    }
+    let user_properties = obj
+        .get("user_properties")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<Vec<crate::connector::MqttUserProperty>>(value.clone())
+        })
+        .transpose()
+        .map_err(|err| format!("mqtt sink settings invalid user_properties: {err}"))?
+        .unwrap_or_default();
+    crate::connector::validate_mqtt_user_properties(&user_properties)?;
+    if connector_key.is_none()
+        && protocol_version.unwrap_or_default() == crate::connector::MqttProtocolVersion::V3
+        && !user_properties.is_empty()
+    {
+        return Err("mqtt sink user_properties require protocol_version `v5`".to_string());
+    }
 
     let mut config = MqttSinkConfig::new(
         sink_name.clone(),
@@ -671,6 +699,10 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         qos,
     )
     .with_retain(retain);
+    if let Some(protocol_version) = protocol_version {
+        config = config.with_protocol_version(protocol_version);
+    }
+    config = config.with_user_properties(user_properties);
     if let Some(client_id) = client_id {
         config = config.with_client_id(client_id);
     }
@@ -1017,6 +1049,8 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "client_id": cfg.client_id,
                 "connector_key": cfg.connector_key,
                 "max_packet_size": cfg.max_packet_size,
+                "protocol_version": cfg.protocol_version,
+                "user_properties": cfg.user_properties,
             }),
         ),
         SinkConnectorConfig::Kuksa(cfg) => (
@@ -1216,6 +1250,34 @@ mod tests {
         assert_eq!(config.broker_url, "");
         assert_eq!(config.topic.expose(), "out/topic");
         assert_eq!(config.connector_key.as_deref(), Some("shared_mqtt"));
+    }
+
+    #[test]
+    fn mqtt_v5_sink_ir_roundtrip_preserves_static_user_properties() {
+        let user_properties = vec![
+            crate::connector::MqttUserProperty {
+                key: "tag".to_string(),
+                value: "primary".to_string(),
+            },
+            crate::connector::MqttUserProperty {
+                key: "tag".to_string(),
+                value: "edge".to_string(),
+            },
+        ];
+        let config = MqttSinkConfig::new("sink_v5", "tcp://127.0.0.1:1883", "out/topic", 1)
+            .with_protocol_version(crate::connector::MqttProtocolVersion::V5)
+            .with_user_properties(user_properties.clone());
+        let connector = SinkConnectorConfig::Mqtt(config);
+
+        let (kind, settings) = connector_to_ir(&connector);
+        assert_eq!(kind, "mqtt");
+        let decoded = mqtt_sink_from_ir_settings(&settings).expect("decode MQTT 5 sink config");
+
+        assert_eq!(
+            decoded.protocol_version,
+            Some(crate::connector::MqttProtocolVersion::V5)
+        );
+        assert_eq!(decoded.user_properties, user_properties);
     }
 
     #[test]

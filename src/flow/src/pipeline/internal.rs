@@ -707,6 +707,10 @@ fn build_sinks_from_definition(
                     props.qos,
                 );
                 config = config.with_retain(props.retain);
+                if let Some(protocol_version) = props.protocol_version {
+                    config = config.with_protocol_version(protocol_version);
+                }
+                config = config.with_user_properties(props.user_properties.clone());
                 let client_id = props
                     .client_id
                     .clone()
@@ -1093,6 +1097,9 @@ pub(super) fn attach_sources_from_catalog(
                     );
                     if let Some(client_id) = &stream_props.client_id {
                         config = config.with_client_id(client_id.clone());
+                    }
+                    if let Some(protocol_version) = stream_props.protocol_version {
+                        config = config.with_protocol_version(protocol_version);
                     }
                     if let Some(connector_key) = &stream_props.connector_key {
                         config = config.with_connector_key(connector_key.clone());

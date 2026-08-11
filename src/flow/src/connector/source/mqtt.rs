@@ -1,12 +1,15 @@
 //! MQTT source connector supporting shared or standalone clients.
 
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
+use crate::connector::mqtt_protocol::{
+    MqttClient, MqttConnectionError, MqttEvent, MqttOptions, MqttQos,
+};
 use crate::connector::{
     mask_url_userinfo, ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector,
 };
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
-use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
+use rumqttc::Transport;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -23,6 +26,7 @@ pub struct MqttSourceConfig {
     pub qos: u8,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+    pub protocol_version: Option<crate::connector::MqttProtocolVersion>,
 }
 
 impl MqttSourceConfig {
@@ -39,6 +43,7 @@ impl MqttSourceConfig {
             qos,
             client_id: None,
             connector_key: None,
+            protocol_version: None,
         }
     }
 
@@ -49,6 +54,14 @@ impl MqttSourceConfig {
 
     pub fn with_connector_key(mut self, connector_key: impl Into<String>) -> Self {
         self.connector_key = Some(connector_key.into());
+        self
+    }
+
+    pub fn with_protocol_version(
+        mut self,
+        protocol_version: crate::connector::MqttProtocolVersion,
+    ) -> Self {
+        self.protocol_version = Some(protocol_version);
         self
     }
 
@@ -142,6 +155,12 @@ impl SourceConnector for MqttSourceConnector {
         if self.shutdown_tx.is_some() {
             return Err(ConnectorError::AlreadySubscribed(self.id.clone()));
         }
+        if self.config.connector_key.is_some() && self.config.protocol_version.is_some() {
+            return Err(ConnectorError::Other(
+                "mqtt source protocol_version is owned by connector_key and must not be set locally"
+                    .to_string(),
+            ));
+        }
 
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
         let config = self.config.clone();
@@ -233,7 +252,7 @@ async fn run_standalone_loop(
     let qos = map_qos(config.qos)?;
     let topic = config.topic.clone();
 
-    let (client, mut event_loop) = AsyncClient::new(mqtt_options, 32);
+    let (client, mut event_loop) = MqttClient::new(mqtt_options, 32);
 
     client
         .subscribe(topic.clone(), qos)
@@ -248,14 +267,14 @@ async fn run_standalone_loop(
             _ = &mut shutdown_rx => break,
             event = event_loop.poll() => {
                 match event {
-                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                    Ok(MqttEvent::Publish { payload, .. }) => {
                         veloflux_metrics::mqtt_source_records_in_total()
                             .with_label_values(&[
                                 flow_instance_id.as_ref(),
                                 connector_id.as_str(),
                             ])
                             .inc();
-                        let payload = publish.payload.to_vec();
+                        let payload = payload.to_vec();
                         match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                             Ok(_) => {
                                 veloflux_metrics::mqtt_source_records_out_total()
@@ -268,18 +287,18 @@ async fn run_standalone_loop(
                             Err(_) => break,
                         }
                     }
-                    Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    Ok(MqttEvent::Connected) => {
                         backoff = Duration::from_millis(100);
                         let _ = client.subscribe(topic.clone(), qos).await;
                     }
-                    Ok(Event::Incoming(Packet::Disconnect)) => {
+                    Ok(MqttEvent::Disconnected) => {
                         tracing::warn!(connector_id = %connector_id, "mqtt source disconnected; reconnecting");
                         event_loop.clean();
                     }
-                    Ok(_) => {}
-                    Err(ConnectionError::RequestsDone) => break,
-                    Err(err) => {
-                        let _ = sender.send(Err(ConnectorError::Connection(err.to_string()))).await;
+                    Ok(MqttEvent::Other) => {}
+                    Err(MqttConnectionError::RequestsDone) => break,
+                    Err(MqttConnectionError::Connection(err)) => {
+                        let _ = sender.send(Err(ConnectorError::Connection(err))).await;
                         sleep(backoff).await;
                         backoff = std::cmp::min(backoff * 2, max_backoff);
                     }
@@ -320,23 +339,22 @@ fn build_mqtt_options(config: &MqttSourceConfig) -> Result<MqttOptions, Connecto
             ))
         })?;
 
-    let mut options = MqttOptions::new(config.client_id(), host, port);
-    options.set_max_packet_size(64 * 1024 * 1024, 64 * 1024 * 1024);
+    let mut options = MqttOptions::new(
+        config.protocol_version.unwrap_or_default(),
+        config.client_id(),
+        host,
+        port,
+        64 * 1024 * 1024,
+    )
+    .map_err(ConnectorError::Connection)?;
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
     }
     Ok(options)
 }
 
-fn map_qos(qos: u8) -> Result<QoS, ConnectorError> {
-    match qos {
-        0 => Ok(QoS::AtMostOnce),
-        1 => Ok(QoS::AtLeastOnce),
-        2 => Ok(QoS::ExactlyOnce),
-        other => Err(ConnectorError::Other(format!(
-            "unsupported MQTT QoS level: {other}"
-        ))),
-    }
+fn map_qos(qos: u8) -> Result<MqttQos, ConnectorError> {
+    MqttQos::try_from(qos).map_err(ConnectorError::Other)
 }
 
 fn default_port_for_scheme(scheme: &str) -> Option<u16> {
@@ -476,6 +494,7 @@ mod tests {
             client_id: "shared_source_client".to_string(),
             qos: 0,
             max_packet_size: None,
+            protocol_version: Default::default(),
             username: None,
             password: None,
             resolved_password: None,
@@ -527,5 +546,43 @@ mod tests {
         }
 
         connector.close().expect("close source connector");
+    }
+
+    // coverage-covers: source.mqtt.v5_ingest
+    #[tokio::test]
+    async fn standalone_mqtt_v5_source_receives_payload_from_embedded_broker() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let topic_filter = broker.scoped_filter("standalone/v5/source");
+        let config =
+            MqttSourceConfig::new("mqtt_v5_source", broker.broker_url_v5(), topic_filter, 1)
+                .with_protocol_version(crate::connector::MqttProtocolVersion::V5);
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let mut connector = MqttSourceConnector::new(
+            "mqtt_v5_source_connector",
+            config,
+            "default",
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        let mut stream = connector.subscribe().expect("subscribe MQTT 5 source");
+
+        sleep(Duration::from_millis(300)).await;
+        broker
+            .publish_v5("standalone/v5/source", b"mqtt-v5-payload".to_vec())
+            .await
+            .expect("publish MQTT 5 embedded payload");
+
+        let item = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("receive MQTT 5 source payload timeout")
+            .expect("MQTT 5 source event should exist");
+        match item {
+            Ok(ConnectorEvent::Payload(payload)) => {
+                assert_eq!(payload, b"mqtt-v5-payload".to_vec());
+            }
+            other => panic!("expected MQTT 5 source payload, got {other:?}"),
+        }
+
+        connector.close().expect("close MQTT 5 source connector");
     }
 }

@@ -27,6 +27,7 @@ fn mqtt_config(key: &str, password: Option<SecretRef>) -> SharedMqttClientConfig
         client_id: "client".to_string(),
         qos: 0,
         max_packet_size: None,
+        protocol_version: Default::default(),
         username: Some("device".to_string()),
         password,
         resolved_password: None,
