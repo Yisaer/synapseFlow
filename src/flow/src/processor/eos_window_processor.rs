@@ -222,13 +222,22 @@ impl EosWindowState {
         let rows = collection.into_rows().map_err(|err| {
             ProcessorError::ProcessingError(format!("failed to extract rows: {err}"))
         })?;
-        if !rows.is_empty() && self.opened_at.is_none() {
-            self.opened_at = rows.first().map(|tuple| tuple.timestamp);
+        for row in rows {
+            match window_metadata::validate_system_time(row.timestamp) {
+                Ok(()) => {}
+                Err(ProcessorError::ProcessingError(message)) => {
+                    self.stats
+                        .record_error_logged("eos window processor error", message);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+            if self.opened_at.is_none() {
+                self.opened_at = Some(row.timestamp);
+            }
+            self.last_seen_at = Some(row.timestamp);
+            self.rows.push(row);
         }
-        if let Some(last) = rows.last() {
-            self.last_seen_at = Some(last.timestamp);
-        }
-        self.rows.extend(rows);
         self.rows_buffered.set(self.rows.len() as u64);
         Ok(())
     }

@@ -77,8 +77,17 @@ impl StreamingEosAggregationProcessor {
         collection: &dyn Collection,
         opened_at: &mut Option<SystemTime>,
         last_seen_at: &mut Option<SystemTime>,
+        stats: &ProcessorStats,
     ) -> Result<(), String> {
         for row in collection.rows() {
+            match window_metadata::validate_system_time(row.timestamp) {
+                Ok(()) => {}
+                Err(ProcessorError::ProcessingError(message)) => {
+                    stats.record_error_logged("streaming EOS aggregation processor error", message);
+                    continue;
+                }
+                Err(err) => return Err(err.to_string()),
+            }
             if opened_at.is_none() {
                 *opened_at = Some(row.timestamp);
             }
@@ -180,6 +189,7 @@ impl Processor for StreamingEosAggregationProcessor {
                                             collection.as_ref(),
                                             &mut opened_at,
                                             &mut last_seen_at,
+                                            stats.as_ref(),
                                         );
                                         stats.record_handle_duration(handle_start.elapsed());
                                         if let Err(err) = result {

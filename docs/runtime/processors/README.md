@@ -25,3 +25,14 @@ For runtime test design, prefer assertions such as:
 
 Only add a downstream `StreamData::Error` expectation when a specific processor contract explicitly
 documents that behavior.
+
+### Recoverable input error boundary
+
+A processor records and skips an invalid input only when the error is classified before any
+persistent state mutation. Examples include an invalid partition key or a timestamp that cannot be
+represented by the target window.
+
+Errors that may follow a partial state mutation continue to terminate the processor task. The same
+applies to unreachable invariant failures, downstream channel failures, startup or configuration
+failures, control lifecycle failures, panics, and unexpected task exits. The processor does not
+clear active state in an attempt to recover from these errors.

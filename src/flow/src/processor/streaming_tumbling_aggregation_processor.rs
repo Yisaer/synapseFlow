@@ -167,16 +167,41 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
+                                        let mut mutation_error = None;
                                         for row in collection.rows() {
-                                            window_state.add_row(row).map_err(|e| {
-                                                ProcessorError::ProcessingError(format!(
-                                                    "Failed to update window state: {e}"
-                                                ))
-                                            })?;
+                                            match window_state.add_row(row) {
+                                                Ok(()) => {}
+                                                Err(AddRowError::BeforeMutation(message)) => {
+                                                    stats.record_error_logged(
+                                                        "streaming tumbling aggregation processor error",
+                                                        message,
+                                                    );
+                                                }
+                                                Err(AddRowError::AfterMutation(message)) => {
+                                                    mutation_error = Some(message);
+                                                    break;
+                                                }
+                                            }
                                         }
                                         stats.record_handle_duration(handle_start.elapsed());
+                                        if let Some(message) = mutation_error {
+                                            return Err(ProcessorError::ProcessingError(format!(
+                                                "Failed to update window state: {message}"
+                                            )));
+                                        }
                                     }
                                     StreamData::Watermark(ts) => {
+                                        match window_metadata::validate_system_time(ts) {
+                                            Ok(()) => {}
+                                            Err(ProcessorError::ProcessingError(message)) => {
+                                                stats.record_error_logged(
+                                                    "streaming tumbling aggregation processor error",
+                                                    message,
+                                                );
+                                                continue;
+                                            }
+                                            Err(err) => return Err(err),
+                                        }
                                         window_state
                                             .flush_until(
                                                 ts,
@@ -318,8 +343,7 @@ impl ProcessingWindowState {
         }
     }
 
-    fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), String> {
-        let start_secs = window_start_secs_str(row.timestamp, self.len_secs)?;
+    fn add_row_at(&mut self, start_secs: u64, row: &crate::model::Tuple) -> Result<(), String> {
         if let Some(back) = self.windows.back_mut() {
             if back.start_secs == start_secs {
                 return back.worker.update_groups(row);
@@ -419,6 +443,11 @@ struct PartitionedProcessingWindowState {
     partition_by_scalars: Vec<crate::expr::ScalarExpr>,
 }
 
+enum AddRowError {
+    BeforeMutation(String),
+    AfterMutation(String),
+}
+
 impl PartitionedProcessingWindowState {
     fn new(
         len_secs: u64,
@@ -438,9 +467,16 @@ impl PartitionedProcessingWindowState {
         }
     }
 
-    fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), String> {
-        let partition_key = eval_partition_key(&self.partition_by_scalars, row, "tumblingwindow")?;
-        self.get_or_insert(partition_key).add_row(row)
+    fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), AddRowError> {
+        let partition_key = eval_partition_key(&self.partition_by_scalars, row, "tumblingwindow")
+            .map_err(AddRowError::BeforeMutation)?;
+        let start_secs = window_start_secs_str(row.timestamp, self.len_secs)
+            .map_err(AddRowError::BeforeMutation)?;
+        window_metadata::validate_epoch_secs(start_secs.saturating_add(self.len_secs))
+            .map_err(|err| AddRowError::BeforeMutation(err.to_string()))?;
+        self.get_or_insert(partition_key)
+            .add_row_at(start_secs, row)
+            .map_err(AddRowError::AfterMutation)
     }
 
     async fn flush_until(

@@ -137,9 +137,7 @@ impl Processor for TumblingWindowProcessor {
                                 let res = state.add_collection(collection).await;
                                 // Tumbling window enqueue/buffer work is local-only.
                                 stats.record_handle_duration(handle_start.elapsed());
-                                if let Err(e) = res {
-                                    stats.record_error_logged("tumbling window processor error", e.to_string());
-                                }
+                                res?;
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 state.flush_up_to(ts).await?;
@@ -272,9 +270,33 @@ impl PartitionedProcessingState {
             .into_rows()
             .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
         for tuple in rows {
+            let window_start = match window_start_secs(tuple.timestamp, self.len_secs) {
+                Ok(start) => start,
+                Err(ProcessorError::ProcessingError(message)) => {
+                    self.stats
+                        .record_error_logged("tumbling window processor error", message);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            match window_metadata::validate_epoch_secs(window_start.saturating_add(self.len_secs)) {
+                Ok(()) => {}
+                Err(ProcessorError::ProcessingError(message)) => {
+                    self.stats
+                        .record_error_logged("tumbling window processor error", message);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
             let partition_key =
-                eval_partition_key(&self.partition_by_scalars, &tuple, "tumblingwindow")
-                    .map_err(ProcessorError::ProcessingError)?;
+                match eval_partition_key(&self.partition_by_scalars, &tuple, "tumblingwindow") {
+                    Ok(key) => key,
+                    Err(message) => {
+                        self.stats
+                            .record_error_logged("tumbling window processor error", message);
+                        continue;
+                    }
+                };
             self.state_for(partition_key).add_tuple(tuple);
         }
         self.update_rows_buffered();
@@ -514,5 +536,48 @@ mod tests {
             ))
         ));
         assert_eq!(stats.snapshot().records_out, 2);
+    }
+
+    #[tokio::test]
+    async fn tumbling_window_skips_invalid_timestamp_and_preserves_buffered_rows() {
+        let spawner = test_spawner();
+        let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
+        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let invalid_timestamp = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second before epoch is representable");
+        let invalid_tuple = crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            invalid_timestamp,
+        );
+        let batch = crate::model::RecordBatch::new(vec![tuple_at(1), invalid_tuple, tuple_at(2)])
+            .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::watermark(UNIX_EPOCH + Duration::from_secs(10)))
+            .is_ok());
+
+        let item = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(collection) = item else {
+            panic!("expected tumbling window collection");
+        };
+        assert_eq!(collection.rows().len(), 2);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.error_count, 1);
+        assert!(snapshot
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("invalid timestamp")));
     }
 }

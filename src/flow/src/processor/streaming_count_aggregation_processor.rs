@@ -126,9 +126,21 @@ impl StreamingCountAggregationProcessor {
         worker: &mut AggregationWorker,
         window_state: &mut CountWindowState,
         collection: &dyn Collection,
+        stats: &ProcessorStats,
     ) -> Result<Vec<Box<dyn Collection>>, String> {
         let mut outputs = Vec::new();
         for row in collection.rows() {
+            match window_metadata::validate_system_time(row.timestamp) {
+                Ok(()) => {}
+                Err(ProcessorError::ProcessingError(message)) => {
+                    stats.record_error_logged(
+                        "streaming count aggregation processor error",
+                        message,
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err.to_string()),
+            }
             let now = row.timestamp;
             worker.update_groups(row)?;
 
@@ -146,23 +158,42 @@ impl StreamingCountAggregationProcessor {
     }
 
     fn process_partitioned_collection(
-        physical: &Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: &Arc<AggregateFunctionRegistry>,
-        group_by_meta: &[GroupByMeta],
+        worker: &AggregationWorker,
         partition_by_scalars: &[crate::expr::ScalarExpr],
         target: u64,
         partitions: &mut PartitionedCountAggregationState,
         collection: &dyn Collection,
+        stats: &ProcessorStats,
     ) -> Result<Vec<Box<dyn Collection>>, String> {
         let mut outputs = Vec::new();
         for row in collection.rows() {
-            let partition_key = eval_partition_key(partition_by_scalars, row, "countwindow")?;
+            match window_metadata::validate_system_time(row.timestamp) {
+                Ok(()) => {}
+                Err(ProcessorError::ProcessingError(message)) => {
+                    stats.record_error_logged(
+                        "streaming count aggregation processor error",
+                        message,
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err.to_string()),
+            }
+            let partition_key = match eval_partition_key(partition_by_scalars, row, "countwindow") {
+                Ok(key) => key,
+                Err(message) => {
+                    stats.record_error_logged(
+                        "streaming count aggregation processor error",
+                        message,
+                    );
+                    continue;
+                }
+            };
             let state = partitions.get_or_insert(
                 partition_key,
                 target,
-                Arc::clone(physical),
-                Arc::clone(aggregate_registry),
-                group_by_meta.to_vec(),
+                Arc::clone(&worker.physical),
+                Arc::clone(&worker.aggregate_registry),
+                worker.group_by_meta.clone(),
             );
             let now = row.timestamp;
             state.worker.update_groups(row)?;
@@ -246,16 +277,16 @@ impl Processor for StreamingCountAggregationProcessor {
                                                 &mut worker,
                                                 &mut window_state,
                                                 collection.as_ref(),
+                                                stats.as_ref(),
                                             )
                                         } else {
                                             StreamingCountAggregationProcessor::process_partitioned_collection(
-                                                &worker.physical,
-                                                &worker.aggregate_registry,
-                                                &worker.group_by_meta,
+                                                &worker,
                                                 &partition_by_scalars,
                                                 target,
                                                 &mut partitioned_state,
                                                 collection.as_ref(),
+                                                stats.as_ref(),
                                             )
                                         };
                                         match outputs_result {

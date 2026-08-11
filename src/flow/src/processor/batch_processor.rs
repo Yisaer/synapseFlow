@@ -262,13 +262,19 @@ impl BatchProcessor {
         partitions: &mut CountPartitionBuffers,
         partition_by_scalars: &[ScalarExpr],
         collection: Box<dyn Collection>,
+        stats: &ProcessorStats,
     ) -> Result<(), ProcessorError> {
         let rows = collection.into_rows().map_err(|err| {
             ProcessorError::ProcessingError(format!("failed to extract rows: {err}"))
         })?;
         for tuple in rows {
-            let key = eval_partition_key(partition_by_scalars, &tuple, "countwindow")
-                .map_err(ProcessorError::ProcessingError)?;
+            let key = match eval_partition_key(partition_by_scalars, &tuple, "countwindow") {
+                Ok(key) => key,
+                Err(message) => {
+                    stats.record_error_logged("batch processor error", message);
+                    continue;
+                }
+            };
             partitions.buffer_for(key).push(tuple);
         }
         Ok(())
@@ -422,6 +428,7 @@ impl Processor for BatchProcessor {
                                                     &mut partitions,
                                                     &partition_by_scalars,
                                                     collection,
+                                                    stats.as_ref(),
                                                 )?;
                                                 BatchProcessor::drain_partitioned_by_count(
                                                     &processor_id,

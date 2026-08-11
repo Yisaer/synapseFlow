@@ -23,6 +23,14 @@ pub(crate) fn metadata_from_system_time(
     )))
 }
 
+pub(crate) fn validate_epoch_secs(secs: u64) -> Result<(), ProcessorError> {
+    timestamp_from_epoch_secs(secs).map(|_| ())
+}
+
+pub(crate) fn validate_system_time(time: SystemTime) -> Result<(), ProcessorError> {
+    timestamp_from_system_time(time).map(|_| ())
+}
+
 pub(crate) fn attach_from_epoch_secs(
     collection: Box<dyn Collection>,
     start_secs: u64,

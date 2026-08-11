@@ -179,9 +179,7 @@ impl Processor for SlidingWindowProcessor {
                                 let res = state.add_collection(collection).await;
                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
                                 stats.record_handle_duration(handle_start.elapsed());
-                                if let Err(e) = res {
-                                    stats.record_error_logged("sliding window processor error", e.to_string());
-                                }
+                                res?;
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 state.flush_up_to(ts).await?;
@@ -311,9 +309,66 @@ impl PartitionedProcessingState {
             .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
         for tuple in rows {
             let partition_key =
-                eval_partition_key(&self.partition_by_scalars, &tuple, "slidingwindow")
-                    .map_err(ProcessorError::ProcessingError)?;
-            self.state_for(partition_key).add_tuple(tuple).await?;
+                match eval_partition_key(&self.partition_by_scalars, &tuple, "slidingwindow") {
+                    Ok(key) => key,
+                    Err(message) => {
+                        self.stats
+                            .record_error_logged("sliding window processor error", message);
+                        continue;
+                    }
+                };
+            let should_trigger = match evaluate_trigger_condition(
+                self.trigger.condition.as_ref(),
+                &tuple,
+                "slidingwindow trigger condition",
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.stats
+                        .record_error_logged("sliding window processor error", err.to_string());
+                    false
+                }
+            };
+            let trigger_end = if should_trigger {
+                let end = match self.lookahead {
+                    Some(lookahead) => match tuple.timestamp.checked_add(lookahead) {
+                        Some(end) => end,
+                        None => {
+                            self.stats.record_error_logged(
+                                "sliding window processor error",
+                                "slidingwindow end timestamp overflow",
+                            );
+                            continue;
+                        }
+                    },
+                    None => tuple.timestamp,
+                };
+                match window_metadata::validate_system_time(end) {
+                    Ok(()) => Some(end),
+                    Err(ProcessorError::ProcessingError(message)) => {
+                        self.stats
+                            .record_error_logged("sliding window processor error", message);
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else {
+                None
+            };
+            if should_trigger {
+                match self.trigger.update_after_hit(tuple.timestamp) {
+                    Ok(()) => {}
+                    Err(ProcessorError::ProcessingError(message)) => {
+                        self.stats
+                            .record_error_logged("sliding window processor error", message);
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            self.state_for(partition_key)
+                .add_tuple(tuple, trigger_end)
+                .await?;
         }
         Ok(())
     }
@@ -342,7 +397,6 @@ impl PartitionedProcessingState {
         self.states.push(ProcessingState::new(
             self.lookback,
             self.lookahead,
-            self.trigger.clone(),
             self.output.clone(),
             self.data_channel_capacity,
             Arc::clone(&self.stats),
@@ -367,23 +421,19 @@ impl ProcessingState {
     fn new(
         lookback: Duration,
         lookahead: Option<Duration>,
-        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
     ) -> Self {
         match lookahead {
-            Some(lookahead) => Self::WithLookahead(ProcessingWithLookaheadState::new(
+            Some(_) => Self::WithLookahead(ProcessingWithLookaheadState::new(
                 lookback,
-                lookahead,
-                trigger,
                 output,
                 data_channel_capacity,
                 Arc::clone(&stats),
             )),
             None => Self::WithoutLookahead(ProcessingWithoutLookaheadState::new(
                 lookback,
-                trigger,
                 output,
                 data_channel_capacity,
                 stats,
@@ -391,10 +441,14 @@ impl ProcessingState {
         }
     }
 
-    async fn add_tuple(&mut self, tuple: crate::model::Tuple) -> Result<(), ProcessorError> {
+    async fn add_tuple(
+        &mut self,
+        tuple: crate::model::Tuple,
+        trigger_end: Option<SystemTime>,
+    ) -> Result<(), ProcessorError> {
         match self {
-            ProcessingState::WithLookahead(state) => state.add_tuple(tuple).await,
-            ProcessingState::WithoutLookahead(state) => state.add_tuple(tuple).await,
+            ProcessingState::WithLookahead(state) => state.add_tuple(tuple, trigger_end).await,
+            ProcessingState::WithoutLookahead(state) => state.add_tuple(tuple, trigger_end).await,
         }
     }
 
@@ -416,7 +470,6 @@ impl ProcessingState {
 struct ProcessingWithoutLookaheadState {
     rows: VecDeque<crate::model::Tuple>,
     lookback: Duration,
-    trigger: SlidingTriggerRuntime,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
@@ -425,7 +478,6 @@ struct ProcessingWithoutLookaheadState {
 impl ProcessingWithoutLookaheadState {
     fn new(
         lookback: Duration,
-        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -433,37 +485,26 @@ impl ProcessingWithoutLookaheadState {
         Self {
             rows: VecDeque::new(),
             lookback,
-            trigger,
             output,
             data_channel_capacity,
             stats,
         }
     }
 
-    async fn add_tuple(&mut self, tuple: crate::model::Tuple) -> Result<(), ProcessorError> {
+    async fn add_tuple(
+        &mut self,
+        tuple: crate::model::Tuple,
+        trigger_end: Option<SystemTime>,
+    ) -> Result<(), ProcessorError> {
         let t = tuple.timestamp;
         self.rows.push_back(tuple);
-        let tuple_ref = self.rows.back().expect("just pushed");
-        let should_trigger = match evaluate_trigger_condition(
-            self.trigger.condition.as_ref(),
-            tuple_ref,
-            "slidingwindow trigger condition",
-        ) {
-            Ok(v) => v,
-            Err(err) => {
-                self.stats
-                    .record_error_logged("sliding window processor error", err.to_string());
-                false
-            }
-        };
-        if !should_trigger {
+        let Some(end) = trigger_end else {
             return Ok(());
-        }
-        self.trigger.update_after_hit(t)?;
+        };
         let start = t
             .checked_sub(self.lookback)
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        self.emit_window(start, t).await
+        self.emit_window(start, end).await
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
@@ -516,8 +557,6 @@ struct ProcessingWithLookaheadState {
     rows: VecDeque<crate::model::Tuple>,
     pending: VecDeque<WindowRequest>,
     lookback: Duration,
-    lookahead: Duration,
-    trigger: SlidingTriggerRuntime,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
@@ -526,8 +565,6 @@ struct ProcessingWithLookaheadState {
 impl ProcessingWithLookaheadState {
     fn new(
         lookback: Duration,
-        lookahead: Duration,
-        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -536,38 +573,25 @@ impl ProcessingWithLookaheadState {
             rows: VecDeque::new(),
             pending: VecDeque::new(),
             lookback,
-            lookahead,
-            trigger,
             output,
             data_channel_capacity,
             stats,
         }
     }
 
-    async fn add_tuple(&mut self, tuple: crate::model::Tuple) -> Result<(), ProcessorError> {
+    async fn add_tuple(
+        &mut self,
+        tuple: crate::model::Tuple,
+        trigger_end: Option<SystemTime>,
+    ) -> Result<(), ProcessorError> {
         let t = tuple.timestamp;
         self.rows.push_back(tuple);
-        let tuple_ref = self.rows.back().expect("just pushed");
-        let should_trigger = match evaluate_trigger_condition(
-            self.trigger.condition.as_ref(),
-            tuple_ref,
-            "slidingwindow trigger condition",
-        ) {
-            Ok(v) => v,
-            Err(err) => {
-                self.stats
-                    .record_error_logged("sliding window processor error", err.to_string());
-                false
-            }
-        };
-        if !should_trigger {
+        let Some(end) = trigger_end else {
             return Ok(());
-        }
-        self.trigger.update_after_hit(t)?;
+        };
         let start = t
             .checked_sub(self.lookback)
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let end = t + self.lookahead;
         self.pending.push_back(WindowRequest { start, end });
         Ok(())
     }
@@ -635,11 +659,13 @@ impl ProcessingWithLookaheadState {
 mod tests {
     use super::*;
     use crate::expr::func::BinaryFunc;
+    use crate::expr::scalar::ColumnRef;
     use crate::expr::ProcStateField;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
     use crate::processor::processor_state::ProcessorState;
     use crate::runtime::TaskSpawner;
     use datatypes::{ConcreteDatatype, Int64Type, Value};
+    use sqlparser::ast::{Expr, Ident};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::UNIX_EPOCH;
@@ -658,6 +684,23 @@ mod tests {
         crate::model::Tuple::with_timestamp(
             crate::model::Tuple::empty_messages(),
             UNIX_EPOCH + Duration::from_secs(sec),
+        )
+    }
+
+    fn tuple_with_a_at(timestamp: SystemTime, value: i64) -> crate::model::Tuple {
+        let mut tuple =
+            crate::model::Tuple::with_timestamp(crate::model::Tuple::empty_messages(), timestamp);
+        tuple.add_affiliate_column(Arc::new("a".to_string()), Value::Int64(value));
+        tuple
+    }
+
+    fn a_greater_than_five() -> ScalarExpr {
+        ScalarExpr::Column(ColumnRef::ByName {
+            column_name: "a".to_string(),
+        })
+        .call_binary(
+            ScalarExpr::Literal(Value::Int64(5), ConcreteDatatype::Int64(Int64Type)),
+            BinaryFunc::Gt,
         )
     }
 
@@ -740,6 +783,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sliding_window_skips_trigger_hit_state_error_before_lookahead_mutation() {
+        let spawner = test_spawner();
+        let state = Arc::new(ProcessorState::new());
+        let mut physical =
+            PhysicalSlidingWindow::new(TimeUnit::Seconds, 2, Some(10), Vec::new(), 0);
+        physical.trigger_condition_scalar = Some(ScalarExpr::CallBinary {
+            func: BinaryFunc::Lt,
+            expr1: Box::new(ScalarExpr::ProcessorState {
+                state: Arc::clone(&state),
+                field: ProcStateField::LastHitTimeUnixMs,
+            }),
+            expr2: Box::new(ScalarExpr::Literal(
+                Value::Int64(100_000),
+                ConcreteDatatype::Int64(Int64Type),
+            )),
+        });
+        physical.trigger_processor_state = Some(Arc::clone(&state));
+        physical.trigger_state_usage = PipelineStateUsage {
+            last_hit_time_unix_ms: true,
+            ..PipelineStateUsage::default()
+        };
+        let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let bad_timestamp = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(5))
+            .expect("pre-epoch timestamp");
+        let good_timestamp = UNIX_EPOCH + Duration::from_secs(20);
+        let batch = crate::model::RecordBatch::new(vec![
+            tuple_with_a_at(bad_timestamp, 1),
+            tuple_with_a_at(good_timestamp, 2),
+        ])
+        .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::watermark(UNIX_EPOCH + Duration::from_secs(30)))
+            .is_ok());
+
+        let item = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(collection) = item else {
+            panic!("expected sliding window collection");
+        };
+        assert_eq!(collection.rows().len(), 1);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.error_count, 1);
+        assert!(snapshot
+            .last_error
+            .as_deref()
+            .is_some_and(|err| err.contains("invalid timestamp")));
+        assert_eq!(state.last_hit_time_unix_ms.load(Ordering::Relaxed), 20_000);
+        assert!(output_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn sliding_window_with_lookahead_waits_for_watermark() {
         let spawner = test_spawner();
         let physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, Some(15), Vec::new(), 0);
@@ -812,5 +918,59 @@ mod tests {
         }
 
         assert_eq!(window_sizes, vec![3, 3, 2]);
+    }
+
+    #[tokio::test]
+    async fn sliding_window_validates_end_only_for_trigger_tuple() {
+        let max_timestamp_secs = u64::try_from(i64::MAX).expect("i64 max fits u64") / 1_000_000;
+        let lookahead_secs = 10;
+        let first_timestamp =
+            UNIX_EPOCH + Duration::from_secs(max_timestamp_secs.saturating_sub(lookahead_secs));
+        let second_timestamp =
+            UNIX_EPOCH + Duration::from_secs(max_timestamp_secs.saturating_sub(1));
+        let watermark = UNIX_EPOCH + Duration::from_secs(max_timestamp_secs);
+
+        for (second_value, expected_rows, expected_errors) in [(1, 2, 0), (10, 1, 1)] {
+            let spawner = test_spawner();
+            let physical = PhysicalSlidingWindow::new_with_trigger(
+                TimeUnit::Seconds,
+                2,
+                Some(lookahead_secs),
+                Vec::new(),
+                Vec::new(),
+                Some(Expr::Identifier(Ident::new("a_gt_5"))),
+                Some(a_greater_than_five()),
+                Vec::new(),
+                0,
+            );
+            let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+            let stats = Arc::new(ProcessorStats::default());
+            processor.set_stats(Arc::clone(&stats));
+            let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+            processor.add_input(input.subscribe());
+            let mut output_rx = processor.subscribe_output().unwrap();
+            let _handle = processor.start(&spawner);
+
+            let batch = crate::model::RecordBatch::new(vec![
+                tuple_with_a_at(first_timestamp, 10),
+                tuple_with_a_at(second_timestamp, second_value),
+            ])
+            .expect("batch");
+            assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+            assert!(input.send(StreamData::watermark(watermark)).is_ok());
+
+            let item = timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv");
+            let StreamData::Collection(collection) = item else {
+                panic!("expected sliding window collection");
+            };
+            assert_eq!(collection.rows().len(), expected_rows);
+
+            let snapshot = stats.snapshot();
+            assert_eq!(snapshot.error_count, expected_errors);
+            assert_eq!(snapshot.last_error.is_some(), expected_errors > 0);
+        }
     }
 }
