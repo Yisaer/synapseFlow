@@ -113,6 +113,14 @@ struct WindowMetadataCase {
     expected: serde_json::Value,
 }
 
+struct LastHitTimeCase {
+    name: &'static str,
+    sql: &'static str,
+    input_rows: Vec<serde_json::Value>,
+    expected_outputs: Vec<serde_json::Value>,
+    assert_no_extra_output: bool,
+}
+
 async fn run_window_metadata_case(case: WindowMetadataCase) {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -189,6 +197,77 @@ async fn run_window_metadata_case(case: WindowMetadataCase) {
         .expect("delete eventtime pipeline");
 }
 
+async fn run_last_hit_time_case(case: LastHitTimeCase) {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_eventtime", case.name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_eventtime_stream(&instance, &input_topic, "stream_eventtime").await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    );
+    let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink])
+        .with_options(eventtime_pipeline_options(7_000));
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create eventtime pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start eventtime pipeline");
+
+    for row in case.input_rows {
+        publish_json_row(&instance, &input_topic, row).await;
+    }
+
+    let timeout_duration = Duration::from_secs(5);
+    let mut actual_outputs = Vec::with_capacity(case.expected_outputs.len());
+    for _ in 0..case.expected_outputs.len() {
+        actual_outputs.push(recv_next_json(&mut output, timeout_duration).await);
+    }
+    assert_eq!(
+        actual_outputs, case.expected_outputs,
+        "wrong outputs for {}",
+        case.name
+    );
+
+    if case.assert_no_extra_output {
+        assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+    }
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .expect("stop eventtime pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete eventtime pipeline");
+}
+
 // coverage-covers: expr.window_metadata, pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling, stream.window.count, stream.window.state
 #[tokio::test]
 async fn eventtime_window_metadata_table_driven() {
@@ -245,6 +324,48 @@ async fn eventtime_window_metadata_table_driven() {
 
     for case in cases {
         run_window_metadata_case(case).await;
+    }
+}
+
+// coverage-covers: expr.pipeline_state, pipeline.runtime.eventtime
+#[tokio::test]
+async fn eventtime_last_hit_time_unix_ms_table_driven() {
+    let cases = vec![
+        LastHitTimeCase {
+            name: "last_hit_time_select_reads_previous_project_hit",
+            sql: "SELECT last_hit_time_unix_ms() AS prev_ts, a FROM stream_eventtime",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "event_ts": 1000}),
+                serde_json::json!({"a": 2, "event_ts": 2000}),
+                serde_json::json!({"a": 3, "event_ts": 3000}),
+            ],
+            expected_outputs: vec![
+                serde_json::json!([{"prev_ts": 0, "a": 1}]),
+                serde_json::json!([{"prev_ts": 1000, "a": 2}]),
+                serde_json::json!([{"prev_ts": 2000, "a": 3}]),
+            ],
+            assert_no_extra_output: true,
+        },
+        LastHitTimeCase {
+            name: "last_hit_time_where_updates_after_accepted_rows",
+            sql: "SELECT a FROM stream_eventtime WHERE last_hit_time_unix_ms() < 2500",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "event_ts": 1000}),
+                serde_json::json!({"a": 2, "event_ts": 2000}),
+                serde_json::json!({"a": 3, "event_ts": 3000}),
+                serde_json::json!({"a": 4, "event_ts": 4000}),
+            ],
+            expected_outputs: vec![
+                serde_json::json!([{"a": 1}]),
+                serde_json::json!([{"a": 2}]),
+                serde_json::json!([{"a": 3}]),
+            ],
+            assert_no_extra_output: true,
+        },
+    ];
+
+    for case in cases {
+        run_last_hit_time_case(case).await;
     }
 }
 

@@ -198,6 +198,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_window_metadata_function_placement(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
+    validate_last_hit_time_unix_ms_placement(&select_stmt)?;
     validate_last_agg_hit_count_placement(&select_stmt)?;
     validate_relation_aliases_unsupported(&select_stmt)?;
     validate_select_alias_names(&select_stmt, stream_defs, table_defs)?;
@@ -1303,7 +1304,10 @@ fn validate_having_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
         return Err("HAVING requires GROUP BY window".to_string());
     }
 
-    if !expr_contains_aggregate_placeholder(having) && !expr_contains_last_agg_hit_count(having) {
+    if !expr_contains_aggregate_placeholder(having)
+        && !expr_contains_last_agg_hit_count(having)
+        && !expr_contains_last_hit_time_unix_ms(having)
+    {
         return Err(format!(
             "HAVING expression '{}' must reference aggregate functions",
             having
@@ -1470,6 +1474,55 @@ fn validate_last_agg_hit_count_placement(select_stmt: &SelectStmt) -> Result<(),
         if window_contains_last_agg_hit_count(window) {
             return Err(
                 "pipeline state function `last_agg_hit_count` is only allowed in HAVING"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_last_hit_time_unix_ms_placement(select_stmt: &SelectStmt) -> Result<(), String> {
+    if let Some(expr) = &select_stmt.having {
+        if expr_contains_last_hit_time_unix_ms(expr) {
+            return Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed in HAVING"
+                    .to_string(),
+            );
+        }
+    }
+
+    for expr in &select_stmt.group_by_exprs {
+        if expr_contains_last_hit_time_unix_ms(expr) {
+            return Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed in GROUP BY"
+                    .to_string(),
+            );
+        }
+    }
+
+    for item in &select_stmt.order_by {
+        if expr_contains_last_hit_time_unix_ms(&item.expr) {
+            return Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed in ORDER BY"
+                    .to_string(),
+            );
+        }
+    }
+
+    for expr in select_stmt.aggregate_mappings.values() {
+        if expr_contains_last_hit_time_unix_ms(expr) {
+            return Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed inside aggregate function arguments"
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(window) = select_stmt.window.as_ref() {
+        if window_contains_last_hit_time_unix_ms_in_disallowed_position(window) {
+            return Err(
+                "pipeline state function `last_hit_time_unix_ms` is only allowed in slidingwindow OVER WHEN within window clauses"
                     .to_string(),
             );
         }
@@ -1846,6 +1899,10 @@ fn expr_contains_last_agg_hit_count(expr: &sqlparser::ast::Expr) -> bool {
     expr_contains_function_name(expr, "last_agg_hit_count")
 }
 
+fn expr_contains_last_hit_time_unix_ms(expr: &sqlparser::ast::Expr) -> bool {
+    expr_contains_function_name(expr, "last_hit_time_unix_ms")
+}
+
 fn expr_contains_window_metadata_function(expr: &sqlparser::ast::Expr) -> bool {
     expr_contains_function_name(expr, "window_start")
         || expr_contains_function_name(expr, "window_end")
@@ -2117,6 +2174,54 @@ fn window_contains_last_agg_hit_count(window: &parser_window::Window) -> bool {
                 || filter
                     .as_deref()
                     .is_some_and(expr_contains_last_agg_hit_count)
+        }
+    }
+}
+
+fn window_contains_last_hit_time_unix_ms_in_disallowed_position(
+    window: &parser_window::Window,
+) -> bool {
+    match window {
+        parser_window::Window::Tumbling {
+            partition_by,
+            filter,
+            ..
+        }
+        | parser_window::Window::Count {
+            partition_by,
+            filter,
+            ..
+        } => {
+            partition_by.iter().any(expr_contains_last_hit_time_unix_ms)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_last_hit_time_unix_ms)
+        }
+        parser_window::Window::Sliding {
+            partition_by,
+            filter,
+            ..
+        } => {
+            partition_by.iter().any(expr_contains_last_hit_time_unix_ms)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_last_hit_time_unix_ms)
+        }
+        parser_window::Window::Eos { filter } => filter
+            .as_deref()
+            .is_some_and(expr_contains_last_hit_time_unix_ms),
+        parser_window::Window::State {
+            open,
+            emit,
+            partition_by,
+            filter,
+        } => {
+            expr_contains_last_hit_time_unix_ms(open)
+                || expr_contains_last_hit_time_unix_ms(emit)
+                || partition_by.iter().any(expr_contains_last_hit_time_unix_ms)
+                || filter
+                    .as_deref()
+                    .is_some_and(expr_contains_last_hit_time_unix_ms)
         }
     }
 }

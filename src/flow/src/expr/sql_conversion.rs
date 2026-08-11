@@ -273,13 +273,10 @@ fn convert_expr_to_scalar_internal(
             // a placeholder that is resolved to ScalarExpr::ProcessorState during
             // physical plan building.
             if is_pipeline_state_function(&function_name) {
-                if !args.is_empty() {
-                    return Err(ConversionError::UnsupportedExpression(format!(
-                        "{function_name}() takes zero arguments"
-                    )));
-                }
+                validate_pipeline_state_function(function, &function_name)?;
                 let field = match function_name.as_str() {
                     "last_hit_count" => ProcStateField::LastHitCount,
+                    "last_hit_time_unix_ms" => ProcStateField::LastHitTimeUnixMs,
                     "last_agg_hit_count" => ProcStateField::LastAggHitCount,
                     _ => {
                         return Err(ConversionError::UnsupportedExpression(format!(
@@ -359,6 +356,33 @@ fn convert_expr_to_scalar_internal(
             expr
         ))),
     }
+}
+
+fn validate_pipeline_state_function(
+    function: &Function,
+    function_name: &str,
+) -> Result<(), ConversionError> {
+    if !function.args.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() takes zero arguments"
+        )));
+    }
+    if function.filter.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support FILTER"
+        )));
+    }
+    if function.over.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support OVER"
+        )));
+    }
+    if !function.order_by.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support ORDER BY"
+        )));
+    }
+    Ok(())
 }
 
 fn is_window_metadata_function(function_name: &str) -> bool {

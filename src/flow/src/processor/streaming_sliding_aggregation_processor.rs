@@ -1,11 +1,15 @@
 use super::{build_group_by_meta, create_accumulators_static, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
+use crate::planner::physical::{
+    PhysicalStreamingAggregation, PipelineStateUsage, StreamingWindowSpec,
+};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
+use crate::processor::pipeline_state_runtime::update_row_hit_state;
+use crate::processor::processor_state::ProcessorState;
 use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -49,6 +53,8 @@ pub struct StreamingSlidingAggregationProcessor {
     group_by_meta: Vec<GroupByMeta>,
     partition_by_scalars: Vec<crate::expr::ScalarExpr>,
     trigger_condition_scalar: Option<crate::expr::ScalarExpr>,
+    trigger_processor_state: Option<Arc<ProcessorState>>,
+    trigger_state_usage: PipelineStateUsage,
     length_secs: u64,
     delay_secs: u64,
     stats: Arc<ProcessorStats>,
@@ -115,6 +121,14 @@ impl StreamingSlidingAggregationProcessor {
             } => trigger_condition_scalar.clone(),
             _ => None,
         };
+        let (trigger_processor_state, trigger_state_usage) = match &physical.window {
+            StreamingWindowSpec::Sliding {
+                trigger_processor_state,
+                trigger_state_usage,
+                ..
+            } => (trigger_processor_state.clone(), *trigger_state_usage),
+            _ => (None, PipelineStateUsage::default()),
+        };
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -135,6 +149,8 @@ impl StreamingSlidingAggregationProcessor {
             group_by_meta,
             partition_by_scalars,
             trigger_condition_scalar,
+            trigger_processor_state,
+            trigger_state_usage,
             length_secs,
             delay_secs,
             stats: Arc::new(ProcessorStats::default()),
@@ -210,6 +226,8 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let group_by_meta = self.group_by_meta.clone();
         let partition_by_scalars = self.partition_by_scalars.clone();
         let trigger_condition_scalar = self.trigger_condition_scalar.clone();
+        let trigger_processor_state = self.trigger_processor_state.clone();
+        let trigger_state_usage = self.trigger_state_usage;
         let length_secs = self.length_secs;
         let delay_secs = self.delay_secs;
         let bounds = SlidingWindowBounds {
@@ -583,6 +601,15 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                             };
 
                                             if should_trigger {
+                                                if let Some(state) =
+                                                    trigger_processor_state.as_deref()
+                                                {
+                                                    update_row_hit_state(
+                                                        state,
+                                                        trigger_state_usage,
+                                                        tuple_ref.timestamp,
+                                                    )?;
+                                                }
                                                 let start_secs = now_secs.saturating_sub(length_secs);
                                                 let end_secs = bounds.end_secs(start_secs);
                                                 let window = build_triggered_window_from_rows(
@@ -887,15 +914,19 @@ impl PartitionedTriggeredSlidingWindows {
 mod tests {
     use super::*;
     use crate::aggregation::AggregateFunctionRegistry;
+    use crate::expr::func::BinaryFunc;
     use crate::expr::scalar::ColumnRef;
+    use crate::expr::ProcStateField;
     use crate::expr::ScalarExpr;
     use crate::planner::logical::TimeUnit;
     use crate::planner::physical::AggregateCall;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::processor::processor_state::ProcessorState;
     use crate::runtime::TaskSpawner;
-    use datatypes::Value;
+    use datatypes::{ConcreteDatatype, Int64Type, Value};
     use sqlparser::ast::{Expr, Ident};
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
     use tokio::time::{timeout, Duration};
 
     fn test_spawner() -> TaskSpawner {
@@ -927,6 +958,14 @@ mod tests {
     }
 
     fn make_physical_with_lookahead(lookahead: Option<u64>) -> Arc<PhysicalStreamingAggregation> {
+        make_physical_with_lookahead_and_trigger(lookahead, None, None)
+    }
+
+    fn make_physical_with_lookahead_and_trigger(
+        lookahead: Option<u64>,
+        trigger_condition_scalar: Option<ScalarExpr>,
+        trigger_processor_state: Option<Arc<ProcessorState>>,
+    ) -> Arc<PhysicalStreamingAggregation> {
         let call = AggregateCall {
             output_column: "sum_a".to_string(),
             func_name: "sum".to_string(),
@@ -950,6 +989,14 @@ mod tests {
                 special: false,
             }),
         );
+        let trigger_state_usage = if trigger_processor_state.is_some() {
+            PipelineStateUsage {
+                last_hit_time_unix_ms: true,
+                ..PipelineStateUsage::default()
+            }
+        } else {
+            PipelineStateUsage::default()
+        };
 
         Arc::new(PhysicalStreamingAggregation::new(
             StreamingWindowSpec::Sliding {
@@ -959,7 +1006,9 @@ mod tests {
                 partition_by_exprs: Vec::new(),
                 partition_by_scalars: Vec::new(),
                 trigger_condition_expr: None,
-                trigger_condition_scalar: None,
+                trigger_condition_scalar,
+                trigger_processor_state,
+                trigger_state_usage,
             },
             mappings,
             Vec::new(),
@@ -1025,6 +1074,58 @@ mod tests {
         }
 
         assert_eq!(sums, vec![1, 3, 2, 12]);
+    }
+
+    #[tokio::test]
+    async fn sliding_aggregation_updates_last_hit_time_after_trigger_hit() {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let state = Arc::new(ProcessorState::new());
+        let trigger = ScalarExpr::CallBinary {
+            func: BinaryFunc::Lt,
+            expr1: Box::new(ScalarExpr::ProcessorState {
+                state: Arc::clone(&state),
+                field: ProcStateField::LastHitTimeUnixMs,
+            }),
+            expr2: Box::new(ScalarExpr::Literal(
+                Value::Int64(1_500),
+                ConcreteDatatype::Int64(Int64Type),
+            )),
+        };
+        let physical =
+            make_physical_with_lookahead_and_trigger(None, Some(trigger), Some(Arc::clone(&state)));
+
+        let mut processor = StreamingSlidingAggregationProcessor::new(
+            "sliding",
+            Arc::clone(&physical),
+            Arc::clone(&aggregate_registry),
+        )
+        .expect("sliding processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(1, 1), tuple_at(2, 2), tuple_at(4, 4)])
+                .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        let mut sums = Vec::new();
+        for _ in 0..2 {
+            let item = timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv");
+            let StreamData::Collection(collection) = item else {
+                panic!("expected sliding aggregation collection");
+            };
+            sums.push(extract_sum(collection.as_ref()));
+        }
+
+        assert_eq!(sums, vec![1, 3]);
+        assert_eq!(state.last_hit_time_unix_ms.load(Ordering::Relaxed), 2_000);
+        assert!(output_rx.try_recv().is_err());
     }
 
     #[tokio::test]

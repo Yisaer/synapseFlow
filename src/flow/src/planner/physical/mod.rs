@@ -32,6 +32,7 @@ pub mod physical_streaming_aggregation;
 pub mod physical_table_scan;
 pub mod physical_watermark;
 pub mod physical_window;
+pub mod pipeline_state_usage;
 
 pub use base_physical::BasePhysicalPlan;
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
@@ -68,6 +69,7 @@ pub use physical_window::{
     PhysicalCountWindow, PhysicalEosWindow, PhysicalSlidingWindow, PhysicalStateWindow,
     PhysicalTumblingWindow,
 };
+pub use pipeline_state_usage::PipelineStateUsage;
 
 /// Enum describing all supported physical execution nodes
 #[allow(clippy::large_enum_variant)]

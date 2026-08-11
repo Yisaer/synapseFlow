@@ -5,12 +5,14 @@
 
 use crate::expr::ScalarExpr;
 use crate::planner::logical::TimeUnit;
-use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
+use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow, PipelineStateUsage};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
     ProcessorChannelCapacities,
 };
+use crate::processor::pipeline_state_runtime::update_row_hit_state;
+use crate::processor::processor_state::ProcessorState;
 use crate::processor::sliding_window_runtime::evaluate_trigger_condition;
 use crate::processor::window_metadata;
 use crate::processor::window_partition::{eval_partition_key, PartitionKey};
@@ -26,12 +28,30 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::StreamExt;
 
+#[derive(Clone)]
+struct SlidingTriggerRuntime {
+    condition: Option<ScalarExpr>,
+    state: Option<Arc<ProcessorState>>,
+    state_usage: PipelineStateUsage,
+}
+
+impl SlidingTriggerRuntime {
+    fn update_after_hit(&self, timestamp: SystemTime) -> Result<(), ProcessorError> {
+        if let Some(state) = self.state.as_deref() {
+            update_row_hit_state(state, self.state_usage, timestamp)?;
+        }
+        Ok(())
+    }
+}
+
 pub struct SlidingWindowProcessor {
     id: String,
     lookback: Duration,
     lookahead: Option<Duration>,
     partition_by_scalars: Vec<ScalarExpr>,
     trigger_condition_scalar: Option<ScalarExpr>,
+    trigger_processor_state: Option<Arc<ProcessorState>>,
+    trigger_state_usage: PipelineStateUsage,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -63,12 +83,16 @@ impl SlidingWindowProcessor {
         };
         let partition_by_scalars = physical.partition_by_scalars.clone();
         let trigger_condition_scalar = physical.trigger_condition_scalar.clone();
+        let trigger_processor_state = physical.trigger_processor_state.clone();
+        let trigger_state_usage = physical.trigger_state_usage;
         Self {
             id: id.into(),
             lookback,
             lookahead,
             partition_by_scalars,
             trigger_condition_scalar,
+            trigger_processor_state,
+            trigger_state_usage,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -108,14 +132,18 @@ impl Processor for SlidingWindowProcessor {
         let lookback = self.lookback;
         let lookahead = self.lookahead;
         let partition_by_scalars = self.partition_by_scalars.clone();
-        let trigger_condition_scalar = self.trigger_condition_scalar.clone();
+        let trigger = SlidingTriggerRuntime {
+            condition: self.trigger_condition_scalar.clone(),
+            state: self.trigger_processor_state.clone(),
+            state_usage: self.trigger_state_usage,
+        };
 
         let stats = Arc::clone(&self.stats);
         let mut state = PartitionedProcessingState::new(
             lookback,
             lookahead,
             partition_by_scalars,
-            trigger_condition_scalar,
+            trigger,
             output.clone(),
             channel_capacities.data,
             Arc::clone(&stats),
@@ -241,7 +269,7 @@ struct PartitionedProcessingState {
     lookback: Duration,
     lookahead: Option<Duration>,
     partition_by_scalars: Vec<ScalarExpr>,
-    trigger_condition_scalar: Option<ScalarExpr>,
+    trigger: SlidingTriggerRuntime,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
@@ -252,7 +280,7 @@ impl PartitionedProcessingState {
         lookback: Duration,
         lookahead: Option<Duration>,
         partition_by_scalars: Vec<ScalarExpr>,
-        trigger_condition_scalar: Option<ScalarExpr>,
+        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -263,7 +291,7 @@ impl PartitionedProcessingState {
             lookback,
             lookahead,
             partition_by_scalars,
-            trigger_condition_scalar,
+            trigger,
             output,
             data_channel_capacity,
             stats,
@@ -314,7 +342,7 @@ impl PartitionedProcessingState {
         self.states.push(ProcessingState::new(
             self.lookback,
             self.lookahead,
-            self.trigger_condition_scalar.clone(),
+            self.trigger.clone(),
             self.output.clone(),
             self.data_channel_capacity,
             Arc::clone(&self.stats),
@@ -339,7 +367,7 @@ impl ProcessingState {
     fn new(
         lookback: Duration,
         lookahead: Option<Duration>,
-        trigger_condition_scalar: Option<ScalarExpr>,
+        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -348,14 +376,14 @@ impl ProcessingState {
             Some(lookahead) => Self::WithLookahead(ProcessingWithLookaheadState::new(
                 lookback,
                 lookahead,
-                trigger_condition_scalar,
+                trigger,
                 output,
                 data_channel_capacity,
                 Arc::clone(&stats),
             )),
             None => Self::WithoutLookahead(ProcessingWithoutLookaheadState::new(
                 lookback,
-                trigger_condition_scalar,
+                trigger,
                 output,
                 data_channel_capacity,
                 stats,
@@ -388,7 +416,7 @@ impl ProcessingState {
 struct ProcessingWithoutLookaheadState {
     rows: VecDeque<crate::model::Tuple>,
     lookback: Duration,
-    trigger_condition_scalar: Option<ScalarExpr>,
+    trigger: SlidingTriggerRuntime,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
@@ -397,7 +425,7 @@ struct ProcessingWithoutLookaheadState {
 impl ProcessingWithoutLookaheadState {
     fn new(
         lookback: Duration,
-        trigger_condition_scalar: Option<ScalarExpr>,
+        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -405,7 +433,7 @@ impl ProcessingWithoutLookaheadState {
         Self {
             rows: VecDeque::new(),
             lookback,
-            trigger_condition_scalar,
+            trigger,
             output,
             data_channel_capacity,
             stats,
@@ -417,7 +445,7 @@ impl ProcessingWithoutLookaheadState {
         self.rows.push_back(tuple);
         let tuple_ref = self.rows.back().expect("just pushed");
         let should_trigger = match evaluate_trigger_condition(
-            self.trigger_condition_scalar.as_ref(),
+            self.trigger.condition.as_ref(),
             tuple_ref,
             "slidingwindow trigger condition",
         ) {
@@ -431,6 +459,7 @@ impl ProcessingWithoutLookaheadState {
         if !should_trigger {
             return Ok(());
         }
+        self.trigger.update_after_hit(t)?;
         let start = t
             .checked_sub(self.lookback)
             .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -488,7 +517,7 @@ struct ProcessingWithLookaheadState {
     pending: VecDeque<WindowRequest>,
     lookback: Duration,
     lookahead: Duration,
-    trigger_condition_scalar: Option<ScalarExpr>,
+    trigger: SlidingTriggerRuntime,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
@@ -498,7 +527,7 @@ impl ProcessingWithLookaheadState {
     fn new(
         lookback: Duration,
         lookahead: Duration,
-        trigger_condition_scalar: Option<ScalarExpr>,
+        trigger: SlidingTriggerRuntime,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
@@ -508,7 +537,7 @@ impl ProcessingWithLookaheadState {
             pending: VecDeque::new(),
             lookback,
             lookahead,
-            trigger_condition_scalar,
+            trigger,
             output,
             data_channel_capacity,
             stats,
@@ -520,7 +549,7 @@ impl ProcessingWithLookaheadState {
         self.rows.push_back(tuple);
         let tuple_ref = self.rows.back().expect("just pushed");
         let should_trigger = match evaluate_trigger_condition(
-            self.trigger_condition_scalar.as_ref(),
+            self.trigger.condition.as_ref(),
             tuple_ref,
             "slidingwindow trigger condition",
         ) {
@@ -534,6 +563,7 @@ impl ProcessingWithLookaheadState {
         if !should_trigger {
             return Ok(());
         }
+        self.trigger.update_after_hit(t)?;
         let start = t
             .checked_sub(self.lookback)
             .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -604,8 +634,13 @@ impl ProcessingWithLookaheadState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::func::BinaryFunc;
+    use crate::expr::ProcStateField;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::processor::processor_state::ProcessorState;
     use crate::runtime::TaskSpawner;
+    use datatypes::{ConcreteDatatype, Int64Type, Value};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::UNIX_EPOCH;
     use tokio::time::timeout;
@@ -653,6 +688,55 @@ mod tests {
 
         // For t=100, window [90,100] contains 1 row; for t=105, window [95,105] contains 2 rows.
         assert_eq!(seen, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn sliding_window_updates_last_hit_time_after_trigger_hit() {
+        let spawner = test_spawner();
+        let state = Arc::new(ProcessorState::new());
+        let mut physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, None, Vec::new(), 0);
+        physical.trigger_condition_scalar = Some(ScalarExpr::CallBinary {
+            func: BinaryFunc::Lt,
+            expr1: Box::new(ScalarExpr::ProcessorState {
+                state: Arc::clone(&state),
+                field: ProcStateField::LastHitTimeUnixMs,
+            }),
+            expr2: Box::new(ScalarExpr::Literal(
+                Value::Int64(100_500),
+                ConcreteDatatype::Int64(Int64Type),
+            )),
+        });
+        physical.trigger_processor_state = Some(Arc::clone(&state));
+        physical.trigger_state_usage = PipelineStateUsage {
+            last_hit_time_unix_ms: true,
+            ..PipelineStateUsage::default()
+        };
+        let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(100), tuple_at(101), tuple_at(102)])
+                .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            match timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv")
+            {
+                StreamData::Collection(collection) => seen.push(collection.rows().len()),
+                other => panic!("unexpected output: {}", other.description()),
+            }
+        }
+
+        assert_eq!(seen, vec![1, 2]);
+        assert_eq!(state.last_hit_time_unix_ms.load(Ordering::Relaxed), 101_000);
+        assert!(output_rx.try_recv().is_err());
     }
 
     #[tokio::test]

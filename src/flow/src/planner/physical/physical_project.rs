@@ -1,6 +1,6 @@
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::expr::ScalarExpr;
-use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan, PipelineStateUsage};
 use crate::processor::processor_state::ProcessorState;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
@@ -29,6 +29,7 @@ pub struct PhysicalProject {
     /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
     /// When `Some`, `ProjectProcessor` increments the counter after each projected row.
     pub processor_state: Option<Arc<ProcessorState>>,
+    pub pipeline_state_usage: PipelineStateUsage,
 }
 
 impl PhysicalProjectField {
@@ -81,6 +82,7 @@ impl PhysicalProject {
             base,
             fields: fields.into(),
             processor_state: None,
+            pipeline_state_usage: PipelineStateUsage::default(),
         }
     }
 
@@ -95,6 +97,7 @@ impl PhysicalProject {
             base,
             fields: fields.into(),
             processor_state: None,
+            pipeline_state_usage: PipelineStateUsage::default(),
         }
     }
 }

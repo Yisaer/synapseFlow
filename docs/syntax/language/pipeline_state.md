@@ -9,7 +9,7 @@ history of data flowing through the pipeline. Examples include:
 - How many rows have been delivered to the sink so far (`last_hit_count`).
 - How many non-empty aggregate result collections have passed `HAVING` so far
   (`last_agg_hit_count`).
-- The timestamp of the most recent row that reached the sink (`last_hit_ts`).
+- The timestamp of the previous operator-local hit (`last_hit_time_unix_ms`).
 - (Future) The number of rows currently in-flight between two processors.
 
 We call this concept **Pipeline State**: counters, timestamps, or other metrics that are
@@ -42,9 +42,10 @@ reached the sink — is difficult to implement in a batch-oriented async pipelin
    same stale value, losing row-level precision. Serializing the pipeline (one row at a
    time with sink ack) would devastate throughput.
 
-4. **Intermediate data loss.** Processors such as RowDiff (`output.mode=delta`) or
-   EmptySuppress (`output.omit_if_empty=true`) can drop rows between Filter and Sink,
-   meaning a Filter-level counter would overcount relative to the sink.
+4. **Intermediate data loss.** Sink-side row-diff paths (`output.mode=delta`) can change the
+   sink-facing output after Filter by attaching `output_mask` metadata, and `omit_if_empty` after
+   RowDiff can suppress all-false mask collections. A Filter-level counter would overcount relative
+   to sink delivery on those paths.
 
 ---
 
@@ -86,14 +87,18 @@ Between Filter and Sink:
 |---|---|---|
 | Order | No | |
 | Project | No | |
-| RowDiff | Yes | `output.mode=delta` — rejected |
-| EmptySuppress | Yes | `output.omit_if_empty=true` — rejected |
+| RowDiff | Unsafe | `output.mode=delta` creates row-diff output masks after Filter — rejected |
+| EmptySuppress on full output | No accepted-row loss | suppresses zero-row collections only — allowed |
+| EmptySuppress after RowDiff | Yes | can suppress all-false `output_mask` collections — rejected by the delta rule |
 
-RowDiff and EmptySuppress are the only post-Filter processors that can discard rows, and
-both are tied to specific sink configurations. The planner rejects queries using pipeline
-state functions when these configurations are active.
+RowDiff is the post-Filter path that can make processor-local hit counters diverge from
+sink-facing delivery. The planner rejects queries using pipeline state functions when
+`output.mode=delta` is active.
 
-Therefore, in all **supported** configurations: every row that survives Filter reaches Sink.
+Full-output `output.omit_if_empty=true` remains supported because it suppresses only zero-row
+collections. `last_hit_count()` increments only for accepted rows, and `last_agg_hit_count()`
+increments only for non-empty filtered collections, so suppressing zero-row collections does not
+change the counters' supported meaning.
 
 #### Premise 2: Pipeline state functions are only allowed at their owning processor positions
 
@@ -147,8 +152,8 @@ SELECT last_hit_count() FROM stream WHERE last_hit_count() < 3
 - No `OVER (PARTITION BY ...)` or `FILTER (WHERE ...)`.
 - Allowed only in `SELECT` fields and `WHERE` conditions.
 
-Future consumers (e.g. `last_hit_ts(column)`) will follow the same pattern, adding new
-fields to `ProcessorState` and new variants to `ProcStateField`.
+Future consumers will follow the same pattern, adding new fields to `ProcessorState`
+and new variants to `ProcStateField`.
 
 ---
 
@@ -237,9 +242,9 @@ pub enum ScalarExpr {
 }
 ```
 
-`ProcessorState` is designed for extension: adding `last_hit_ts` later only requires a new
-field in `ProcessorState` and a new variant in `ProcStateField`. `ScalarExpr` stays
-unchanged.
+`ProcessorState` is designed for extension: adding another pipeline state field only
+requires a new field in `ProcessorState` and a new variant in `ProcStateField`.
+`ScalarExpr` stays unchanged.
 
 #### 2.2 Evaluation
 
@@ -319,7 +324,8 @@ detects `ScalarExpr::PipelineState` in the Filter predicate or Project expressio
 
 - Create `ProcessorState`, inject into expressions via `inject_processor_state`.
 - Store `ProcessorState` in the corresponding `PhysicalFilter` / `PhysicalProject` node.
-- Reject the query if the sink uses `output.mode=delta` or `output.omit_if_empty=true`.
+- Reject the query if the sink uses `output.mode=delta`.
+- Allow full-output `output.omit_if_empty=true`; it only suppresses zero-row collections.
 - Reject if a pipeline state function appears in an unsupported clause.
 
 ### 4. Processor Layer
@@ -412,25 +418,37 @@ Output: `[0, 1, 2]`.
 
 Both counters converge to `3` after the batch completes.
 
+`last_hit_time_unix_ms()` uses the same operator-local scope model, but stores
+the previous hit timestamp as Unix milliseconds. The expression reads the old
+timestamp first, then the owning operator updates it after a hit:
+
+- `ProjectProcessor`: every projected row is a hit, so the state is updated
+  after the row's `SELECT` fields are evaluated.
+- `FilterProcessor`: only accepted rows are hits, so the state is updated after
+  the `WHERE` predicate returns `true`.
+- `slidingwindow OVER (WHEN ...)`: only trigger rows are hits, so the state is
+  updated after the trigger condition returns `true`.
+
+`HAVING last_hit_time_unix_ms()` is currently rejected.
+
 ---
 
 ## Restrictions
 
 | Category | Restriction |
 |---|---|
-| Sink config | Reject `output.mode=delta` (RowDiff drops rows after Filter) |
-| Sink config | Reject `output.omit_if_empty=true` (EmptySuppress drops collections) |
+| Sink config | Reject `output.mode=delta` (RowDiff/output-mask semantics run after Filter) |
+| Sink config | Allow full-output `output.omit_if_empty=true` |
 | SQL context | `last_hit_count()` is allowed only in `SELECT` fields and `WHERE` conditions |
 | SQL context | `last_agg_hit_count()` is allowed only in `HAVING` |
+| SQL context | `last_hit_time_unix_ms()` is allowed in `SELECT`, `WHERE`, and `slidingwindow OVER (WHEN ...)`; `HAVING` is rejected |
 | Syntax | No `OVER (PARTITION BY ...)` or `FILTER (WHERE ...)` |
-| Lifecycle | Counter resets to 0 on pipeline (re)start |
+| Lifecycle | Pipeline state fields reset to 0 on pipeline (re)start |
 
 ---
 
 ## Future Work
 
-- `last_hit_ts(column)`: add `last_hit_ts: Arc<RwLock<Option<Value>>>` to `ProcessorState`
-  and `LastHitTs` to `ProcStateField`.
 - Support `output.mode=delta` by placing the counter at RowDiff instead of Filter.
 - Expose pipeline state counters as observable metrics.
 - (Dropped for now) True cross-processor pipeline state with sink ack. Deferred due to the

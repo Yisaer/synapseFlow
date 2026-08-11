@@ -621,6 +621,18 @@ async fn sliding_window_when_pipeline_table_driven() {
             assert_no_extra_output: true,
         },
         WindowPartitionCase {
+            name: "sliding_when_last_hit_time_streaming_trigger_once",
+            sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10) OVER (WHEN last_hit_time_unix_ms() = 0)",
+            input_rows: vec![
+                serde_json::json!({"a": 1, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+                serde_json::json!({"a": 2, "k1": 1, "k2": 10, "m": 0, "event_ts": 2000}),
+                serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+            ],
+            graceful_stop_before_expect: true,
+            expected_outputs: vec![serde_json::json!([{"s": 1}])],
+            assert_no_extra_output: true,
+        },
+        WindowPartitionCase {
             name: "sliding_when_lookback_only_partition_by",
             sql: "SELECT sum(a) AS s FROM stream_eventtime GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 5 PARTITION BY k1)",
             input_rows: vec![
@@ -654,5 +666,25 @@ async fn sliding_window_when_pipeline_table_driven() {
 
     for case in cases {
         run_window_partition_case(case).await;
+    }
+}
+
+// coverage-covers: parser.window.sliding.over_when, pipeline.window.when, stream.window.sliding
+#[tokio::test]
+async fn sliding_window_when_processing_time_pipeline_table_driven() {
+    let cases = vec![CollectionWindowPartitionCase {
+        name: "sliding_when_last_hit_time_non_streaming_trigger_once",
+        sql: "SELECT ndv(a) AS n FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN last_hit_time_unix_ms() = 0)",
+        input_data: columns_from_rows(vec![
+            serde_json::json!({"a": 1, "k1": 1, "k2": 10, "m": 0, "event_ts": 1000}),
+            serde_json::json!({"a": 2, "k1": 1, "k2": 10, "m": 0, "event_ts": 2000}),
+            serde_json::json!({"a": 3, "k1": 1, "k2": 10, "m": 0, "event_ts": 3000}),
+        ]),
+        expected_outputs: vec![serde_json::json!([{"n": 1}])],
+        assert_no_extra_output: true,
+    }];
+
+    for case in cases {
+        run_collection_window_partition_case(case).await;
     }
 }

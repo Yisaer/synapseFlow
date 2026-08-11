@@ -4,19 +4,21 @@
 
 use crate::expr::{EvalRowContext, ScalarExpr};
 use crate::model::{Collection, RecordBatch, Tuple};
-use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
+use crate::planner::physical::{
+    PhysicalPlan, PhysicalProject, PhysicalProjectField, PipelineStateUsage,
+};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::pipeline_state_runtime::update_row_hit_state;
 use crate::processor::processor_state::ProcessorState;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -32,6 +34,7 @@ pub struct ProjectProcessor {
     fields: Arc<[PhysicalProjectField]>,
     /// Processor-local state for pipeline state functions (e.g. last_hit_count).
     pub(crate) processor_state: Option<Arc<ProcessorState>>,
+    pub(crate) pipeline_state_usage: PipelineStateUsage,
     /// Input channels for receiving data
     inputs: Vec<LinkReceiver<StreamData>>,
     /// Control input channels
@@ -63,7 +66,8 @@ impl ProjectProcessor {
         Self {
             id: id.into(),
             fields: Arc::clone(&physical_project.fields),
-            processor_state: None,
+            processor_state: physical_project.processor_state.clone(),
+            pipeline_state_usage: physical_project.pipeline_state_usage,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -81,12 +85,7 @@ impl ProjectProcessor {
     /// Returns None if the plan is not a PhysicalProject
     pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
         match plan.as_ref() {
-            PhysicalPlan::Project(project) => {
-                let processor_state = project.processor_state.clone();
-                let mut proc = Self::new(id, Arc::new(project.clone()));
-                proc.processor_state = processor_state;
-                Some(proc)
-            }
+            PhysicalPlan::Project(project) => Some(Self::new(id, Arc::new(project.clone()))),
             _ => None,
         }
     }
@@ -97,6 +96,7 @@ fn apply_projection(
     input_collection: &dyn Collection,
     fields: &[PhysicalProjectField],
     state: Option<&ProcessorState>,
+    state_usage: PipelineStateUsage,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
     for tuple in input_collection.rows() {
@@ -123,7 +123,7 @@ fn apply_projection(
         }
         projected_rows.push(projected_tuple);
         if let Some(state) = state {
-            state.last_hit_count.fetch_add(1, Ordering::Relaxed);
+            update_row_hit_state(state, state_usage, tuple.timestamp)?;
         }
     }
 
@@ -135,9 +135,18 @@ fn apply_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::ProcStateField;
     use crate::model::Message;
     use datatypes::Value;
-    use std::time::SystemTime;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn empty_tuple_at_ms(ms: u64) -> Tuple {
+        Tuple::with_timestamp(
+            Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_millis(ms),
+        )
+    }
 
     #[test]
     fn empty_projection_drops_upstream_affiliate() {
@@ -150,7 +159,8 @@ mod tests {
         assert!(input_tuple.affiliate().is_some(), "precondition");
 
         let input = RecordBatch::new(vec![input_tuple]).expect("record batch");
-        let output = apply_projection(&input, &[], None).expect("projection succeeds");
+        let output = apply_projection(&input, &[], None, PipelineStateUsage::default())
+            .expect("projection succeeds");
         let out_rows = output.rows();
         assert_eq!(out_rows.len(), 1);
         assert!(
@@ -159,6 +169,40 @@ mod tests {
         );
         assert_eq!(out_rows[0].messages().len(), 1);
         assert_eq!(out_rows[0].timestamp, timestamp);
+    }
+
+    #[test]
+    fn projection_updates_last_hit_time_after_projected_row() {
+        let state = Arc::new(ProcessorState::new());
+        let input = RecordBatch::new(vec![empty_tuple_at_ms(1000), empty_tuple_at_ms(2000)])
+            .expect("record batch");
+        let field_name = "last_hit_time_unix_ms()";
+        let fields = vec![PhysicalProjectField::new(
+            field_name,
+            sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new(field_name)),
+            ScalarExpr::ProcessorState {
+                state: Arc::clone(&state),
+                field: ProcStateField::LastHitTimeUnixMs,
+            },
+        )];
+        let usage = PipelineStateUsage {
+            last_hit_time_unix_ms: true,
+            ..PipelineStateUsage::default()
+        };
+
+        let output = apply_projection(&input, &fields, Some(state.as_ref()), usage)
+            .expect("projection should succeed");
+
+        let rows = output.rows();
+        assert_eq!(
+            rows[0].affiliate().and_then(|row| row.value(field_name)),
+            Some(&Value::Int64(0))
+        );
+        assert_eq!(
+            rows[1].affiliate().and_then(|row| row.value(field_name)),
+            Some(&Value::Int64(1000))
+        );
+        assert_eq!(state.last_hit_time_unix_ms.load(Ordering::Relaxed), 2000);
     }
 }
 
@@ -177,6 +221,7 @@ impl Processor for ProjectProcessor {
         let control_output = self.control_output.clone();
         let fields = Arc::clone(&self.fields);
         let processor_state = self.processor_state.clone();
+        let pipeline_state_usage = self.pipeline_state_usage;
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "project processor starting");
@@ -218,6 +263,7 @@ impl Processor for ProjectProcessor {
                                             collection.as_ref(),
                                             fields.as_ref(),
                                             processor_state.as_deref(),
+                                            pipeline_state_usage,
                                         );
                                         match result {
                                             Ok(projected_collection) => {

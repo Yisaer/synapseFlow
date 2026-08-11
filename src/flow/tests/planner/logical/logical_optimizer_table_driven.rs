@@ -847,3 +847,85 @@ fn create_logical_plan_error_table_driven() {
         }
     }
 }
+
+#[test]
+fn create_logical_plan_last_hit_time_unix_ms_placement_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: Result<(), &'static str>,
+    }
+
+    let cases = vec![
+        Case {
+            name: "allows_select_field",
+            sql: "SELECT last_hit_time_unix_ms() FROM stream",
+            expected: Ok(()),
+        },
+        Case {
+            name: "allows_where",
+            sql: "SELECT a FROM stream WHERE a > last_hit_time_unix_ms()",
+            expected: Ok(()),
+        },
+        Case {
+            name: "rejects_having",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4) HAVING last_hit_time_unix_ms() < 3",
+            expected: Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed in HAVING",
+            ),
+        },
+        Case {
+            name: "allows_sliding_over_when",
+            sql: "SELECT sum(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > last_hit_time_unix_ms())",
+            expected: Ok(()),
+        },
+        Case {
+            name: "rejects_group_by_expression",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4), last_hit_time_unix_ms()",
+            expected: Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed in GROUP BY",
+            ),
+        },
+        Case {
+            name: "rejects_order_by_expression",
+            sql: "SELECT a FROM stream ORDER BY last_hit_time_unix_ms()",
+            expected: Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed in ORDER BY",
+            ),
+        },
+        Case {
+            name: "rejects_aggregate_argument",
+            sql: "SELECT sum(last_hit_time_unix_ms()) FROM stream GROUP BY countwindow(4)",
+            expected: Err(
+                "pipeline state function `last_hit_time_unix_ms` is not allowed inside aggregate function arguments",
+            ),
+        },
+        Case {
+            name: "rejects_window_partition_by",
+            sql: "SELECT sum(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 0 PARTITION BY last_hit_time_unix_ms())",
+            expected: Err(
+                "pipeline state function `last_hit_time_unix_ms` is only allowed in slidingwindow OVER WHEN within window clauses",
+            ),
+        },
+    ];
+
+    for case in cases {
+        let stream_defs = setup_streams();
+        let select_stmt = parse_sql(case.sql)
+            .unwrap_or_else(|err| panic!("case={} parse failed: {err}", case.name));
+        let got = create_logical_plan(select_stmt, Vec::new(), &stream_defs);
+        match case.expected {
+            Ok(()) => {
+                got.unwrap_or_else(|err| panic!("case={} unexpected error: {err}", case.name));
+            }
+            Err(expected) => {
+                let err = got.expect_err("case should fail logical planning");
+                assert!(
+                    err.contains(expected),
+                    "case={} expected err to contain {expected:?}, got: {err}",
+                    case.name
+                );
+            }
+        }
+    }
+}

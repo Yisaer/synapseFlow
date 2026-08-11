@@ -21,7 +21,7 @@ use crate::planner::physical::{
     PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
     PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
     PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
-    PhysicalTableScan, PhysicalTableScanSpec, StatefulCall, WatermarkConfig,
+    PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage, StatefulCall, WatermarkConfig,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -784,7 +784,7 @@ fn create_physical_window_with_builder(
             let index = builder.allocate_index();
             let partition_by_scalars =
                 compile_window_partition_by(partition_by, bindings, registries)?;
-            let (trigger_condition_expr, trigger_condition_scalar) =
+            let (trigger_condition_expr, mut trigger_condition_scalar) =
                 match trigger_condition.as_ref() {
                     Some(cond) => {
                         let scalar = convert_expr_to_scalar_with_bindings_and_custom_registry(
@@ -797,8 +797,20 @@ fn create_physical_window_with_builder(
                     }
                     None => (None, None),
                 };
+            let trigger_state_usage = trigger_condition_scalar
+                .as_ref()
+                .map(PipelineStateUsage::from_expr)
+                .unwrap_or_default();
+            let trigger_processor_state = match trigger_condition_scalar.as_mut() {
+                Some(scalar) if !trigger_state_usage.is_empty() => {
+                    let state = Arc::new(ProcessorState::new());
+                    inject_processor_state(scalar, &state);
+                    Some(state)
+                }
+                _ => None,
+            };
 
-            let sliding = crate::planner::physical::PhysicalSlidingWindow::new_with_trigger(
+            let mut sliding = crate::planner::physical::PhysicalSlidingWindow::new_with_trigger(
                 *time_unit,
                 *lookback,
                 *lookahead,
@@ -809,6 +821,8 @@ fn create_physical_window_with_builder(
                 sliding_children,
                 index,
             );
+            sliding.trigger_processor_state = trigger_processor_state;
+            sliding.trigger_state_usage = trigger_state_usage;
             PhysicalPlan::SlidingWindow(sliding)
         }
         LogicalWindowSpec::State {
@@ -1085,41 +1099,6 @@ fn create_physical_data_source_with_builder(
     }
 }
 
-/// Recursively check whether a [`ScalarExpr`] contains any
-/// [`ScalarExpr::PipelineState`] (unresolved pipeline state read).
-fn expr_contains_pipeline_state(expr: &ScalarExpr) -> bool {
-    match expr {
-        ScalarExpr::PipelineState { .. } => true,
-        ScalarExpr::CallUnary { expr: inner, .. } => expr_contains_pipeline_state(inner),
-        ScalarExpr::CallBinary { expr1, expr2, .. } => {
-            expr_contains_pipeline_state(expr1) || expr_contains_pipeline_state(expr2)
-        }
-        ScalarExpr::FieldAccess { expr: inner, .. } => expr_contains_pipeline_state(inner),
-        ScalarExpr::ListIndex { expr, index_expr } => {
-            expr_contains_pipeline_state(expr) || expr_contains_pipeline_state(index_expr)
-        }
-        ScalarExpr::CallFunc { args, .. } => args.iter().any(expr_contains_pipeline_state),
-        ScalarExpr::Case {
-            operand,
-            when_then,
-            else_expr,
-        } => {
-            operand
-                .as_ref()
-                .map(|e| expr_contains_pipeline_state(e))
-                .unwrap_or(false)
-                || when_then.iter().any(|(w, t)| {
-                    expr_contains_pipeline_state(w) || expr_contains_pipeline_state(t)
-                })
-                || else_expr
-                    .as_ref()
-                    .map(|e| expr_contains_pipeline_state(e))
-                    .unwrap_or(false)
-        }
-        _ => false,
-    }
-}
-
 /// Recursively replace every [`ScalarExpr::PipelineState`] in `expr` with
 /// [`ScalarExpr::ProcessorState`] pointing at `state`.
 fn inject_processor_state(expr: &mut ScalarExpr, state: &Arc<ProcessorState>) {
@@ -1200,7 +1179,8 @@ fn create_physical_filter_with_builder_cached(
         )
     })?;
 
-    let processor_state = if expr_contains_pipeline_state(&scalar_predicate) {
+    let pipeline_state_usage = PipelineStateUsage::from_expr(&scalar_predicate);
+    let processor_state = if !pipeline_state_usage.is_empty() {
         let state = Arc::new(ProcessorState::new());
         inject_processor_state(&mut scalar_predicate, &state);
         Some(state)
@@ -1216,6 +1196,7 @@ fn create_physical_filter_with_builder_cached(
         index,
     );
     physical_filter.processor_state = processor_state;
+    physical_filter.pipeline_state_usage = pipeline_state_usage;
     Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
 }
 
@@ -1331,10 +1312,12 @@ fn create_physical_project_with_builder_cached(
         physical_fields.push(physical_field);
     }
 
-    let processor_state = if physical_fields
-        .iter()
-        .any(|f| expr_contains_pipeline_state(&f.compiled_expr))
-    {
+    let mut pipeline_state_usage = PipelineStateUsage::default();
+    for field in &physical_fields {
+        pipeline_state_usage.merge(PipelineStateUsage::from_expr(&field.compiled_expr));
+    }
+
+    let processor_state = if !pipeline_state_usage.is_empty() {
         let state = Arc::new(ProcessorState::new());
         for field in &mut physical_fields {
             inject_processor_state(&mut field.compiled_expr, &state);
@@ -1347,6 +1330,7 @@ fn create_physical_project_with_builder_cached(
     let index = builder.allocate_index();
     let mut physical_project = PhysicalProject::new(physical_fields, physical_children, index);
     physical_project.processor_state = processor_state;
+    physical_project.pipeline_state_usage = pipeline_state_usage;
     Ok(Arc::new(PhysicalPlan::Project(physical_project)))
 }
 
@@ -1508,19 +1492,14 @@ fn build_sink_chain_with_builder(
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     sink.retry.validate()?;
 
-    // Reject pipeline state functions with sink configs that can drop rows
-    // after Filter (RowDiff for delta mode, EmptySuppress for omit_if_empty).
-    if plan_uses_processor_state(input_child) {
-        if sink.output.is_delta() {
-            return Err(
-                "pipeline state functions (e.g. last_hit_count()) are not compatible with output.mode=delta (RowDiff can drop rows after Filter)".to_string(),
-            );
-        }
-        if sink.output.omit_if_empty() {
-            return Err(
-                "pipeline state functions (e.g. last_hit_count()) are not compatible with output.omit_if_empty=true (EmptySuppress can drop rows after Filter)".to_string(),
-            );
-        }
+    // Reject pipeline state functions with RowDiff because delta output can
+    // make the processor-local hit counters diverge from sink delivery.
+    // Full-output omit_if_empty only suppresses zero-row collections here and
+    // does not change the counters' accepted-row / accepted-collection meaning.
+    if plan_uses_processor_state(input_child) && sink.output.is_delta() {
+        return Err(
+            "pipeline state functions (e.g. last_hit_count()) are not compatible with output.mode=delta (RowDiff/output_mask semantics run after Filter)".to_string(),
+        );
     }
 
     // Insert ColumnFilter BEFORE RowDiff so that RowDiff only sees the

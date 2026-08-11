@@ -1460,6 +1460,43 @@ fn plan_explain_pipeline_state_table_driven() {
 }
 
 #[test]
+fn plan_explain_last_hit_time_unix_ms_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "last_hit_time_unix_ms_select_field",
+            sql: "SELECT last_hit_time_unix_ms() FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[last_hit_time_unix_ms()]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[last_hit_time_unix_ms()]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_time_unix_ms_where",
+            sql: "SELECT a FROM stream WHERE last_hit_time_unix_ms() < 1000",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=last_hit_time_unix_ms() < 1000"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=last_hit_time_unix_ms() < 1000"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_time_unix_ms_sliding_over_when_streaming",
+            sql: "SELECT sum(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN last_hit_time_unix_ms() < 1000)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=last_hit_time_unix_ms() < 1000"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","window=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=last_hit_time_unix_ms() < 1000"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "last_hit_time_unix_ms_sliding_over_when_non_streaming",
+            sql: "SELECT ndv(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN last_hit_time_unix_ms() < 1000)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=last_hit_time_unix_ms() < 1000"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[ndv(a) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as ndv(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalSlidingWindow_3","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=last_hit_time_unix_ms() < 1000"],"operator":"PhysicalSlidingWindow"}],"id":"PhysicalAggregation_4","info":["calls=[ndv(a) -> col_1]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_1 as ndv(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn plan_explain_window_metadata_table_driven() {
     struct Case {
         name: &'static str,
@@ -1508,6 +1545,71 @@ fn plan_explain_last_agg_hit_count_table_driven() {
     for case in cases {
         let got = explain_json_string(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_pipeline_state_sink_output_table_driven() {
+    enum Expected {
+        Explain(&'static str),
+        ErrorContains(&'static str),
+    }
+
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sink: PipelineSink,
+        covers: &'static [&'static str],
+        expected: Expected,
+    }
+
+    let cases = vec![
+        Case {
+            name: "last_agg_hit_count_allows_full_output_omit_if_empty",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4) HAVING last_agg_hit_count() < 3",
+            sink: build_nop_json_omit_if_empty_sink("test_sink", None),
+            covers: &["syntax.pipeline_state", "sink.output.omit_if_empty"],
+            expected: Expected::Explain(
+                r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=last_agg_hit_count() < 3"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_5","info":["sink_id=test_sink","connector=nop","encoder=json","output.omit_if_empty=true"],"operator":"DataSink"}],"id":"Tail_6","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=last_agg_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}],"id":"PhysicalEmptySuppress_7","info":["sink_id=test_sink","omit_if_empty=true"],"operator":"PhysicalEmptySuppress"}],"id":"PhysicalSinkEncoder_8","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_9","info":[],"operator":"PhysicalResultCollect"}}"##,
+            ),
+        },
+        Case {
+            name: "last_agg_hit_count_rejects_delta_omit_if_empty",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(4) HAVING last_agg_hit_count() < 3",
+            sink: build_nop_json_delta_omit_if_empty_sink_with_columns(
+                "test_sink",
+                None,
+                Some(&["sum(a)"]),
+            ),
+            covers: &[
+                "syntax.pipeline_state",
+                "sink.output.row_diff",
+                "sink.output.omit_if_empty",
+            ],
+            expected: Expected::ErrorContains(
+                "pipeline state functions (e.g. last_hit_count()) are not compatible with output.mode=delta",
+            ),
+        },
+    ];
+
+    for case in cases {
+        assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
+        match case.expected {
+            Expected::Explain(expected) => {
+                let got = explain_json_result(case.sql, vec![case.sink])
+                    .unwrap_or_else(|err| panic!("case={} unexpected error: {err}", case.name));
+                assert_eq!(got, expected, "case={}", case.name);
+            }
+            Expected::ErrorContains(expected) => {
+                let err = explain_json_result(case.sql, vec![case.sink])
+                    .expect_err("pipeline state with delta output should fail planning");
+                assert!(
+                    err.contains(expected),
+                    "case={} unexpected error: {err}",
+                    case.name
+                );
+            }
+        }
     }
 }
 

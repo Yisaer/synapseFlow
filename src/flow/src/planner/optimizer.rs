@@ -154,6 +154,8 @@ impl StreamingAggregationRewrite {
                     partition_by_scalars: window.partition_by_scalars.clone(),
                     trigger_condition_expr: window.trigger_condition_expr.clone(),
                     trigger_condition_scalar: window.trigger_condition_scalar.clone(),
+                    trigger_processor_state: window.trigger_processor_state.clone(),
+                    trigger_state_usage: window.trigger_state_usage,
                 };
                 let upstream = window.base.children.first()?.clone();
                 (spec, upstream)

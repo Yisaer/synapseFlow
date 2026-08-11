@@ -1220,6 +1220,28 @@ mod source_info_tests {
     }
 
     #[test]
+    fn parse_group_by_sliding_window_over_when_last_hit_time() {
+        let parser = StreamSqlParser::new();
+        let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > last_hit_time_unix_ms())";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        match select_stmt.window {
+            Some(Window::Sliding {
+                trigger_condition, ..
+            }) => {
+                assert_eq!(
+                    trigger_condition.as_ref().map(|e| e.to_string()),
+                    Some("a > last_hit_time_unix_ms()".to_string()),
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_group_by_sliding_window_over_when_no_expr() {
         let parser = StreamSqlParser::new();
         let sql = "SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN)";

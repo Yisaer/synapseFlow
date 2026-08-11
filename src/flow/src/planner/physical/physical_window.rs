@@ -1,6 +1,7 @@
 use crate::expr::ScalarExpr;
 use crate::planner::logical::TimeUnit;
-use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
+use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan, PipelineStateUsage};
+use crate::processor::processor_state::ProcessorState;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
 
@@ -82,6 +83,8 @@ pub struct PhysicalSlidingWindow {
     pub partition_by_scalars: Vec<ScalarExpr>,
     pub trigger_condition_expr: Option<Expr>,
     pub trigger_condition_scalar: Option<ScalarExpr>,
+    pub trigger_processor_state: Option<Arc<ProcessorState>>,
+    pub trigger_state_usage: PipelineStateUsage,
 }
 
 impl PhysicalSlidingWindow {
@@ -147,6 +150,8 @@ impl PhysicalSlidingWindow {
             partition_by_scalars,
             trigger_condition_expr,
             trigger_condition_scalar,
+            trigger_processor_state: None,
+            trigger_state_usage: PipelineStateUsage::default(),
         }
     }
 }

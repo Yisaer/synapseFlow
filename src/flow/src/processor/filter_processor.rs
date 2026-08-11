@@ -2,15 +2,16 @@
 //!
 //! This processor evaluates filter expressions and produces output with filtered records.
 
-use crate::expr::{ProcStateField, ScalarExpr};
+use crate::expr::ScalarExpr;
 use crate::model::Collection;
 use crate::model::RecordBatch;
-use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
+use crate::planner::physical::{PhysicalFilter, PhysicalPlan, PipelineStateUsage};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::pipeline_state_runtime::{update_collection_hit_state, update_row_hit_state};
 use crate::processor::processor_state::ProcessorState;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -18,7 +19,6 @@ use crate::processor::{
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -35,6 +35,7 @@ pub struct FilterProcessor {
     physical_filter: Arc<PhysicalFilter>,
     /// Processor-local state for pipeline state functions (e.g. last_hit_count).
     pub(crate) processor_state: Option<Arc<ProcessorState>>,
+    pub(crate) pipeline_state_usage: PipelineStateUsage,
     /// Input channels for receiving data
     inputs: Vec<LinkReceiver<StreamData>>,
     /// Control input channels
@@ -65,8 +66,9 @@ impl FilterProcessor {
         );
         Self {
             id: id.into(),
+            processor_state: physical_filter.processor_state.clone(),
+            pipeline_state_usage: physical_filter.pipeline_state_usage,
             physical_filter,
-            processor_state: None,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -84,90 +86,25 @@ impl FilterProcessor {
     /// Returns None if the plan is not a PhysicalFilter
     pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
         match plan.as_ref() {
-            PhysicalPlan::Filter(filter) => {
-                let processor_state = filter.processor_state.clone();
-                let mut proc = Self::new(id, Arc::new(filter.clone()));
-                proc.processor_state = processor_state;
-                Some(proc)
-            }
+            PhysicalPlan::Filter(filter) => Some(Self::new(id, Arc::new(filter.clone()))),
             _ => None,
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct FilterStateUpdate {
-    row_hit_count: bool,
-    collection_hit_count: bool,
-}
-
-impl FilterStateUpdate {
-    fn from_expr(expr: &ScalarExpr) -> Self {
-        let mut update = Self::default();
-        collect_filter_state_update(expr, &mut update);
-        update
-    }
-
-    fn requires_stateful_iteration(self) -> bool {
-        self.row_hit_count || self.collection_hit_count
-    }
-}
-
-fn collect_filter_state_update(expr: &ScalarExpr, update: &mut FilterStateUpdate) {
-    match expr {
-        ScalarExpr::PipelineState { field } | ScalarExpr::ProcessorState { field, .. } => {
-            match field {
-                ProcStateField::LastHitCount => update.row_hit_count = true,
-                ProcStateField::LastAggHitCount => update.collection_hit_count = true,
-            }
-        }
-        ScalarExpr::CallUnary { expr, .. } => collect_filter_state_update(expr, update),
-        ScalarExpr::CallBinary { expr1, expr2, .. } => {
-            collect_filter_state_update(expr1, update);
-            collect_filter_state_update(expr2, update);
-        }
-        ScalarExpr::FieldAccess { expr, .. } => collect_filter_state_update(expr, update),
-        ScalarExpr::ListIndex { expr, index_expr } => {
-            collect_filter_state_update(expr, update);
-            collect_filter_state_update(index_expr, update);
-        }
-        ScalarExpr::CallFunc { args, .. } => {
-            for arg in args {
-                collect_filter_state_update(arg, update);
-            }
-        }
-        ScalarExpr::Case {
-            operand,
-            when_then,
-            else_expr,
-        } => {
-            if let Some(expr) = operand {
-                collect_filter_state_update(expr, update);
-            }
-            for (when, then) in when_then {
-                collect_filter_state_update(when, update);
-                collect_filter_state_update(then, update);
-            }
-            if let Some(expr) = else_expr {
-                collect_filter_state_update(expr, update);
-            }
-        }
-        _ => {}
     }
 }
 
 /// Apply filter to a collection, optionally tracking pipeline state updates.
 ///
 /// `last_hit_count()` is row-scoped and increments after each accepted row.
+/// `last_hit_time_unix_ms()` is row-scoped and updates after each accepted row.
 /// `last_agg_hit_count()` is collection-scoped and increments once after a
 /// non-empty filtered collection is produced.
 fn apply_filter(
     input_collection: &dyn Collection,
     filter_expr: &ScalarExpr,
     state: Option<&ProcessorState>,
-    state_update: FilterStateUpdate,
+    state_usage: PipelineStateUsage,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    match (state, state_update.requires_stateful_iteration()) {
+    match (state, !state_usage.is_empty()) {
         (Some(state), true) => {
             let mut kept = Vec::with_capacity(input_collection.num_rows());
             for tuple in input_collection.rows() {
@@ -175,14 +112,12 @@ fn apply_filter(
                     .eval_with_tuple(tuple)
                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                 if matches!(result, Value::Bool(true)) {
-                    if state_update.row_hit_count {
-                        state.last_hit_count.fetch_add(1, Ordering::Relaxed);
-                    }
+                    update_row_hit_state(state, state_usage, tuple.timestamp)?;
                     kept.push(tuple.clone());
                 }
             }
-            if state_update.collection_hit_count && !kept.is_empty() {
-                state.last_agg_hit_count.fetch_add(1, Ordering::Relaxed);
+            if !kept.is_empty() {
+                update_collection_hit_state(state, state_usage);
             }
             Ok(Box::new(
                 RecordBatch::new_with_metadata_from(kept, input_collection)
@@ -192,6 +127,56 @@ fn apply_filter(
         _ => input_collection
             .apply_filter(filter_expr)
             .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply filter: {}", e))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::func::BinaryFunc;
+    use crate::expr::ProcStateField;
+    use crate::model::Tuple;
+    use datatypes::{ConcreteDatatype, Int64Type};
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn tuple_at_ms(ms: u64) -> Tuple {
+        Tuple::with_timestamp(
+            Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_millis(ms),
+        )
+    }
+
+    #[test]
+    fn filter_updates_last_hit_time_after_accepted_rows() {
+        let state = Arc::new(ProcessorState::new());
+        let input = RecordBatch::new(vec![
+            tuple_at_ms(1000),
+            tuple_at_ms(2000),
+            tuple_at_ms(3000),
+        ])
+        .expect("record batch");
+        let expr = ScalarExpr::CallBinary {
+            func: BinaryFunc::Lt,
+            expr1: Box::new(ScalarExpr::ProcessorState {
+                state: Arc::clone(&state),
+                field: ProcStateField::LastHitTimeUnixMs,
+            }),
+            expr2: Box::new(ScalarExpr::Literal(
+                Value::Int64(1500),
+                ConcreteDatatype::Int64(Int64Type),
+            )),
+        };
+        let usage = PipelineStateUsage {
+            last_hit_time_unix_ms: true,
+            ..PipelineStateUsage::default()
+        };
+
+        let output = apply_filter(&input, &expr, Some(state.as_ref()), usage)
+            .expect("filter should succeed");
+
+        assert_eq!(output.num_rows(), 2);
+        assert_eq!(state.last_hit_time_unix_ms.load(Ordering::Relaxed), 2000);
     }
 }
 
@@ -213,7 +198,7 @@ impl Processor for FilterProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let filter_expr = self.physical_filter.scalar_predicate.clone();
-        let state_update = FilterStateUpdate::from_expr(&filter_expr);
+        let state_usage = self.pipeline_state_usage;
         let processor_state = self.processor_state.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
@@ -261,7 +246,7 @@ impl Processor for FilterProcessor {
                                             collection.as_ref(),
                                             &filter_expr,
                                             processor_state.as_deref(),
-                                            state_update,
+                                            state_usage,
                                         );
                                         match result {
                                             Ok(filtered_collection) => {

@@ -24,6 +24,7 @@ pub mod filter_processor;
 pub mod memory_collection_materialize_processor;
 pub mod order_processor;
 pub(crate) mod output_row_accessor;
+pub(crate) mod pipeline_state_runtime;
 pub mod processor_builder;
 pub mod processor_state;
 pub mod project_processor;

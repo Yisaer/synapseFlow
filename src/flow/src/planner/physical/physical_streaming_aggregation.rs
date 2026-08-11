@@ -1,7 +1,8 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::expr::ScalarExpr;
 use crate::planner::logical::TimeUnit;
-use crate::planner::physical::{AggregateCall, BasePhysicalPlan, PhysicalPlan};
+use crate::planner::physical::{AggregateCall, BasePhysicalPlan, PhysicalPlan, PipelineStateUsage};
+use crate::processor::processor_state::ProcessorState;
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +30,8 @@ pub enum StreamingWindowSpec {
         partition_by_scalars: Vec<ScalarExpr>,
         trigger_condition_expr: Option<Expr>,
         trigger_condition_scalar: Option<ScalarExpr>,
+        trigger_processor_state: Option<Arc<ProcessorState>>,
+        trigger_state_usage: PipelineStateUsage,
     },
     State {
         open_expr: Expr,
