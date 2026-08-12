@@ -141,8 +141,11 @@ impl StreamingCountAggregationProcessor {
                 }
                 Err(err) => return Err(err.to_string()),
             }
+            if let Err(message) = worker.update_groups(row) {
+                stats.record_error_logged("streaming count aggregation processor error", message);
+                continue;
+            }
             let now = row.timestamp;
-            worker.update_groups(row)?;
 
             if let Some(opened_at) = window_state.register_row_and_check_finalize(now) {
                 if let Some(batch) = worker.finalize_current_window()? {
@@ -195,8 +198,11 @@ impl StreamingCountAggregationProcessor {
                 Arc::clone(&worker.aggregate_registry),
                 worker.group_by_meta.clone(),
             );
+            if let Err(message) = state.worker.update_groups(row) {
+                stats.record_error_logged("streaming count aggregation processor error", message);
+                continue;
+            }
             let now = row.timestamp;
-            state.worker.update_groups(row)?;
 
             if let Some(opened_at) = state.window.register_row_and_check_finalize(now) {
                 if let Some(batch) = state.worker.finalize_current_window()? {

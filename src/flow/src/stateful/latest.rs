@@ -1,9 +1,13 @@
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 
 pub struct LatestFunction;
 
@@ -56,7 +60,7 @@ struct LatestInstance {
 }
 
 impl StatefulFunctionInstance for LatestInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.len() != 1 {
             return Err(format!(
                 "latest() expects exactly 1 argument, got {}",
@@ -66,15 +70,39 @@ impl StatefulFunctionInstance for LatestInstance {
 
         let current = &input.args[0];
         if input.should_apply && !current.is_null() {
-            self.latest = Some(current.clone());
-            return Ok(current.clone());
+            return Ok(PreparedStatefulEval::new(
+                current.clone(),
+                Box::new(LatestUpdate {
+                    latest: Some(current.clone()),
+                }),
+            ));
         }
 
-        if let Some(value) = &self.latest {
-            return Ok(value.clone());
-        }
+        let output = self.latest.clone().unwrap_or(Value::Null);
+        Ok(PreparedStatefulEval::new(
+            output,
+            Box::new(LatestUpdate { latest: None }),
+        ))
+    }
 
-        Ok(Value::Null)
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<LatestUpdate>()
+            .expect("latest received incompatible update");
+        if let Some(value) = &update.latest {
+            self.latest = Some(value.clone());
+        }
+    }
+}
+
+struct LatestUpdate {
+    latest: Option<Value>,
+}
+
+impl StatefulEvalUpdate for LatestUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

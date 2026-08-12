@@ -28,11 +28,29 @@ documents that behavior.
 
 ### Recoverable input error boundary
 
-A processor records and skips an invalid input only when the error is classified before any
-persistent state mutation. Examples include an invalid partition key or a timestamp that cannot be
-represented by the target window.
+A processor records and skips an invalid input when the error is classified before any persistent
+state mutation. Examples include an invalid partition key or a timestamp that cannot be represented
+by the target window.
 
-Errors that may follow a partial state mutation continue to terminate the processor task. The same
-applies to unreachable invariant failures, downstream channel failures, startup or configuration
-failures, control lifecycle failures, panics, and unexpected task exits. The processor does not
-clear active state in an attempt to recover from these errors.
+Row-transform processors should keep processing later rows in the same collection after a
+recoverable row-level error. Valid rows from that collection may still be emitted; the invalid row is
+not forwarded.
+
+Stateful row processors should update processor-local state only after the row has reached the
+state mutation point successfully. A row that fails while resolving keys, filters, arguments, or
+tracked values is skipped without advancing that row-scoped state.
+
+Stateful function processors prepare each per-call state update for a row and commit those prepared
+updates only after every stateful call in the row succeeds. If a later call fails, earlier prepared
+updates from the same row are discarded with the row.
+
+Aggregation processors prepare all accumulator updates for a row before committing any of them. If
+one aggregate update fails, the row is skipped and no accumulator for that row is advanced.
+
+Window processors may also recover from errors that are isolated to the current row, requested
+window, or active partition state. In those cases the processor records the error, drops the invalid
+row or window state, and continues with later input.
+
+Downstream channel failures, startup or configuration failures, control lifecycle failures,
+unreachable invariant failures, panics, and unexpected task exits continue to terminate the
+processor task.

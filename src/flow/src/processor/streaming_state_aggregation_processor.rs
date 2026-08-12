@@ -139,16 +139,28 @@ impl StreamingStateAggregationProcessor {
 
             match state.worker.finalize_current_window() {
                 Ok(Some(batch)) => {
-                    stats.record_out(batch.num_rows() as u64);
+                    let row_count = batch.num_rows() as u64;
                     let closed_at = state
                         .last_seen_at
                         .or(state.opened_at)
                         .unwrap_or(SystemTime::UNIX_EPOCH);
-                    let batch = window_metadata::attach_from_system_time(
+                    let batch = match window_metadata::attach_from_system_time(
                         batch,
                         state.opened_at.unwrap_or(closed_at),
                         closed_at,
-                    )?;
+                    ) {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            stats.record_error_logged(
+                                "streaming state aggregation processor error",
+                                e.to_string(),
+                            );
+                            state.active = false;
+                            state.opened_at = None;
+                            state.last_seen_at = None;
+                            continue;
+                        }
+                    };
                     send_with_backpressure(
                         output,
                         channel_capacities.data,
@@ -156,6 +168,7 @@ impl StreamingStateAggregationProcessor {
                         Some(stats.as_ref()),
                     )
                     .await?;
+                    stats.record_out(row_count);
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -320,13 +333,25 @@ impl Processor for StreamingStateAggregationProcessor {
                                     if emit {
                                         match entry.worker.finalize_current_window() {
                                             Ok(Some(batch)) => {
-                                                stats.record_out(batch.num_rows() as u64);
+                                                let row_count = batch.num_rows() as u64;
                                                 let closed_at = tuple.timestamp;
-                                                let batch = window_metadata::attach_from_system_time(
+                                                let batch = match window_metadata::attach_from_system_time(
                                                     batch,
                                                     entry.opened_at.unwrap_or(closed_at),
                                                     closed_at,
-                                                )?;
+                                                ) {
+                                                    Ok(batch) => batch,
+                                                    Err(e) => {
+                                                        stats.record_error_logged(
+                                                            "streaming state aggregation processor error",
+                                                            e.to_string(),
+                                                        );
+                                                        entry.active = false;
+                                                        entry.opened_at = None;
+                                                        entry.last_seen_at = None;
+                                                        continue;
+                                                    }
+                                                };
                                                 let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
@@ -338,6 +363,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                                     stats.record_handle_duration(handle_start.elapsed());
                                                     return Err(err);
                                                 }
+                                                stats.record_out(row_count);
                                             }
                                             Ok(None) => {}
                                             Err(e) => {

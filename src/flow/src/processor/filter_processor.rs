@@ -103,31 +103,54 @@ fn apply_filter(
     filter_expr: &ScalarExpr,
     state: Option<&ProcessorState>,
     state_usage: PipelineStateUsage,
+    stats: Option<&ProcessorStats>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    match (state, !state_usage.is_empty()) {
-        (Some(state), true) => {
-            let mut kept = Vec::with_capacity(input_collection.num_rows());
-            for tuple in input_collection.rows() {
-                let result = filter_expr
-                    .eval_with_tuple(tuple)
-                    .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-                if matches!(result, Value::Bool(true)) {
-                    update_row_hit_state(state, state_usage, tuple.timestamp)?;
-                    kept.push(tuple.clone());
+    let mut kept = Vec::with_capacity(input_collection.num_rows());
+    for tuple in input_collection.rows() {
+        let result = match filter_expr.eval_with_tuple(tuple) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(stats) = stats {
+                    stats.record_error_logged("filter processor error", error.to_string());
+                }
+                continue;
+            }
+        };
+
+        match result {
+            Value::Bool(true) => {
+                if let Some(state) = state {
+                    if let Err(error) = update_row_hit_state(state, state_usage, tuple.timestamp) {
+                        if let Some(stats) = stats {
+                            stats.record_error_logged("filter processor error", error.to_string());
+                        }
+                        continue;
+                    }
+                }
+                kept.push(tuple.clone());
+            }
+            Value::Bool(false) => {}
+            other => {
+                if let Some(stats) = stats {
+                    stats.record_error_logged(
+                        "filter processor error",
+                        format!("Filter expression must return boolean values, got {other:?}"),
+                    );
                 }
             }
-            if !kept.is_empty() {
-                update_collection_hit_state(state, state_usage);
-            }
-            Ok(Box::new(
-                RecordBatch::new_with_metadata_from(kept, input_collection)
-                    .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?,
-            ))
         }
-        _ => input_collection
-            .apply_filter(filter_expr)
-            .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply filter: {}", e))),
     }
+
+    if !kept.is_empty() {
+        if let Some(state) = state {
+            update_collection_hit_state(state, state_usage);
+        }
+    }
+
+    Ok(Box::new(
+        RecordBatch::new_with_metadata_from(kept, input_collection)
+            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?,
+    ))
 }
 
 #[cfg(test)]
@@ -172,7 +195,7 @@ mod tests {
             ..PipelineStateUsage::default()
         };
 
-        let output = apply_filter(&input, &expr, Some(state.as_ref()), usage)
+        let output = apply_filter(&input, &expr, Some(state.as_ref()), usage, None)
             .expect("filter should succeed");
 
         assert_eq!(output.num_rows(), 2);
@@ -247,6 +270,7 @@ impl Processor for FilterProcessor {
                                             &filter_expr,
                                             processor_state.as_deref(),
                                             state_usage,
+                                            Some(stats.as_ref()),
                                         );
                                         match result {
                                             Ok(filtered_collection) => {

@@ -1,10 +1,14 @@
 use super::util::{bool_arg, normalize_state_value};
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 
 pub struct ChangedColFunction;
 
@@ -78,7 +82,7 @@ struct ChangedColConfig {
 }
 
 impl StatefulFunctionInstance for ChangedColInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.len() != 2 {
             return Err(format!(
                 "changed_col() expects exactly 2 arguments, got {}",
@@ -88,30 +92,74 @@ impl StatefulFunctionInstance for ChangedColInstance {
 
         let config = match self.config {
             Some(config) => config,
-            None => {
-                let config = ChangedColConfig {
-                    ignore_null: bool_arg("changed_col() first argument", &input.args[0])?,
-                };
-                self.config = Some(config);
-                config
-            }
+            None => ChangedColConfig {
+                ignore_null: bool_arg("changed_col() first argument", &input.args[0])?,
+            },
         };
         let current = &input.args[1];
+        let config_update = self.config.is_none().then_some(config);
 
         if config.ignore_null && current.is_null() {
-            return Ok(Value::Null);
+            return Ok(PreparedStatefulEval::new(
+                Value::Null,
+                Box::new(ChangedColUpdate {
+                    config: config_update,
+                    previous: None,
+                }),
+            ));
         }
         if !input.should_apply {
-            return Ok(Value::Null);
+            return Ok(PreparedStatefulEval::new(
+                Value::Null,
+                Box::new(ChangedColUpdate {
+                    config: config_update,
+                    previous: None,
+                }),
+            ));
         }
 
         let normalized = normalize_state_value(current);
         if self.previous != normalized {
-            self.previous = normalized;
-            return Ok(current.clone());
+            return Ok(PreparedStatefulEval::new(
+                current.clone(),
+                Box::new(ChangedColUpdate {
+                    config: config_update,
+                    previous: Some(normalized),
+                }),
+            ));
         }
 
-        Ok(Value::Null)
+        Ok(PreparedStatefulEval::new(
+            Value::Null,
+            Box::new(ChangedColUpdate {
+                config: config_update,
+                previous: None,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ChangedColUpdate>()
+            .expect("changed_col received incompatible update");
+        if let Some(config) = update.config {
+            self.config = Some(config);
+        }
+        if let Some(previous) = &update.previous {
+            self.previous = previous.clone();
+        }
+    }
+}
+
+struct ChangedColUpdate {
+    config: Option<ChangedColConfig>,
+    previous: Option<Option<Value>>,
+}
+
+impl StatefulEvalUpdate for ChangedColUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

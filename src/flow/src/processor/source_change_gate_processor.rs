@@ -97,6 +97,7 @@ fn gate_collection(
     source_name: &str,
     tracked_column_indexes: &[usize],
     state: &mut SourceChangeGateState,
+    stats: Option<&ProcessorStats>,
 ) -> Result<Option<Box<dyn crate::model::Collection>>, ProcessorError> {
     let num_rows = collection.num_rows();
     if num_rows == 0 {
@@ -105,7 +106,18 @@ fn gate_collection(
 
     let mut selected_indices = Vec::with_capacity(num_rows);
     for (row_index, tuple) in collection.rows().iter().enumerate() {
-        let tracked_row = extract_tracked_row(tuple, source_name, tracked_column_indexes)?;
+        let tracked_row = match extract_tracked_row(tuple, source_name, tracked_column_indexes) {
+            Ok(tracked_row) => tracked_row,
+            Err(error) => {
+                if let Some(stats) = stats {
+                    stats.record_error_logged(
+                        "source change gate processor error",
+                        error.to_string(),
+                    );
+                }
+                continue;
+            }
+        };
         let changed = match state.previous_tracked_row.as_ref() {
             Some(previous) => previous != &tracked_row,
             None => true,
@@ -189,6 +201,7 @@ impl Processor for SourceChangeGateProcessor {
                                             source_name.as_ref(),
                                             tracked_column_indexes.as_ref(),
                                             &mut state,
+                                            Some(stats.as_ref()),
                                         ) {
                                             Ok(Some(out_collection)) => {
                                                 let out_data = StreamData::collection(out_collection);

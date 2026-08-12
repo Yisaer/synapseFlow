@@ -1,10 +1,14 @@
 use super::util::bool_condition;
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 
 pub struct ConsecutiveStartFunction;
 
@@ -84,7 +88,7 @@ impl ConsecutiveStartInstance {
 }
 
 impl StatefulFunctionInstance for ConsecutiveStartInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.len() != 2 {
             return Err(format!(
                 "consecutive_start() expects exactly 2 arguments, got {}",
@@ -95,26 +99,56 @@ impl StatefulFunctionInstance for ConsecutiveStartInstance {
         // Filtered-out rows return the held value without advancing state, so a
         // later real row still observes the captured start (or recaptures).
         if !input.should_apply {
-            return Ok(self.held());
+            return Ok(PreparedStatefulEval::new(
+                self.held(),
+                Box::new(ConsecutiveStartUpdate { next: None }),
+            ));
         }
 
         let condition = bool_condition("consecutive_start() condition", &input.args[0])?;
+        let mut start = self.start.clone();
         if condition {
             if !self.prev_condition {
                 // Rising edge: capture the start value once.
-                self.start = Some(input.args[1].clone());
+                start = Some(input.args[1].clone());
             }
         } else {
             // Condition no longer holds: end the run.
-            self.start = None;
+            start = None;
         }
-        self.prev_condition = condition;
 
-        if condition {
-            Ok(self.held())
+        let output = if condition {
+            start.clone().unwrap_or(Value::Null)
         } else {
-            Ok(Value::Null)
+            Value::Null
+        };
+        Ok(PreparedStatefulEval::new(
+            output,
+            Box::new(ConsecutiveStartUpdate {
+                next: Some((condition, start)),
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ConsecutiveStartUpdate>()
+            .expect("consecutive_start received incompatible update");
+        if let Some((condition, start)) = &update.next {
+            self.prev_condition = *condition;
+            self.start = start.clone();
         }
+    }
+}
+
+struct ConsecutiveStartUpdate {
+    next: Option<(bool, Option<Value>)>,
+}
+
+impl StatefulEvalUpdate for ConsecutiveStartUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

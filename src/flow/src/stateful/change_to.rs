@@ -1,11 +1,15 @@
 use super::util::{bool_arg, normalize_state_value};
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use crate::expr::value_compare;
 use datatypes::{BooleanType, ConcreteDatatype, Value};
+use std::any::Any;
 
 pub struct ChangeToFunction;
 
@@ -90,7 +94,7 @@ struct ChangeToConfig {
 }
 
 impl StatefulFunctionInstance for ChangeToInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.len() != 3 {
             return Err(format!(
                 "change_to() expects exactly 3 arguments, got {}",
@@ -100,32 +104,70 @@ impl StatefulFunctionInstance for ChangeToInstance {
 
         let config = match self.config {
             Some(config) => config,
-            None => {
-                let config = ChangeToConfig {
-                    ignore_null: bool_arg("change_to() first argument", &input.args[0])?,
-                };
-                self.config = Some(config);
-                config
-            }
+            None => ChangeToConfig {
+                ignore_null: bool_arg("change_to() first argument", &input.args[0])?,
+            },
         };
+        let config_update = self.config.is_none().then_some(config);
         let value = &input.args[1];
         let target = &input.args[2];
 
         // Freeze state and emit false on a null value (when ignoring nulls) or a
         // filtered-out row, so a later real value still registers as a transition.
         if config.ignore_null && value.is_null() {
-            return Ok(Value::Bool(false));
+            return Ok(PreparedStatefulEval::new(
+                Value::Bool(false),
+                Box::new(ChangeToUpdate {
+                    config: config_update,
+                    previous: None,
+                }),
+            ));
         }
         if !input.should_apply {
-            return Ok(Value::Bool(false));
+            return Ok(PreparedStatefulEval::new(
+                Value::Bool(false),
+                Box::new(ChangeToUpdate {
+                    config: config_update,
+                    previous: None,
+                }),
+            ));
         }
 
         let normalized = normalize_state_value(value);
         let changed = self.previous != normalized;
-        self.previous = normalized;
 
         let hit = changed && value_compare::values_equal(value, target);
-        Ok(Value::Bool(hit))
+        Ok(PreparedStatefulEval::new(
+            Value::Bool(hit),
+            Box::new(ChangeToUpdate {
+                config: config_update,
+                previous: Some(normalized),
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ChangeToUpdate>()
+            .expect("change_to received incompatible update");
+        if let Some(config) = update.config {
+            self.config = Some(config);
+        }
+        if let Some(previous) = &update.previous {
+            self.previous = previous.clone();
+        }
+    }
+}
+
+struct ChangeToUpdate {
+    config: Option<ChangeToConfig>,
+    previous: Option<Option<Value>>,
+}
+
+impl StatefulEvalUpdate for ChangeToUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

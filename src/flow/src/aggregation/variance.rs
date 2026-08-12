@@ -1,9 +1,10 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, DataType, Float64Type, Value};
+use std::any::Any;
 
 #[derive(Debug)]
 pub struct StddevFunction;
@@ -315,22 +316,36 @@ impl VarianceAccumulator {
 }
 
 impl AggregateAccumulator for VarianceAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("stat aggregate expects one argument".to_string());
         };
 
-        let Some(x) = Self::cast_to_f64(value)? else {
-            return Ok(());
+        let next = match Self::cast_to_f64(value)? {
+            Some(x) => {
+                let count = self.count.saturating_add(1);
+                let delta = x - self.mean;
+                let mean = self.mean + delta / count as f64;
+                let delta2 = x - mean;
+                let m2 = self.m2 + delta * delta2;
+                Some((count, mean, m2))
+            }
+            None => None,
         };
 
-        self.count = self.count.saturating_add(1);
-        let delta = x - self.mean;
-        self.mean += delta / self.count as f64;
-        let delta2 = x - self.mean;
-        self.m2 += delta * delta2;
+        Ok(Box::new(VarianceUpdate { next }))
+    }
 
-        Ok(())
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<VarianceUpdate>()
+            .expect("variance accumulator received incompatible update");
+        if let Some((count, mean, m2)) = update.next {
+            self.count = count;
+            self.mean = mean;
+            self.m2 = m2;
+        }
     }
 
     fn finalize(&self) -> Value {
@@ -364,6 +379,16 @@ impl AggregateAccumulator for VarianceAccumulator {
                 }
             }
         }
+    }
+}
+
+struct VarianceUpdate {
+    next: Option<(u64, f64, f64)>,
+}
+
+impl AggregateUpdate for VarianceUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

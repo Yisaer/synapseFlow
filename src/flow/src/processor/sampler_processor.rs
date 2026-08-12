@@ -281,7 +281,8 @@ impl Processor for SamplerProcessor {
                                     // For sampler (async emit), handle duration measures local state update time only.
                                     stats.record_handle_duration(handle_start.elapsed());
                                     tracing::error!(processor_id = %processor_id, error = ?e, "strategy sampling error");
-                                    return Err(e);
+                                    stats.record_error(e.to_string());
+                                    continue;
                                 }
                                 // For sampler (async emit), handle duration measures local state update time only.
                                 stats.record_handle_duration(handle_start.elapsed());

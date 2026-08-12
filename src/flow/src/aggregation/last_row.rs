@@ -1,9 +1,10 @@
-use super::{AggregateAccumulator, AggregateFunction};
+use super::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 
 pub struct LastRowFunction;
 
@@ -58,16 +59,35 @@ struct LastRowAccumulator {
 }
 
 impl AggregateAccumulator for LastRowAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let value = args
             .first()
             .ok_or_else(|| "last_row expects exactly 1 argument".to_string())?;
-        self.last = Some(value.clone());
-        Ok(())
+        Ok(Box::new(LastRowUpdate {
+            value: value.clone(),
+        }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<LastRowUpdate>()
+            .expect("last_row accumulator received incompatible update");
+        self.last = Some(update.value.clone());
     }
 
     fn finalize(&self) -> Value {
         self.last.clone().unwrap_or(Value::Null)
+    }
+}
+
+struct LastRowUpdate {
+    value: Value,
+}
+
+impl AggregateUpdate for LastRowUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

@@ -95,6 +95,7 @@ impl TableScanProcessor {
         props: HistoryTableProps,
         decoder: Arc<dyn RecordDecoder>,
         scan_tx: mpsc::Sender<TableScanEvent>,
+        stats: Arc<ProcessorStats>,
         spawner: TaskSpawner,
     ) {
         let result = Self::run_history_scan_inner(
@@ -103,6 +104,7 @@ impl TableScanProcessor {
             props,
             decoder,
             scan_tx.clone(),
+            Arc::clone(&stats),
             spawner,
         )
         .await;
@@ -122,6 +124,7 @@ impl TableScanProcessor {
         props: HistoryTableProps,
         decoder: Arc<dyn RecordDecoder>,
         scan_tx: mpsc::Sender<TableScanEvent>,
+        stats: Arc<ProcessorStats>,
         spawner: TaskSpawner,
     ) -> Result<(), String> {
         let datasource = PathBuf::from(&props.datasource);
@@ -147,20 +150,44 @@ impl TableScanProcessor {
                 "table scan reading history file"
             );
             let path = file.path.clone();
-            let batches = spawner
+            let batches_result = spawner
                 .spawn_blocking(move || read_history_parquet_file(path, batch_size))
                 .await
                 .map_err(|err| format!("history parquet read task join error: {err}"))?
                 .map_err(|err| {
                     format!("read history parquet file `{}`: {err}", file.path.display())
-                })?;
+                });
+            let batches = match batches_result {
+                Ok(batches) => batches,
+                Err(err) => {
+                    stats.record_error_logged("table scan processor error", err);
+                    continue;
+                }
+            };
 
             for batch in batches {
-                let payloads = extract_history_payloads(&batch, &props.time_column, None, None)?;
+                let payloads =
+                    match extract_history_payloads(&batch, &props.time_column, None, None) {
+                        Ok(payloads) => payloads,
+                        Err(err) => {
+                            stats.record_error_logged(
+                                "table scan processor error",
+                                format!("extract history payloads for table `{table_name}`: {err}"),
+                            );
+                            continue;
+                        }
+                    };
                 for payload in payloads {
-                    let decoded = decoder
-                        .decode(payload.as_slice())
-                        .map_err(|err| format!("decode table `{table_name}` payload: {err}"))?;
+                    let decoded = match decoder.decode(payload.as_slice()) {
+                        Ok(decoded) => decoded,
+                        Err(err) => {
+                            stats.record_error_logged(
+                                "table scan processor error",
+                                format!("decode table `{table_name}` payload: {err}"),
+                            );
+                            continue;
+                        }
+                    };
                     if decoded.num_rows() == 0 {
                         continue;
                     }
@@ -239,6 +266,7 @@ impl Processor for TableScanProcessor {
                 props,
                 decoder,
                 scan_tx,
+                Arc::clone(&stats),
                 scan_spawner.clone(),
             ));
             let _ = ready_tx.send(Ok(()));

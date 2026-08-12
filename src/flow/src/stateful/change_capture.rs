@@ -1,11 +1,15 @@
 use super::util::{bool_arg, normalize_state_value};
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use crate::expr::value_compare;
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 
 pub struct ChangeCaptureFunction;
 
@@ -104,7 +108,7 @@ impl ChangeCaptureInstance {
 }
 
 impl StatefulFunctionInstance for ChangeCaptureInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.len() != 3 && input.args.len() != 4 {
             return Err(format!(
                 "change_capture() expects 3 or 4 arguments, got {}",
@@ -114,14 +118,11 @@ impl StatefulFunctionInstance for ChangeCaptureInstance {
 
         let config = match self.config {
             Some(config) => config,
-            None => {
-                let config = ChangeCaptureConfig {
-                    ignore_null: bool_arg("change_capture() first argument", &input.args[0])?,
-                };
-                self.config = Some(config);
-                config
-            }
+            None => ChangeCaptureConfig {
+                ignore_null: bool_arg("change_capture() first argument", &input.args[0])?,
+            },
         };
+        let config_update = self.config.is_none().then_some(config);
         let capture = &input.args[1];
         let monitor = &input.args[2];
 
@@ -129,27 +130,78 @@ impl StatefulFunctionInstance for ChangeCaptureInstance {
         // holding the last captured value and freeze the monitor state, so a
         // later real change still triggers a capture.
         if config.ignore_null && monitor.is_null() {
-            return Ok(self.held());
+            return Ok(PreparedStatefulEval::new(
+                self.held(),
+                Box::new(ChangeCaptureUpdate {
+                    config: config_update,
+                    previous_monitor: None,
+                    captured: None,
+                }),
+            ));
         }
         if !input.should_apply {
-            return Ok(self.held());
+            return Ok(PreparedStatefulEval::new(
+                self.held(),
+                Box::new(ChangeCaptureUpdate {
+                    config: config_update,
+                    previous_monitor: None,
+                    captured: None,
+                }),
+            ));
         }
 
         let normalized = normalize_state_value(monitor);
         let changed = self.previous_monitor != normalized;
-        self.previous_monitor = normalized;
 
+        let mut captured = None;
+        let mut output = self.held();
         if changed {
             let to_target = match input.args.get(3) {
                 Some(target) => value_compare::values_equal(monitor, target),
                 None => true,
             };
             if to_target {
-                self.captured = Some(capture.clone());
+                output = capture.clone();
+                captured = Some(Some(capture.clone()));
             }
         }
 
-        Ok(self.held())
+        Ok(PreparedStatefulEval::new(
+            output,
+            Box::new(ChangeCaptureUpdate {
+                config: config_update,
+                previous_monitor: Some(normalized),
+                captured,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ChangeCaptureUpdate>()
+            .expect("change_capture received incompatible update");
+        if let Some(config) = update.config {
+            self.config = Some(config);
+        }
+        if let Some(previous_monitor) = &update.previous_monitor {
+            self.previous_monitor = previous_monitor.clone();
+        }
+        if let Some(captured) = &update.captured {
+            self.captured = captured.clone();
+        }
+    }
+}
+
+struct ChangeCaptureUpdate {
+    config: Option<ChangeCaptureConfig>,
+    previous_monitor: Option<Option<Value>>,
+    captured: Option<Option<Value>>,
+}
+
+impl StatefulEvalUpdate for ChangeCaptureUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

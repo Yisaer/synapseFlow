@@ -1,9 +1,10 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Int64Type, Value};
+use std::any::Any;
 
 #[derive(Debug)]
 pub struct CountFunction;
@@ -86,18 +87,36 @@ struct CountAccumulator {
 }
 
 impl AggregateAccumulator for CountAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("COUNT expects one argument".to_string());
         };
-        if value.is_null() {
-            return Ok(());
+        Ok(Box::new(CountUpdate {
+            increment: !value.is_null(),
+        }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<CountUpdate>()
+            .expect("count accumulator received incompatible update");
+        if update.increment {
+            self.count = self.count.saturating_add(1);
         }
-        self.count = self.count.saturating_add(1);
-        Ok(())
     }
 
     fn finalize(&self) -> Value {
         Value::Int64(self.count)
+    }
+}
+
+struct CountUpdate {
+    increment: bool,
+}
+
+impl AggregateUpdate for CountUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

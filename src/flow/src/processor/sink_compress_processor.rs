@@ -173,7 +173,10 @@ impl Processor for SinkCompressProcessor {
                                                 "compress delivery error"
                                             );
                                             stats.record_error(err.to_string());
-                                            return Err(err);
+                                            if matches!(err, ProcessorError::ChannelClosed) {
+                                                return Err(err);
+                                            }
+                                            continue;
                                         }
                                         // Delivery completed (END processed): forward parked terminal.
                                         if !delivery.active {
@@ -329,9 +332,17 @@ async fn handle_delivery(
             )
             .await;
         }
-        writer
-            .begin_delivery()
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        if let Err(e) = writer.begin_delivery() {
+            return fail_delivery(
+                writer,
+                delivery,
+                output,
+                data_channel_capacity,
+                stats,
+                &e.to_string(),
+            )
+            .await;
+        }
         delivery.active = true;
     } else if !delivery.active {
         return Err(ProcessorError::ProcessingError(
@@ -457,13 +468,13 @@ async fn fail_delivery(
     *delivery = CompressDelivery::default();
     if was_started {
         // ABORT is not a completed delivery → not counted in record_out.
-        let _ = send_with_backpressure(
+        send_with_backpressure(
             output,
             data_channel_capacity,
             StreamData::encoded_delivery_abort(),
             Some(stats.as_ref()),
         )
-        .await;
+        .await?;
     }
     Err(ProcessorError::ProcessingError(reason.to_string()))
 }

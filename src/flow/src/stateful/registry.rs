@@ -1,5 +1,6 @@
 use datatypes::{ConcreteDatatype, Value};
 use parking_lot::RwLock;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,8 +15,31 @@ pub struct StatefulEvalInput<'a> {
     pub should_apply: bool,
 }
 
+pub struct PreparedStatefulEval {
+    pub output: Value,
+    pub update: Box<dyn StatefulEvalUpdate>,
+}
+
+impl PreparedStatefulEval {
+    pub fn new(output: Value, update: Box<dyn StatefulEvalUpdate>) -> Self {
+        Self { output, update }
+    }
+}
+
+pub trait StatefulEvalUpdate: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
 pub trait StatefulFunctionInstance: Send + Sync {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String>;
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String>;
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>);
+
+    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+        let prepared = self.prepare_eval(input)?;
+        let output = prepared.output.clone();
+        self.commit_eval(prepared.update);
+        Ok(output)
+    }
 }
 
 pub trait StatefulFunction: Send + Sync {
@@ -118,11 +142,22 @@ mod tests {
         }
 
         fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
+            struct Update;
+            impl StatefulEvalUpdate for Update {
+                fn as_any(&self) -> &dyn Any {
+                    self
+                }
+            }
             struct Inst;
             impl StatefulFunctionInstance for Inst {
-                fn eval(&mut self, _input: StatefulEvalInput<'_>) -> Result<Value, String> {
-                    Ok(Value::Null)
+                fn prepare_eval(
+                    &self,
+                    _input: StatefulEvalInput<'_>,
+                ) -> Result<PreparedStatefulEval, String> {
+                    Ok(PreparedStatefulEval::new(Value::Null, Box::new(Update)))
                 }
+
+                fn commit_eval(&mut self, _update: Box<dyn StatefulEvalUpdate>) {}
             }
             Box::new(Inst)
         }

@@ -82,10 +82,22 @@ fn materialize_collection(
     shared_keys: &Arc<[Arc<str>]>,
     row_accessor: &mut OutputRowAccessor,
     input: &dyn Collection,
+    stats: Option<&ProcessorStats>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     let mut rows = Vec::with_capacity(input.num_rows());
     for tuple in input.rows() {
-        let extracted = row_accessor.extract_row(tuple)?;
+        let extracted = match row_accessor.extract_row(tuple) {
+            Ok(extracted) => extracted,
+            Err(error) => {
+                if let Some(stats) = stats {
+                    stats.record_error_logged(
+                        "memory collection materialize processor error",
+                        error.to_string(),
+                    );
+                }
+                continue;
+            }
+        };
         let values = extracted.into_values_with_null_fill();
 
         let msg = Arc::new(Message::new_shared_keys(
@@ -171,6 +183,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                                             &shared_keys,
                                             &mut row_accessor,
                                             collection.as_ref(),
+                                            Some(stats.as_ref()),
                                         ) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
@@ -320,6 +333,7 @@ mod tests {
             &shared_keys,
             &mut row_accessor,
             &input,
+            None,
         )
         .expect("materialize collection");
 

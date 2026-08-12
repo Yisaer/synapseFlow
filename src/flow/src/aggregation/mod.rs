@@ -19,7 +19,9 @@ pub use median::{median_function_def, MedianFunction};
 pub use ndv::ndv_function_def;
 pub use ndv::NdvFunction;
 pub use registry::builtin_aggregation_defs;
-pub use registry::{AggregateAccumulator, AggregateFunction, AggregateFunctionRegistry};
+pub use registry::{
+    AggregateAccumulator, AggregateFunction, AggregateFunctionRegistry, AggregateUpdate,
+};
 pub use sum::sum_function_def;
 pub use sum::SumFunction;
 pub use variance::{

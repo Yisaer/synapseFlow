@@ -1,9 +1,10 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, DataType, Float64Type, Value};
+use std::any::Any;
 
 #[derive(Debug)]
 pub struct AvgFunction;
@@ -123,17 +124,25 @@ impl AvgAccumulator {
 }
 
 impl AggregateAccumulator for AvgAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("AVG expects one argument".to_string());
         };
 
-        if let Some(v) = Self::cast_to_f64(value)? {
+        Ok(Box::new(AvgUpdate {
+            value: Self::cast_to_f64(value)?,
+        }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<AvgUpdate>()
+            .expect("avg accumulator received incompatible update");
+        if let Some(v) = update.value {
             self.sum += v;
             self.count = self.count.saturating_add(1);
         }
-
-        Ok(())
     }
 
     fn finalize(&self) -> Value {
@@ -142,6 +151,16 @@ impl AggregateAccumulator for AvgAccumulator {
         } else {
             Value::Float64(self.sum / self.count as f64)
         }
+    }
+}
+
+struct AvgUpdate {
+    value: Option<f64>,
+}
+
+impl AggregateUpdate for AvgUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

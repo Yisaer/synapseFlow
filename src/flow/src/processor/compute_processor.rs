@@ -89,13 +89,14 @@ impl ComputeProcessor {
 fn apply_compute(
     input_collection: &dyn Collection,
     fields: &[ComputeExpr],
+    stats: Option<&ProcessorStats>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     if fields.is_empty() {
         return Ok(input_collection.clone_box());
     }
 
     let mut out_rows = Vec::with_capacity(input_collection.num_rows());
-    for tuple in input_collection.rows() {
+    'rows: for tuple in input_collection.rows() {
         let mut out_tuple = tuple.clone();
         for field in fields {
             // Evaluate against the current tuple so compute fields can reference
@@ -104,15 +105,19 @@ fn apply_compute(
                 tuple: &out_tuple,
                 collection_metadata: input_collection.metadata(),
             };
-            let value = field
-                .expr
-                .eval_with_context(&context)
-                .map_err(|eval_error| {
-                    ProcessorError::ProcessingError(format!(
+            let value = match field.expr.eval_with_context(&context) {
+                Ok(value) => value,
+                Err(eval_error) => {
+                    let message = format!(
                         "Failed to evaluate expression for field '{}': {}",
                         field.field_name, eval_error
-                    ))
-                })?;
+                    );
+                    if let Some(stats) = stats {
+                        stats.record_error_logged("compute processor error", message);
+                    }
+                    continue 'rows;
+                }
+            };
             out_tuple.add_affiliate_column(Arc::clone(&field.output_name), value);
         }
         out_rows.push(out_tuple);
@@ -176,7 +181,7 @@ impl Processor for ComputeProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match apply_compute(collection.as_ref(), &fields) {
+                                        match apply_compute(collection.as_ref(), &fields, Some(stats.as_ref())) {
                                             Ok(out_collection) => {
                                                 let out_data = StreamData::collection(out_collection);
                                                 let out_rows = out_data.num_rows_hint();

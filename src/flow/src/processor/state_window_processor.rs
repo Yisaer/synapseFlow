@@ -221,7 +221,7 @@ impl Processor for StateWindowProcessor {
                                             continue;
                                         }
                                         let batch_rows: Vec<_> = state.rows.drain(..).collect();
-                                        stats.record_out(batch_rows.len() as u64);
+                                        let row_count = batch_rows.len() as u64;
                                         let closed_at = tuple_timestamp;
                                         let batch = match window_metadata::record_batch_from_system_time(
                                             batch_rows,
@@ -230,8 +230,13 @@ impl Processor for StateWindowProcessor {
                                         ) {
                                             Ok(batch) => batch,
                                             Err(e) => {
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                return Err(e);
+                                                stats.record_error_logged(
+                                                    "state window processor error",
+                                                    e.to_string(),
+                                                );
+                                                state.active = false;
+                                                state.opened_at = None;
+                                                continue;
                                             }
                                         };
                                         let send_res = send_with_backpressure(
@@ -245,6 +250,7 @@ impl Processor for StateWindowProcessor {
                                             stats.record_handle_duration(handle_start.elapsed());
                                             return Err(e);
                                         }
+                                        stats.record_out(row_count);
                                         state.active = false;
                                         state.opened_at = None;
                                     }
@@ -277,13 +283,23 @@ impl Processor for StateWindowProcessor {
                                                     });
                                                 let batch_rows: Vec<_> =
                                                     state.rows.drain(..).collect();
-                                                stats.record_out(batch_rows.len() as u64);
-                                                let batch =
-                                                    window_metadata::record_batch_from_system_time(
-                                                        batch_rows,
-                                                        state.opened_at.unwrap_or(closed_at),
-                                                        closed_at,
-                                                    )?;
+                                                let row_count = batch_rows.len() as u64;
+                                                let batch = match window_metadata::record_batch_from_system_time(
+                                                    batch_rows,
+                                                    state.opened_at.unwrap_or(closed_at),
+                                                    closed_at,
+                                                ) {
+                                                    Ok(batch) => batch,
+                                                    Err(e) => {
+                                                        stats.record_error_logged(
+                                                            "state window processor error",
+                                                            e.to_string(),
+                                                        );
+                                                        state.active = false;
+                                                        state.opened_at = None;
+                                                        continue;
+                                                    }
+                                                };
                                                 send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
@@ -291,6 +307,7 @@ impl Processor for StateWindowProcessor {
                                                     Some(stats.as_ref()),
                                                 )
                                                 .await?;
+                                                stats.record_out(row_count);
                                                 state.active = false;
                                                 state.opened_at = None;
                                             }

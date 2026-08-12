@@ -15,7 +15,8 @@ use crate::processor::{
 };
 use crate::runtime::TaskSpawner;
 use crate::stateful::{
-    StatefulEvalInput, StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry,
+    StatefulEvalInput, StatefulEvalUpdate, StatefulFunction, StatefulFunctionInstance,
+    StatefulFunctionRegistry,
 };
 use datatypes::Value;
 use futures::stream::StreamExt;
@@ -161,13 +162,15 @@ impl StatefulFunctionProcessor {
         collection: Box<dyn Collection>,
         partition_groups: &[PartitionGroup],
         calls: &mut [StatefulProcessorCall],
+        stats: Option<&ProcessorStats>,
     ) -> Result<Box<dyn Collection>, ProcessorError> {
         let metadata = collection.metadata().clone();
-        let mut rows = collection.into_rows().map_err(|e| {
+        let rows = collection.into_rows().map_err(|e| {
             ProcessorError::ProcessingError(format!("Failed to materialize rows: {}", e))
         })?;
+        let mut out_rows = Vec::with_capacity(rows.len());
 
-        for tuple in rows.iter_mut() {
+        'rows: for mut tuple in rows {
             let mut partition_keys = Vec::with_capacity(partition_groups.len());
             for group in partition_groups {
                 let key = if group.scalars.is_empty() {
@@ -175,33 +178,52 @@ impl StatefulFunctionProcessor {
                 } else {
                     let mut key_values = Vec::with_capacity(group.scalars.len());
                     for scalar in &group.scalars {
-                        key_values.push(scalar.eval_with_tuple(tuple).map_err(|e| {
-                            ProcessorError::ProcessingError(format!(
-                                "failed to evaluate stateful function partition key: {e}"
-                            ))
-                        })?);
+                        let value = match scalar.eval_with_tuple(&tuple) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                if let Some(stats) = stats {
+                                    stats.record_error_logged(
+                                        "stateful function processor error",
+                                        format!(
+                                            "failed to evaluate stateful function partition key: {error}"
+                                        ),
+                                    );
+                                }
+                                continue 'rows;
+                            }
+                        };
+                        key_values.push(value);
                     }
                     PartitionKey::Values(key_values)
                 };
                 partition_keys.push(key);
             }
 
-            for call in calls.iter_mut() {
+            let mut prepared_updates: Vec<(usize, PartitionKey, Box<dyn StatefulEvalUpdate>)> =
+                Vec::with_capacity(calls.len());
+            for (idx, call) in calls.iter().enumerate() {
                 let partition_key = &partition_keys[call.partition_group_id];
-
                 let should_apply = match call.when_scalar.as_ref() {
-                    Some(scalar) => match scalar.eval_with_tuple(tuple) {
+                    Some(scalar) => match scalar.eval_with_tuple(&tuple) {
                         Ok(Value::Bool(v)) => v,
                         Ok(Value::Null) => false,
                         Ok(other) => {
-                            return Err(ProcessorError::ProcessingError(format!(
-                                "stateful function filter must be bool, got {other:?}"
-                            )));
+                            if let Some(stats) = stats {
+                                stats.record_error_logged(
+                                    "stateful function processor error",
+                                    format!("stateful function filter must be bool, got {other:?}"),
+                                );
+                            }
+                            continue 'rows;
                         }
-                        Err(e) => {
-                            return Err(ProcessorError::ProcessingError(format!(
-                                "failed to evaluate stateful function filter: {e}"
-                            )));
+                        Err(error) => {
+                            if let Some(stats) = stats {
+                                stats.record_error_logged(
+                                    "stateful function processor error",
+                                    format!("failed to evaluate stateful function filter: {error}"),
+                                );
+                            }
+                            continue 'rows;
                         }
                     },
                     None => true,
@@ -209,40 +231,64 @@ impl StatefulFunctionProcessor {
 
                 let mut args = Vec::with_capacity(call.arg_scalars.len());
                 for scalar in &call.arg_scalars {
-                    args.push(
-                        scalar
-                            .eval_with_tuple(tuple)
-                            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?,
-                    );
+                    let value = match scalar.eval_with_tuple(&tuple) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            if let Some(stats) = stats {
+                                stats.record_error_logged(
+                                    "stateful function processor error",
+                                    error.to_string(),
+                                );
+                            }
+                            continue 'rows;
+                        }
+                    };
+                    args.push(value);
                 }
 
-                let out = if let Some(state) = call.states.get_mut(partition_key) {
-                    state
-                        .instance
-                        .eval(StatefulEvalInput {
-                            args: &args,
-                            should_apply,
-                        })
-                        .map_err(ProcessorError::ProcessingError)?
+                let prepared_result = if let Some(state) = call.states.get(partition_key) {
+                    state.instance.prepare_eval(StatefulEvalInput {
+                        args: &args,
+                        should_apply,
+                    })
                 } else {
-                    let state = call.states.entry(partition_key.clone()).or_insert_with(|| {
-                        StatefulPartitionState {
-                            instance: call.function.create_instance(),
-                        }
-                    });
-                    state
-                        .instance
-                        .eval(StatefulEvalInput {
-                            args: &args,
-                            should_apply,
-                        })
-                        .map_err(ProcessorError::ProcessingError)?
+                    let instance = call.function.create_instance();
+                    instance.prepare_eval(StatefulEvalInput {
+                        args: &args,
+                        should_apply,
+                    })
                 };
-                tuple.add_affiliate_column(Arc::clone(&call.output_column), out);
+                let prepared = match prepared_result {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        if let Some(stats) = stats {
+                            stats.record_error_logged(
+                                "stateful function processor error",
+                                format!("failed to evaluate stateful function: {error}"),
+                            );
+                        }
+                        continue 'rows;
+                    }
+                };
+                tuple.add_affiliate_column(Arc::clone(&call.output_column), prepared.output);
+                prepared_updates.push((idx, partition_key.clone(), prepared.update));
             }
+
+            for (idx, partition_key, update) in prepared_updates {
+                let call = &mut calls[idx];
+                let state =
+                    call.states
+                        .entry(partition_key)
+                        .or_insert_with(|| StatefulPartitionState {
+                            instance: call.function.create_instance(),
+                        });
+                state.instance.commit_eval(update);
+            }
+
+            out_rows.push(tuple);
         }
 
-        let batch = RecordBatch::new_with_metadata(rows, metadata)
+        let batch = RecordBatch::new_with_metadata(out_rows, metadata)
             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
     }
@@ -305,7 +351,7 @@ impl Processor for StatefulFunctionProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match Self::apply_stateful(collection, &partition_groups, &mut calls) {
+                                        match Self::apply_stateful(collection, &partition_groups, &mut calls, Some(stats.as_ref())) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.num_rows_hint();

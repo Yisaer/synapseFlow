@@ -110,7 +110,7 @@ impl Processor for EosWindowProcessor {
                                         stats.record_handle_duration(handle_start.elapsed());
                                         if let Err(err) = res {
                                             stats.record_error_logged("eos window processor error", err.to_string());
-                                            return Err(err);
+                                            continue;
                                         }
                                     }
                                     StreamData::Control(signal) => {
@@ -219,18 +219,24 @@ impl EosWindowState {
     }
 
     fn add_collection(&mut self, collection: Box<dyn Collection>) -> Result<(), ProcessorError> {
-        let rows = collection.into_rows().map_err(|err| {
-            ProcessorError::ProcessingError(format!("failed to extract rows: {err}"))
-        })?;
+        let rows = match collection.into_rows() {
+            Ok(rows) => rows,
+            Err(err) => {
+                self.stats.record_error_logged(
+                    "eos window processor error",
+                    format!("failed to extract rows: {err}"),
+                );
+                return Ok(());
+            }
+        };
         for row in rows {
             match window_metadata::validate_system_time(row.timestamp) {
                 Ok(()) => {}
-                Err(ProcessorError::ProcessingError(message)) => {
+                Err(err) => {
                     self.stats
-                        .record_error_logged("eos window processor error", message);
+                        .record_error_logged("eos window processor error", err.to_string());
                     continue;
                 }
-                Err(err) => return Err(err),
             }
             if self.opened_at.is_none() {
                 self.opened_at = Some(row.timestamp);
@@ -259,19 +265,27 @@ impl EosWindowState {
             .take()
             .or(self.opened_at)
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        let collection = window_metadata::record_batch_from_system_time(
+        let collection = match window_metadata::record_batch_from_system_time(
             rows,
             self.opened_at.take().unwrap_or(closed_at),
             closed_at,
-        )?;
-        self.stats.record_out(row_count);
+        ) {
+            Ok(collection) => collection,
+            Err(err) => {
+                self.stats
+                    .record_error_logged("eos window processor error", err.to_string());
+                return Ok(());
+            }
+        };
         send_with_backpressure(
             output,
             data_channel_capacity,
             StreamData::collection(Box::new(collection)),
             Some(self.stats.as_ref()),
         )
-        .await
+        .await?;
+        self.stats.record_out(row_count);
+        Ok(())
     }
 
     fn clear(&mut self) {

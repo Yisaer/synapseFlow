@@ -1,9 +1,10 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, DataType, Float64Type, Value};
+use std::any::Any;
 
 #[derive(Debug)]
 pub struct MedianFunction;
@@ -119,16 +120,24 @@ impl MedianAccumulator {
 }
 
 impl AggregateAccumulator for MedianAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("median expects one argument".to_string());
         };
 
-        if let Some(v) = Self::cast_to_f64(value)? {
-            self.values.push(v);
-        }
+        Ok(Box::new(MedianUpdate {
+            value: Self::cast_to_f64(value)?,
+        }))
+    }
 
-        Ok(())
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<MedianUpdate>()
+            .expect("median accumulator received incompatible update");
+        if let Some(value) = update.value {
+            self.values.push(value);
+        }
     }
 
     fn finalize(&self) -> Value {
@@ -145,6 +154,16 @@ impl AggregateAccumulator for MedianAccumulator {
         } else {
             Value::Float64((values[mid - 1] + values[mid]) / 2.0)
         }
+    }
+}
+
+struct MedianUpdate {
+    value: Option<f64>,
+}
+
+impl AggregateUpdate for MedianUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

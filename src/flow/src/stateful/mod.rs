@@ -32,8 +32,8 @@ pub use lag::LagFunction;
 pub use latest::latest_function_def;
 pub use latest::LatestFunction;
 pub use registry::{
-    StatefulEvalInput, StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry,
-    StatefulRegistryError,
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance, StatefulFunctionRegistry, StatefulRegistryError,
 };
 
 use crate::catalog::FunctionDef;

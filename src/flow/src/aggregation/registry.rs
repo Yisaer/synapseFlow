@@ -9,12 +9,24 @@ use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
 use parking_lot::RwLock;
 use parser::aggregate_registry::AggregateRegistry;
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub trait AggregateUpdate: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+}
+
 pub trait AggregateAccumulator: Send + Sync {
-    fn update(&mut self, args: &[Value]) -> Result<(), String>;
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String>;
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>);
     fn finalize(&self) -> Value;
+
+    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+        let update = self.prepare_update(args)?;
+        self.commit_update(update);
+        Ok(())
+    }
 }
 
 pub trait AggregateFunction: Send + Sync {
@@ -133,11 +145,23 @@ mod tests {
             Ok(ConcreteDatatype::Int64(types::Int64Type))
         }
         fn create_accumulator(&self) -> Box<dyn AggregateAccumulator> {
+            struct Update;
+            impl AggregateUpdate for Update {
+                fn as_any(&self) -> &dyn Any {
+                    self
+                }
+            }
             struct Acc;
             impl AggregateAccumulator for Acc {
-                fn update(&mut self, _args: &[Value]) -> Result<(), String> {
-                    Ok(())
+                fn prepare_update(
+                    &self,
+                    _args: &[Value],
+                ) -> Result<Box<dyn AggregateUpdate>, String> {
+                    Ok(Box::new(Update))
                 }
+
+                fn commit_update(&mut self, _update: Box<dyn AggregateUpdate>) {}
+
                 fn finalize(&self) -> Value {
                     Value::Null
                 }

@@ -1,10 +1,11 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use crate::expr::func::BinaryFunc;
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 
 #[derive(Debug)]
 pub struct SumFunction;
@@ -122,16 +123,35 @@ impl SumAccumulator {
 }
 
 impl AggregateAccumulator for SumAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("SUM expects one argument".to_string());
         };
-        self.acc = Self::add_values(self.acc.take(), value.clone())?;
-        Ok(())
+        Ok(Box::new(SumUpdate {
+            next: Self::add_values(self.acc.clone(), value.clone())?,
+        }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<SumUpdate>()
+            .expect("sum accumulator received incompatible update");
+        self.acc = update.next.clone();
     }
 
     fn finalize(&self) -> Value {
         self.acc.clone().unwrap_or(Value::Null)
+    }
+}
+
+struct SumUpdate {
+    next: Option<Value>,
+}
+
+impl AggregateUpdate for SumUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

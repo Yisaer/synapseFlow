@@ -213,6 +213,7 @@ fn apply_row_diff(
     output_keys: &Arc<[Arc<str>]>,
     tracked_flags: &[bool],
     state: &mut RowDiffState,
+    stats: Option<&ProcessorStats>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     let metadata = input_collection.metadata().clone();
     let input_rows = input_collection.into_rows().map_err(|err| {
@@ -221,13 +222,29 @@ fn apply_row_diff(
     let mut output_rows = Vec::with_capacity(input_rows.len());
 
     for tuple in input_rows {
-        let current_values = extract_output_row(row_accessor, &tuple)?;
-        let (diff_values, output_mask) = build_diff_row(
+        let current_values = match extract_output_row(row_accessor, &tuple) {
+            Ok(current_values) => current_values,
+            Err(error) => {
+                if let Some(stats) = stats {
+                    stats.record_error_logged("row diff processor error", error.to_string());
+                }
+                continue;
+            }
+        };
+        let (diff_values, output_mask) = match build_diff_row(
             current_values.as_slice(),
             state.previous_output_row.as_deref(),
             tracked_flags,
             output_keys.as_ref(),
-        )?;
+        ) {
+            Ok(diff) => diff,
+            Err(error) => {
+                if let Some(stats) = stats {
+                    stats.record_error_logged("row diff processor error", error.to_string());
+                }
+                continue;
+            }
+        };
         state.previous_output_row = Some(current_values);
 
         output_rows.push(materialize_diff_tuple(
@@ -304,6 +321,7 @@ impl Processor for RowDiffProcessor {
                                             &output_keys,
                                             tracked_flags.as_ref(),
                                             &mut state,
+                                            Some(stats.as_ref()),
                                         ) {
                                             Ok(out_collection) => {
                                                 let out_data = StreamData::collection(out_collection);

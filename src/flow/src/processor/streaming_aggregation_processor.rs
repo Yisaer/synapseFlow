@@ -1,6 +1,6 @@
 //! StreamingAggregationProcessor - incremental aggregation with windowing.
 
-use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry};
+use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry, AggregateUpdate};
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{
@@ -245,40 +245,29 @@ impl AggregationWorker {
 
     fn update_groups(&mut self, tuple: &crate::model::Tuple) -> Result<(), String> {
         let key_values = self.evaluate_group_by(tuple)?;
+        let row_call_args = self.evaluate_aggregate_args(tuple)?;
         let key_repr = format!("{:?}", key_values);
 
-        let entry = match self.groups.entry(key_repr) {
-            Entry::Occupied(o) => o.into_mut(),
+        match self.groups.entry(key_repr) {
+            Entry::Occupied(mut o) => {
+                let entry = o.get_mut();
+                apply_aggregate_updates(&mut entry.accumulators, &row_call_args)?;
+                entry.last_tuple = tuple.clone();
+                entry.key_values = key_values;
+            }
             Entry::Vacant(v) => {
                 let accumulators = create_accumulators_static(
                     &self.physical.aggregate_calls,
                     self.aggregate_registry.as_ref(),
                 )?;
-                v.insert(GroupState {
+                let mut state = GroupState {
                     accumulators,
                     last_tuple: tuple.clone(),
                     key_values: key_values.clone(),
-                })
+                };
+                apply_aggregate_updates(&mut state.accumulators, &row_call_args)?;
+                v.insert(state);
             }
-        };
-
-        entry.last_tuple = tuple.clone();
-        entry.key_values = key_values;
-
-        for (idx, call) in self.physical.aggregate_calls.iter().enumerate() {
-            let mut args = Vec::new();
-            for arg_expr in &call.args {
-                args.push(
-                    arg_expr
-                        .eval_with_tuple(tuple)
-                        .map_err(|e| format!("Failed to evaluate aggregate argument: {}", e))?,
-                );
-            }
-            entry
-                .accumulators
-                .get_mut(idx)
-                .ok_or_else(|| "accumulator missing".to_string())?
-                .update(&args)?;
         }
 
         Ok(())
@@ -294,6 +283,25 @@ impl AggregationWorker {
             );
         }
         Ok(values)
+    }
+
+    fn evaluate_aggregate_args(
+        &self,
+        tuple: &crate::model::Tuple,
+    ) -> Result<Vec<(usize, Vec<Value>)>, String> {
+        let mut all_args = Vec::with_capacity(self.physical.aggregate_calls.len());
+        for (idx, call) in self.physical.aggregate_calls.iter().enumerate() {
+            let mut args = Vec::with_capacity(call.args.len());
+            for arg_expr in &call.args {
+                args.push(
+                    arg_expr
+                        .eval_with_tuple(tuple)
+                        .map_err(|e| format!("Failed to evaluate aggregate argument: {}", e))?,
+                );
+            }
+            all_args.push((idx, args));
+        }
+        Ok(all_args)
     }
 
     fn finalize_current_window(&mut self) -> Result<Option<Box<dyn Collection>>, String> {
@@ -318,6 +326,29 @@ impl AggregationWorker {
             .map_err(|e| format!("Failed to build RecordBatch: {e}"))?;
         Ok(Some(Box::new(collection)))
     }
+}
+
+fn apply_aggregate_updates(
+    accumulators: &mut [Box<dyn AggregateAccumulator>],
+    row_call_args: &[(usize, Vec<Value>)],
+) -> Result<(), String> {
+    let mut prepared = Vec::<(usize, Box<dyn AggregateUpdate>)>::with_capacity(row_call_args.len());
+    for (idx, args) in row_call_args {
+        let update = accumulators
+            .get(*idx)
+            .ok_or_else(|| "accumulator missing".to_string())?
+            .prepare_update(args)?;
+        prepared.push((*idx, update));
+    }
+
+    for (idx, update) in prepared {
+        accumulators
+            .get_mut(idx)
+            .ok_or_else(|| "accumulator missing".to_string())?
+            .commit_update(update);
+    }
+
+    Ok(())
 }
 
 fn finalize_group(

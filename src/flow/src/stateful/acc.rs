@@ -1,9 +1,13 @@
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, DataType, Float64Type, Int64Type, Value};
+use std::any::Any;
 
 pub struct AccSumFunction;
 pub struct AccMaxFunction;
@@ -266,6 +270,7 @@ struct AccLifecycle {
     should_update: bool,
     reset_before_eval: bool,
     reset_after_eval: bool,
+    next_has_begin: bool,
 }
 
 fn condition_arg(name: &str, arg_name: &str, value: &Value) -> Result<bool, String> {
@@ -280,7 +285,7 @@ fn prepare_lifecycle(
     name: &str,
     args: &[Value],
     should_apply: bool,
-    has_begin: &mut bool,
+    has_begin: bool,
 ) -> Result<AccLifecycle, String> {
     validate_arg_count(name, args)?;
     if args.len() == 1 {
@@ -288,20 +293,20 @@ fn prepare_lifecycle(
             should_update: should_apply,
             reset_before_eval: false,
             reset_after_eval: false,
+            next_has_begin: has_begin,
         });
     }
 
-    let reset_before_eval = !*has_begin;
+    let reset_before_eval = !has_begin;
     let begin_cond = condition_arg(name, "begin_cond", &args[1])?;
     let reset_cond = condition_arg(name, "reset_cond", &args[2])?;
-    if begin_cond {
-        *has_begin = true;
-    }
+    let active = has_begin || begin_cond;
 
     Ok(AccLifecycle {
-        should_update: *has_begin && should_apply,
+        should_update: active && should_apply,
         reset_before_eval,
         reset_after_eval: reset_cond,
+        next_has_begin: if reset_cond { false } else { active },
     })
 }
 
@@ -370,138 +375,245 @@ fn validate_lifecycle_return_types(
 }
 
 impl StatefulFunctionInstance for AccSumInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        let lifecycle = prepare_lifecycle(
-            "acc_sum",
-            input.args,
-            input.should_apply,
-            &mut self.has_begin,
-        )?;
-        if lifecycle.reset_before_eval {
-            self.sum = 0.0;
-        }
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
+        let lifecycle =
+            prepare_lifecycle("acc_sum", input.args, input.should_apply, self.has_begin)?;
+        let mut sum = if lifecycle.reset_before_eval {
+            0.0
+        } else {
+            self.sum
+        };
         if lifecycle.should_update {
             if let Some(value) = numeric_arg("acc_sum", &input.args[0])? {
-                self.sum += value;
+                sum += value;
             }
         }
-        let out = Value::Float64(self.sum);
-        if lifecycle.reset_after_eval {
-            self.sum = 0.0;
-            self.has_begin = false;
-        }
-        Ok(out)
+        let out = Value::Float64(sum);
+        let next_sum = if lifecycle.reset_after_eval { 0.0 } else { sum };
+        Ok(PreparedStatefulEval::new(
+            out,
+            Box::new(AccSumUpdate {
+                sum: next_sum,
+                has_begin: lifecycle.next_has_begin,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<AccSumUpdate>()
+            .expect("acc_sum received incompatible update");
+        self.sum = update.sum;
+        self.has_begin = update.has_begin;
     }
 }
 
 impl StatefulFunctionInstance for AccMaxInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        let lifecycle = prepare_lifecycle(
-            "acc_max",
-            input.args,
-            input.should_apply,
-            &mut self.has_begin,
-        )?;
-        if lifecycle.reset_before_eval {
-            self.value = None;
-        }
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
+        let lifecycle =
+            prepare_lifecycle("acc_max", input.args, input.should_apply, self.has_begin)?;
+        let mut value = if lifecycle.reset_before_eval {
+            None
+        } else {
+            self.value
+        };
         if lifecycle.should_update {
-            if let Some(value) = numeric_arg("acc_max", &input.args[0])? {
-                self.value = Some(match self.value {
-                    Some(current) => current.max(value),
-                    None => value,
+            if let Some(next) = numeric_arg("acc_max", &input.args[0])? {
+                value = Some(match value {
+                    Some(current) => current.max(next),
+                    None => next,
                 });
             }
         }
-        let out = Value::Float64(self.value.unwrap_or(0.0));
-        if lifecycle.reset_after_eval {
-            self.value = None;
-            self.has_begin = false;
-        }
-        Ok(out)
+        let out = Value::Float64(value.unwrap_or(0.0));
+        let next_value = if lifecycle.reset_after_eval {
+            None
+        } else {
+            value
+        };
+        Ok(PreparedStatefulEval::new(
+            out,
+            Box::new(AccExtremaUpdate {
+                value: next_value,
+                has_begin: lifecycle.next_has_begin,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<AccExtremaUpdate>()
+            .expect("acc_max received incompatible update");
+        self.value = update.value;
+        self.has_begin = update.has_begin;
     }
 }
 
 impl StatefulFunctionInstance for AccMinInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        let lifecycle = prepare_lifecycle(
-            "acc_min",
-            input.args,
-            input.should_apply,
-            &mut self.has_begin,
-        )?;
-        if lifecycle.reset_before_eval {
-            self.value = None;
-        }
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
+        let lifecycle =
+            prepare_lifecycle("acc_min", input.args, input.should_apply, self.has_begin)?;
+        let mut value = if lifecycle.reset_before_eval {
+            None
+        } else {
+            self.value
+        };
         if lifecycle.should_update {
-            if let Some(value) = numeric_arg("acc_min", &input.args[0])? {
-                self.value = Some(match self.value {
-                    Some(current) => current.min(value),
-                    None => value,
+            if let Some(next) = numeric_arg("acc_min", &input.args[0])? {
+                value = Some(match value {
+                    Some(current) => current.min(next),
+                    None => next,
                 });
             }
         }
-        let out = Value::Float64(self.value.unwrap_or(0.0));
-        if lifecycle.reset_after_eval {
-            self.value = None;
-            self.has_begin = false;
-        }
-        Ok(out)
+        let out = Value::Float64(value.unwrap_or(0.0));
+        let next_value = if lifecycle.reset_after_eval {
+            None
+        } else {
+            value
+        };
+        Ok(PreparedStatefulEval::new(
+            out,
+            Box::new(AccExtremaUpdate {
+                value: next_value,
+                has_begin: lifecycle.next_has_begin,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<AccExtremaUpdate>()
+            .expect("acc_min received incompatible update");
+        self.value = update.value;
+        self.has_begin = update.has_begin;
     }
 }
 
 impl StatefulFunctionInstance for AccCountInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        let lifecycle = prepare_lifecycle(
-            "acc_count",
-            input.args,
-            input.should_apply,
-            &mut self.has_begin,
-        )?;
-        if lifecycle.reset_before_eval {
-            self.count = 0;
-        }
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
+        let lifecycle =
+            prepare_lifecycle("acc_count", input.args, input.should_apply, self.has_begin)?;
+        let mut count = if lifecycle.reset_before_eval {
+            0
+        } else {
+            self.count
+        };
         if lifecycle.should_update && !input.args[0].is_null() {
-            self.count = self.count.saturating_add(1);
+            count = count.saturating_add(1);
         }
-        let out = Value::Int64(self.count);
-        if lifecycle.reset_after_eval {
-            self.count = 0;
-            self.has_begin = false;
-        }
-        Ok(out)
+        let out = Value::Int64(count);
+        let next_count = if lifecycle.reset_after_eval { 0 } else { count };
+        Ok(PreparedStatefulEval::new(
+            out,
+            Box::new(AccCountUpdate {
+                count: next_count,
+                has_begin: lifecycle.next_has_begin,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<AccCountUpdate>()
+            .expect("acc_count received incompatible update");
+        self.count = update.count;
+        self.has_begin = update.has_begin;
     }
 }
 
 impl StatefulFunctionInstance for AccAvgInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        let lifecycle = prepare_lifecycle(
-            "acc_avg",
-            input.args,
-            input.should_apply,
-            &mut self.has_begin,
-        )?;
-        if lifecycle.reset_before_eval {
-            self.sum = 0.0;
-            self.count = 0;
-        }
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
+        let lifecycle =
+            prepare_lifecycle("acc_avg", input.args, input.should_apply, self.has_begin)?;
+        let (mut sum, mut count) = if lifecycle.reset_before_eval {
+            (0.0, 0)
+        } else {
+            (self.sum, self.count)
+        };
         if lifecycle.should_update {
             if let Some(value) = numeric_arg("acc_avg", &input.args[0])? {
-                self.sum += value;
-                self.count = self.count.saturating_add(1);
+                sum += value;
+                count = count.saturating_add(1);
             }
         }
-        let out = if self.count == 0 {
+        let out = if count == 0 {
             Value::Float64(0.0)
         } else {
-            Value::Float64(self.sum / self.count as f64)
+            Value::Float64(sum / count as f64)
         };
-        if lifecycle.reset_after_eval {
-            self.sum = 0.0;
-            self.count = 0;
-            self.has_begin = false;
-        }
-        Ok(out)
+        let (next_sum, next_count) = if lifecycle.reset_after_eval {
+            (0.0, 0)
+        } else {
+            (sum, count)
+        };
+        Ok(PreparedStatefulEval::new(
+            out,
+            Box::new(AccAvgUpdate {
+                sum: next_sum,
+                count: next_count,
+                has_begin: lifecycle.next_has_begin,
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<AccAvgUpdate>()
+            .expect("acc_avg received incompatible update");
+        self.sum = update.sum;
+        self.count = update.count;
+        self.has_begin = update.has_begin;
+    }
+}
+
+struct AccSumUpdate {
+    sum: f64,
+    has_begin: bool,
+}
+
+struct AccExtremaUpdate {
+    value: Option<f64>,
+    has_begin: bool,
+}
+
+struct AccCountUpdate {
+    count: i64,
+    has_begin: bool,
+}
+
+struct AccAvgUpdate {
+    sum: f64,
+    count: u64,
+    has_begin: bool,
+}
+
+impl StatefulEvalUpdate for AccSumUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl StatefulEvalUpdate for AccExtremaUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl StatefulEvalUpdate for AccCountUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl StatefulEvalUpdate for AccAvgUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

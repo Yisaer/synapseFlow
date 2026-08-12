@@ -1,9 +1,10 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, ListType, ListValue, Value};
+use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -90,23 +91,31 @@ struct DeduplicateAccumulator {
 }
 
 impl AggregateAccumulator for DeduplicateAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("deduplicate expects one argument".to_string());
         };
 
-        if value.is_null() {
-            return Ok(());
-        }
+        let value = if value.is_null() || self.seen.contains(value) {
+            None
+        } else {
+            Some(value.clone())
+        };
+        Ok(Box::new(DeduplicateUpdate { value }))
+    }
 
-        if self.seen.insert(value.clone()) {
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<DeduplicateUpdate>()
+            .expect("deduplicate accumulator received incompatible update");
+        if let Some(value) = &update.value {
+            self.seen.insert(value.clone());
             if self.datatype.is_none() {
                 self.datatype = Some(Arc::new(value.datatype()));
             }
             self.values.push(value.clone());
         }
-
-        Ok(())
     }
 
     fn finalize(&self) -> Value {
@@ -115,6 +124,16 @@ impl AggregateAccumulator for DeduplicateAccumulator {
         };
 
         Value::List(ListValue::new(self.values.clone(), datatype))
+    }
+}
+
+struct DeduplicateUpdate {
+    value: Option<Value>,
+}
+
+impl AggregateUpdate for DeduplicateUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

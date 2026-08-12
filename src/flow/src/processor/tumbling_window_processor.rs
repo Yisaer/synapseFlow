@@ -137,7 +137,12 @@ impl Processor for TumblingWindowProcessor {
                                 let res = state.add_collection(collection).await;
                                 // Tumbling window enqueue/buffer work is local-only.
                                 stats.record_handle_duration(handle_start.elapsed());
-                                res?;
+                                if let Err(err) = res {
+                                    stats.record_error_logged(
+                                        "tumbling window processor error",
+                                        err.to_string(),
+                                    );
+                                }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 state.flush_up_to(ts).await?;
@@ -266,27 +271,32 @@ impl PartitionedProcessingState {
         &mut self,
         collection: Box<dyn crate::model::Collection>,
     ) -> Result<(), ProcessorError> {
-        let rows = collection
-            .into_rows()
-            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
+        let rows = match collection.into_rows() {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.stats.record_error_logged(
+                    "tumbling window processor error",
+                    format!("failed to extract rows: {e}"),
+                );
+                return Ok(());
+            }
+        };
         for tuple in rows {
             let window_start = match window_start_secs(tuple.timestamp, self.len_secs) {
                 Ok(start) => start,
-                Err(ProcessorError::ProcessingError(message)) => {
+                Err(err) => {
                     self.stats
-                        .record_error_logged("tumbling window processor error", message);
+                        .record_error_logged("tumbling window processor error", err.to_string());
                     continue;
                 }
-                Err(err) => return Err(err),
             };
             match window_metadata::validate_epoch_secs(window_start.saturating_add(self.len_secs)) {
                 Ok(()) => {}
-                Err(ProcessorError::ProcessingError(message)) => {
+                Err(err) => {
                     self.stats
-                        .record_error_logged("tumbling window processor error", message);
+                        .record_error_logged("tumbling window processor error", err.to_string());
                     continue;
                 }
-                Err(err) => return Err(err),
             }
             let partition_key =
                 match eval_partition_key(&self.partition_by_scalars, &tuple, "tumblingwindow") {
@@ -384,7 +394,15 @@ impl ProcessingState {
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
         // Flush whole windows whose end <= watermark.
         while let Some(front) = self.rows.front() {
-            let window_start = window_start_secs(front.timestamp, self.len_secs)?;
+            let window_start = match window_start_secs(front.timestamp, self.len_secs) {
+                Ok(start) => start,
+                Err(err) => {
+                    self.stats
+                        .record_error_logged("tumbling window processor error", err.to_string());
+                    self.rows.pop_front();
+                    continue;
+                }
+            };
             let window_end = SystemTime::UNIX_EPOCH
                 + Duration::from_secs(window_start.saturating_add(self.len_secs));
             if window_end > watermark {
@@ -393,7 +411,17 @@ impl ProcessingState {
 
             let mut current_rows = Vec::new();
             while let Some(row) = self.rows.front() {
-                let row_start = window_start_secs(row.timestamp, self.len_secs)?;
+                let row_start = match window_start_secs(row.timestamp, self.len_secs) {
+                    Ok(start) => start,
+                    Err(err) => {
+                        self.stats.record_error_logged(
+                            "tumbling window processor error",
+                            err.to_string(),
+                        );
+                        self.rows.pop_front();
+                        continue;
+                    }
+                };
                 if row_start != window_start {
                     break;
                 }
@@ -408,12 +436,19 @@ impl ProcessingState {
             if current_rows.is_empty() {
                 continue;
             }
-            self.stats.record_out(current_rows.len() as u64);
-            let batch = window_metadata::record_batch_from_epoch_secs(
+            let row_count = current_rows.len() as u64;
+            let batch = match window_metadata::record_batch_from_epoch_secs(
                 current_rows,
                 window_start,
                 window_start.saturating_add(self.len_secs),
-            )?;
+            ) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    self.stats
+                        .record_error_logged("tumbling window processor error", err.to_string());
+                    continue;
+                }
+            };
             send_with_backpressure(
                 &self.output,
                 self.data_channel_capacity,
@@ -421,16 +456,35 @@ impl ProcessingState {
                 Some(self.stats.as_ref()),
             )
             .await?;
+            self.stats.record_out(row_count);
         }
         Ok(())
     }
 
     async fn flush_all(&mut self) -> Result<(), ProcessorError> {
         while let Some(front) = self.rows.front() {
-            let window_start = window_start_secs(front.timestamp, self.len_secs)?;
+            let window_start = match window_start_secs(front.timestamp, self.len_secs) {
+                Ok(start) => start,
+                Err(err) => {
+                    self.stats
+                        .record_error_logged("tumbling window processor error", err.to_string());
+                    self.rows.pop_front();
+                    continue;
+                }
+            };
             let mut current_rows = Vec::new();
             while let Some(row) = self.rows.front() {
-                let row_start = window_start_secs(row.timestamp, self.len_secs)?;
+                let row_start = match window_start_secs(row.timestamp, self.len_secs) {
+                    Ok(start) => start,
+                    Err(err) => {
+                        self.stats.record_error_logged(
+                            "tumbling window processor error",
+                            err.to_string(),
+                        );
+                        self.rows.pop_front();
+                        continue;
+                    }
+                };
                 if row_start != window_start {
                     break;
                 }
@@ -444,12 +498,19 @@ impl ProcessingState {
             if current_rows.is_empty() {
                 continue;
             }
-            self.stats.record_out(current_rows.len() as u64);
-            let batch = window_metadata::record_batch_from_epoch_secs(
+            let row_count = current_rows.len() as u64;
+            let batch = match window_metadata::record_batch_from_epoch_secs(
                 current_rows,
                 window_start,
                 window_start.saturating_add(self.len_secs),
-            )?;
+            ) {
+                Ok(batch) => batch,
+                Err(err) => {
+                    self.stats
+                        .record_error_logged("tumbling window processor error", err.to_string());
+                    continue;
+                }
+            };
             send_with_backpressure(
                 &self.output,
                 self.data_channel_capacity,
@@ -457,6 +518,7 @@ impl ProcessingState {
                 Some(self.stats.as_ref()),
             )
             .await?;
+            self.stats.record_out(row_count);
         }
         Ok(())
     }

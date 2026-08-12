@@ -1,9 +1,10 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Int64Type, Value};
+use std::any::Any;
 use std::collections::HashSet;
 
 #[derive(Debug, Default)]
@@ -77,19 +78,41 @@ struct NdvAccumulator {
 }
 
 impl AggregateAccumulator for NdvAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("NDV expects one argument".to_string());
         };
-        if value.is_null() {
-            return Ok(());
+        Ok(Box::new(NdvUpdate {
+            value: if value.is_null() {
+                None
+            } else {
+                Some(value.clone())
+            },
+        }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<NdvUpdate>()
+            .expect("ndv accumulator received incompatible update");
+        if let Some(value) = &update.value {
+            self.distinct_values.insert(value.clone());
         }
-        self.distinct_values.insert(value.clone());
-        Ok(())
     }
 
     fn finalize(&self) -> Value {
         Value::Int64(i64::try_from(self.distinct_values.len()).unwrap_or(i64::MAX))
+    }
+}
+
+struct NdvUpdate {
+    value: Option<Value>,
+}
+
+impl AggregateUpdate for NdvUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

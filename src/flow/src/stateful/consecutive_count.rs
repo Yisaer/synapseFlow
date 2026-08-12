@@ -1,10 +1,14 @@
 use super::util::bool_condition;
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Int64Type, Value};
+use std::any::Any;
 
 pub struct ConsecutiveCountFunction;
 
@@ -67,7 +71,7 @@ struct ConsecutiveCountInstance {
 }
 
 impl StatefulFunctionInstance for ConsecutiveCountInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.len() != 1 {
             return Err(format!(
                 "consecutive_count() expects exactly 1 argument, got {}",
@@ -78,16 +82,42 @@ impl StatefulFunctionInstance for ConsecutiveCountInstance {
         // Filtered-out rows return the current count without advancing state, so a
         // later real row continues the streak from where it left off.
         if !input.should_apply {
-            return Ok(Value::Int64(self.count));
+            return Ok(PreparedStatefulEval::new(
+                Value::Int64(self.count),
+                Box::new(ConsecutiveCountUpdate { count: None }),
+            ));
         }
 
         let condition = bool_condition("consecutive_count() condition", &input.args[0])?;
-        self.count = if condition {
+        let count = if condition {
             self.count.saturating_add(1)
         } else {
             0
         };
-        Ok(Value::Int64(self.count))
+        Ok(PreparedStatefulEval::new(
+            Value::Int64(count),
+            Box::new(ConsecutiveCountUpdate { count: Some(count) }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ConsecutiveCountUpdate>()
+            .expect("consecutive_count received incompatible update");
+        if let Some(count) = update.count {
+            self.count = count;
+        }
+    }
+}
+
+struct ConsecutiveCountUpdate {
+    count: Option<i64>,
+}
+
+impl StatefulEvalUpdate for ConsecutiveCountUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

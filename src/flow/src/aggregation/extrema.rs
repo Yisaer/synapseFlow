@@ -1,10 +1,11 @@
-use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::aggregation::{AggregateAccumulator, AggregateFunction, AggregateUpdate};
 use crate::catalog::{
     AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
     FunctionRequirement, FunctionSignatureSpec, TypeSpec,
 };
 use crate::expr::value_compare::compare_values;
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 use std::cmp::Ordering;
 
 #[derive(Debug)]
@@ -171,29 +172,39 @@ struct MinAccumulator {
 }
 
 impl AggregateAccumulator for MaxAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("max expects one argument".to_string());
         };
 
         if value.is_null() {
-            return Ok(());
+            return Ok(Box::new(ExtremaUpdate { value: None }));
         }
 
-        match self.value.as_ref() {
-            None => {
-                self.value = Some(value.clone());
-            }
+        let next = match self.value.as_ref() {
+            None => Some(value.clone()),
             Some(current) => {
                 let ordering = compare_values(value, current)
                     .ok_or_else(|| format!("max cannot compare {:?} and {:?}", value, current))?;
                 if ordering == Ordering::Greater {
-                    self.value = Some(value.clone());
+                    Some(value.clone())
+                } else {
+                    None
                 }
             }
-        }
+        };
 
-        Ok(())
+        Ok(Box::new(ExtremaUpdate { value: next }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ExtremaUpdate>()
+            .expect("max accumulator received incompatible update");
+        if let Some(value) = &update.value {
+            self.value = Some(value.clone());
+        }
     }
 
     fn finalize(&self) -> Value {
@@ -202,33 +213,53 @@ impl AggregateAccumulator for MaxAccumulator {
 }
 
 impl AggregateAccumulator for MinAccumulator {
-    fn update(&mut self, args: &[Value]) -> Result<(), String> {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
         let Some(value) = args.first() else {
             return Err("min expects one argument".to_string());
         };
 
         if value.is_null() {
-            return Ok(());
+            return Ok(Box::new(ExtremaUpdate { value: None }));
         }
 
-        match self.value.as_ref() {
-            None => {
-                self.value = Some(value.clone());
-            }
+        let next = match self.value.as_ref() {
+            None => Some(value.clone()),
             Some(current) => {
                 let ordering = compare_values(value, current)
                     .ok_or_else(|| format!("min cannot compare {:?} and {:?}", value, current))?;
                 if ordering == Ordering::Less {
-                    self.value = Some(value.clone());
+                    Some(value.clone())
+                } else {
+                    None
                 }
             }
-        }
+        };
 
-        Ok(())
+        Ok(Box::new(ExtremaUpdate { value: next }))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<ExtremaUpdate>()
+            .expect("min accumulator received incompatible update");
+        if let Some(value) = &update.value {
+            self.value = Some(value.clone());
+        }
     }
 
     fn finalize(&self) -> Value {
         self.value.clone().unwrap_or(Value::Null)
+    }
+}
+
+struct ExtremaUpdate {
+    value: Option<Value>,
+}
+
+impl AggregateUpdate for ExtremaUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

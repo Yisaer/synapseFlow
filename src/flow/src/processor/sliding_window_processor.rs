@@ -179,7 +179,15 @@ impl Processor for SlidingWindowProcessor {
                                 let res = state.add_collection(collection).await;
                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
                                 stats.record_handle_duration(handle_start.elapsed());
-                                res?;
+                                if let Err(err) = res {
+                                    if matches!(err, ProcessorError::ChannelClosed) {
+                                        return Err(err);
+                                    }
+                                    stats.record_error_logged(
+                                        "sliding window processor error",
+                                        err.to_string(),
+                                    );
+                                }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 state.flush_up_to(ts).await?;
@@ -304,9 +312,16 @@ impl PartitionedProcessingState {
         &mut self,
         collection: Box<dyn crate::model::Collection>,
     ) -> Result<(), ProcessorError> {
-        let rows = collection
-            .into_rows()
-            .map_err(|e| ProcessorError::ProcessingError(format!("failed to extract rows: {e}")))?;
+        let rows = match collection.into_rows() {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.stats.record_error_logged(
+                    "sliding window processor error",
+                    format!("failed to extract rows: {e}"),
+                );
+                return Ok(());
+            }
+        };
         for tuple in rows {
             let partition_key =
                 match eval_partition_key(&self.partition_by_scalars, &tuple, "slidingwindow") {
@@ -345,12 +360,11 @@ impl PartitionedProcessingState {
                 };
                 match window_metadata::validate_system_time(end) {
                     Ok(()) => Some(end),
-                    Err(ProcessorError::ProcessingError(message)) => {
+                    Err(err) => {
                         self.stats
-                            .record_error_logged("sliding window processor error", message);
+                            .record_error_logged("sliding window processor error", err.to_string());
                         continue;
                     }
-                    Err(err) => return Err(err),
                 }
             } else {
                 None
@@ -358,17 +372,24 @@ impl PartitionedProcessingState {
             if should_trigger {
                 match self.trigger.update_after_hit(tuple.timestamp) {
                     Ok(()) => {}
-                    Err(ProcessorError::ProcessingError(message)) => {
+                    Err(err) => {
                         self.stats
-                            .record_error_logged("sliding window processor error", message);
+                            .record_error_logged("sliding window processor error", err.to_string());
                         continue;
                     }
-                    Err(err) => return Err(err),
                 }
             }
-            self.state_for(partition_key)
+            if let Err(err) = self
+                .state_for(partition_key)
                 .add_tuple(tuple, trigger_end)
-                .await?;
+                .await
+            {
+                if matches!(err, ProcessorError::ChannelClosed) {
+                    return Err(err);
+                }
+                self.stats
+                    .record_error_logged("sliding window processor error", err.to_string());
+            }
         }
         Ok(())
     }
@@ -540,8 +561,15 @@ impl ProcessingWithoutLookaheadState {
             }
             rows.push(row.clone());
         }
-        self.stats.record_out(rows.len() as u64);
-        let batch = window_metadata::record_batch_from_system_time(rows, start, end)?;
+        let row_count = rows.len() as u64;
+        let batch = match window_metadata::record_batch_from_system_time(rows, start, end) {
+            Ok(batch) => batch,
+            Err(err) => {
+                self.stats
+                    .record_error_logged("sliding window processor error", err.to_string());
+                return Ok(());
+            }
+        };
         send_with_backpressure(
             &self.output,
             self.data_channel_capacity,
@@ -549,6 +577,7 @@ impl ProcessingWithoutLookaheadState {
             Some(self.stats.as_ref()),
         )
         .await?;
+        self.stats.record_out(row_count);
         Ok(())
     }
 }
@@ -602,7 +631,13 @@ impl ProcessingWithLookaheadState {
                 self.pending.push_front(request);
                 break;
             }
-            self.emit_window(request.start, request.end).await?;
+            if let Err(err) = self.emit_window(request.start, request.end).await {
+                if matches!(err, ProcessorError::ChannelClosed) {
+                    return Err(err);
+                }
+                self.stats
+                    .record_error_logged("sliding window processor error", err.to_string());
+            }
         }
         self.trim(watermark);
         Ok(())
@@ -610,7 +645,13 @@ impl ProcessingWithLookaheadState {
 
     async fn flush_all(&mut self) -> Result<(), ProcessorError> {
         while let Some(request) = self.pending.pop_front() {
-            self.emit_window(request.start, request.end).await?;
+            if let Err(err) = self.emit_window(request.start, request.end).await {
+                if matches!(err, ProcessorError::ChannelClosed) {
+                    return Err(err);
+                }
+                self.stats
+                    .record_error_logged("sliding window processor error", err.to_string());
+            }
         }
         Ok(())
     }
@@ -642,8 +683,15 @@ impl ProcessingWithLookaheadState {
             }
             rows.push(row.clone());
         }
-        self.stats.record_out(rows.len() as u64);
-        let batch = window_metadata::record_batch_from_system_time(rows, start, end)?;
+        let row_count = rows.len() as u64;
+        let batch = match window_metadata::record_batch_from_system_time(rows, start, end) {
+            Ok(batch) => batch,
+            Err(err) => {
+                self.stats
+                    .record_error_logged("sliding window processor error", err.to_string());
+                return Ok(());
+            }
+        };
         send_with_backpressure(
             &self.output,
             self.data_channel_capacity,
@@ -651,6 +699,7 @@ impl ProcessingWithLookaheadState {
             Some(self.stats.as_ref()),
         )
         .await?;
+        self.stats.record_out(row_count);
         Ok(())
     }
 }

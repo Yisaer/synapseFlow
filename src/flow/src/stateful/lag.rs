@@ -1,10 +1,14 @@
 use super::util::{bool_arg, lag_offset};
-use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
+use super::{
+    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
+    StatefulFunctionInstance,
+};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Value};
+use std::any::Any;
 use std::collections::VecDeque;
 
 pub struct LagFunction;
@@ -93,7 +97,7 @@ struct LagConfig {
 }
 
 impl StatefulFunctionInstance for LagInstance {
-    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+    fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String> {
         if input.args.is_empty() || input.args.len() > 3 {
             return Err(format!(
                 "lag() expects 1 to 3 arguments, got {}",
@@ -114,10 +118,10 @@ impl StatefulFunctionInstance for LagInstance {
                         None => true,
                     },
                 };
-                self.config = Some(config);
                 config
             }
         };
+        let config_update = self.config.is_none().then_some(config);
 
         let visible = self
             .queue
@@ -125,14 +129,50 @@ impl StatefulFunctionInstance for LagInstance {
             .and_then(|queue| queue.front().cloned())
             .unwrap_or(Value::Null);
         if !input.should_apply {
-            return Ok(visible);
+            return Ok(PreparedStatefulEval::new(
+                visible,
+                Box::new(LagUpdate {
+                    config: config_update,
+                    push: None,
+                }),
+            ));
         }
 
         let current = &input.args[0];
         if config.ignore_null && current.is_null() {
-            return Ok(visible);
+            return Ok(PreparedStatefulEval::new(
+                visible,
+                Box::new(LagUpdate {
+                    config: config_update,
+                    push: None,
+                }),
+            ));
         }
 
+        Ok(PreparedStatefulEval::new(
+            visible,
+            Box::new(LagUpdate {
+                config: config_update,
+                push: Some(current.clone()),
+            }),
+        ))
+    }
+
+    fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>) {
+        let update = update
+            .as_any()
+            .downcast_ref::<LagUpdate>()
+            .expect("lag received incompatible update");
+        if let Some(config) = update.config {
+            self.config = Some(config);
+        }
+        let Some(current) = &update.push else {
+            return;
+        };
+        let config = update
+            .config
+            .or(self.config)
+            .expect("lag update missing configuration");
         let queue = self.queue.get_or_insert_with(|| {
             let mut values = VecDeque::with_capacity(config.offset);
             for _ in 0..config.offset {
@@ -140,9 +180,19 @@ impl StatefulFunctionInstance for LagInstance {
             }
             values
         });
-        let out = queue.pop_front().unwrap_or(Value::Null);
+        let _ = queue.pop_front();
         queue.push_back(current.clone());
-        Ok(out)
+    }
+}
+
+struct LagUpdate {
+    config: Option<LagConfig>,
+    push: Option<Value>,
+}
+
+impl StatefulEvalUpdate for LagUpdate {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

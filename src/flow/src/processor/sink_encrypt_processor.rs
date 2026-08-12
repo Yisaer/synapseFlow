@@ -164,7 +164,10 @@ impl Processor for SinkEncryptProcessor {
                                                 "encrypt delivery error"
                                             );
                                             stats.record_error(err.to_string());
-                                            return Err(err);
+                                            if matches!(err, ProcessorError::ChannelClosed) {
+                                                return Err(err);
+                                            }
+                                            continue;
                                         }
                                         if !delivery.active {
                                             if let Some(terminal) = pending_terminal.take() {
@@ -315,9 +318,17 @@ async fn handle_delivery(
         }
 
         let mut out = Vec::new();
-        writer
-            .begin_delivery(&mut out)
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        if let Err(e) = writer.begin_delivery(&mut out) {
+            return fail_delivery(
+                writer,
+                delivery,
+                output,
+                data_channel_capacity,
+                stats,
+                &e.to_string(),
+            )
+            .await;
+        }
 
         if is_end {
             if let Err(e) = writer.finish(&bytes, &mut out) {
@@ -473,13 +484,13 @@ async fn fail_delivery(
     let was_started = delivery.emitted_chunk;
     *delivery = EncryptDelivery::default();
     if was_started {
-        let _ = send_with_backpressure(
+        send_with_backpressure(
             output,
             data_channel_capacity,
             StreamData::encoded_delivery_abort(),
             Some(stats.as_ref()),
         )
-        .await;
+        .await?;
     }
     Err(ProcessorError::ProcessingError(reason.to_string()))
 }

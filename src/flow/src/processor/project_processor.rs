@@ -97,9 +97,10 @@ fn apply_projection(
     fields: &[PhysicalProjectField],
     state: Option<&ProcessorState>,
     state_usage: PipelineStateUsage,
+    stats: Option<&ProcessorStats>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
     let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
-    for tuple in input_collection.rows() {
+    'rows: for tuple in input_collection.rows() {
         let mut projected_tuple =
             Tuple::with_timestamp(Arc::clone(&tuple.messages), tuple.timestamp);
         for field in fields {
@@ -114,17 +115,27 @@ fn apply_projection(
                 tuple,
                 collection_metadata: input_collection.metadata(),
             };
-            let value = field
-                .compiled_expr
-                .eval_with_context(&context)
-                .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?;
+            let value = match field.compiled_expr.eval_with_context(&context) {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Some(stats) = stats {
+                        stats.record_error_logged("project processor error", error.to_string());
+                    }
+                    continue 'rows;
+                }
+            };
             projected_tuple
                 .add_affiliate_column(Arc::new(field.field_name.as_ref().to_string()), value);
         }
-        projected_rows.push(projected_tuple);
         if let Some(state) = state {
-            update_row_hit_state(state, state_usage, tuple.timestamp)?;
+            if let Err(error) = update_row_hit_state(state, state_usage, tuple.timestamp) {
+                if let Some(stats) = stats {
+                    stats.record_error_logged("project processor error", error.to_string());
+                }
+                continue;
+            }
         }
+        projected_rows.push(projected_tuple);
     }
 
     RecordBatch::new_with_metadata_from(projected_rows, input_collection)
@@ -159,7 +170,7 @@ mod tests {
         assert!(input_tuple.affiliate().is_some(), "precondition");
 
         let input = RecordBatch::new(vec![input_tuple]).expect("record batch");
-        let output = apply_projection(&input, &[], None, PipelineStateUsage::default())
+        let output = apply_projection(&input, &[], None, PipelineStateUsage::default(), None)
             .expect("projection succeeds");
         let out_rows = output.rows();
         assert_eq!(out_rows.len(), 1);
@@ -190,7 +201,7 @@ mod tests {
             ..PipelineStateUsage::default()
         };
 
-        let output = apply_projection(&input, &fields, Some(state.as_ref()), usage)
+        let output = apply_projection(&input, &fields, Some(state.as_ref()), usage, None)
             .expect("projection should succeed");
 
         let rows = output.rows();
@@ -264,6 +275,7 @@ impl Processor for ProjectProcessor {
                                             fields.as_ref(),
                                             processor_state.as_deref(),
                                             pipeline_state_usage,
+                                            Some(stats.as_ref()),
                                         );
                                         match result {
                                             Ok(projected_collection) => {

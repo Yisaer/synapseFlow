@@ -6,9 +6,9 @@
 //! - Updates accumulators with each incoming row
 //! - Finalizes aggregates and outputs results when stream ends
 
-use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry};
+use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry, AggregateUpdate};
 use crate::model::Collection;
-use crate::planner::physical::{AggregateCall, PhysicalAggregation, PhysicalPlan};
+use crate::planner::physical::{PhysicalAggregation, PhysicalPlan};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
@@ -28,23 +28,6 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 struct GroupByMeta {
     is_simple: bool,
     output_name: String,
-}
-
-/// Pre-evaluated argument columns for a single aggregate call.
-///
-/// Example: for two aggregates `sum(a)` and `sum(b)` over 3 rows,
-/// we will have two `AggregateCallArgs`. For `sum(a)`, `arg_values` is
-/// `[ [1, 2, 3] ]`; for `sum(b)`, `arg_values` is `[ [10, 20, 30] ]`.
-/// Outer Vec = args per call, inner Vec = values per row for that arg.
-struct AggregateCallArgs {
-    call_idx: usize,
-    arg_values: Vec<Vec<Value>>,
-}
-
-/// Pre-evaluated group-by expressions for the batch.
-struct PreparedGroupBy {
-    values_per_expr: Vec<Vec<Value>>,
-    meta: Vec<GroupByMeta>,
 }
 
 /// AggregationProcessor - evaluates aggregation expressions
@@ -79,16 +62,14 @@ impl AggregationProcessor {
         physical_aggregation: &PhysicalAggregation,
         aggregate_registry: &Arc<AggregateFunctionRegistry>,
         collection: &dyn Collection,
-    ) -> Result<Box<dyn Collection>, String> {
+        stats: &ProcessorStats,
+    ) -> Result<Option<Box<dyn Collection>>, String> {
         use crate::model::RecordBatch;
         use std::collections::hash_map::Entry;
         use std::collections::HashMap;
 
         let num_rows = collection.num_rows();
-
-        let aggregate_args: Vec<AggregateCallArgs> =
-            Self::prepare_aggregate_args(physical_aggregation, collection)?;
-        let group_by = Self::prepare_group_by(physical_aggregation, collection)?;
+        let group_by_meta = build_group_by_meta(&physical_aggregation.group_by_exprs);
 
         // Group states keyed by evaluated group-by values.
         struct GroupState {
@@ -100,46 +81,56 @@ impl AggregationProcessor {
         let rows = collection.rows();
         let mut groups: HashMap<String, GroupState> = HashMap::new();
 
-        for row_idx in 0..num_rows {
-            // Build group key values for this row.
-            let mut key_values = Vec::with_capacity(group_by.values_per_expr.len());
-            for values in &group_by.values_per_expr {
-                key_values.push(values[row_idx].clone());
-            }
+        for (row_idx, row) in rows.iter().enumerate() {
+            let key_values = match Self::evaluate_group_by_for_tuple(physical_aggregation, row) {
+                Ok(values) => values,
+                Err(message) => {
+                    stats.record_error_logged("aggregation processor error", message);
+                    continue;
+                }
+            };
+            let row_call_args =
+                match Self::evaluate_aggregate_args_for_tuple(physical_aggregation, row) {
+                    Ok(args) => args,
+                    Err(message) => {
+                        stats.record_error_logged("aggregation processor error", message);
+                        continue;
+                    }
+                };
 
             let key_repr = format!("{:?}", key_values);
-            let entry = match groups.entry(key_repr) {
-                Entry::Occupied(o) => o.into_mut(),
+            match groups.entry(key_repr) {
+                Entry::Occupied(mut o) => {
+                    let entry = o.get_mut();
+                    if let Err(message) =
+                        apply_aggregate_updates(&mut entry.accumulators, &row_call_args)
+                    {
+                        stats.record_error_logged("aggregation processor error", message);
+                        continue;
+                    }
+                    entry.last_row_idx = row_idx;
+                    entry.key_values = key_values;
+                }
                 Entry::Vacant(v) => {
                     let accumulators =
                         Self::create_accumulators_static(physical_aggregation, aggregate_registry)?;
-                    v.insert(GroupState {
+                    let mut state = GroupState {
                         accumulators,
                         last_row_idx: row_idx,
                         key_values: key_values.clone(),
-                    })
+                    };
+                    if let Err(message) =
+                        apply_aggregate_updates(&mut state.accumulators, &row_call_args)
+                    {
+                        stats.record_error_logged("aggregation processor error", message);
+                        continue;
+                    }
+                    v.insert(state);
                 }
-            };
-
-            // Update last tuple for this group to the current row.
-            entry.last_row_idx = row_idx;
-
-            // Update aggregates for this group.
-            for call_args in &aggregate_args {
-                let call_idx = call_args.call_idx;
-                let mut row_args = Vec::new();
-                for arg_values in &call_args.arg_values {
-                    row_args.push(arg_values[row_idx].clone());
-                }
-                entry
-                    .accumulators
-                    .get_mut(call_idx)
-                    .ok_or_else(|| "accumulator missing".to_string())?
-                    .update(&row_args)?;
             }
         }
 
-        if groups.is_empty() {
+        if num_rows == 0 {
             // No rows: fall back to single-group finalize (existing behavior).
             let mut accumulators =
                 Self::create_accumulators_static(physical_aggregation, aggregate_registry)?;
@@ -150,11 +141,15 @@ impl AggregationProcessor {
                 None,
                 rows,
                 &[],
-                &group_by.meta,
+                &group_by_meta,
             )?;
             let collection = RecordBatch::new_with_metadata_from(vec![tuple], collection)
                 .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
-            return Ok(Box::new(collection));
+            return Ok(Some(Box::new(collection)));
+        }
+
+        if groups.is_empty() {
+            return Ok(None);
         }
 
         // Finalize each group into output tuples.
@@ -166,14 +161,14 @@ impl AggregationProcessor {
                 Some(state.last_row_idx),
                 rows,
                 &state.key_values,
-                &group_by.meta,
+                &group_by_meta,
             )?;
             output_tuples.push(tuple);
         }
 
         let collection = RecordBatch::new_with_metadata_from(output_tuples, collection)
             .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
-        Ok(Box::new(collection))
+        Ok(Some(Box::new(collection)))
     }
 
     /// Create a new AggregationProcessor from PhysicalAggregation
@@ -291,8 +286,9 @@ impl Processor for AggregationProcessor {
                                             &physical_aggregation,
                                             &aggregate_registry,
                                             collection.as_ref(),
+                                            stats.as_ref(),
                                         ) {
-                                            Ok(result_collection) => {
+                                            Ok(Some(result_collection)) => {
                                                 let result_data = StreamData::Collection(result_collection);
                                                 let out_rows = result_data.num_rows_hint();
                                                 let send_res = send_with_backpressure(
@@ -312,6 +308,9 @@ impl Processor for AggregationProcessor {
                                                     stats.record_out(rows);
                                                 }
                                                 tracing::debug!(processor_id = %id, "processed batch and sent grouped results");
+                                            }
+                                            Ok(None) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                             }
                                             Err(e) => {
                                                 stats.record_handle_duration(handle_start.elapsed());
@@ -423,21 +422,22 @@ impl AggregationProcessor {
         Ok(accumulators)
     }
 
-    /// Static version of evaluate_arguments for use in async context
-    fn evaluate_arguments_static(
-        call: &AggregateCall,
-        collection: &dyn Collection,
-    ) -> Result<Vec<Vec<Value>>, String> {
-        let mut all_args = Vec::new();
-
-        // Evaluate each argument expression for all rows
-        for arg_expr in &call.args {
-            let arg_values = arg_expr
-                .eval_with_collection(collection)
-                .map_err(|e| format!("Failed to evaluate argument: {}", e))?;
-            all_args.push(arg_values);
+    fn evaluate_aggregate_args_for_tuple(
+        physical_aggregation: &PhysicalAggregation,
+        tuple: &crate::model::Tuple,
+    ) -> Result<Vec<(usize, Vec<Value>)>, String> {
+        let mut all_args = Vec::with_capacity(physical_aggregation.aggregate_calls.len());
+        for (idx, call) in physical_aggregation.aggregate_calls.iter().enumerate() {
+            let mut args = Vec::with_capacity(call.args.len());
+            for arg_expr in &call.args {
+                args.push(
+                    arg_expr
+                        .eval_with_tuple(tuple)
+                        .map_err(|e| format!("Failed to evaluate aggregate argument: {}", e))?,
+                );
+            }
+            all_args.push((idx, args));
         }
-
         Ok(all_args)
     }
 
@@ -484,6 +484,29 @@ impl AggregationProcessor {
     }
 }
 
+fn apply_aggregate_updates(
+    accumulators: &mut [Box<dyn AggregateAccumulator>],
+    row_call_args: &[(usize, Vec<Value>)],
+) -> Result<(), String> {
+    let mut prepared = Vec::<(usize, Box<dyn AggregateUpdate>)>::with_capacity(row_call_args.len());
+    for (idx, args) in row_call_args {
+        let update = accumulators
+            .get(*idx)
+            .ok_or_else(|| "accumulator missing".to_string())?
+            .prepare_update(args)?;
+        prepared.push((*idx, update));
+    }
+
+    for (idx, update) in prepared {
+        accumulators
+            .get_mut(idx)
+            .ok_or_else(|| "accumulator missing".to_string())?
+            .commit_update(update);
+    }
+
+    Ok(())
+}
+
 fn is_simple_column_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Identifier(_))
 }
@@ -499,38 +522,18 @@ fn build_group_by_meta(exprs: &[Expr]) -> Vec<GroupByMeta> {
 }
 
 impl AggregationProcessor {
-    fn prepare_aggregate_args(
+    fn evaluate_group_by_for_tuple(
         physical_aggregation: &PhysicalAggregation,
-        collection: &dyn Collection,
-    ) -> Result<Vec<AggregateCallArgs>, String> {
-        let mut all_call_args = Vec::new();
-        for (idx, call) in physical_aggregation.aggregate_calls.iter().enumerate() {
-            let args = Self::evaluate_arguments_static(call, collection)?;
-            all_call_args.push(AggregateCallArgs {
-                call_idx: idx,
-                arg_values: args,
-            });
-        }
-        Ok(all_call_args)
-    }
-
-    fn prepare_group_by(
-        physical_aggregation: &PhysicalAggregation,
-        collection: &dyn Collection,
-    ) -> Result<PreparedGroupBy, String> {
-        let mut values_per_expr = Vec::new();
+        tuple: &crate::model::Tuple,
+    ) -> Result<Vec<Value>, String> {
+        let mut values = Vec::with_capacity(physical_aggregation.group_by_scalars.len());
         for scalar in &physical_aggregation.group_by_scalars {
-            let values = scalar
-                .eval_with_collection(collection)
-                .map_err(|e| format!("Failed to evaluate group-by expression: {}", e))?;
-            values_per_expr.push(values);
+            values.push(
+                scalar
+                    .eval_with_tuple(tuple)
+                    .map_err(|e| format!("Failed to evaluate group-by expression: {}", e))?,
+            );
         }
-
-        let meta = build_group_by_meta(&physical_aggregation.group_by_exprs);
-
-        Ok(PreparedGroupBy {
-            values_per_expr,
-            meta,
-        })
+        Ok(values)
     }
 }

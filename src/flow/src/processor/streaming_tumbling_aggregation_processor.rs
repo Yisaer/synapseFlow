@@ -167,7 +167,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
-                                        let mut mutation_error = None;
                                         for row in collection.rows() {
                                             match window_state.add_row(row) {
                                                 Ok(()) => {}
@@ -178,17 +177,14 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                                     );
                                                 }
                                                 Err(AddRowError::AfterMutation(message)) => {
-                                                    mutation_error = Some(message);
-                                                    break;
+                                                    stats.record_error_logged(
+                                                        "streaming tumbling aggregation processor error",
+                                                        message,
+                                                    );
                                                 }
                                             }
                                         }
                                         stats.record_handle_duration(handle_start.elapsed());
-                                        if let Some(message) = mutation_error {
-                                            return Err(ProcessorError::ProcessingError(format!(
-                                                "Failed to update window state: {message}"
-                                            )));
-                                        }
                                     }
                                     StreamData::Watermark(ts) => {
                                         match window_metadata::validate_system_time(ts) {
@@ -349,21 +345,16 @@ impl ProcessingWindowState {
                 return back.worker.update_groups(row);
             }
         }
-        let new_state = WindowAggState::new(
+        let mut new_state = WindowAggState::new(
             start_secs,
             self.len_secs,
             Arc::clone(&self.physical),
             Arc::clone(&self.aggregate_registry),
             self.group_by_meta.clone(),
         );
+        new_state.worker.update_groups(row)?;
         self.windows.push_back(new_state);
-        // SAFETY: push_back just succeeded; back_mut() is guaranteed Some
-        #[allow(clippy::expect_used)]
-        self.windows
-            .back_mut()
-            .expect("window deque must contain the just-pushed window state")
-            .worker
-            .update_groups(row)
+        Ok(())
     }
 
     async fn flush_until(

@@ -88,11 +88,14 @@ impl StreamingEosAggregationProcessor {
                 }
                 Err(err) => return Err(err.to_string()),
             }
+            if let Err(message) = worker.update_groups(row) {
+                stats.record_error_logged("streaming EOS aggregation processor error", message);
+                continue;
+            }
             if opened_at.is_none() {
                 *opened_at = Some(row.timestamp);
             }
             *last_seen_at = Some(row.timestamp);
-            worker.update_groups(row)?;
         }
         Ok(())
     }
