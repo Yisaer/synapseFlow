@@ -3,7 +3,8 @@
 ## MQTT 5 Sink Properties
 
 An MQTT sink may set `props.protocol_version` to `v5` and provide static User Properties as an
-ordered array. MQTT 3.1.1 remains the default when the version is omitted.
+ordered array. MQTT 3.1.1 remains the default when the version is omitted. Each value may use a
+process property template that is rendered once during pipeline apply.
 
 ```json
 {
@@ -14,7 +15,7 @@ ordered array. MQTT 3.1.1 remains the default when the version is omitted.
     "topic": "processed/telemetry",
     "protocol_version": "v5",
     "user_properties": [
-      { "key": "source", "value": "veloflux" },
+      { "key": "source", "value": "{{ prop(\"site\") }}" },
       { "key": "tag", "value": "primary" },
       { "key": "tag", "value": "edge" }
     ]
@@ -22,10 +23,11 @@ ordered array. MQTT 3.1.1 remains the default when the version is omitted.
 }
 ```
 
-Each item must contain string `key` and `value` fields. Order and duplicate keys are preserved.
-Dynamic templates are not supported in this PR. With `connector_key`, omit connector-local
-`protocol_version`; the referenced shared MQTT client owns the version. User Properties require
-that effective shared version to be `v5`.
+Each item must contain string `key` and `value` fields. Keys are literal. Values support the static
+connector template profile, where `prop()` reads process-wide properties; `.row` and incoming MQTT
+5 User Properties are not available. Order and duplicate keys are preserved. With `connector_key`,
+omit connector-local `protocol_version`; the referenced shared MQTT client owns the version. User
+Properties require that effective shared version to be `v5`.
 
 ## Schedule Options
 

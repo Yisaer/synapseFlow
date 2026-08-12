@@ -921,10 +921,10 @@ mod tests {
             other => panic!("expected inbound MQTT 5 payload, got {other:?}"),
         }
 
-        let user_properties = vec![crate::connector::MqttUserProperty {
-            key: "source".to_string(),
-            value: "shared-client".to_string(),
-        }];
+        let user_properties = vec![crate::connector::MqttUserProperty::new(
+            "source",
+            "shared-client",
+        )];
         held.publish_with_user_properties(
             broker.scoped_topic("fleet/device_b/telemetry"),
             MqttQos::Qos1,

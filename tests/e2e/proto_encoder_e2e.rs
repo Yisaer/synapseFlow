@@ -7,7 +7,7 @@ use rumqttc::v5::mqttbytes::v5::Packet;
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::{AsyncClient, Event, MqttOptions};
 use rumqttd::{Broker, Config, ConnectionSettings, RouterConfig, ServerSettings};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::mpsc;
 use std::thread;
@@ -168,6 +168,10 @@ async fn protobuf_encoder_covers_all_value_types() {
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
     let instance = manager::new_default_flow_instance();
     let injector = instance.clone();
+    instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([(
+        "mqtt_format".to_string(),
+        flow::secret::SecretString::new("protobuf".to_string()),
+    )])));
 
     let Some(listener) = bind_manager_listener_or_skip().await else {
         return;
@@ -260,7 +264,7 @@ async fn protobuf_encoder_covers_all_value_types() {
                     "qos": 0,
                     "protocol_version": "v5",
                     "user_properties": [
-                        { "key": "format", "value": "protobuf" },
+                        { "key": "format", "value": "{{ prop(\"mqtt_format\") }}" },
                         { "key": "tag", "value": "primary" },
                         { "key": "tag", "value": "edge" }
                     ]

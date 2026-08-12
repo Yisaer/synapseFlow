@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -26,11 +27,53 @@ pub enum MqttProtocolVersion {
 }
 
 /// One MQTT 5 User Property entry.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MqttUserProperty {
     pub key: String,
-    pub value: String,
+    pub value: crate::ConnectorString,
+}
+
+impl MqttUserProperty {
+    pub fn new(key: impl Into<String>, value: impl Into<crate::ConnectorString>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Serialize for MqttUserProperty {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut property = serializer.serialize_struct("MqttUserProperty", 2)?;
+        property.serialize_field("key", &self.key)?;
+        match &self.value {
+            crate::ConnectorString::Plain(value) => property.serialize_field("value", value)?,
+            crate::ConnectorString::Sensitive(_) => {
+                property.serialize_field("value", &serde_json::json!({ "sensitive": true }))?
+            }
+        }
+        property.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for MqttUserProperty {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireProperty {
+            key: String,
+            value: String,
+        }
+
+        let property = WireProperty::deserialize(deserializer)?;
+        Ok(Self::new(property.key, property.value))
+    }
 }
 
 impl std::fmt::Debug for MqttUserProperty {
@@ -49,7 +92,7 @@ pub fn validate_mqtt_user_properties(properties: &[MqttUserProperty]) -> Result<
         validate_mqtt_utf8_string(&property.key).map_err(|rule| {
             format!("user_properties[{index}].key violates MQTT UTF-8 String rules: {rule}")
         })?;
-        validate_mqtt_utf8_string(&property.value).map_err(|rule| {
+        validate_mqtt_utf8_string(property.value.expose()).map_err(|rule| {
             format!("user_properties[{index}].value violates MQTT UTF-8 String rules: {rule}")
         })?;
     }
@@ -316,7 +359,7 @@ impl MqttClient {
                 let properties = PublishProperties {
                     user_properties: user_properties
                         .iter()
-                        .map(|property| (property.key.clone(), property.value.clone()))
+                        .map(|property| (property.key.clone(), property.value.expose().to_string()))
                         .collect(),
                     ..PublishProperties::default()
                 };
@@ -402,27 +445,18 @@ mod tests {
     #[test]
     fn mqtt_user_property_validation_preserves_duplicate_keys() {
         let properties = vec![
-            MqttUserProperty {
-                key: "tag".to_string(),
-                value: "primary".to_string(),
-            },
-            MqttUserProperty {
-                key: "tag".to_string(),
-                value: "edge".to_string(),
-            },
+            MqttUserProperty::new("tag", "primary"),
+            MqttUserProperty::new("tag", "edge"),
         ];
 
         validate_mqtt_user_properties(&properties).expect("duplicate keys are valid");
-        assert_eq!(properties[0].value, "primary");
-        assert_eq!(properties[1].value, "edge");
+        assert_eq!(properties[0].value.expose(), "primary");
+        assert_eq!(properties[1].value.expose(), "edge");
     }
 
     #[test]
     fn mqtt_user_property_validation_rejects_invalid_strings_without_value_leakage() {
-        let properties = vec![MqttUserProperty {
-            key: "source".to_string(),
-            value: "secret\0value".to_string(),
-        }];
+        let properties = vec![MqttUserProperty::new("source", "secret\0value")];
 
         let error = validate_mqtt_user_properties(&properties)
             .expect_err("NUL must be rejected in MQTT UTF-8 strings");

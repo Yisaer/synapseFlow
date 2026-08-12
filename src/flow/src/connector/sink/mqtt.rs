@@ -739,18 +739,9 @@ mod tests {
             .expect("MQTT 5 subscriber suback channel");
 
         let expected_properties = vec![
-            crate::connector::MqttUserProperty {
-                key: "source".to_string(),
-                value: "veloflux".to_string(),
-            },
-            crate::connector::MqttUserProperty {
-                key: "tag".to_string(),
-                value: "primary".to_string(),
-            },
-            crate::connector::MqttUserProperty {
-                key: "tag".to_string(),
-                value: "edge".to_string(),
-            },
+            crate::connector::MqttUserProperty::new("source", "veloflux"),
+            crate::connector::MqttUserProperty::new("tag", "primary"),
+            crate::connector::MqttUserProperty::new("tag", "edge"),
         ];
         let spawner = TaskSpawner::from_handle(Handle::current());
         let config = MqttSinkConfig::new(
@@ -802,7 +793,7 @@ mod tests {
             received_properties,
             expected_properties
                 .iter()
-                .map(|property| (property.key.clone(), property.value.clone()))
+                .map(|property| { (property.key.clone(), property.value.expose().to_string()) })
                 .collect::<Vec<_>>()
         );
 

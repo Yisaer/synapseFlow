@@ -16,7 +16,7 @@ features:
 
   - id: sink.connector.mqtt_v5_user_properties
     title: MQTT 5 static User Properties
-    summary: Publish ordered static User Properties, including duplicate keys, through MQTT 5.
+    summary: Render process property templates and publish ordered User Properties, including duplicate keys, through MQTT 5.
     doc_refs:
       - docs/runtime/sinks/connectors/mqtt.md
     status: active

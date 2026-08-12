@@ -1255,14 +1255,8 @@ mod tests {
     #[test]
     fn mqtt_v5_sink_ir_roundtrip_preserves_static_user_properties() {
         let user_properties = vec![
-            crate::connector::MqttUserProperty {
-                key: "tag".to_string(),
-                value: "primary".to_string(),
-            },
-            crate::connector::MqttUserProperty {
-                key: "tag".to_string(),
-                value: "edge".to_string(),
-            },
+            crate::connector::MqttUserProperty::new("tag", "primary"),
+            crate::connector::MqttUserProperty::new("tag", "edge"),
         ];
         let config = MqttSinkConfig::new("sink_v5", "tcp://127.0.0.1:1883", "out/topic", 1)
             .with_protocol_version(crate::connector::MqttProtocolVersion::V5)

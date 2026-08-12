@@ -179,8 +179,9 @@ This asymmetry is intentional:
   sink-local
 
 One shared key may therefore be used by both source and sink bindings in the same instance.
-An MQTT 5 shared client also supports static sink User Properties; an MQTT 3.1.1 shared client
-rejects a sink that configures them.
+An MQTT 5 shared client also supports static sink User Properties, including values rendered from
+process property templates during pipeline apply. An MQTT 3.1.1 shared client rejects a sink that
+configures User Properties.
 
 ## Manager / Storage / Runtime Consistency
 

@@ -157,6 +157,24 @@ fn render_connector_string(
     })
 }
 
+fn render_mqtt_user_properties(
+    properties: &flow::PropertyContext,
+    mut user_properties: Vec<flow::MqttUserProperty>,
+    pipeline_id: &str,
+    sink_id: &str,
+) -> Result<Vec<flow::MqttUserProperty>, String> {
+    for (index, property) in user_properties.iter_mut().enumerate() {
+        property.value = render_connector_string(
+            properties,
+            property.value.expose(),
+            pipeline_id,
+            sink_id,
+            &format!("props.user_properties[{index}].value"),
+        )?;
+    }
+    Ok(user_properties)
+}
+
 fn render_http_body(
     body: flow::HttpBodyConfig,
     properties: &flow::PropertyContext,
@@ -406,9 +424,15 @@ pub(crate) fn build_pipeline_definition(
                 })?;
                 let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
                 let retain = mqtt_props.retain.unwrap_or(false);
-                flow::connector::validate_mqtt_user_properties(&mqtt_props.user_properties)
+                let user_properties = render_mqtt_user_properties(
+                    &property_ctx,
+                    mqtt_props.user_properties,
+                    &req.id,
+                    &sink_id,
+                )?;
+                flow::connector::validate_mqtt_user_properties(&user_properties)
                     .map_err(|err| format!("invalid mqtt sink user_properties: {err}"))?;
-                if !mqtt_props.user_properties.is_empty() {
+                if !user_properties.is_empty() {
                     let effective_protocol = if let Some(key) = &connector_key {
                         instance
                             .get_shared_mqtt_client(key)
@@ -432,7 +456,7 @@ pub(crate) fn build_pipeline_definition(
                 if let Some(protocol_version) = mqtt_props.protocol_version {
                     props = props.with_protocol_version(protocol_version);
                 }
-                props = props.with_user_properties(mqtt_props.user_properties);
+                props = props.with_user_properties(user_properties);
                 if let Some(client_id) = mqtt_props.client_id {
                     props = props.with_client_id(client_id);
                 }
@@ -1311,6 +1335,10 @@ mod tests {
     #[tokio::test]
     async fn build_pipeline_definition_accepts_static_mqtt_v5_user_properties() {
         let instance = test_instance();
+        instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([(
+            "site".to_string(),
+            SecretString::new("edge".to_string()),
+        )])));
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
             "id": "pipe_mqtt_v5_properties",
             "revision": 1,
@@ -1325,7 +1353,7 @@ mod tests {
                     "protocol_version": "v5",
                     "user_properties": [
                         { "key": "tag", "value": "primary" },
-                        { "key": "tag", "value": "edge" }
+                        { "key": "tag", "value": "{{ prop(\"site\") }}" }
                     ]
                 }
             }],
@@ -1344,8 +1372,86 @@ mod tests {
         };
         assert_eq!(mqtt.protocol_version, Some(flow::MqttProtocolVersion::V5));
         assert_eq!(mqtt.user_properties.len(), 2);
-        assert_eq!(mqtt.user_properties[0].value, "primary");
-        assert_eq!(mqtt.user_properties[1].value, "edge");
+        assert_eq!(mqtt.user_properties[0].value.expose(), "primary");
+        assert!(!mqtt.user_properties[0].value.is_sensitive());
+        assert_eq!(mqtt.user_properties[1].value.expose(), "edge");
+        assert!(mqtt.user_properties[1].value.is_sensitive());
+        let serialized = serde_json::to_string(&mqtt.user_properties)
+            .expect("serialize rendered MQTT User Properties");
+        assert!(!serialized.contains("edge"));
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_missing_mqtt_user_property_template_value() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_mqtt_v5_missing_property",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "mqtt",
+                "props": {
+                    "broker_url": "tcp://127.0.0.1:1883",
+                    "topic": "out/topic",
+                    "protocol_version": "v5",
+                    "user_properties": [
+                        { "key": "source", "value": "literal" },
+                        { "key": "site", "value": "{{ prop(\"missing\") }}" }
+                    ]
+                }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
+            }
+        }))
+        .expect("deserialize MQTT 5 pipeline request");
+
+        let error =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("missing static property must be rejected");
+
+        assert!(error.contains("props.user_properties[1].value"));
+        assert!(error.contains("property `missing` is not defined"));
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_validates_rendered_mqtt_user_property_value() {
+        let instance = test_instance();
+        instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([(
+            "invalid".to_string(),
+            SecretString::new("private\0value".to_string()),
+        )])));
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_mqtt_v5_invalid_property",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "mqtt",
+                "props": {
+                    "broker_url": "tcp://127.0.0.1:1883",
+                    "topic": "out/topic",
+                    "protocol_version": "v5",
+                    "user_properties": [
+                        { "key": "source", "value": "{{ prop(\"invalid\") }}" }
+                    ]
+                }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
+            }
+        }))
+        .expect("deserialize MQTT 5 pipeline request");
+
+        let error =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("invalid rendered MQTT string must be rejected");
+
+        assert!(error.contains("user_properties[0].value"));
+        assert!(!error.contains("private"));
     }
 
     #[tokio::test]

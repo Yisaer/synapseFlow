@@ -45,13 +45,14 @@ during pipeline apply and validated as an MQTT publish topic. `broker_url` is re
 absent. `retain` defaults to `false`, and `qos` falls back to the manager default when omitted.
 
 `protocol_version` defaults to `v3`, meaning MQTT 3.1.1. Static User Properties require effective
-protocol `v5`. Each entry has literal string `key` and `value` fields:
+protocol `v5`. Each entry has a literal string `key` and a string `value`. The value may use a
+process property template and is rendered once during pipeline apply:
 
 ```json
 {
   "protocol_version": "v5",
   "user_properties": [
-    { "key": "source", "value": "veloflux" },
+    { "key": "source", "value": "{{ prop(\"site\") }}" },
     { "key": "tag", "value": "primary" },
     { "key": "tag", "value": "edge" }
   ]
@@ -59,8 +60,9 @@ protocol `v5`. Each entry has literal string `key` and `value` fields:
 ```
 
 The array preserves declaration order and permits duplicate keys, matching MQTT 5 wire semantics.
-Keys and values must satisfy MQTT UTF-8 String limits. Every value is currently treated as a static
-literal; row or source-property templates are not implemented.
+Keys and rendered values must satisfy MQTT UTF-8 String limits. Values use the connector property
+profile: `prop()` reads process-wide static properties, while `.row` and incoming MQTT 5 User
+Properties are unavailable. Literal values without template expressions remain unchanged.
 
 No other MQTT sink property supports connector templates. See
 [connector property templates](../../../syntax/connectors/property_templates.md).
@@ -202,7 +204,8 @@ the connector becomes ready again.
   through upstream sink-output stages.
 - Verify runtime errors are surfaced when MQTT sink is used without a bytes-producing encoder path.
 - Verify disconnect/reconnect behavior eventually restores readiness for standalone clients.
-- Verify MQTT 5 publishes static User Properties in declaration order, including duplicate keys.
+- Verify MQTT 5 renders process property templates once and publishes User Properties in
+  declaration order, including duplicate keys.
 - Verify MQTT 3.1.1 sinks reject non-empty User Properties without changing normal v3 delivery.
 
 ## Future Work

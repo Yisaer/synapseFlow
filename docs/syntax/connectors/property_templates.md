@@ -22,6 +22,7 @@ converted, encoded, parsed recursively, or expanded a second time.
 The initial template-enabled connector fields are:
 
 - MQTT sink `props.topic`;
+- MQTT sink `props.user_properties[].value`;
 - HTTP sink `props.headers.*` values;
 - HTTP multipart `props.body.fields.*` values.
 - File sink `props.filename_prefix`;
@@ -31,6 +32,11 @@ Other connector fields are not interpreted as templates and retain their
 literal configuration value. In particular, HTTP `auth` and `secret_headers`
 remain `SecretRef` paths: template-looking text there is handled as literal
 secret input by the existing secret policy.
+
+MQTT User Property keys remain literal. Their values use the process property
+profile described above and are rendered once during pipeline apply. They do
+not provide `.row` or access to incoming MQTT 5 User Properties. Declaration
+order and duplicate keys are preserved after rendering.
 
 Missing properties, invalid Upon syntax, unavailable context values, and
 invalid rendered protocol fields reject only the affected pipeline during
