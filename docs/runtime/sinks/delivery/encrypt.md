@@ -168,6 +168,11 @@ stats, or debug output. Explain output contains only:
 
 ## Stats Accounting
 
-- `record_in`: each `EncodedDelivery` event counts as 1.
-- `record_out`: only completed deliveries (`END`/`START|END`) count as 1. This matches the
-  connector and compression accounting.
+- The processor does not expose `records_in` or `records_out` because encrypted payload processing
+  cannot observe rows.
+- `messages_in` increments when the complete input message reaches `END`, before encryption
+  finalization. It can therefore increment even if finalization or downstream forwarding fails.
+- `messages_out` increments only after the encrypted message is successfully forwarded. Streaming
+  protocol events are not counted as separate messages.
+- `messages_aborted` records an explicit aborted lifecycle.
+- `bytes_in` and `bytes_out` count plaintext input bytes and emitted encrypted bytes.

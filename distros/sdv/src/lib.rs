@@ -48,6 +48,7 @@ pub fn register(instance: &flow::FlowInstance) {
     let merger_registry = instance.merger_registry();
     merger_registry.register_with_schema_artifact(
         "busmirror",
+        flow::codec::MergerOutputKind::Collection,
         |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {
             let artifact = artifact
                 .and_then(|artifact| {
@@ -65,6 +66,7 @@ pub fn register(instance: &flow::FlowInstance) {
     );
     merger_registry.register_with_schema_artifact(
         "gbf",
+        flow::codec::MergerOutputKind::Collection,
         |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {
             let artifact = artifact
                 .and_then(|artifact| artifact.downcast::<schema::gbf::CompiledGbfSchema>().ok())

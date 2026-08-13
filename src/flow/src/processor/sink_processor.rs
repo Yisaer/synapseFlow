@@ -1,12 +1,14 @@
 //! SinkProcessor - routes collections to SinkConnectors and forwards results.
 use crate::connector::{SinkConnector, SinkConnectorError};
 use crate::model::Collection;
+use crate::planner::physical::DataDomain;
 use crate::planner::sink::SinkRetryConfig;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::SinkMetrics;
 use crate::processor::{
     ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError, ProcessorStart, ProcessorStats,
     StreamData,
@@ -188,7 +190,7 @@ impl ConnectorBinding {
 
     /// Attempt a full single-shot delivery: start → write_chunk(payload) → finish.
     /// On any error, aborts the delivery and returns the classified error.
-    async fn attempt_delivery(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
+    async fn attempt_delivery(&mut self, payload: &[u8]) -> Result<u64, SinkConnectorError> {
         self.connector.start_delivery().await?;
         self.active_delivery = true;
         if let Err(err) = self.connector.write_chunk(payload).await {
@@ -197,9 +199,9 @@ impl ConnectorBinding {
             return Err(err);
         }
         match self.connector.finish_delivery().await {
-            Ok(_) => {
+            Ok(result) => {
                 self.active_delivery = false;
-                Ok(())
+                Ok(result.bytes_written)
             }
             Err(err) => {
                 self.connector.abort_delivery().await;
@@ -232,6 +234,7 @@ pub struct SinkProcessor {
     connector: Option<ConnectorBinding>,
     forward_to_result: bool,
     stats: Arc<ProcessorStats>,
+    input_domain: DataDomain,
 
     retry_config: SinkRetryConfig,
 }
@@ -261,12 +264,17 @@ impl SinkProcessor {
             connector: None,
             forward_to_result: false,
             stats: Arc::new(ProcessorStats::default()),
+            input_domain: DataDomain::Message,
             retry_config: SinkRetryConfig::default(),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
+    }
+
+    pub(crate) fn set_input_domain(&mut self, input_domain: DataDomain) {
+        self.input_domain = input_domain;
     }
 
     /// Enable forwarding collections/control signals to downstream consumers (tests).
@@ -334,14 +342,16 @@ impl SinkProcessor {
         connector: &mut ConnectorBinding,
         retry_config: &SinkRetryConfig,
         pending: &mut PendingDelivery,
+        metrics: &SinkMetrics,
     ) -> DeliveryAttemptOutcome {
         pending.attempt += 1;
         pending.retry_at = None;
 
         let handle_start = Instant::now();
         match connector.attempt_delivery(&pending.payload).await {
-            Ok(()) => {
-                stats.record_out(1);
+            Ok(bytes_written) => {
+                metrics.record_encoded_output(bytes_written);
+                connector.connector.record_message_out();
                 stats.record_handle_duration(handle_start.elapsed());
                 DeliveryAttemptOutcome::Delivered
             }
@@ -375,6 +385,7 @@ impl SinkProcessor {
                 );
                 stats.record_handle_duration(handle_start.elapsed());
                 stats.record_error(err.to_string());
+                metrics.record_dropped();
                 DeliveryAttemptOutcome::Dropped
             }
         }
@@ -443,6 +454,7 @@ impl Processor for SinkProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
+        let metrics = SinkMetrics::new(stats.as_ref(), self.input_domain);
         let retry_config = self.retry_config.clone();
 
         let Some(mut connector) = self.connector.take() else {
@@ -543,6 +555,7 @@ impl Processor for SinkProcessor {
                             &mut connector,
                             &retry_config,
                             delivery,
+                            &metrics,
                         )
                         .await
                         {
@@ -570,12 +583,13 @@ impl Processor for SinkProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
+                                if let Some(rows) = data.row_count() {
+                                    stats.record_collection_in(rows);
                                 }
                                 match data {
                                     StreamData::EncodedDelivery { flags, bytes } => {
                                         let handle_start = Instant::now();
+                                        metrics.record_input_bytes(bytes.len());
                                         match accumulator.push(flags, bytes, forward_data, max_delivery_bytes)? {
                                             AccumulatorAction::Pending => {
                                                 stats.record_handle_duration(handle_start.elapsed());
@@ -595,6 +609,8 @@ impl Processor for SinkProcessor {
                                             }
                                             AccumulatorAction::Completed(completed) => {
                                                 stats.record_handle_duration(handle_start.elapsed());
+                                                metrics.record_encoded_message_in();
+                                                connector.connector.record_message_in();
                                                 let mut delivery = PendingDelivery::new(completed, &retry_config);
                                                 match Self::handle_delivery_attempt(
                                                     &processor_id,
@@ -602,6 +618,7 @@ impl Processor for SinkProcessor {
                                                     &mut connector,
                                                     &retry_config,
                                                     &mut delivery,
+                                                    &metrics,
                                                 )
                                                 .await
                                                 {
@@ -625,7 +642,7 @@ impl Processor for SinkProcessor {
                                         }
                                     }
                                     StreamData::Collection(collection) => {
-                                        let in_rows = collection.num_rows() as u64;
+                                        connector.connector.record_message_in();
                                         let handle_start = Instant::now();
                                         if let Err(err) = Self::handle_collection(&mut connector, collection.as_ref()).await {
                                             tracing::error!(
@@ -635,9 +652,11 @@ impl Processor for SinkProcessor {
                                             );
                                             stats.record_handle_duration(handle_start.elapsed());
                                             stats.record_error(err.to_string());
+                                            metrics.record_dropped();
                                             continue;
                                         }
-                                        stats.record_out(in_rows);
+                                        metrics.record_message_out();
+                                        connector.connector.record_message_out();
                                         if forward_data {
                                             let send_res = send_with_backpressure(
                                                 &output,

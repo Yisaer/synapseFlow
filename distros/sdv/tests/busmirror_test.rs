@@ -242,13 +242,25 @@ fn wait_for_buffered_sampler_input(client: &ApiClient, pipeline_id: &str) {
                         .get("processor_id")
                         .and_then(Value::as_str)
                         .is_some_and(|id| id.contains("PhysicalSampler"));
-                    let records_in = processor
-                        .pointer("/stats/records_in")
+                    let messages_in = processor
+                        .pointer("/stats/messages_in")
+                        .and_then(Value::as_u64);
+                    let bytes_in = processor.pointer("/stats/bytes_in").and_then(Value::as_u64);
+                    let collections_out = processor
+                        .pointer("/stats/collections_out")
                         .and_then(Value::as_u64);
                     let records_out = processor
                         .pointer("/stats/records_out")
                         .and_then(Value::as_u64);
-                    is_sampler && records_in == Some(11) && records_out == Some(0)
+                    is_sampler
+                        && messages_in == Some(11)
+                        && bytes_in.is_some_and(|value| value > 0)
+                        && collections_out == Some(0)
+                        && records_out == Some(0)
+                        && processor.pointer("/stats/messages_out").is_none()
+                        && processor.pointer("/stats/bytes_out").is_none()
+                        && processor.pointer("/stats/collections_in").is_none()
+                        && processor.pointer("/stats/records_in").is_none()
                 })
             });
             if matched {
@@ -364,7 +376,7 @@ fn decodes_and_packs_busmirror_end_to_end() {
     }
     // Use sampler stats as a delivery barrier before triggering a graceful
     // stop. The long interval prevents a wall-clock tick from splitting the
-    // MQTT burst, while records_in=11 proves that all separate messages have
+    // MQTT burst, while messages_in=11 proves that all separate messages have
     // reached the same packer window. Graceful stop then exercises the
     // sampler's terminal flush path deterministically. Periodic tick emission
     // is covered by the flow-level sampler tests.

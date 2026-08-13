@@ -9,6 +9,12 @@ use crate::codec::CodecError;
 use crate::model::Collection;
 use crate::planner::decode_projection::DecodeProjection;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergerOutputKind {
+    Bytes,
+    Collection,
+}
+
 /// Trait for merging raw byte data into accumulated state and triggering emission.
 ///
 /// Implementations accumulate incoming byte payloads via `merge()` and produce

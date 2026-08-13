@@ -49,11 +49,12 @@ impl EosWindowProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -104,7 +105,7 @@ impl Processor for EosWindowProcessor {
                                 log_received_data(&id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        stats.record_in(collection.num_rows() as u64);
+                                        stats.record_collection_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
                                         let res = state.add_collection(collection);
                                         stats.record_handle_duration(handle_start.elapsed());
@@ -284,7 +285,7 @@ impl EosWindowState {
             Some(self.stats.as_ref()),
         )
         .await?;
-        self.stats.record_out(row_count);
+        self.stats.record_collection_out(row_count);
         Ok(())
     }
 

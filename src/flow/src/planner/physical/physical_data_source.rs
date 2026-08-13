@@ -1,5 +1,5 @@
 use crate::planner::decode_projection::DecodeProjection;
-use crate::planner::physical::BasePhysicalPlan;
+use crate::planner::physical::{BasePhysicalPlan, DataDomain};
 use datatypes::Schema;
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ pub struct PhysicalDataSource {
     pub source_name: String,
     pub schema: Arc<Schema>,
     decode_projection: Option<DecodeProjection>,
+    output_domain: DataDomain,
 }
 
 impl PhysicalDataSource {
@@ -29,7 +30,17 @@ impl PhysicalDataSource {
             source_name,
             schema,
             decode_projection,
+            output_domain: DataDomain::Message,
         }
+    }
+
+    pub(crate) fn with_output_domain(mut self, output_domain: DataDomain) -> Self {
+        self.output_domain = output_domain;
+        self
+    }
+
+    pub(crate) fn output_domain(&self) -> DataDomain {
+        self.output_domain
     }
 
     pub fn source_name(&self) -> &str {

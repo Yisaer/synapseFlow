@@ -19,7 +19,7 @@ pub use encrypt::{
     AesGcmStreamWriter, EncryptError, EncryptWriter, EncryptionAlgorithm, InlineEncryptionKey,
     SecretBytes, SecretEncoding, SinkEncryptionConfig,
 };
-pub use merger::Merger;
+pub use merger::{Merger, MergerOutputKind};
 pub use registry::{DecoderRegistry, EncoderRegistry, MergerRegistry};
 pub use video::{
     default_video_schema, raw_frame_from_tuple, raw_frame_to_record_batch,

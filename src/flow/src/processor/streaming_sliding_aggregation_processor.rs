@@ -155,7 +155,7 @@ impl StreamingSlidingAggregationProcessor {
             trigger_state_usage,
             length_secs,
             delay_secs,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
 
@@ -180,6 +180,7 @@ impl StreamingSlidingAggregationProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 
@@ -374,7 +375,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 if out_rows.is_empty() {
                     return Ok(());
                 }
-                stats.record_out(out_rows.len() as u64);
+                stats.record_collection_out(out_rows.len() as u64);
                 let batch = window_metadata::record_batch_from_epoch_secs(
                     out_rows,
                     window.start_secs,
@@ -559,7 +560,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     data_item = input_streams.next() => {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                stats.record_in(collection.num_rows() as u64);
+                                stats.record_collection_in(collection.num_rows() as u64);
                                 let handle_start = std::time::Instant::now();
                                 let res = async {
                                     let rows = match collection.into_rows() {
@@ -1398,7 +1399,7 @@ mod tests {
                 Arc::clone(&aggregate_registry),
             )
             .expect("sliding processor");
-            let stats = Arc::new(ProcessorStats::default());
+            let stats = Arc::new(ProcessorStats::collection_in_out());
             processor.set_stats(Arc::clone(&stats));
             let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
             processor.add_input(input.subscribe());

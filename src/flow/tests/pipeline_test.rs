@@ -203,8 +203,8 @@ async fn test_sampler_execution_latest_strategy() {
             // Identify sampler by behavior: 5 in, 1 out (and ideally name)
             // Or just check if name contains "sampler"
             s.processor_id.to_lowercase().contains("sampler")
-                && snap.records_in == 5
-                && snap.records_out == 1
+                && snap.custom["messages_in"] == 5
+                && snap.custom["messages_out"] == 1
         })
         .expect("Sampler stats not found or incorrect (expected 5 in, 1 out)");
 
@@ -282,4 +282,20 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
         serde_json::json!([{"x": 1}, {"x": 2}, {"x": 3}]),
         "shared-tail barrier should hold the graceful end until the batched sibling flushes"
     );
+
+    let stats = pipeline.processor_stats();
+    for processor_fragment in ["PhysicalBarrier", "PhysicalResultCollect"] {
+        let stats = stats
+            .iter()
+            .find(|entry| entry.processor_id.contains(processor_fragment))
+            .unwrap_or_else(|| panic!("missing {processor_fragment} stats"))
+            .snapshot()
+            .stats;
+        assert_eq!(stats.records_in, None);
+        assert_eq!(stats.records_out, None);
+        assert_eq!(stats.custom.get("messages_in"), Some(&1));
+        assert_eq!(stats.custom.get("messages_out"), Some(&1));
+        assert!(!stats.custom.contains_key("bytes_in"));
+        assert!(!stats.custom.contains_key("bytes_out"));
+    }
 }

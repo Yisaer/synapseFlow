@@ -158,7 +158,7 @@ async fn run_nng_source_loop(
                 result = sub.next() => {
                     match result {
                         Ok(message) => {
-                            veloflux_metrics::nng_pubsub_source_records_in_total()
+                            veloflux_metrics::nng_pubsub_source_messages_in_total()
                                 .with_label_values(&[flow_instance_id.as_ref(), connector_id.as_str()])
                                 .inc();
                             let Some(payload) = strip_topic_prefix(message.as_slice(), &delimiter, &topic) else {
@@ -171,7 +171,7 @@ async fn run_nng_source_loop(
                             };
                             match sender.send(Ok(ConnectorEvent::Payload(payload.to_vec()))).await {
                                 Ok(_) => {
-                                    veloflux_metrics::nng_pubsub_source_records_out_total()
+                                    veloflux_metrics::nng_pubsub_source_messages_out_total()
                                         .with_label_values(&[flow_instance_id.as_ref(), connector_id.as_str()])
                                         .inc();
                                 }

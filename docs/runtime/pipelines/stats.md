@@ -37,15 +37,44 @@ The pipeline must currently be running for stats collection to succeed.
 
 Each response entry is keyed by `processor_id` and contains a snapshot object.
 
-The stable base fields are:
+The always-present base fields are:
 
-- `records_in`
-- `records_out`
 - `error_count`
 - `last_error`
 
-These fields are part of the processor runtime contract and should remain the primary assertions in
-tests and diagnostics.
+Collection boundaries additionally expose both the collection count and its row count:
+
+- `collections_in` and `records_in` for a collection input boundary
+- `collections_out` and `records_out` for a collection output boundary
+
+These fields strictly count rows. Raw payloads, encoded messages, delivery protocol events, and
+connector attempts are not records. A field is omitted when the processor does not declare rows as
+an applicable unit in that direction. A declared field starts at `0`, including before the first
+collection arrives and when an observed collection contains zero rows. Processing one collection
+increments the applicable `collections_*` counter by one and its `records_*` counter by
+`collection.num_rows()`.
+
+Processors register applicable data-unit counters as flattened custom fields:
+
+- `messages_in`, `messages_out`, `messages_aborted`, `messages_dropped`
+- processor-specific collection outcomes such as `collections_forwarded` and
+  `collections_suppressed`
+- `bytes_in`, `bytes_out`, `bytes_delivered`
+
+Only applicable fields are registered. For custom message, collection, and byte counters, a missing
+field means the processor does not support that unit and a present zero means it is applicable but
+has not observed an event. Row fields follow the same declaration rule.
+
+The physical plan determines each processor instance's input and output domains before runtime
+startup. Metric fields are registered from that fixed contract and never appear in response to the
+first observed data variant. Receiving data outside the planned domain is a pipeline wiring error.
+
+Conversion boundaries deliberately expose different units by direction. A decoder declares
+message/byte input and collection/row output. An encoder declares collection/row input and
+message/byte output; it does not expose `records_out` because rows are not its output domain.
+Every sink declares message output. A collection-native sink declares collection/row input and
+message output; retaining a collection as the payload representation does not turn the sink output
+back into a collection metric boundary.
 
 ## Metric Categories
 
@@ -60,8 +89,8 @@ Custom metrics are registered with:
 - a flattened response field name
 - a metric kind (`gauge` or `counter`)
 
-The flattened field name must not collide with reserved base names. This keeps the JSON payload
-simple while preserving extension room for processors such as empty suppression or windowing.
+The flattened field name must not collide with reserved base names. Unit-specific custom counters
+must not be substituted for row counters simply to make adjacent stages appear symmetric.
 
 ## Snapshot Semantics
 

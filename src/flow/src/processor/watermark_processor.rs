@@ -253,7 +253,7 @@ impl TumblingWatermarkProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -268,6 +268,7 @@ impl TumblingWatermarkProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -349,11 +350,11 @@ impl Processor for TumblingWatermarkProcessor {
                                 }
                             }
                             Some(Ok(data)) => {
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
+                                if let Some(rows) = data.row_count() {
+                                    stats.record_collection_in(rows);
                                 }
                                 let is_terminal = data.is_terminal();
-                                let out_rows = data.num_rows_hint();
+                                let out_rows = data.row_count();
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -362,7 +363,7 @@ impl Processor for TumblingWatermarkProcessor {
                                 )
                                 .await?;
                                 if let Some(rows) = out_rows {
-                                    stats.record_out(rows);
+                                    stats.record_collection_out(rows);
                                 }
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");
@@ -477,11 +478,12 @@ impl SlidingWatermarkProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 
@@ -628,7 +630,7 @@ impl Processor for SlidingWatermarkProcessor {
                             Some(Ok(data)) => {
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        stats.record_in(collection.num_rows() as u64);
+                                        stats.record_collection_in(collection.num_rows() as u64);
                                         if let Some(lookahead) = lookahead {
                                             for row in collection.rows() {
                                                 let deadline = row.timestamp + lookahead;
@@ -643,7 +645,7 @@ impl Processor for SlidingWatermarkProcessor {
                                             };
                                         }
                                         let out = StreamData::collection(collection);
-                                        let out_rows = out.num_rows_hint();
+                                        let out_rows = out.row_count();
                                         send_with_backpressure(
                                             &output,
                                             channel_capacities.data,
@@ -652,7 +654,7 @@ impl Processor for SlidingWatermarkProcessor {
                                         )
                                         .await?;
                                         if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
+                                            stats.record_collection_out(rows);
                                         }
                                     }
                                     other => {
@@ -780,7 +782,7 @@ impl EventtimeWatermarkProcessor {
             control_output,
             channel_capacities,
             state: EventtimeWatermarkState::new(physical.late_tolerance),
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -803,6 +805,7 @@ impl EventtimeWatermarkProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -872,7 +875,7 @@ impl Processor for EventtimeWatermarkProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                stats.record_in(collection.num_rows() as u64);
+                                stats.record_collection_in(collection.num_rows() as u64);
                                 let rows = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(err) => {
@@ -888,7 +891,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                             stats.record_error_logged("watermark processor error", err);
                                         }
                                         for item in step.outputs {
-                                            let out_rows = item.num_rows_hint();
+                                            let out_rows = item.row_count();
                                             send_with_backpressure(
                                                 &output,
                                                 channel_capacities.data,
@@ -897,7 +900,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                             )
                                             .await?;
                                             if let Some(rows) = out_rows {
-                                                stats.record_out(rows);
+                                                stats.record_collection_out(rows);
                                             }
                                         }
                                     }

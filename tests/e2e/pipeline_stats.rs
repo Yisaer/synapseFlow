@@ -4,10 +4,8 @@ use sdk::{PipelineCreateRequest, StreamCreateRequest};
 use serde_json::Value as JsonValue;
 use std::time::Duration;
 
-fn stats_value(entry: &JsonValue, field: &str) -> u64 {
-    entry["stats"][field]
-        .as_u64()
-        .unwrap_or_else(|| panic!("missing numeric stats field {field} in {entry}"))
+fn stats_value_or_zero(entry: &JsonValue, field: &str) -> u64 {
+    entry["stats"][field].as_u64().unwrap_or(0)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -185,7 +183,8 @@ async fn pipeline_stats_excludes_internal_and_shared_ingest_processors_via_rest(
             .await
             .expect("decode pipeline stats");
         if stats.iter().any(|entry| {
-            stats_value(entry, "records_in") > 0 || stats_value(entry, "records_out") > 0
+            stats_value_or_zero(entry, "records_in") > 0
+                || stats_value_or_zero(entry, "records_out") > 0
         }) {
             break stats;
         }

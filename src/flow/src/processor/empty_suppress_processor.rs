@@ -49,11 +49,12 @@ impl EmptySuppressProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -74,11 +75,6 @@ impl Processor for EmptySuppressProcessor {
         let channel_capacities = self.channel_capacities;
         let omit_if_empty = self.omit_if_empty;
         let stats = Arc::clone(&self.stats);
-        let collections_in = stats.register_counter(MetricSpec {
-            id: "empty_suppress.collections_in",
-            flat_name: "collections_in",
-            kind: MetricKind::Counter,
-        });
         let collections_forwarded = stats.register_counter(MetricSpec {
             id: "empty_suppress.collections_forwarded",
             flat_name: "collections_forwarded",
@@ -116,13 +112,12 @@ impl Processor for EmptySuppressProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
+                                if let Some(rows) = data.row_count() {
+                                    stats.record_collection_in(rows);
                                 }
 
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        collections_in.inc_by(1);
                                         if omit_if_empty
                                             && collection_is_effectively_empty(collection.as_ref())
                                         {
@@ -143,11 +138,11 @@ impl Processor for EmptySuppressProcessor {
                                             Some(stats.as_ref()),
                                         )
                                         .await?;
-                                        stats.record_out(out_rows);
+                                        stats.record_collection_out(out_rows);
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
-                                        let out_rows = data.num_rows_hint();
+                                        let out_rows = data.row_count();
                                         send_with_backpressure(
                                             &output,
                                             channel_capacities.data,
@@ -156,7 +151,7 @@ impl Processor for EmptySuppressProcessor {
                                         )
                                         .await?;
                                         if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
+                                            stats.record_collection_out(rows);
                                         }
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");

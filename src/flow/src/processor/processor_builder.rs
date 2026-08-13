@@ -9,11 +9,12 @@ use crate::codec::{
     SinkEncryptionConfig,
 };
 use crate::connector::{ConnectorRegistry, MqttClientManager};
-use crate::planner::physical::PhysicalPlan;
+use crate::planner::physical::{DataDomain, PhysicalPlan};
 use crate::processor::base::{
     normalize_channel_capacity, LinkKind, LinkReceiver, ProcessorChannelCapacities,
     DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY,
 };
+use crate::processor::data_metrics::DataMetricDomains;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
@@ -1064,13 +1065,14 @@ fn create_processor_from_plan_node(
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
             let schema = ds.schema();
-            let processor = DataSourceProcessor::with_custom_id_and_channel_capacities(
+            let mut processor = DataSourceProcessor::with_custom_id_and_channel_capacities(
                 None, // plan_index is no longer needed as we use plan_name for ID
                 processor_id.clone(),
                 ds.source_name().to_string(),
                 schema,
                 channel_capacities,
             );
+            processor.set_metric_domains(DataMetricDomains::NONE.passthrough(ds.output_domain()));
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::DataSource(processor),
             ))
@@ -1143,6 +1145,12 @@ fn create_processor_from_plan_node(
                     parser,
                 });
             }
+            let input_domain = plan_input_domain(plan, context.merger_registry()?.as_ref())?;
+            processor.set_metric_domains(
+                DataMetricDomains::NONE
+                    .with_input(input_domain)
+                    .with_output(DataDomain::Collection),
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Decoder(processor),
             ))
@@ -1469,6 +1477,10 @@ fn create_processor_from_plan_node(
                 processor_id.clone(),
                 channel_capacities,
             );
+            processor.set_input_domain(plan_input_domain(
+                plan,
+                context.merger_registry()?.as_ref(),
+            )?);
             if sink_plan.connector.forward_to_result {
                 processor.enable_result_forwarding();
             } else {
@@ -1497,18 +1509,26 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::ResultCollect(_result_collect) => {
-            let processor = ResultCollectProcessor::new(processor_id.clone());
+            let mut processor = ResultCollectProcessor::new(processor_id.clone());
+            processor.set_input_domain(plan_input_domain(
+                plan,
+                context.merger_registry()?.as_ref(),
+            )?);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::ResultCollect(processor),
             ))
         }
         PhysicalPlan::Barrier(barrier) => {
             let expected_upstreams = barrier.base.children.len();
-            let processor = BarrierProcessor::new_with_channel_capacities(
+            let mut processor = BarrierProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 expected_upstreams,
                 channel_capacities,
             );
+            processor.set_input_domain(plan_input_domain(
+                plan,
+                context.merger_registry()?.as_ref(),
+            )?);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Barrier(processor),
             ))
@@ -1522,9 +1542,14 @@ fn create_processor_from_plan_node(
                 },
                 channel_capacities,
             );
+            let merger_registry = context.merger_registry()?;
+            processor.set_metric_domains(
+                DataMetricDomains::NONE
+                    .with_input(plan_input_domain(plan, merger_registry.as_ref())?)
+                    .with_output(plan_output_domain(plan, merger_registry.as_ref())?),
+            );
             if let crate::processor::SamplingStrategy::Packer { .. } = &sampler.strategy {
-                let registry = context.merger_registry()?;
-                processor.set_merger_registry(registry);
+                processor.set_merger_registry(merger_registry);
                 // The Packer merger may build an embedded decoder for the fused
                 // decode path, which needs the stream's output schema. Derive it
                 // from the sampler's input (the datasource/decoder child).
@@ -1553,6 +1578,85 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Sampler(processor),
             ))
         }
+    }
+}
+
+fn plan_input_domain(
+    plan: &PhysicalPlan,
+    merger_registry: &MergerRegistry,
+) -> Result<DataDomain, ProcessorError> {
+    let children = plan.children();
+    let first_child = children.first().ok_or_else(|| {
+        ProcessorError::InvalidConfiguration(format!(
+            "{} requires a data input child",
+            plan.get_plan_type()
+        ))
+    })?;
+    let expected = plan_output_domain(first_child.as_ref(), merger_registry)?;
+    for child in children.iter().skip(1) {
+        let actual = plan_output_domain(child.as_ref(), merger_registry)?;
+        if actual != expected {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "{} requires all input children to use the same data domain; expected {:?}, got {:?} from {}",
+                plan.get_plan_type(),
+                expected,
+                actual,
+                child.get_plan_type(),
+            )));
+        }
+    }
+    Ok(expected)
+}
+
+fn plan_output_domain(
+    plan: &PhysicalPlan,
+    merger_registry: &MergerRegistry,
+) -> Result<DataDomain, ProcessorError> {
+    match plan {
+        PhysicalPlan::DataSource(source) => Ok(source.output_domain()),
+        PhysicalPlan::SinkEncoder(_)
+        | PhysicalPlan::IncSinkEncoder(_)
+        | PhysicalPlan::SinkCompress(_)
+        | PhysicalPlan::SinkEncrypt(_) => Ok(DataDomain::Message),
+        PhysicalPlan::Sampler(sampler) => match &sampler.strategy {
+            crate::processor::SamplingStrategy::Latest => plan_input_domain(plan, merger_registry),
+            crate::processor::SamplingStrategy::Packer { props } => merger_registry
+                .output_kind(&props.merger.merger_type)
+                .map(|kind| match kind {
+                    crate::codec::MergerOutputKind::Bytes => DataDomain::Message,
+                    crate::codec::MergerOutputKind::Collection => DataDomain::Collection,
+                })
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string())),
+        },
+        PhysicalPlan::DataSink(_) | PhysicalPlan::SinkConnector(_) => Ok(DataDomain::Message),
+        PhysicalPlan::ResultCollect(_) | PhysicalPlan::Barrier(_) => {
+            plan_input_domain(plan, merger_registry)
+        }
+        PhysicalPlan::TableScan(_)
+        | PhysicalPlan::Decoder(_)
+        | PhysicalPlan::CollectionLayoutNormalize(_)
+        | PhysicalPlan::MemoryCollectionMaterialize(_)
+        | PhysicalPlan::StatefulFunction(_)
+        | PhysicalPlan::Filter(_)
+        | PhysicalPlan::Compute(_)
+        | PhysicalPlan::Order(_)
+        | PhysicalPlan::Project(_)
+        | PhysicalPlan::RowDiff(_)
+        | PhysicalPlan::ColumnFilter(_)
+        | PhysicalPlan::EmptySuppress(_)
+        | PhysicalPlan::Aggregation(_)
+        | PhysicalPlan::SharedStream(_)
+        | PhysicalPlan::SourceChangeGate(_)
+        | PhysicalPlan::Batch(_)
+        | PhysicalPlan::StreamingAggregation(_)
+        | PhysicalPlan::TumblingWindow(_)
+        | PhysicalPlan::CountWindow(_)
+        | PhysicalPlan::SlidingWindow(_)
+        | PhysicalPlan::StateWindow(_)
+        | PhysicalPlan::EosWindow(_)
+        | PhysicalPlan::ProcessTimeWatermark(_)
+        | PhysicalPlan::EventtimeWatermark(_)
+        | PhysicalPlan::Watermark(_) => Ok(DataDomain::Collection),
     }
 }
 

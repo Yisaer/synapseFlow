@@ -64,6 +64,18 @@ impl SinkConnector for NngPubSubSinkConnector {
         &self.id
     }
 
+    fn record_message_in(&self) {
+        veloflux_metrics::nng_pubsub_sink_messages_in_total()
+            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
+            .inc();
+    }
+
+    fn record_message_out(&self) {
+        veloflux_metrics::nng_pubsub_sink_messages_out_total()
+            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
+            .inc();
+    }
+
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
         self.ensure_socket().await
     }
@@ -93,21 +105,12 @@ impl SinkConnector for NngPubSubSinkConnector {
             ))
         })?;
         let bytes_written = payload.len() as u64;
-        veloflux_metrics::nng_pubsub_sink_records_in_total()
-            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-            .inc();
-
         let message = build_message(&self.config.topic, &self.config.topic_delimiter, &payload)?;
         let socket = self.socket.as_mut().ok_or_else(|| {
             SinkConnectorError::Unavailable(format!("nng pubsub sink `{}` not connected", self.id))
         })?;
         match socket.publish(message).await {
-            Ok(()) => {
-                veloflux_metrics::nng_pubsub_sink_records_out_total()
-                    .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-                    .inc();
-                Ok(DeliveryResult { bytes_written })
-            }
+            Ok(()) => Ok(DeliveryResult { bytes_written }),
             Err((err, _message)) => {
                 self.socket = None;
                 Err(SinkConnectorError::Unavailable(format!(

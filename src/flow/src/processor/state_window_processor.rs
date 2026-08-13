@@ -63,7 +63,7 @@ impl StateWindowProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -77,6 +77,7 @@ impl StateWindowProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -128,7 +129,7 @@ impl Processor for StateWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                stats.record_in(collection.num_rows() as u64);
+                                stats.record_collection_in(collection.num_rows() as u64);
                                 let handle_start = std::time::Instant::now();
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
@@ -250,7 +251,7 @@ impl Processor for StateWindowProcessor {
                                             stats.record_handle_duration(handle_start.elapsed());
                                             return Err(e);
                                         }
-                                        stats.record_out(row_count);
+                                        stats.record_collection_out(row_count);
                                         state.active = false;
                                         state.opened_at = None;
                                     }
@@ -307,7 +308,7 @@ impl Processor for StateWindowProcessor {
                                                     Some(stats.as_ref()),
                                                 )
                                                 .await?;
-                                                stats.record_out(row_count);
+                                                stats.record_collection_out(row_count);
                                                 state.active = false;
                                                 state.opened_at = None;
                                             }
@@ -570,7 +571,7 @@ mod tests {
         );
 
         let mut processor = StateWindowProcessor::new("sw", Arc::new(physical));
-        let stats = Arc::new(ProcessorStats::default());
+        let stats = Arc::new(ProcessorStats::collection_in_out());
         processor.set_stats(Arc::clone(&stats));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
@@ -606,6 +607,6 @@ mod tests {
             .collect::<Vec<_>>();
         seen.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         assert_eq!(seen, vec![Value::Int64(1), Value::Int64(2)]);
-        assert_eq!(stats.snapshot().records_out, 2);
+        assert_eq!(stats.snapshot().records_out, Some(2));
     }
 }

@@ -82,7 +82,7 @@ fn find_processor_stats<'a>(
 
 // coverage-covers: pipeline.runtime.stats
 #[tokio::test]
-async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
+async fn collect_pipeline_stats_declares_applicable_row_fields() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
@@ -113,11 +113,70 @@ async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
             .all(|entry| entry.stats.error_count == 0 && entry.stats.last_error.is_none()),
         "fresh running pipeline should not report processor errors"
     );
+    let project = find_processor_stats(&stats, "PhysicalProject");
+    assert_eq!(project.stats.records_in, Some(0));
+    assert_eq!(project.stats.records_out, Some(0));
+    assert_eq!(project.stats.custom.get("collections_in"), Some(&0));
+    assert_eq!(project.stats.custom.get("collections_out"), Some(&0));
+
+    let datasource = find_processor_stats(&stats, "PhysicalDataSource");
+    assert_eq!(datasource.stats.records_in, None);
+    assert_eq!(datasource.stats.records_out, None);
+    assert_eq!(datasource.stats.custom.get("messages_in"), Some(&0));
+    assert_eq!(datasource.stats.custom.get("messages_out"), Some(&0));
+    assert_eq!(datasource.stats.custom.get("bytes_in"), Some(&0));
+    assert_eq!(datasource.stats.custom.get("bytes_out"), Some(&0));
+    assert!(!datasource.stats.custom.contains_key("collections_in"));
+    assert!(!datasource.stats.custom.contains_key("collections_out"));
+
+    let decoder = find_processor_stats(&stats, "PhysicalDecoder");
+    assert_eq!(decoder.stats.records_in, None);
+    assert_eq!(decoder.stats.records_out, Some(0));
+    assert_eq!(decoder.stats.custom.get("messages_in"), Some(&0));
+    assert_eq!(decoder.stats.custom.get("bytes_in"), Some(&0));
+    assert_eq!(decoder.stats.custom.get("collections_out"), Some(&0));
+    assert!(!decoder.stats.custom.contains_key("collections_in"));
+    assert!(!decoder.stats.custom.contains_key("messages_out"));
+    assert!(!decoder.stats.custom.contains_key("bytes_out"));
+
+    let encoder = find_processor_stats(&stats, "PhysicalSinkEncoder");
+    assert_eq!(encoder.stats.records_in, Some(0));
+    assert_eq!(encoder.stats.records_out, None);
+    assert_eq!(encoder.stats.custom.get("collections_in"), Some(&0));
+    assert_eq!(encoder.stats.custom.get("messages_out"), Some(&0));
+    assert_eq!(encoder.stats.custom.get("bytes_out"), Some(&0));
+
+    let encoded_sink = find_processor_stats(&stats, "PhysicalSinkConnector");
+    assert_eq!(encoded_sink.stats.records_in, None);
+    assert_eq!(encoded_sink.stats.records_out, None);
+    assert_eq!(encoded_sink.stats.custom.get("messages_in"), Some(&0));
+    assert_eq!(encoded_sink.stats.custom.get("messages_out"), Some(&0));
+    assert_eq!(encoded_sink.stats.custom.get("messages_dropped"), Some(&0));
+    assert_eq!(encoded_sink.stats.custom.get("bytes_in"), Some(&0));
+    assert_eq!(encoded_sink.stats.custom.get("bytes_delivered"), Some(&0));
+    assert!(!encoded_sink.stats.custom.contains_key("collections_in"));
+    assert!(!encoded_sink.stats.custom.contains_key("collections_out"));
+
+    let result_collect = find_processor_stats(&stats, "PhysicalResultCollect");
+    assert_eq!(result_collect.stats.records_in, None);
+    assert_eq!(result_collect.stats.records_out, None);
+    assert_eq!(result_collect.stats.custom.get("messages_in"), Some(&0));
+    assert_eq!(result_collect.stats.custom.get("messages_out"), Some(&0));
+    assert!(!result_collect.stats.custom.contains_key("bytes_in"));
+    assert!(!result_collect.stats.custom.contains_key("bytes_out"));
+    let serialized = serde_json::to_value(&stats).expect("serialize pipeline stats");
     assert!(
-        stats
-            .iter()
-            .all(|entry| entry.stats.records_in == 0 && entry.stats.records_out == 0),
-        "idle pipeline should expose zeroed base counters"
+        serialized
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry
+                    .get("processor_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id.contains("PhysicalProject"))
+                    && entry.pointer("/stats/records_in") == Some(&json!(0))
+                    && entry.pointer("/stats/records_out") == Some(&json!(0))
+            })),
+        "applicable row counters should be serialized from zero: {serialized}"
     );
     let control_source = find_processor_stats(&stats, "control_source");
     assert_eq!(
@@ -129,13 +188,6 @@ async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
         control_source.stats.custom.get("mpsc_links"),
         Some(&5),
         "control source stats should expose pipeline mpsc link count"
-    );
-    assert!(
-        stats
-            .iter()
-            .filter(|entry| entry.processor_id != "control_source")
-            .all(|entry| entry.stats.custom.is_empty()),
-        "non-control processors should not expose pipeline-level custom metrics"
     );
 
     instance
@@ -255,11 +307,17 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
         .await
         .expect("collect stats before rebuild");
     assert!(
-        stats_before
-            .iter()
-            .any(|entry| entry.stats.records_in > 0 || entry.stats.records_out > 0),
+        stats_before.iter().any(|entry| {
+            entry.stats.records_in.is_some_and(|value| value > 0)
+                || entry.stats.records_out.is_some_and(|value| value > 0)
+        }),
         "processed pipeline should expose non-zero counters before rebuild: {stats_before:#?}"
     );
+    let encoded_sink = find_processor_stats(&stats_before, "PhysicalSinkConnector");
+    assert_eq!(encoded_sink.stats.records_in, None);
+    assert_eq!(encoded_sink.stats.records_out, None);
+    assert_eq!(encoded_sink.stats.custom.get("messages_in"), Some(&1));
+    assert_eq!(encoded_sink.stats.custom.get("messages_out"), Some(&1));
 
     instance
         .stop_pipeline(pipeline_id, PipelineStopMode::Quick, Duration::from_secs(5))
@@ -280,13 +338,16 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
     );
     assert!(
         stats_after.iter().all(|entry| {
-            entry.stats.records_in == 0
-                && entry.stats.records_out == 0
+            entry.stats.records_in.is_none_or(|value| value == 0)
+                && entry.stats.records_out.is_none_or(|value| value == 0)
                 && entry.stats.error_count == 0
                 && entry.stats.last_error.is_none()
         }),
-        "runtime rebuild should reset in-memory stats counters: {stats_after:#?}"
+        "runtime rebuild should reset applicable counters to zero: {stats_after:#?}"
     );
+    let encoded_sink = find_processor_stats(&stats_after, "PhysicalSinkConnector");
+    assert_eq!(encoded_sink.stats.records_in, None);
+    assert_eq!(encoded_sink.stats.records_out, None);
     let control_source = find_processor_stats(&stats_after, "control_source");
     assert_eq!(
         control_source.stats.custom.get("broadcast_links"),

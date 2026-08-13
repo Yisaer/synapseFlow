@@ -330,11 +330,18 @@ impl StreamData {
         }
     }
 
-    pub fn num_rows_hint(&self) -> Option<u64> {
+    /// Return the row count when this item directly exposes rows.
+    ///
+    /// Raw and encoded byte payloads are messages, not rows. Their row cardinality is unknown at
+    /// this boundary and must not be inferred as one.
+    pub fn row_count(&self) -> Option<u64> {
         match self {
             StreamData::Collection(collection) => Some(collection.num_rows() as u64),
-            StreamData::Bytes(_) | StreamData::EncodedDelivery { .. } => Some(1),
-            StreamData::Control(_) | StreamData::Watermark(_) | StreamData::Error(_) => None,
+            StreamData::Bytes(_)
+            | StreamData::EncodedDelivery { .. }
+            | StreamData::Control(_)
+            | StreamData::Watermark(_)
+            | StreamData::Error(_) => None,
         }
     }
 
@@ -407,7 +414,7 @@ mod tests {
     fn encoded_delivery_hint_and_description_do_not_include_payload() {
         let data = StreamData::encoded_delivery_single("secret-payload");
 
-        assert_eq!(data.num_rows_hint(), Some(1));
+        assert_eq!(data.row_count(), None);
         let description = data.description();
         assert!(description.contains("Encoded delivery"));
         assert!(description.contains("14 bytes"));

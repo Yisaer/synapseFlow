@@ -172,11 +172,12 @@ impl BatchProcessor {
             batch_count,
             batch_duration,
             partition_by_scalars,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 
@@ -202,7 +203,7 @@ impl BatchProcessor {
             Some(stats.as_ref()),
         )
         .await?;
-        stats.record_out(row_count);
+        stats.record_collection_out(row_count);
         tracing::info!(processor_id = %processor_id, "flushed batch");
         Ok(())
     }
@@ -421,7 +422,7 @@ impl Processor for BatchProcessor {
                                     log_received_data(&processor_id, &data);
                                     match data {
                                         StreamData::Collection(collection) => {
-                                            stats.record_in(collection.num_rows() as u64);
+                                            stats.record_collection_in(collection.num_rows() as u64);
                                             let handle_start = std::time::Instant::now();
                                             let res = async {
                                                 BatchProcessor::append_partitioned_collection(
@@ -551,7 +552,7 @@ impl Processor for BatchProcessor {
                                 log_received_data(&processor_id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        stats.record_in(collection.num_rows() as u64);
+                                        stats.record_collection_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
                                         BatchProcessor::append_collection(
                                             &mut buffer,

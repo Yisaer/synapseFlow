@@ -24,6 +24,8 @@ To achieve maximum performance, the Sampler is designed as a **bytes-first** pro
 - **Placement**: The `PhysicalSampler` is inserted into the pipeline immediately after the Source and **before** the Decoder (`PhysicalDecoder`).
 - **Input**: Operates on `StreamData::Bytes(Vec<u8>)` (raw payloads).
 - **Benefit**: Discarded messages are never decoded, saving significant CPU cycles.
+- **Metrics**: Raw payloads use `messages_in`/`messages_out` and `bytes_in`/`bytes_out`.
+  They do not increment row-level `records_in`/`records_out` before decoding.
 
 The physical plan structure is:
 `Source -> Sampler -> Decoder -> [Processors]`

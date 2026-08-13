@@ -180,7 +180,7 @@ impl EncoderRegistry {
     }
 }
 
-use super::Merger;
+use super::{Merger, MergerOutputKind};
 use serde_json::{Map, Value};
 use std::any::Any;
 
@@ -194,34 +194,45 @@ type MergerFactory = Arc<
         + Sync,
 >;
 
+struct MergerRegistration {
+    factory: MergerFactory,
+    output_kind: MergerOutputKind,
+}
+
 /// Registry mapping merger identifiers to factories.
 pub struct MergerRegistry {
-    factories: RwLock<HashMap<String, MergerFactory>>,
+    registrations: RwLock<HashMap<String, MergerRegistration>>,
 }
 
 impl MergerRegistry {
     pub fn new() -> Self {
         Self {
-            factories: RwLock::new(HashMap::new()),
+            registrations: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn register<F>(&self, name: impl Into<String>, factory: F)
+    pub fn register<F>(&self, name: impl Into<String>, output_kind: MergerOutputKind, factory: F)
     where
         F: Fn(&Map<String, Value>, Arc<Schema>) -> Result<Box<dyn Merger>, CodecError>
             + Send
             + Sync
             + 'static,
     {
-        let mut map = self.factories.write();
-        map.insert(
+        self.registrations.write().insert(
             name.into(),
-            Arc::new(move |props, schema, _| factory(props, schema)),
+            MergerRegistration {
+                factory: Arc::new(move |props, schema, _| factory(props, schema)),
+                output_kind,
+            },
         );
     }
 
-    pub fn register_with_schema_artifact<F>(&self, name: impl Into<String>, factory: F)
-    where
+    pub fn register_with_schema_artifact<F>(
+        &self,
+        name: impl Into<String>,
+        output_kind: MergerOutputKind,
+        factory: F,
+    ) where
         F: Fn(
                 &Map<String, Value>,
                 Arc<Schema>,
@@ -231,9 +242,21 @@ impl MergerRegistry {
             + Sync
             + 'static,
     {
-        self.factories
-            .write()
-            .insert(name.into(), Arc::new(factory));
+        self.registrations.write().insert(
+            name.into(),
+            MergerRegistration {
+                factory: Arc::new(factory),
+                output_kind,
+            },
+        );
+    }
+
+    pub fn output_kind(&self, name: &str) -> Result<MergerOutputKind, CodecError> {
+        self.registrations
+            .read()
+            .get(name)
+            .map(|registration| registration.output_kind)
+            .ok_or_else(|| CodecError::Other(format!("merger '{name}' not registered")))
     }
 
     pub fn instantiate(
@@ -242,9 +265,9 @@ impl MergerRegistry {
         props: &Map<String, Value>,
         schema: Arc<Schema>,
     ) -> Result<Box<dyn Merger>, CodecError> {
-        let map = self.factories.read();
-        if let Some(factory) = map.get(name) {
-            factory(props, schema, None)
+        let map = self.registrations.read();
+        if let Some(registration) = map.get(name) {
+            (registration.factory)(props, schema, None)
         } else {
             Err(CodecError::Other(format!(
                 "merger '{}' not registered",
@@ -260,9 +283,9 @@ impl MergerRegistry {
         schema: Arc<Schema>,
         artifact: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Result<Box<dyn Merger>, CodecError> {
-        let map = self.factories.read();
-        if let Some(factory) = map.get(name) {
-            factory(props, schema, artifact)
+        let map = self.registrations.read();
+        if let Some(registration) = map.get(name) {
+            (registration.factory)(props, schema, artifact)
         } else {
             Err(CodecError::Other(format!("merger '{name}' not registered")))
         }

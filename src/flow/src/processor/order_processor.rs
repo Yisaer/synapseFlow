@@ -54,7 +54,7 @@ impl OrderProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -66,6 +66,7 @@ impl OrderProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 
@@ -254,8 +255,8 @@ impl Processor for OrderProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
+                                if let Some(rows) = data.row_count() {
+                                    stats.record_collection_in(rows);
                                 }
                                 match data {
                                     StreamData::Collection(collection) => {
@@ -263,7 +264,7 @@ impl Processor for OrderProcessor {
                                         match Self::apply_order(physical_order.as_ref(), collection, Some(stats.as_ref())) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
-                                                let out_rows = out.num_rows_hint();
+                                                let out_rows = out.row_count();
                                                 let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
@@ -275,7 +276,7 @@ impl Processor for OrderProcessor {
                                                 stats.record_handle_duration(handle_start.elapsed());
                                                 send_res?;
                                                 if let Some(rows) = out_rows {
-                                                    stats.record_out(rows);
+                                                    stats.record_collection_out(rows);
                                                 }
                                             }
                                             Err(e) => {

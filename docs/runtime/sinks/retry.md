@@ -42,6 +42,13 @@ Each attempt replays the full connector protocol:
 start_delivery() -> write_chunk(full_payload) -> finish_delivery()
 ```
 
+Retries replay the same logical message. `messages_in` increments once when `SinkProcessor`
+assembles the complete message, and `messages_out` increments once only after confirmed success.
+Retry attempts do not increment either counter and do not have a separate attempt metric. Any
+delivery that still returns an error after the final attempt increments `messages_dropped`.
+`bytes_delivered` only includes successful messages. Error details remain available through
+`error_count`, `last_error`, and logs.
+
 ## Error Handling
 
 Connector error classification is used for logging and metrics only. The retry decision does not

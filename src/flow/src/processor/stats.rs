@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -70,8 +70,6 @@ impl GaugeHandle {
 /// record path does a plain atomic add / histogram observe with no label-map lookup.
 #[derive(Debug)]
 struct BoundMetrics {
-    in_counter: ChildCounter,
-    out_counter: ChildCounter,
     error_counter: ChildCounter,
     handle_duration: ChildHistogram,
     backpressure_counter: ChildCounter,
@@ -80,11 +78,6 @@ struct BoundMetrics {
 impl BoundMetrics {
     fn new(labels: &[&str; 3]) -> Self {
         Self {
-            in_counter: ChildCounter::bind(veloflux_metrics::processor_records_in_total(), labels),
-            out_counter: ChildCounter::bind(
-                veloflux_metrics::processor_records_out_total(),
-                labels,
-            ),
             error_counter: ChildCounter::bind(veloflux_metrics::processor_errors_total(), labels),
             handle_duration: ChildHistogram::bind(
                 veloflux_metrics::processor_handle_duration_seconds(),
@@ -141,6 +134,10 @@ pub struct ProcessorStats {
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     records_in: AtomicU64,
     records_out: AtomicU64,
+    records_in_enabled: AtomicBool,
+    records_out_enabled: AtomicBool,
+    collections_in: OnceLock<CounterHandle>,
+    collections_out: OnceLock<CounterHandle>,
     error_count: AtomicU64,
     last_error: RwLock<Option<Arc<str>>>,
     metrics: RwLock<BTreeMap<&'static str, Arc<MetricEntry>>>,
@@ -148,9 +145,19 @@ pub struct ProcessorStats {
     /// Resolved lazily on the first record call that observes a set `pipeline_id`;
     /// the labels are fixed for the lifetime of this processor.
     bound_metrics: OnceLock<BoundMetrics>,
+    /// Row counters are bound independently from the generic processor metrics so processors
+    /// without a collection boundary never create zero-valued Prometheus row series.
+    records_in_counter: OnceLock<ChildCounter>,
+    records_out_counter: OnceLock<ChildCounter>,
 }
 
 impl ProcessorStats {
+    pub(crate) fn collection_in_out() -> Self {
+        let stats = Self::default();
+        stats.declare_collection_in_out();
+        stats
+    }
+
     pub fn new(
         flow_instance_id: impl Into<Arc<str>>,
         processor_id: impl Into<Arc<str>>,
@@ -163,10 +170,16 @@ impl ProcessorStats {
             pipeline_id: Arc::new(OnceLock::new()),
             records_in: AtomicU64::new(0),
             records_out: AtomicU64::new(0),
+            records_in_enabled: AtomicBool::new(false),
+            records_out_enabled: AtomicBool::new(false),
+            collections_in: OnceLock::new(),
+            collections_out: OnceLock::new(),
             error_count: AtomicU64::new(0),
             last_error: RwLock::new(None),
             metrics: RwLock::new(BTreeMap::new()),
             bound_metrics: OnceLock::new(),
+            records_in_counter: OnceLock::new(),
+            records_out_counter: OnceLock::new(),
         }
     }
 
@@ -189,6 +202,20 @@ impl ProcessorStats {
             self.bound_metrics
                 .get_or_init(|| BoundMetrics::new(&labels)),
         )
+    }
+
+    fn records_in_counter(&self) -> Option<&ChildCounter> {
+        let labels = self.metric_labels()?;
+        Some(self.records_in_counter.get_or_init(|| {
+            ChildCounter::bind(veloflux_metrics::processor_records_in_total(), &labels)
+        }))
+    }
+
+    fn records_out_counter(&self) -> Option<&ChildCounter> {
+        let labels = self.metric_labels()?;
+        Some(self.records_out_counter.get_or_init(|| {
+            ChildCounter::bind(veloflux_metrics::processor_records_out_total(), &labels)
+        }))
     }
 
     pub fn set_pipeline_id(&self, pipeline_id: &str) {
@@ -215,6 +242,33 @@ impl ProcessorStats {
             entry,
             counter: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn declare_collection_in(&self) {
+        self.records_in_enabled.store(true, Ordering::Release);
+        self.collections_in.get_or_init(|| {
+            self.register_counter(MetricSpec {
+                id: "processor.collections_in",
+                flat_name: "collections_in",
+                kind: MetricKind::Counter,
+            })
+        });
+    }
+
+    pub(crate) fn declare_collection_out(&self) {
+        self.records_out_enabled.store(true, Ordering::Release);
+        self.collections_out.get_or_init(|| {
+            self.register_counter(MetricSpec {
+                id: "processor.collections_out",
+                flat_name: "collections_out",
+                kind: MetricKind::Counter,
+            })
+        });
+    }
+
+    pub(crate) fn declare_collection_in_out(&self) {
+        self.declare_collection_in();
+        self.declare_collection_out();
     }
 
     // Called only from processor constructors (new / new_with_channel_capacities), never during
@@ -264,17 +318,25 @@ impl ProcessorStats {
         Arc::clone(entry)
     }
 
-    pub fn record_in(&self, rows: u64) {
+    pub(crate) fn record_collection_in(&self, rows: u64) {
+        self.collections_in
+            .get()
+            .expect("processor must declare collection input metrics")
+            .inc_by(1);
         self.records_in.fetch_add(rows, Ordering::Relaxed);
-        if let Some(bound) = self.bound_metrics() {
-            bound.in_counter.inc_by(rows);
+        if let Some(counter) = self.records_in_counter() {
+            counter.inc_by(rows);
         }
     }
 
-    pub fn record_out(&self, rows: u64) {
+    pub(crate) fn record_collection_out(&self, rows: u64) {
+        self.collections_out
+            .get()
+            .expect("processor must declare collection output metrics")
+            .inc_by(1);
         self.records_out.fetch_add(rows, Ordering::Relaxed);
-        if let Some(bound) = self.bound_metrics() {
-            bound.out_counter.inc_by(rows);
+        if let Some(counter) = self.records_out_counter() {
+            counter.inc_by(rows);
         }
     }
 
@@ -359,8 +421,14 @@ impl ProcessorStats {
             })
             .collect();
         ProcessorStatsSnapshot {
-            records_in: self.records_in.load(Ordering::Relaxed),
-            records_out: self.records_out.load(Ordering::Relaxed),
+            records_in: self
+                .records_in_enabled
+                .load(Ordering::Acquire)
+                .then(|| self.records_in.load(Ordering::Relaxed)),
+            records_out: self
+                .records_out_enabled
+                .load(Ordering::Acquire)
+                .then(|| self.records_out.load(Ordering::Relaxed)),
             error_count: self.error_count.load(Ordering::Relaxed),
             last_error,
             custom,
@@ -376,8 +444,10 @@ impl Default for ProcessorStats {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessorStatsSnapshot {
-    pub records_in: u64,
-    pub records_out: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_out: Option<u64>,
     pub error_count: u64,
     pub last_error: Option<String>,
     #[serde(flatten)]

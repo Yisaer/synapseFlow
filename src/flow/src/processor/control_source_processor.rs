@@ -157,10 +157,6 @@ impl Processor for ControlSourceProcessor {
                 match ingress.target {
                     IngressTarget::Data => {
                         let is_terminal = ingress.data.is_terminal();
-                        let rows = ingress.data.num_rows_hint();
-                        if let Some(rows) = rows {
-                            stats.record_in(rows);
-                        }
                         send_with_backpressure(
                             &output,
                             channel_capacities.data,
@@ -168,9 +164,6 @@ impl Processor for ControlSourceProcessor {
                             Some(stats.as_ref()),
                         )
                         .await?;
-                        if let Some(rows) = rows {
-                            stats.record_out(rows);
-                        }
                         if is_terminal {
                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                             return Ok(());

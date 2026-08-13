@@ -121,12 +121,12 @@ async fn forward_shared_mqtt_event(
 ) -> SharedEventForwardOutcome {
     match event {
         Some(Ok(SharedMqttEvent::Payload(payload))) => {
-            veloflux_metrics::mqtt_source_records_in_total()
+            veloflux_metrics::mqtt_source_messages_in_total()
                 .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
                 .inc();
             match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                 Ok(_) => {
-                    veloflux_metrics::mqtt_source_records_out_total()
+                    veloflux_metrics::mqtt_source_messages_out_total()
                         .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
                         .inc();
                     SharedEventForwardOutcome::Continue
@@ -268,7 +268,7 @@ async fn run_standalone_loop(
             event = event_loop.poll() => {
                 match event {
                     Ok(MqttEvent::Publish { payload, .. }) => {
-                        veloflux_metrics::mqtt_source_records_in_total()
+                        veloflux_metrics::mqtt_source_messages_in_total()
                             .with_label_values(&[
                                 flow_instance_id.as_ref(),
                                 connector_id.as_str(),
@@ -277,7 +277,7 @@ async fn run_standalone_loop(
                         let payload = payload.to_vec();
                         match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                             Ok(_) => {
-                                veloflux_metrics::mqtt_source_records_out_total()
+                                veloflux_metrics::mqtt_source_messages_out_total()
                                     .with_label_values(&[
                                         flow_instance_id.as_ref(),
                                         connector_id.as_str(),

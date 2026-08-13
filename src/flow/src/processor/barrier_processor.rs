@@ -4,12 +4,14 @@
 //! (`children.len() > 1`). It forwards all data downstream, while aligning barrier-style control
 //! signals per-channel before forwarding them.
 
+use crate::planner::physical::DataDomain;
 use crate::processor::barrier::{align_control_signal, BarrierAligner};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::{PassthroughMetrics, BARRIER_METRICS};
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -27,6 +29,7 @@ pub struct BarrierProcessor {
     output: LinkOutput<StreamData>,
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
+    input_domain: DataDomain,
     stats: Arc<ProcessorStats>,
 }
 
@@ -53,12 +56,17 @@ impl BarrierProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            input_domain: DataDomain::Collection,
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
+    }
+
+    pub(crate) fn set_input_domain(&mut self, input_domain: DataDomain) {
+        self.input_domain = input_domain;
     }
 }
 
@@ -84,6 +92,7 @@ impl Processor for BarrierProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
+        let metrics = PassthroughMetrics::new(stats.as_ref(), BARRIER_METRICS, self.input_domain);
 
         tracing::info!(
             processor_id = %id,
@@ -144,9 +153,7 @@ impl Processor for BarrierProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
-                                }
+                                let measurement = metrics.record_input(stats.as_ref(), &data)?;
                                 match data {
                                     StreamData::Control(control_signal) => {
                                         if let Some(signal) =
@@ -161,6 +168,7 @@ impl Processor for BarrierProcessor {
                                                 Some(stats.as_ref()),
                                             )
                                             .await?;
+                                            metrics.record_output(stats.as_ref(), measurement);
                                             if is_terminal {
                                                 tracing::info!(processor_id = %id, "received terminal signal (data)");
                                                 tracing::info!(processor_id = %id, "stopped");
@@ -177,6 +185,7 @@ impl Processor for BarrierProcessor {
                                             Some(stats.as_ref()),
                                         )
                                         .await?;
+                                        metrics.record_output(stats.as_ref(), measurement);
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received terminal item (data)");
                                             tracing::info!(processor_id = %id, "stopped");

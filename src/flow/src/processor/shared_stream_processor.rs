@@ -68,7 +68,7 @@ impl SharedStreamProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -88,6 +88,7 @@ impl SharedStreamProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -198,11 +199,11 @@ impl Processor for SharedStreamProcessor {
                     }
                     data_msg = inputs.next(), if input_active => {
                         if let Some(Ok(data)) = data_msg {
-                            if let Some(rows) = data.num_rows_hint() {
-                                stats.record_in(rows);
+                            if let Some(rows) = data.row_count() {
+                                stats.record_collection_in(rows);
                             }
                             let is_terminal = data.is_terminal();
-                            let out_rows = data.num_rows_hint();
+                            let out_rows = data.row_count();
                             send_with_backpressure(
                                 &output,
                                 channel_capacities.data,
@@ -211,7 +212,7 @@ impl Processor for SharedStreamProcessor {
                             )
                             .await?;
                             if let Some(rows) = out_rows {
-                                stats.record_out(rows);
+                                stats.record_collection_out(rows);
                             }
                             if is_terminal {
                                 return Ok(());
@@ -223,11 +224,11 @@ impl Processor for SharedStreamProcessor {
                     shared_data_msg = shared_data.recv() => {
                         match shared_data_msg {
                             Some(data) => {
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
+                                if let Some(rows) = data.row_count() {
+                                    stats.record_collection_in(rows);
                                 }
                                 let is_terminal = data.is_terminal();
-                                let out_rows = data.num_rows_hint();
+                                let out_rows = data.row_count();
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -236,7 +237,7 @@ impl Processor for SharedStreamProcessor {
                                 )
                                 .await?;
                                 if let Some(rows) = out_rows {
-                                    stats.record_out(rows);
+                                    stats.record_collection_out(rows);
                                 }
                                 if is_terminal {
                                     return Ok(());

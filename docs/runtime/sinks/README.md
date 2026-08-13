@@ -29,6 +29,11 @@ At a high level, sink-side delivery in veloFlux is split into five layers:
 3. **Delivery transforms**
    - Transform encoded delivery bytes before they reach the connector.
    - Examples: gzip/zstd compression and AES-GCM encryption.
+   - The encoder creates one message unit that remains the same unit through transforms,
+     `SinkProcessor`, and the connector; delivery names describe its lifecycle, not a new metric
+     unit.
+   - Collection-native sinks produce the same message unit without serializing it. The collection
+     remains the payload representation, but it is one message after the sink boundary.
 
 4. **Sink retry**
    - Retains a failed encoded delivery at the `SinkProcessor` layer and replays the full connector

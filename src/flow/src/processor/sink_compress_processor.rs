@@ -9,6 +9,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::{TransformMetrics, SINK_COMPRESS_METRICS};
 use crate::processor::EncodedDeliveryFlags;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -107,6 +108,7 @@ impl Processor for SinkCompressProcessor {
         };
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
+        let metrics = TransformMetrics::new(stats.as_ref(), SINK_COMPRESS_METRICS);
         tracing::info!(processor_id = %processor_id, "sink compress processor starting");
 
         ProcessorStart::ready(spawner.spawn(async move {
@@ -155,7 +157,7 @@ impl Processor for SinkCompressProcessor {
                                 match data {
                                     StreamData::EncodedDelivery { flags, bytes } => {
                                         let handle_start = std::time::Instant::now();
-                                        let res = handle_delivery(
+                                        let res = handle_delivery_with_metrics(
                                             writer.as_mut(),
                                             &mut delivery,
                                             flags,
@@ -163,6 +165,7 @@ impl Processor for SinkCompressProcessor {
                                             &output,
                                             channel_capacities.data,
                                             &stats,
+                                            &metrics,
                                         )
                                         .await;
                                         stats.record_handle_duration(handle_start.elapsed());
@@ -201,11 +204,11 @@ impl Processor for SinkCompressProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 &stats,
+                                                &metrics,
                                                 &processor_id,
                                             )
                                             .await;
                                         }
-                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(
                                             &output,
                                             channel_capacities.data,
@@ -213,9 +216,6 @@ impl Processor for SinkCompressProcessor {
                                             Some(stats.as_ref()),
                                         )
                                         .await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             return Ok(());
@@ -241,6 +241,7 @@ impl Processor for SinkCompressProcessor {
                                         &output,
                                         channel_capacities.data,
                                         &stats,
+                                        &metrics,
                                         &processor_id,
                                     )
                                     .await;
@@ -287,7 +288,8 @@ impl Processor for SinkCompressProcessor {
 }
 
 /// Handle one `EncodedDelivery` event through the compress state machine.
-async fn handle_delivery(
+#[allow(clippy::too_many_arguments)]
+async fn handle_delivery_with_metrics(
     writer: &mut dyn CompressWriter,
     delivery: &mut CompressDelivery,
     flags: EncodedDeliveryFlags,
@@ -295,14 +297,16 @@ async fn handle_delivery(
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
+    metrics: &TransformMetrics,
 ) -> Result<(), ProcessorError> {
-    stats.record_in(1);
+    metrics.record_input_bytes(bytes.len());
 
     let is_abort = flags.contains(EncodedDeliveryFlags::ABORT);
     let is_start = flags.contains(EncodedDeliveryFlags::START);
     let is_end = flags.contains(EncodedDeliveryFlags::END);
 
     if is_abort {
+        metrics.record_aborted();
         writer.abort_delivery();
         let was_started = delivery.emitted_chunk;
         *delivery = CompressDelivery::default();
@@ -328,6 +332,7 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 "START received while delivery already active",
             )
             .await;
@@ -339,6 +344,7 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 &e.to_string(),
             )
             .await;
@@ -348,6 +354,10 @@ async fn handle_delivery(
         return Err(ProcessorError::ProcessingError(
             "chunk/END received without active delivery".into(),
         ));
+    }
+
+    if is_end {
+        metrics.record_message_in();
     }
 
     // Compress the input bytes (if any).
@@ -360,6 +370,7 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 &e.to_string(),
             )
             .await;
@@ -374,23 +385,26 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 &e.to_string(),
             )
             .await;
         }
         *delivery = CompressDelivery::default();
         // Always forward END (even if out is empty).
+        let output_bytes = out.len();
         let data = if is_start {
             StreamData::encoded_delivery_single(out)
         } else {
             StreamData::encoded_delivery_end(out)
         };
         send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
-        // One completed delivery = 1 out (matches connector accounting).
-        stats.record_out(1);
+        metrics.record_output_bytes(output_bytes);
+        metrics.record_message_out();
     } else if is_start {
         // Always forward START (even if out is empty). START is not a completed
         // delivery → not counted in record_out.
+        let output_bytes = out.len();
         send_with_backpressure(
             output,
             data_channel_capacity,
@@ -398,10 +412,12 @@ async fn handle_delivery(
             Some(stats.as_ref()),
         )
         .await?;
+        metrics.record_output_bytes(output_bytes);
         delivery.emitted_chunk = true;
     } else if !out.is_empty() {
         // Middle chunk: only forward when natural drain produced output.
         // Not a completed delivery → not counted in record_out.
+        let output_bytes = out.len();
         send_with_backpressure(
             output,
             data_channel_capacity,
@@ -409,6 +425,7 @@ async fn handle_delivery(
             Some(stats.as_ref()),
         )
         .await?;
+        metrics.record_output_bytes(output_bytes);
     }
 
     Ok(())
@@ -425,8 +442,10 @@ async fn abort_in_flight(
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
+    metrics: &TransformMetrics,
     processor_id: &str,
 ) {
+    metrics.record_aborted();
     writer.abort_delivery();
     let was_started = delivery.emitted_chunk;
     *delivery = CompressDelivery::default();
@@ -461,8 +480,10 @@ async fn fail_delivery(
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
+    metrics: &TransformMetrics,
     reason: &str,
 ) -> Result<(), ProcessorError> {
+    metrics.record_aborted();
     writer.abort_delivery();
     let was_started = delivery.emitted_chunk;
     *delivery = CompressDelivery::default();
@@ -559,8 +580,14 @@ mod tests {
     #[tokio::test]
     async fn gzip_single_chunk_delivery_compresses_correctly() {
         let payload = b"hello gzip world";
-        let compressed = run_single_chunk_delivery(gzip_processor("gzip"), payload).await;
+        let stats = Arc::new(ProcessorStats::default());
+        let mut processor = gzip_processor("gzip");
+        processor.set_stats(Arc::clone(&stats));
+        let compressed = run_single_chunk_delivery(processor, payload).await;
         assert_eq!(decompress_gzip(&compressed), payload);
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.records_in, None);
+        assert_eq!(snapshot.records_out, None);
     }
 
     // coverage-covers: sink.compress.zstd_delivery

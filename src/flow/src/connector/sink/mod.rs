@@ -15,6 +15,12 @@ pub trait SinkConnector: Send + Sync + 'static {
     /// Identifier for logging/metrics.
     fn id(&self) -> &str;
 
+    /// Record that one logical message was accepted at the connector boundary.
+    fn record_message_in(&self) {}
+
+    /// Record that one logical message was successfully delivered externally.
+    fn record_message_out(&self) {}
+
     /// Maximum encoded payload size accepted for one delivery.
     ///
     /// Connectors that do not have a fixed delivery-size limit return `None`.
@@ -91,12 +97,6 @@ pub enum SinkConnectorError {
     /// Examples: 400 Bad Request, 404 Not Found, invalid payload.
     #[error("permanent failure: {0}")]
     Permanent(String),
-
-    /// Acknowledgement uncertain — request may or may not have succeeded.
-    /// Logged distinctly so operators can identify possible duplicate deliveries.
-    /// Examples: MQTT QoS 1 PUBACK timeout, HTTP response lost mid-stream.
-    #[error("acknowledgement uncertain: {0}")]
-    Uncertain(String),
 
     /// Catch-all for errors that don't fall into the categories above.
     /// Treated as permanent by default.

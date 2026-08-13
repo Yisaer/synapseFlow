@@ -71,6 +71,12 @@ pub use physical_window::{
 };
 pub use pipeline_state_usage::PipelineStateUsage;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataDomain {
+    Message,
+    Collection,
+}
+
 /// Enum describing all supported physical execution nodes
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]

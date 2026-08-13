@@ -7,11 +7,13 @@
 //! - Latest: Keep only the latest value, emit at fixed intervals (lossy downsampling)
 //! - Future: Merge strategy for combining multiple records
 
+use crate::planner::physical::DataDomain;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::{DataMetricDomains, DataMetrics, SAMPLER_METRICS};
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -104,6 +106,7 @@ pub struct SamplerProcessor {
     merger_schema_artifact: Option<Arc<dyn Any + Send + Sync>>,
     /// Shared decode state for projection pushdown into the fused decode path.
     applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
+    metric_domains: DataMetricDomains,
 }
 
 impl SamplerProcessor {
@@ -134,6 +137,7 @@ impl SamplerProcessor {
             merger_schema: None,
             merger_schema_artifact: None,
             applied_decode_state: None,
+            metric_domains: DataMetricDomains::NONE.passthrough(DataDomain::Message),
         }
     }
 
@@ -148,6 +152,10 @@ impl SamplerProcessor {
 
     pub fn set_merger_registry(&mut self, registry: Arc<MergerRegistry>) {
         self.merger_registry = Some(registry);
+    }
+
+    pub(crate) fn set_metric_domains(&mut self, metric_domains: DataMetricDomains) {
+        self.metric_domains = metric_domains;
     }
 
     /// Provide the output schema used to construct a Packer merger (required for
@@ -199,18 +207,22 @@ impl Processor for SamplerProcessor {
         let merger_schema = self.merger_schema.clone();
         let merger_schema_artifact = self.merger_schema_artifact.clone();
         let applied_decode_state = self.applied_decode_state.clone();
+        let metric_domains = self.metric_domains;
+        let mut strategy_state = match StrategyState::new(
+            strategy,
+            merger_registry,
+            merger_schema,
+            merger_schema_artifact,
+            applied_decode_state,
+        ) {
+            Ok(state) => state,
+            Err(err) => return ProcessorStart::failed(spawner, err),
+        };
+        let data_metrics = DataMetrics::new(stats.as_ref(), SAMPLER_METRICS, metric_domains);
 
         ProcessorStart::ready(spawner.spawn(async move {
             let mut ticker = interval(emit_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            let mut strategy_state = StrategyState::new(
-                strategy,
-                merger_registry,
-                merger_schema,
-                merger_schema_artifact,
-                applied_decode_state,
-            )?;
             let mut control_active = control_active;
 
             loop {
@@ -227,7 +239,13 @@ impl Processor for SamplerProcessor {
                             .await?;
                             if is_terminal {
                                 if let Some(pending) = strategy_state.flush() {
-                                    emit_data(&output, channel_capacities.data, &stats, pending)
+                                    emit_data(
+                                        &output,
+                                        channel_capacities.data,
+                                        &stats,
+                                        &data_metrics,
+                                        pending,
+                                    )
                                         .await?;
                                 }
                                 tracing::info!(processor_id = %processor_id, "sampler received terminal signal, shutting down");
@@ -241,7 +259,14 @@ impl Processor for SamplerProcessor {
                     }
                     _ = ticker.tick() => {
                         if let Some(data) = strategy_state.on_tick() {
-                            emit_data(&output, channel_capacities.data, &stats, data).await?;
+                            emit_data(
+                                &output,
+                                channel_capacities.data,
+                                &stats,
+                                &data_metrics,
+                                data,
+                            )
+                            .await?;
                             tracing::trace!(processor_id = %processor_id, "sampler emitted tick value");
                         }
                     }
@@ -249,7 +274,7 @@ impl Processor for SamplerProcessor {
                         match data_item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                stats.record_in(data.num_rows_hint().unwrap_or(0));
+                                data_metrics.record_input(stats.as_ref(), &data)?;
 
                                 if !should_sample_data(&data) {
                                     // Do not throttle non-data items received on the data channel.
@@ -261,16 +286,29 @@ impl Processor for SamplerProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 &stats,
+                                                &data_metrics,
                                                 pending,
                                             )
                                             .await?;
                                         }
-                                        emit_data(&output, channel_capacities.data, &stats, data)
+                                        emit_data(
+                                            &output,
+                                            channel_capacities.data,
+                                            &stats,
+                                            &data_metrics,
+                                            data,
+                                        )
                                             .await?;
                                         tracing::info!(processor_id = %processor_id, "sampler received terminal item on data channel, shutting down");
                                         return Ok(());
                                     }
-                                    emit_data(&output, channel_capacities.data, &stats, data)
+                                    emit_data(
+                                        &output,
+                                        channel_capacities.data,
+                                        &stats,
+                                        &data_metrics,
+                                        data,
+                                    )
                                         .await?;
                                     continue;
                                 }
@@ -292,7 +330,13 @@ impl Processor for SamplerProcessor {
                             }
                             None => {
                                 if let Some(pending) = strategy_state.flush() {
-                                    emit_data(&output, channel_capacities.data, &stats, pending)
+                                    emit_data(
+                                        &output,
+                                        channel_capacities.data,
+                                        &stats,
+                                        &data_metrics,
+                                        pending,
+                                    )
                                         .await?;
                                 }
                                 tracing::info!(processor_id = %processor_id, "sampler input closed, shutting down");
@@ -446,11 +490,12 @@ async fn emit_data(
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
+    data_metrics: &DataMetrics,
     data: StreamData,
 ) -> Result<(), ProcessorError> {
-    let row_count = data.num_rows_hint().unwrap_or(0);
+    let measurement = DataMetrics::measure(&data);
     send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
-    stats.record_out(row_count);
+    data_metrics.record_output(stats.as_ref(), measurement)?;
     Ok(())
 }
 
@@ -490,6 +535,7 @@ mod tests {
     async fn test_sampler_emits_latest_value() {
         let spawner = test_spawner();
         let mut sampler = SamplerProcessor::latest("latest_test", Duration::from_millis(200));
+        sampler.set_metric_domains(DataMetricDomains::NONE.passthrough(DataDomain::Collection));
 
         let (input_tx, input_rx) = broadcast::channel::<StreamData>(16);
         sampler.add_input(input_rx);

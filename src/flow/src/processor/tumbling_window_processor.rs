@@ -64,7 +64,7 @@ impl TumblingWindowProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -76,6 +76,7 @@ impl TumblingWindowProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -132,7 +133,7 @@ impl Processor for TumblingWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                stats.record_in(collection.num_rows() as u64);
+                                stats.record_collection_in(collection.num_rows() as u64);
                                 let handle_start = std::time::Instant::now();
                                 let res = state.add_collection(collection).await;
                                 // Tumbling window enqueue/buffer work is local-only.
@@ -456,7 +457,7 @@ impl ProcessingState {
                 Some(self.stats.as_ref()),
             )
             .await?;
-            self.stats.record_out(row_count);
+            self.stats.record_collection_out(row_count);
         }
         Ok(())
     }
@@ -518,7 +519,7 @@ impl ProcessingState {
                 Some(self.stats.as_ref()),
             )
             .await?;
-            self.stats.record_out(row_count);
+            self.stats.record_collection_out(row_count);
         }
         Ok(())
     }
@@ -563,7 +564,7 @@ mod tests {
         let spawner = test_spawner();
         let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
         let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
-        let stats = Arc::new(ProcessorStats::default());
+        let stats = Arc::new(ProcessorStats::collection_in_out());
         processor.set_stats(Arc::clone(&stats));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
@@ -597,7 +598,7 @@ mod tests {
                 BarrierControlSignal::StreamGracefulEnd { .. }
             ))
         ));
-        assert_eq!(stats.snapshot().records_out, 2);
+        assert_eq!(stats.snapshot().records_out, Some(2));
     }
 
     #[tokio::test]
@@ -605,7 +606,7 @@ mod tests {
         let spawner = test_spawner();
         let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
         let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
-        let stats = Arc::new(ProcessorStats::default());
+        let stats = Arc::new(ProcessorStats::collection_in_out());
         processor.set_stats(Arc::clone(&stats));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());

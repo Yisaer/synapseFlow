@@ -15,6 +15,7 @@ pub mod batch_processor;
 pub mod collection_layout_normalize_processor;
 pub mod compute_processor;
 pub mod control_source_processor;
+pub(crate) mod data_metrics;
 pub mod datasource_processor;
 pub mod decoder_processor;
 pub mod empty_suppress_processor;

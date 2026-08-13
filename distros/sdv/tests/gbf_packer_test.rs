@@ -346,9 +346,9 @@ fn test_gbf_packer_integration() {
         for stat in stats.as_array().unwrap_or(&vec![]) {
             if let Some(id) = stat.get("processor_id").and_then(|v| v.as_str()) {
                 if id.contains("Sampler") {
-                    let records_in = stat
+                    let messages_in = stat
                         .get("stats")
-                        .and_then(|s| s.get("records_in"))
+                        .and_then(|s| s.get("messages_in"))
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0);
                     let records_out = stat
@@ -356,11 +356,11 @@ fn test_gbf_packer_integration() {
                         .and_then(|s| s.get("records_out"))
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0);
-                    assert_eq!(records_in, 3, "Expected sampler to receive 3 packets");
+                    assert_eq!(messages_in, 3, "Expected sampler to receive 3 messages");
                     assert_eq!(records_out, 1, "Expected sampler to emit 1 merged packet");
                     println!(
-                        "✓ Sampler stats verified: in={}, out={}",
-                        records_in, records_out
+                        "✓ Sampler stats verified: messages_in={}, records_out={}",
+                        messages_in, records_out
                     );
                 }
             }

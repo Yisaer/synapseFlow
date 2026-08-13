@@ -1,6 +1,7 @@
 use super::{
     bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
-    records_value, wait_for_pipeline_activity, wait_for_shared_stream_status, ManagerHarness,
+    records_value_or_zero, wait_for_pipeline_activity, wait_for_shared_stream_status,
+    ManagerHarness,
 };
 use sdk::PipelineCreateRequest;
 use sdk::StopOptions;
@@ -15,7 +16,9 @@ use std::time::Duration;
 fn total_records(stats: &[JsonValue]) -> u64 {
     stats
         .iter()
-        .map(|entry| records_value(entry, "records_in") + records_value(entry, "records_out"))
+        .map(|entry| {
+            records_value_or_zero(entry, "records_in") + records_value_or_zero(entry, "records_out")
+        })
         .sum()
 }
 

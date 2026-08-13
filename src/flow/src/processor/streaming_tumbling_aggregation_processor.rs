@@ -84,7 +84,7 @@ impl StreamingTumblingAggregationProcessor {
             group_by_meta,
             partition_by_scalars,
             len_secs,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
 
@@ -108,6 +108,7 @@ impl StreamingTumblingAggregationProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -165,7 +166,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                 log_received_data(&id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        stats.record_in(collection.num_rows() as u64);
+                                        stats.record_collection_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
                                         for row in collection.rows() {
                                             match window_state.add_row(row) {
@@ -380,7 +381,7 @@ impl ProcessingWindowState {
                     state.start_secs,
                     state.end_secs,
                 )?;
-                stats.record_out(batch.num_rows() as u64);
+                stats.record_collection_out(batch.num_rows() as u64);
                 send_with_backpressure(
                     output,
                     data_channel_capacity,
@@ -410,7 +411,7 @@ impl ProcessingWindowState {
                     state.start_secs,
                     state.end_secs,
                 )?;
-                stats.record_out(batch.num_rows() as u64);
+                stats.record_collection_out(batch.num_rows() as u64);
                 send_with_backpressure(
                     output,
                     data_channel_capacity,

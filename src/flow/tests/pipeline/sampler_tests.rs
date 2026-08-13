@@ -2,6 +2,7 @@
 
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+use flow::codec::MergerOutputKind;
 use flow::planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig, SinkOutputConfig,
@@ -222,13 +223,13 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
         .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
         .expect("sampler stats should exist");
     for _ in 0..20 {
-        if sampler_handle.snapshot().stats.records_in == 5 {
+        if sampler_handle.snapshot().stats.custom["messages_in"] == 5 {
             break;
         }
         tokio::task::yield_now().await;
     }
     assert_eq!(
-        sampler_handle.snapshot().stats.records_in,
+        sampler_handle.snapshot().stats.custom["messages_in"],
         5,
         "sampler should consume all inputs before the sampling tick"
     );
@@ -242,12 +243,12 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
 
     let sampler_stats = sampler_handle.snapshot().stats;
     assert_eq!(
-        sampler_stats.records_in, 5,
+        sampler_stats.custom["messages_in"], 5,
         "sampler should observe all inputs"
     );
     assert_eq!(
-        sampler_stats.records_out, 1,
-        "sampler should emit one sampled row"
+        sampler_stats.custom["messages_out"], 1,
+        "sampler should emit one sampled message"
     );
 
     timeout(
@@ -322,12 +323,12 @@ async fn sampler_latest_flushes_buffer_on_close() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 2,
+        sampler_stats.custom["messages_in"], 2,
         "sampler should observe both inputs"
     );
     assert_eq!(
-        sampler_stats.records_out, 1,
-        "sampler should flush one buffered row on close"
+        sampler_stats.custom["messages_out"], 1,
+        "sampler should flush one buffered message on close"
     );
 }
 
@@ -390,12 +391,12 @@ async fn sampler_latest_before_filter_and_projection() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 3,
+        sampler_stats.custom["messages_in"], 3,
         "sampler should observe both filtered and passing inputs"
     );
     assert_eq!(
-        sampler_stats.records_out, 2,
-        "sampler should emit one sampled row per interval before downstream filtering"
+        sampler_stats.custom["messages_out"], 2,
+        "sampler should emit one sampled message per interval before downstream filtering"
     );
 
     timeout(
@@ -466,12 +467,12 @@ async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 3,
+        sampler_stats.custom["messages_in"], 3,
         "sampler should observe filtered and non-filtered inputs before omit_if_empty"
     );
     assert_eq!(
-        sampler_stats.records_out, 2,
-        "sampler should still emit one sampled row per interval before downstream suppression"
+        sampler_stats.custom["messages_out"], 2,
+        "sampler should still emit one sampled message per interval before downstream suppression"
     );
 
     timeout(
@@ -559,12 +560,12 @@ async fn sampler_latest_before_row_diff_delta_output() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 5,
+        sampler_stats.custom["messages_in"], 5,
         "sampler should observe every raw input before row diff"
     );
     assert_eq!(
-        sampler_stats.records_out, 3,
-        "sampler should emit one sampled row per interval into row diff"
+        sampler_stats.custom["messages_out"], 3,
+        "sampler should emit one sampled message per interval into row diff"
     );
 
     timeout(
@@ -678,12 +679,12 @@ async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 12,
+        sampler_stats.custom["messages_in"], 12,
         "sampler should observe every raw input before streaming aggregation"
     );
     assert_eq!(
-        sampler_stats.records_out, 6,
-        "sampler should emit one sampled row per interval into streaming aggregation"
+        sampler_stats.custom["messages_out"], 6,
+        "sampler should emit one sampled message per interval into streaming aggregation"
     );
 
     timeout(
@@ -808,12 +809,12 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 12,
+        sampler_stats.custom["messages_in"], 12,
         "sampler should observe every raw input before streaming aggregation and batching"
     );
     assert_eq!(
-        sampler_stats.records_out, 6,
-        "sampler should still emit one sampled row per interval before downstream batching"
+        sampler_stats.custom["messages_out"], 6,
+        "sampler should still emit one sampled message per interval before downstream batching"
     );
 
     timeout(
@@ -831,11 +832,11 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
         "default", None,
     ))
     .expect("create flow instance");
-    instance
-        .merger_registry()
-        .register("json_object_merge", |_props, _schema| {
-            Ok(Box::new(JsonObjectMerger::default()))
-        });
+    instance.merger_registry().register(
+        "json_object_merge",
+        MergerOutputKind::Bytes,
+        |_props, _schema| Ok(Box::new(JsonObjectMerger::default())),
+    );
     create_stream_with_sampler(
         &instance,
         "packer_stream",
@@ -877,11 +878,11 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 3,
+        sampler_stats.custom["messages_in"], 3,
         "sampler should observe all bytes inputs"
     );
     assert_eq!(
-        sampler_stats.records_out, 1,
+        sampler_stats.custom["messages_out"], 1,
         "sampler should emit one merged payload per interval"
     );
 
@@ -900,11 +901,11 @@ async fn sampler_packer_flushes_buffer_on_close() {
         "default", None,
     ))
     .expect("create flow instance");
-    instance
-        .merger_registry()
-        .register("json_object_merge", |_props, _schema| {
-            Ok(Box::new(JsonObjectMerger::default()))
-        });
+    instance.merger_registry().register(
+        "json_object_merge",
+        MergerOutputKind::Bytes,
+        |_props, _schema| Ok(Box::new(JsonObjectMerger::default())),
+    );
     create_stream_with_sampler(
         &instance,
         "packer_flush_stream",
@@ -965,11 +966,11 @@ async fn sampler_packer_flushes_buffer_on_close() {
         .snapshot()
         .stats;
     assert_eq!(
-        sampler_stats.records_in, 2,
+        sampler_stats.custom["messages_in"], 2,
         "sampler should observe both packed inputs"
     );
     assert_eq!(
-        sampler_stats.records_out, 1,
+        sampler_stats.custom["messages_out"], 1,
         "sampler should flush one merged payload on close"
     );
 }

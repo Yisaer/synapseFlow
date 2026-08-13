@@ -231,16 +231,7 @@ impl StandaloneMqttClient {
                 )
                 .await
         };
-        result.map_err(|err| {
-            // For QoS 1 and 2, the outcome is uncertain when the publish
-            // call itself fails: the message may have been partially
-            // delivered or acknowledged.
-            if matches!(qos, MqttQos::Qos1 | MqttQos::Qos2) {
-                SinkConnectorError::Uncertain(format!("mqtt publish error (QoS {:?}): {err}", qos))
-            } else {
-                SinkConnectorError::Transient(format!("mqtt publish error: {err}"))
-            }
-        })
+        result.map_err(|err| SinkConnectorError::Transient(format!("mqtt publish error: {err}")))
     }
 
     async fn shutdown(self) -> Result<(), SinkConnectorError> {
@@ -361,6 +352,18 @@ impl SinkConnector for MqttSinkConnector {
         &self.id
     }
 
+    fn record_message_in(&self) {
+        veloflux_metrics::mqtt_sink_messages_in_total()
+            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
+            .inc();
+    }
+
+    fn record_message_out(&self) {
+        veloflux_metrics::mqtt_sink_messages_out_total()
+            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
+            .inc();
+    }
+
     fn max_delivery_bytes(&self) -> Option<usize> {
         self.config.max_packet_size
     }
@@ -392,9 +395,6 @@ impl SinkConnector for MqttSinkConnector {
         let bytes_written = payload.len() as u64;
         let qos = self.publish_qos()?;
         if let Some(client) = &self.client {
-            veloflux_metrics::mqtt_sink_records_in_total()
-                .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-                .inc();
             client
                 .publish(
                     self.config.topic.expose(),
@@ -403,12 +403,7 @@ impl SinkConnector for MqttSinkConnector {
                     payload,
                     &self.config.user_properties,
                 )
-                .await
-                .map(|_| {
-                    veloflux_metrics::mqtt_sink_records_out_total()
-                        .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-                        .inc()
-                })?;
+                .await?;
             Ok(DeliveryResult { bytes_written })
         } else {
             Err(SinkConnectorError::Transient(format!(

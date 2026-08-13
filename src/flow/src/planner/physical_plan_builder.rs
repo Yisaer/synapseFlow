@@ -14,14 +14,15 @@ use crate::planner::logical::{
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink,
-    PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress,
-    PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
-    PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
-    PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
-    PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
-    PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage, StatefulCall, WatermarkConfig,
+    DataDomain, PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute,
+    PhysicalDataSink, PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec,
+    PhysicalEmptySuppress, PhysicalEventtimeWatermark, PhysicalFilter,
+    PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
+    PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
+    PhysicalSampler, PhysicalSharedStream, PhysicalSharedStreamRequirement, PhysicalSinkCompress,
+    PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate,
+    PhysicalStatefulFunction, PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage,
+    StatefulCall, WatermarkConfig,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -1001,12 +1002,18 @@ fn create_physical_data_source_with_builder(
     };
     match entry.kind {
         SourceBindingKind::Regular | SourceBindingKind::MemoryCollection => {
+            let source_domain = if decoder_kind == "none" {
+                DataDomain::Collection
+            } else {
+                DataDomain::Message
+            };
             let physical_ds = PhysicalDataSource::new(
                 logical_ds.source_name.clone(),
                 Arc::clone(&schema),
                 logical_ds.decode_projection.clone(),
                 index,
-            );
+            )
+            .with_output_domain(source_domain);
             let datasource_plan = Arc::new(PhysicalPlan::DataSource(physical_ds));
             let sampler_plan = logical_ds.sampler().map(|sampler_config| {
                 let sampler_index = builder.allocate_index();

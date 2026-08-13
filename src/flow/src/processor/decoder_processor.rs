@@ -3,11 +3,13 @@
 use crate::codec::RecordDecoder;
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
 use crate::planner::decode_projection::DecodeProjection;
+use crate::planner::physical::DataDomain;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::{DataMetricDomains, DataMetrics, DECODER_METRICS};
 use crate::processor::{ControlSignal, Processor, ProcessorStart, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
 use crate::shared_stream::AppliedDecodeState;
@@ -36,6 +38,7 @@ pub struct DecoderProcessor {
     shared_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
     decode_projection: Option<DecodeProjection>,
     eventtime: Option<EventtimeDecodeConfig>,
+    metric_domains: DataMetricDomains,
     stats: Arc<ProcessorStats>,
 }
 
@@ -70,6 +73,9 @@ impl DecoderProcessor {
             shared_decode_state: None,
             decode_projection: None,
             eventtime: None,
+            metric_domains: DataMetricDomains::NONE
+                .with_input(DataDomain::Message)
+                .with_output(DataDomain::Collection),
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -95,6 +101,10 @@ impl DecoderProcessor {
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
     }
+
+    pub(crate) fn set_metric_domains(&mut self, metric_domains: DataMetricDomains) {
+        self.metric_domains = metric_domains;
+    }
 }
 
 impl Processor for DecoderProcessor {
@@ -112,6 +122,7 @@ impl Processor for DecoderProcessor {
         let processor_id = self.id.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
+        let data_metrics = DataMetrics::new(stats.as_ref(), DECODER_METRICS, self.metric_domains);
         let base_inputs = std::mem::take(&mut self.inputs);
         let mut input_streams = fan_in_streams(base_inputs);
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -145,9 +156,7 @@ impl Processor for DecoderProcessor {
                         match item {
                             Some(Ok(mut data)) => {
                                 log_received_data(&processor_id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
-                                }
+                                data_metrics.record_input(stats.as_ref(), &data)?;
                                 let mut decode_handle_start: Option<std::time::Instant> = None;
                                 if let StreamData::Bytes(payload) = &data {
                                     decode_handle_start = Some(std::time::Instant::now());
@@ -226,7 +235,7 @@ impl Processor for DecoderProcessor {
                                     };
                                 }
                                 let is_terminal = data.is_terminal();
-                                let out_rows = data.num_rows_hint();
+                                let output_measurement = DataMetrics::measure(&data);
                                 let send_res = send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -239,9 +248,7 @@ impl Processor for DecoderProcessor {
                                     stats.record_handle_duration(handle_start.elapsed());
                                 }
                                 send_res?;
-                                if let Some(rows) = out_rows {
-                                    stats.record_out(rows);
-                                }
+                                data_metrics.record_output(stats.as_ref(), output_measurement)?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %processor_id, "stopped");

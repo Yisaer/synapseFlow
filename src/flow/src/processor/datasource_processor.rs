@@ -4,11 +4,13 @@
 //! `StreamData::Bytes`. Decoding is handled by a dedicated decoder processor.
 
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
+use crate::planner::physical::DataDomain;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::{DataMetricDomains, DataMetrics, DATASOURCE_METRICS};
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -41,6 +43,7 @@ pub struct DataSourceProcessor {
     channel_capacities: ProcessorChannelCapacities,
     /// External source connectors that feed this processor
     connectors: Vec<ConnectorBinding>,
+    metric_domains: DataMetricDomains,
     stats: Arc<ProcessorStats>,
 }
 
@@ -214,12 +217,17 @@ impl DataSourceProcessor {
             control_output,
             channel_capacities,
             connectors: Vec::new(),
+            metric_domains: DataMetricDomains::NONE.passthrough(DataDomain::Message),
             stats: Arc::new(ProcessorStats::default()),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
+    }
+
+    pub(crate) fn set_metric_domains(&mut self, metric_domains: DataMetricDomains) {
+        self.metric_domains = metric_domains;
     }
 
     /// Register an external source connector and its decoder.
@@ -264,17 +272,13 @@ impl DataSourceProcessor {
         output: &LinkOutput<StreamData>,
         channel_capacity: usize,
         stats: &ProcessorStats,
+        data_metrics: &DataMetrics,
         data: StreamData,
     ) -> Result<(), ProcessorError> {
         log_received_data(processor_id, &data);
-        if let Some(rows) = data.num_rows_hint() {
-            stats.record_in(rows);
-        }
-        let out_rows = data.num_rows_hint();
+        let measurement = data_metrics.record_input(stats, &data)?;
         send_with_backpressure(output, channel_capacity, data, Some(stats)).await?;
-        if let Some(rows) = out_rows {
-            stats.record_out(rows);
-        }
+        data_metrics.record_output(stats, measurement)?;
         Ok(())
     }
 }
@@ -290,6 +294,8 @@ impl Processor for DataSourceProcessor {
         let processor_id = self.id.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
+        let data_metrics =
+            DataMetrics::new(stats.as_ref(), DATASOURCE_METRICS, self.metric_domains);
         let plan_label = self
             .plan_index
             .map(|idx| idx.to_string())
@@ -379,6 +385,7 @@ impl Processor for DataSourceProcessor {
                                             &output,
                                             channel_capacities.data,
                                             stats.as_ref(),
+                                            &data_metrics,
                                             pending,
                                         )
                                         .await?;
@@ -388,6 +395,7 @@ impl Processor for DataSourceProcessor {
                                         &output,
                                         channel_capacities.data,
                                         stats.as_ref(),
+                                        &data_metrics,
                                         data,
                                     )
                                     .await?;
@@ -404,6 +412,7 @@ impl Processor for DataSourceProcessor {
                                     &output,
                                     channel_capacities.data,
                                     stats.as_ref(),
+                                    &data_metrics,
                                     data,
                                 )
                                 .await?;

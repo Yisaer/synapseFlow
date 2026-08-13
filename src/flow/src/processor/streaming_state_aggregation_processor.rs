@@ -90,7 +90,7 @@ impl StreamingStateAggregationProcessor {
             channel_capacities,
             group_by_meta,
             state_window,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
 
@@ -123,6 +123,7 @@ impl StreamingStateAggregationProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 
@@ -168,7 +169,7 @@ impl StreamingStateAggregationProcessor {
                         Some(stats.as_ref()),
                     )
                     .await?;
-                    stats.record_out(row_count);
+                    stats.record_collection_out(row_count);
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -229,7 +230,7 @@ impl Processor for StreamingStateAggregationProcessor {
                     data_item = input_streams.next() => {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                stats.record_in(collection.num_rows() as u64);
+                                stats.record_collection_in(collection.num_rows() as u64);
                                 let handle_start = std::time::Instant::now();
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
@@ -363,7 +364,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                                     stats.record_handle_duration(handle_start.elapsed());
                                                     return Err(err);
                                                 }
-                                                stats.record_out(row_count);
+                                                stats.record_collection_out(row_count);
                                             }
                                             Ok(None) => {}
                                             Err(e) => {

@@ -9,6 +9,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::data_metrics::{TransformMetrics, SINK_ENCRYPT_METRICS};
 use crate::processor::EncodedDeliveryFlags;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -106,6 +107,7 @@ impl Processor for SinkEncryptProcessor {
         };
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
+        let metrics = TransformMetrics::new(stats.as_ref(), SINK_ENCRYPT_METRICS);
         tracing::info!(processor_id = %processor_id, "sink encrypt processor starting");
 
         ProcessorStart::ready(spawner.spawn(async move {
@@ -146,7 +148,7 @@ impl Processor for SinkEncryptProcessor {
                                 match data {
                                     StreamData::EncodedDelivery { flags, bytes } => {
                                         let handle_start = std::time::Instant::now();
-                                        let res = handle_delivery(
+                                        let res = handle_delivery_with_metrics(
                                             writer.as_mut(),
                                             &mut delivery,
                                             flags,
@@ -154,6 +156,7 @@ impl Processor for SinkEncryptProcessor {
                                             &output,
                                             channel_capacities.data,
                                             &stats,
+                                            &metrics,
                                         )
                                         .await;
                                         stats.record_handle_duration(handle_start.elapsed());
@@ -191,11 +194,11 @@ impl Processor for SinkEncryptProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 &stats,
+                                                &metrics,
                                                 &processor_id,
                                             )
                                             .await;
                                         }
-                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(
                                             &output,
                                             channel_capacities.data,
@@ -203,9 +206,6 @@ impl Processor for SinkEncryptProcessor {
                                             Some(stats.as_ref()),
                                         )
                                         .await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             return Ok(());
@@ -228,6 +228,7 @@ impl Processor for SinkEncryptProcessor {
                                         &output,
                                         channel_capacities.data,
                                         &stats,
+                                        &metrics,
                                         &processor_id,
                                     )
                                     .await;
@@ -273,6 +274,7 @@ impl Processor for SinkEncryptProcessor {
     }
 }
 
+#[cfg(test)]
 async fn handle_delivery(
     writer: &mut dyn EncryptWriter,
     delivery: &mut EncryptDelivery,
@@ -282,13 +284,38 @@ async fn handle_delivery(
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
 ) -> Result<(), ProcessorError> {
-    stats.record_in(1);
+    handle_delivery_with_metrics(
+        writer,
+        delivery,
+        flags,
+        bytes,
+        output,
+        data_channel_capacity,
+        stats,
+        &TransformMetrics::new(stats.as_ref(), SINK_ENCRYPT_METRICS),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_delivery_with_metrics(
+    writer: &mut dyn EncryptWriter,
+    delivery: &mut EncryptDelivery,
+    flags: EncodedDeliveryFlags,
+    bytes: Bytes,
+    output: &LinkOutput<StreamData>,
+    data_channel_capacity: usize,
+    stats: &Arc<ProcessorStats>,
+    metrics: &TransformMetrics,
+) -> Result<(), ProcessorError> {
+    metrics.record_input_bytes(bytes.len());
 
     let is_abort = flags.contains(EncodedDeliveryFlags::ABORT);
     let is_start = flags.contains(EncodedDeliveryFlags::START);
     let is_end = flags.contains(EncodedDeliveryFlags::END);
 
     if is_abort {
+        metrics.record_aborted();
         writer.abort_delivery();
         let was_started = delivery.emitted_chunk;
         *delivery = EncryptDelivery::default();
@@ -312,6 +339,7 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 "START received while delivery already active",
             )
             .await;
@@ -325,12 +353,14 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 &e.to_string(),
             )
             .await;
         }
 
         if is_end {
+            metrics.record_message_in();
             if let Err(e) = writer.finish(&bytes, &mut out) {
                 return fail_delivery(
                     writer,
@@ -338,10 +368,12 @@ async fn handle_delivery(
                     output,
                     data_channel_capacity,
                     stats,
+                    metrics,
                     &e.to_string(),
                 )
                 .await;
             }
+            let output_bytes = out.len();
             send_with_backpressure(
                 output,
                 data_channel_capacity,
@@ -349,7 +381,8 @@ async fn handle_delivery(
                 Some(stats.as_ref()),
             )
             .await?;
-            stats.record_out(1);
+            metrics.record_output_bytes(output_bytes);
+            metrics.record_message_out();
             *delivery = EncryptDelivery::default();
             return Ok(());
         }
@@ -362,12 +395,14 @@ async fn handle_delivery(
                     output,
                     data_channel_capacity,
                     stats,
+                    metrics,
                     &e.to_string(),
                 )
                 .await;
             }
         }
 
+        let output_bytes = out.len();
         send_with_backpressure(
             output,
             data_channel_capacity,
@@ -375,6 +410,7 @@ async fn handle_delivery(
             Some(stats.as_ref()),
         )
         .await?;
+        metrics.record_output_bytes(output_bytes);
         delivery.active = true;
         delivery.emitted_chunk = true;
         return Ok(());
@@ -387,6 +423,7 @@ async fn handle_delivery(
     }
 
     if is_end {
+        metrics.record_message_in();
         let mut out = Vec::new();
         if let Err(e) = writer.finish(&bytes, &mut out) {
             return fail_delivery(
@@ -395,11 +432,13 @@ async fn handle_delivery(
                 output,
                 data_channel_capacity,
                 stats,
+                metrics,
                 &e.to_string(),
             )
             .await;
         }
         *delivery = EncryptDelivery::default();
+        let output_bytes = out.len();
         send_with_backpressure(
             output,
             data_channel_capacity,
@@ -407,7 +446,8 @@ async fn handle_delivery(
             Some(stats.as_ref()),
         )
         .await?;
-        stats.record_out(1);
+        metrics.record_output_bytes(output_bytes);
+        metrics.record_message_out();
         return Ok(());
     }
 
@@ -423,10 +463,12 @@ async fn handle_delivery(
             output,
             data_channel_capacity,
             stats,
+            metrics,
             &e.to_string(),
         )
         .await;
     }
+    let output_bytes = out.len();
     send_with_backpressure(
         output,
         data_channel_capacity,
@@ -434,6 +476,7 @@ async fn handle_delivery(
         Some(stats.as_ref()),
     )
     .await?;
+    metrics.record_output_bytes(output_bytes);
 
     Ok(())
 }
@@ -444,8 +487,10 @@ async fn abort_in_flight(
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
+    metrics: &TransformMetrics,
     processor_id: &str,
 ) {
+    metrics.record_aborted();
     writer.abort_delivery();
     let was_started = delivery.emitted_chunk;
     *delivery = EncryptDelivery::default();
@@ -478,8 +523,10 @@ async fn fail_delivery(
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
+    metrics: &TransformMetrics,
     reason: &str,
 ) -> Result<(), ProcessorError> {
+    metrics.record_aborted();
     writer.abort_delivery();
     let was_started = delivery.emitted_chunk;
     *delivery = EncryptDelivery::default();
@@ -563,6 +610,9 @@ mod tests {
         assert!(!flags.contains(EncodedDeliveryFlags::ABORT));
         assert!(!bytes.is_empty());
         assert!(!delivery.active);
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.records_in, None);
+        assert_eq!(snapshot.records_out, None);
     }
 
     // coverage-covers: sink.encrypt.aes_gcm_delivery

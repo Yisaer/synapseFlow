@@ -65,7 +65,7 @@ impl TableScanProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -86,6 +86,7 @@ impl TableScanProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 
@@ -218,13 +219,13 @@ impl TableScanProcessor {
         data: StreamData,
     ) -> Result<(), ProcessorError> {
         log_received_data(processor_id, &data);
-        if let Some(rows) = data.num_rows_hint() {
-            stats.record_in(rows);
+        if let Some(rows) = data.row_count() {
+            stats.record_collection_in(rows);
         }
-        let out_rows = data.num_rows_hint();
+        let out_rows = data.row_count();
         send_with_backpressure(output, channel_capacity, data, Some(stats)).await?;
         if let Some(rows) = out_rows {
-            stats.record_out(rows);
+            stats.record_collection_out(rows);
         }
         Ok(())
     }
@@ -330,7 +331,7 @@ impl Processor for TableScanProcessor {
                         match scan_item {
                             Some(TableScanEvent::Collection(batch)) => {
                                 let data = StreamData::collection(Box::new(batch));
-                                let out_rows = data.num_rows_hint();
+                                let out_rows = data.row_count();
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -339,7 +340,7 @@ impl Processor for TableScanProcessor {
                                 )
                                 .await?;
                                 if let Some(rows) = out_rows {
-                                    stats.record_out(rows);
+                                    stats.record_collection_out(rows);
                                 }
                             }
                             Some(TableScanEvent::Done) | None => {

@@ -120,10 +120,8 @@ impl Drop for ManagerHarness {
     }
 }
 
-pub fn records_value(entry: &JsonValue, field: &str) -> u64 {
-    entry["stats"][field]
-        .as_u64()
-        .unwrap_or_else(|| panic!("missing numeric stats field {field} in {entry}"))
+pub fn records_value_or_zero(entry: &JsonValue, field: &str) -> u64 {
+    entry["stats"][field].as_u64().unwrap_or(0)
 }
 
 pub async fn wait_for_pipeline_activity(
@@ -145,7 +143,8 @@ pub async fn wait_for_pipeline_activity(
                 .await
                 .expect("decode pipeline stats");
             if stats.iter().any(|entry| {
-                records_value(entry, "records_in") > 0 || records_value(entry, "records_out") > 0
+                records_value_or_zero(entry, "records_in") > 0
+                    || records_value_or_zero(entry, "records_out") > 0
             }) {
                 return stats;
             }

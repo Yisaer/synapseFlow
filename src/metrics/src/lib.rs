@@ -27,36 +27,36 @@ pub fn default_flow_instance_id() -> &'static str {
     flow_instance::default_id()
 }
 
-pub fn mqtt_source_records_in_total() -> &'static IntCounterVec {
-    mqtt_source::records_in_total()
+pub fn mqtt_source_messages_in_total() -> &'static IntCounterVec {
+    mqtt_source::messages_in_total()
 }
 
-pub fn mqtt_source_records_out_total() -> &'static IntCounterVec {
-    mqtt_source::records_out_total()
+pub fn mqtt_source_messages_out_total() -> &'static IntCounterVec {
+    mqtt_source::messages_out_total()
 }
 
-pub fn mqtt_sink_records_in_total() -> &'static IntCounterVec {
-    mqtt_sink::records_in_total()
+pub fn mqtt_sink_messages_in_total() -> &'static IntCounterVec {
+    mqtt_sink::messages_in_total()
 }
 
-pub fn mqtt_sink_records_out_total() -> &'static IntCounterVec {
-    mqtt_sink::records_out_total()
+pub fn mqtt_sink_messages_out_total() -> &'static IntCounterVec {
+    mqtt_sink::messages_out_total()
 }
 
-pub fn nng_pubsub_source_records_in_total() -> &'static IntCounterVec {
-    nng_pubsub_source::records_in_total()
+pub fn nng_pubsub_source_messages_in_total() -> &'static IntCounterVec {
+    nng_pubsub_source::messages_in_total()
 }
 
-pub fn nng_pubsub_source_records_out_total() -> &'static IntCounterVec {
-    nng_pubsub_source::records_out_total()
+pub fn nng_pubsub_source_messages_out_total() -> &'static IntCounterVec {
+    nng_pubsub_source::messages_out_total()
 }
 
-pub fn nng_pubsub_sink_records_in_total() -> &'static IntCounterVec {
-    nng_pubsub_sink::records_in_total()
+pub fn nng_pubsub_sink_messages_in_total() -> &'static IntCounterVec {
+    nng_pubsub_sink::messages_in_total()
 }
 
-pub fn nng_pubsub_sink_records_out_total() -> &'static IntCounterVec {
-    nng_pubsub_sink::records_out_total()
+pub fn nng_pubsub_sink_messages_out_total() -> &'static IntCounterVec {
+    nng_pubsub_sink::messages_out_total()
 }
 
 pub fn mqtt_shared_client_connected() -> &'static IntGaugeVec {

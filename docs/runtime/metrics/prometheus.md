@@ -56,6 +56,8 @@ The name identifies the metric itself:
 
 - `records_in_total`
 - `records_out_total`
+- `messages_in_total`
+- `messages_out_total`
 - `errors_total`
 - `handle_duration_seconds`
 - `memory_usage_bytes`
@@ -68,8 +70,8 @@ The final metric name is generated as:
 
 Examples:
 
-- `veloflux_mqtt_source_records_in_total`
-- `veloflux_mqtt_sink_records_out_total`
+- `veloflux_mqtt_source_messages_in_total`
+- `veloflux_mqtt_sink_messages_out_total`
 - `veloflux_shared_stream_messages_out_total`
 - `veloflux_processor_errors_total`
 - `veloflux_processor_handle_duration_seconds`
@@ -129,14 +131,15 @@ Examples:
 
 ### `mqtt_source`
 
-This subsystem contains source-side connector ingress and egress counters.
+This subsystem contains source-side connector message ingress and egress counters. Ingress means a
+message received externally; egress means the same message was handed to the flow runtime.
 
 Examples:
 
-- `veloflux_mqtt_source_records_in_total`
-- `veloflux_mqtt_source_records_out_total`
-- `veloflux_nng_pubsub_source_records_in_total`
-- `veloflux_nng_pubsub_source_records_out_total`
+- `veloflux_mqtt_source_messages_in_total`
+- `veloflux_mqtt_source_messages_out_total`
+- `veloflux_nng_pubsub_source_messages_in_total`
+- `veloflux_nng_pubsub_source_messages_out_total`
 
 Expected labels:
 
@@ -145,14 +148,16 @@ Expected labels:
 
 ### `mqtt_sink`
 
-This subsystem contains sink-side connector ingress and publish-success counters.
+This subsystem contains sink-side connector message ingress and publish-success counters. A
+logical message is counted once on ingress and once after confirmed external output; retrying the
+same message does not increment ingress again.
 
 Examples:
 
-- `veloflux_mqtt_sink_records_in_total`
-- `veloflux_mqtt_sink_records_out_total`
-- `veloflux_nng_pubsub_sink_records_in_total`
-- `veloflux_nng_pubsub_sink_records_out_total`
+- `veloflux_mqtt_sink_messages_in_total`
+- `veloflux_mqtt_sink_messages_out_total`
+- `veloflux_nng_pubsub_sink_messages_in_total`
+- `veloflux_nng_pubsub_sink_messages_out_total`
 
 Expected labels:
 
@@ -257,6 +262,17 @@ Standard processor metrics:
 - `veloflux_processor_handle_duration_seconds`
 - `veloflux_processor_send_backpressure_waits_total`
 
+`records_in_total` and `records_out_total` strictly count rows directly observed through
+collections. A processor declares the corresponding direction together with the
+`collections_in` or `collections_out` custom counter. One observed collection increments the
+collection counter by one and the row counter by `collection.num_rows()`. The counters start at
+zero before the first collection. Processors in the raw-message or encoded-message domain do not
+expose these series; use their custom message and byte metrics instead.
+
+The declaration comes from the physical plan and remains fixed for the processor lifetime. Runtime
+data does not create a previously undeclared row series. In particular, an encoder exposes
+`records_in_total` for its collection input but not `records_out_total` for its message output.
+
 Expected labels:
 
 - `flow_instance`
@@ -282,6 +298,11 @@ Expected labels:
 
 Examples of `metric` label values:
 
+- `messages_in`
+- `messages_out`
+- `bytes_in`
+- `bytes_out`
+- `bytes_delivered`
 - `rows_buffered`
 - `collections_in`
 - `collections_forwarded`
@@ -340,7 +361,7 @@ The naming and labeling rules are designed to keep Prometheus queries simple and
 Examples:
 
 ```promql
-sum by (connector) (rate(veloflux_mqtt_source_records_in_total[5m]))
+sum by (connector) (rate(veloflux_mqtt_source_messages_in_total[5m]))
 ```
 
 ```promql

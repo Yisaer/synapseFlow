@@ -98,7 +98,7 @@ impl SlidingWindowProcessor {
             output,
             control_output,
             channel_capacities,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -110,6 +110,7 @@ impl SlidingWindowProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -174,7 +175,7 @@ impl Processor for SlidingWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
-                                state.record_in(collection.num_rows() as u64);
+                                state.record_collection_in(collection.num_rows() as u64);
                                 let handle_start = std::time::Instant::now();
                                 let res = state.add_collection(collection).await;
                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -304,8 +305,8 @@ impl PartitionedProcessingState {
         }
     }
 
-    fn record_in(&self, rows: u64) {
-        self.stats.record_in(rows);
+    fn record_collection_in(&self, rows: u64) {
+        self.stats.record_collection_in(rows);
     }
 
     async fn add_collection(
@@ -577,7 +578,7 @@ impl ProcessingWithoutLookaheadState {
             Some(self.stats.as_ref()),
         )
         .await?;
-        self.stats.record_out(row_count);
+        self.stats.record_collection_out(row_count);
         Ok(())
     }
 }
@@ -699,7 +700,7 @@ impl ProcessingWithLookaheadState {
             Some(self.stats.as_ref()),
         )
         .await?;
-        self.stats.record_out(row_count);
+        self.stats.record_collection_out(row_count);
         Ok(())
     }
 }
@@ -854,7 +855,7 @@ mod tests {
             ..PipelineStateUsage::default()
         };
         let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
-        let stats = Arc::new(ProcessorStats::default());
+        let stats = Arc::new(ProcessorStats::collection_in_out());
         processor.set_stats(Arc::clone(&stats));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
@@ -993,7 +994,7 @@ mod tests {
                 0,
             );
             let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
-            let stats = Arc::new(ProcessorStats::default());
+            let stats = Arc::new(ProcessorStats::collection_in_out());
             processor.set_stats(Arc::clone(&stats));
             let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
             processor.add_input(input.subscribe());

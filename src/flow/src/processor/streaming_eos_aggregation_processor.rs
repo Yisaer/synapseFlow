@@ -68,7 +68,7 @@ impl StreamingEosAggregationProcessor {
             control_output,
             channel_capacities,
             group_by_meta,
-            stats: Arc::new(ProcessorStats::default()),
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -117,7 +117,7 @@ impl StreamingEosAggregationProcessor {
                 opened_at.unwrap_or(closed_at),
                 closed_at,
             )?;
-            stats.record_out(collection.num_rows() as u64);
+            stats.record_collection_out(collection.num_rows() as u64);
             send_with_backpressure(
                 output,
                 channel_capacity,
@@ -134,6 +134,7 @@ impl StreamingEosAggregationProcessor {
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
@@ -185,7 +186,7 @@ impl Processor for StreamingEosAggregationProcessor {
                                 log_received_data(&id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        stats.record_in(collection.num_rows() as u64);
+                                        stats.record_collection_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
                                         let result = Self::process_collection(
                                             &mut worker,

@@ -2,8 +2,12 @@
 //!
 //! This processor receives data from upstream processors and forwards it to a single output.
 
+use crate::planner::physical::DataDomain;
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data, LinkReceiver,
+};
+use crate::processor::data_metrics::{
+    PassthroughMeasurement, PassthroughMetrics, RESULT_COLLECT_METRICS,
 };
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -109,6 +113,7 @@ pub struct ResultCollectProcessor {
     output: Option<mpsc::Sender<StreamData>>,
     /// Hooks that observe items after they have been written to the output bus.
     bus_hooks: Vec<Arc<dyn OutputBusHook>>,
+    input_domain: DataDomain,
     stats: Arc<ProcessorStats>,
 }
 
@@ -121,7 +126,8 @@ impl ResultCollectProcessor {
             control_inputs: Vec::new(),
             output: None,
             bus_hooks: Vec::new(),
-            stats: Arc::new(ProcessorStats::default()),
+            input_domain: DataDomain::Collection,
+            stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
 
@@ -143,6 +149,10 @@ impl ResultCollectProcessor {
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
     }
+
+    pub(crate) fn set_input_domain(&mut self, input_domain: DataDomain) {
+        self.input_domain = input_domain;
+    }
 }
 
 impl Processor for ResultCollectProcessor {
@@ -157,17 +167,17 @@ impl Processor for ResultCollectProcessor {
             bus_hooks: &[Arc<dyn OutputBusHook>],
             data: StreamData,
             stats: &Arc<ProcessorStats>,
+            metrics: &PassthroughMetrics,
+            measurement: PassthroughMeasurement,
         ) -> Result<(), ProcessorError> {
             for hook in bus_hooks {
                 hook.on_receive(processor_id, &data);
-            }
-            if let Some(rows) = data.num_rows_hint() {
-                stats.record_out(rows);
             }
             output
                 .send(data)
                 .await
                 .map_err(|_| ProcessorError::ChannelClosed)?;
+            metrics.record_output(stats, measurement);
             Ok(())
         }
 
@@ -186,6 +196,8 @@ impl Processor for ResultCollectProcessor {
         let processor_id = self.id.clone();
         let bus_hooks = self.bus_hooks.clone();
         let stats = Arc::clone(&self.stats);
+        let metrics =
+            PassthroughMetrics::new(stats.as_ref(), RESULT_COLLECT_METRICS, self.input_domain);
         tracing::info!(processor_id = %processor_id, "result collect processor starting");
 
         ProcessorStart::ready(spawner.spawn(async move {
@@ -202,7 +214,15 @@ impl Processor for ResultCollectProcessor {
                             Some(Ok(control_signal)) => {
                                 let out = StreamData::control(control_signal);
                                 let is_terminal = out.is_terminal();
-                                forward_to_output_bus(&output, &processor_id, &bus_hooks, out, &stats)
+                                forward_to_output_bus(
+                                    &output,
+                                    &processor_id,
+                                    &bus_hooks,
+                                    out,
+                                    &stats,
+                                    &metrics,
+                                    PassthroughMeasurement::Other,
+                                )
                                     .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %processor_id, "received terminal signal (control)");
@@ -221,11 +241,17 @@ impl Processor for ResultCollectProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
-                                }
+                                let measurement = metrics.record_input(stats.as_ref(), &data)?;
                                 let is_terminal = data.is_terminal();
-                                forward_to_output_bus(&output, &processor_id, &bus_hooks, data, &stats)
+                                forward_to_output_bus(
+                                    &output,
+                                    &processor_id,
+                                    &bus_hooks,
+                                    data,
+                                    &stats,
+                                    &metrics,
+                                    measurement,
+                                )
                                     .await?;
                                 if is_terminal {
                                     tracing::info!(

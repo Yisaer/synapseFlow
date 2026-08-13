@@ -42,5 +42,12 @@ SinkDefinition::new("my_sink", SinkType::File, SinkProps::File(...))
 
 ## Stats Accounting
 
-- `record_in`: each `EncodedDelivery` event counts as 1.
-- `record_out`: only completed deliveries (`END`/`START|END`) count as 1. Matches the connector's accounting.
+- The processor does not expose `records_in` or `records_out` because encoded payloads do not
+  expose rows.
+- `messages_in` increments when the complete input message reaches `END`, before compression
+  finalization. It can therefore increment even if finalization or downstream forwarding fails.
+- `messages_out` increments only after the transformed message is successfully forwarded.
+  Individual `START`, middle, and `END` events are not separate messages.
+- `messages_aborted` records an explicit aborted lifecycle.
+- `bytes_in` and `bytes_out` count the physical input and compressed output bytes, including bytes
+  processed before a later abort.

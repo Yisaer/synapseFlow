@@ -1,4 +1,4 @@
-use super::{random_suffix, records_value, ManagerHarness};
+use super::{random_suffix, records_value_or_zero, ManagerHarness};
 use sdk::{PipelineCreateRequest, StopOptions, StreamCreateRequest};
 use serde_json::Value as JsonValue;
 use std::sync::{
@@ -33,7 +33,9 @@ async fn pipeline_stats(
 fn total_records(stats: &[JsonValue]) -> u64 {
     stats
         .iter()
-        .map(|entry| records_value(entry, "records_in") + records_value(entry, "records_out"))
+        .map(|entry| {
+            records_value_or_zero(entry, "records_in") + records_value_or_zero(entry, "records_out")
+        })
         .sum()
 }
 

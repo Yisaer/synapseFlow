@@ -4,7 +4,9 @@
 mod tests {
     use crate::connector::sink::{DeliveryResult, SinkConnector, SinkConnectorError};
     use crate::planner::sink::SinkRetryConfig;
-    use crate::processor::{EncodedDeliveryFlags, Processor, SinkProcessor, StreamData};
+    use crate::processor::{
+        EncodedDeliveryFlags, Processor, ProcessorStats, SinkProcessor, StreamData,
+    };
     use crate::runtime::TaskSpawner;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -145,6 +147,22 @@ mod tests {
         let _ = timeout(Duration::from_secs(5), handle).await;
     }
 
+    fn assert_message_metrics(
+        stats: &ProcessorStats,
+        messages_out: u64,
+        messages_dropped: u64,
+        bytes_delivered: u64,
+    ) {
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.records_in, None);
+        assert_eq!(snapshot.records_out, None);
+        assert_eq!(snapshot.custom["messages_in"], 1);
+        assert_eq!(snapshot.custom["bytes_in"], 10);
+        assert_eq!(snapshot.custom["messages_out"], messages_out);
+        assert_eq!(snapshot.custom["messages_dropped"], messages_dropped);
+        assert_eq!(snapshot.custom["bytes_delivered"], bytes_delivered);
+    }
+
     // ── test cases ──
 
     #[tokio::test]
@@ -152,6 +170,8 @@ mod tests {
         let (connector, handle) = RetryMockConnector::new(2, "transient");
 
         let mut processor = SinkProcessor::new("retry_sink");
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
         processor.set_retry_config(SinkRetryConfig {
             max_attempts: Some(3),
             initial_backoff_ms: 10,
@@ -173,6 +193,7 @@ mod tests {
         let _ = tx.send(StreamData::stream_end());
 
         drive_and_assert(start.handle, handle, true).await;
+        assert_message_metrics(stats.as_ref(), 1, 0, payload.len() as u64);
     }
 
     #[tokio::test]
@@ -180,6 +201,8 @@ mod tests {
         let (connector, handle) = RetryMockConnector::new(5, "permanent");
 
         let mut processor = SinkProcessor::new("retry_sink");
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
         processor.set_retry_config(SinkRetryConfig {
             max_attempts: Some(3),
             initial_backoff_ms: 10,
@@ -203,6 +226,7 @@ mod tests {
         // All connector errors are retried. Exhausted attempts drop the delivery
         // and allow the processor to consume the terminal signal.
         drive_and_assert(start.handle, handle, false).await;
+        assert_message_metrics(stats.as_ref(), 0, 1, 0);
     }
 
     #[tokio::test]
@@ -210,6 +234,8 @@ mod tests {
         let (connector, handle) = RetryMockConnector::new(3, "transient");
 
         let mut processor = SinkProcessor::new("retry_sink");
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
         processor.set_retry_config(SinkRetryConfig {
             max_attempts: Some(3),
             initial_backoff_ms: 10,
@@ -233,5 +259,6 @@ mod tests {
         // 3 failures, 3 attempts -> exhausted -> drop -> pipeline continues,
         // no data received because all attempts failed.
         drive_and_assert(start.handle, handle, false).await;
+        assert_message_metrics(stats.as_ref(), 0, 1, 0);
     }
 }

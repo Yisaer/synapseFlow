@@ -501,6 +501,33 @@ async fn multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sin
         );
     }
 
+    let stats = instance
+        .collect_pipeline_stats(&pipeline_id, timeout_duration)
+        .await
+        .expect("collect multi-sink pipeline stats");
+    let collection_sink_stats = stats
+        .iter()
+        .find(|entry| entry.processor_id.ends_with("mem_sink_collection"))
+        .expect("collection sink stats");
+    assert_eq!(collection_sink_stats.stats.records_in, Some(3));
+    assert_eq!(collection_sink_stats.stats.records_out, None);
+    assert_eq!(
+        collection_sink_stats.stats.custom.get("collections_in"),
+        Some(&1)
+    );
+    assert_eq!(
+        collection_sink_stats.stats.custom.get("messages_out"),
+        Some(&1)
+    );
+    assert!(!collection_sink_stats
+        .stats
+        .custom
+        .contains_key("messages_in"));
+    assert!(!collection_sink_stats
+        .stats
+        .custom
+        .contains_key("collections_out"));
+
     instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Graceful, timeout_duration)
         .await

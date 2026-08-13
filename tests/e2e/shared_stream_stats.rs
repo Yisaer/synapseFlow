@@ -15,7 +15,7 @@ fn find_processor<'a>(processors: &'a [JsonValue], suffix: &str) -> &'a JsonValu
         .unwrap_or_else(|| panic!("missing processor with suffix {suffix}"))
 }
 
-fn records_value(entry: &JsonValue, field: &str) -> u64 {
+fn stats_value(entry: &JsonValue, field: &str) -> u64 {
     entry["stats"][field]
         .as_u64()
         .unwrap_or_else(|| panic!("missing numeric stats field {field} in {entry}"))
@@ -121,13 +121,13 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
             entry["processor_id"]
                 .as_str()
                 .is_some_and(|id| id.ends_with("PhysicalDecoder_1"))
-                && records_value(entry, "records_in") > 0
+                && stats_value(entry, "messages_in") > 0
         });
         let collect_ready = processors.iter().any(|entry| {
             entry["processor_id"]
                 .as_str()
                 .is_some_and(|id| id.ends_with("PhysicalResultCollect_2"))
-                && records_value(entry, "records_in") > 0
+                && stats_value(entry, "records_in") > 0
         });
         if decoder_ready && collect_ready {
             break stats;
@@ -151,16 +151,31 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
     let result_collect = find_processor(processors, "PhysicalResultCollect_2");
 
     assert!(
-        records_value(data_source, "records_out") > 0,
-        "datasource stats should reflect emitted records: {data_source}"
+        stats_value(data_source, "messages_out") > 0,
+        "datasource stats should reflect emitted messages: {data_source}"
     );
     assert!(
-        records_value(decoder, "records_in") > 0,
-        "decoder stats should reflect consumed records: {decoder}"
+        stats_value(decoder, "messages_in") > 0,
+        "decoder stats should reflect consumed messages: {decoder}"
     );
     assert!(
-        records_value(result_collect, "records_in") > 0,
+        stats_value(result_collect, "records_in") > 0,
         "result collect stats should reflect consumed records: {result_collect}"
+    );
+    assert_eq!(
+        stats_value(result_collect, "records_in"),
+        stats_value(result_collect, "records_out"),
+        "result collect should forward every observed row: {result_collect}"
+    );
+    assert_eq!(
+        stats_value(result_collect, "collections_in"),
+        stats_value(result_collect, "collections_out"),
+        "result collect should forward every observed collection: {result_collect}"
+    );
+    assert!(
+        result_collect["stats"].get("messages_in").is_none()
+            && result_collect["stats"].get("messages_out").is_none(),
+        "collection-domain result collect should not expose message counters: {result_collect}"
     );
 
     let stop_pipeline_resp = http
