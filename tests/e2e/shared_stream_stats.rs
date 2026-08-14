@@ -128,6 +128,7 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
                 .as_str()
                 .is_some_and(|id| id.ends_with("PhysicalResultCollect_2"))
                 && stats_value(entry, "records_in") > 0
+                && stats_value(entry, "records_out") > 0
         });
         if decoder_ready && collect_ready {
             break stats;
