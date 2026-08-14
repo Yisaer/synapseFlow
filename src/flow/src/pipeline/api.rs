@@ -75,6 +75,16 @@ pub enum SinkProps {
 pub enum PipelineStatus {
     Stopped,
     Running,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineRuntimeFailure {
+    pub pipeline_id: String,
+    pub failed_at_ms: u64,
+    pub processor_id: String,
+    pub processor_kind: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -732,7 +742,7 @@ pub struct PipelineSnapshot {
 
 /// Stores all registered pipelines and manages their lifecycle.
 pub(crate) struct PipelineManager {
-    pub(super) pipelines: RwLock<HashMap<String, super::internal::ManagedPipeline>>,
+    pub(super) pipelines: Arc<RwLock<HashMap<String, super::internal::ManagedPipeline>>>,
     pub(super) catalog: Arc<Catalog>,
     pub(super) context: super::PipelineContext,
     pub(super) registries: RwLock<PipelineRegistries>,

@@ -33,7 +33,8 @@ Properties require that effective shared version to be `v5`.
 
 Pipeline schedules are declared inside `options.schedule` when creating or upserting a pipeline.
 The scheduler owns the lifecycle of a scheduled pipeline. Manual `POST /pipelines/:id/start` and
-`POST /pipelines/:id/stop` calls return `409 Conflict` while a schedule is present.
+`POST /pipelines/:id/stop` calls return `409 Conflict` while a schedule is present, except that
+manual stop is allowed when the current revision has a matching runtime failure marker.
 
 ```json
 {
@@ -81,3 +82,48 @@ Scheduled pipeline desired state is stored separately from manual lifecycle stat
 - `ScheduledStopped`: the effective schedule window currently expects the pipeline to stop.
 
 REST responses expose these states as `scheduled_running` and `scheduled_stopped`.
+
+## Runtime Failure Status
+
+Pipeline list and get responses expose the current runtime status when it differs from the stored
+desired state. A pipeline can report:
+
+- `running`
+- `stopped`
+- `scheduled_running`
+- `scheduled_stopped`
+- `failed`
+
+`failed` means a processor task returned an error, panicked, or exited unexpectedly while the
+pipeline was expected to run. When this happens, the pipeline supervisor aborts the remaining
+processor tasks and records a runtime failure marker for the current pipeline revision.
+
+Responses may include these additional fields:
+
+- `desired_status`: present when the stored desired state differs from `status`, such as a failed
+  pipeline that is still desired to be `running` or `scheduled_running`
+- `last_runtime_error`: present when a matching runtime failure marker exists for the current
+  revision
+
+`last_runtime_error` has this shape:
+
+```json
+{
+  "processor_id": "filter_1",
+  "processor_kind": "filter",
+  "reason": "processor returned error: boom",
+  "failed_at_ms": 1797249600000
+}
+```
+
+Startup hydration restores a failed pipeline definition but does not auto-start a revision with a
+matching runtime failure marker. Scheduled patrol also skips auto-start while the matching marker is
+present. A manual start is treated as an explicit retry for unscheduled pipelines and clears the
+marker only after a successful runtime start. Manual stop clears the marker and writes desired state
+`stopped`; for scheduled failed pipelines, manual stop writes `scheduled_stopped` and returns the
+pipeline to scheduler control so the next active patrol can retry. Delete removes the stored pipeline
+and the marker.
+
+`GET /pipelines/:id/stats` is only available for a running pipeline. For a failed pipeline, the
+endpoint returns `400 Bad Request` with the failed processor and reason instead of returning stale
+processor counters.

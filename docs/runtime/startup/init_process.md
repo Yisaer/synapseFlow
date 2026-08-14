@@ -116,7 +116,14 @@ SQL planning inputs, and managed files. Runtime availability is not an
 application precondition. An unreachable broker, unavailable device, connector
 start failure, or later processor failure does not roll back a statically valid
 artifact. The resource, revision, and pipeline desired run state remain stored;
-runtime status reports the real error and a later restart may recover.
+runtime status reports the real error.
+
+Processor-fatal pipeline failures are persisted separately from the inline
+`run_state`. If a stored pipeline revision has a matching runtime failure
+marker, startup hydration restores the pipeline definition but keeps the
+runtime status as `failed` instead of auto-starting it. The operator must
+explicitly start the pipeline to retry it, or stop/delete it to clear the failed
+runtime state.
 
 Every resource result is one of:
 
@@ -156,5 +163,6 @@ hydration or planning failure; it does not roll back the schema.
 
 If a pipeline and its `run_state: "Running"` are applied but its connector
 cannot reach a broker, the pipeline artifact, revision, and desired state remain
-stored. Runtime status reports the connector failure and startup can retry
-runtime convergence later.
+stored. Runtime status reports the connector failure. If that failure is stored
+as a runtime failure marker for the same revision, later startup hydration keeps
+the pipeline failed until an explicit operator lifecycle action is made.

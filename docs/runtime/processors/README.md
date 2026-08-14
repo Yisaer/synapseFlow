@@ -54,3 +54,8 @@ row or window state, and continues with later input.
 Downstream channel failures, startup or configuration failures, control lifecycle failures,
 unreachable invariant failures, panics, and unexpected task exits continue to terminate the
 processor task.
+
+Managed pipeline runtimes treat a processor task exit as a pipeline-fatal event unless the pipeline
+is already in a stop or delete shutdown path. The pipeline supervisor records the failed processor,
+aborts the remaining processor tasks, and reports the pipeline runtime as failed. This contract does
+not attempt data replay or state recovery.

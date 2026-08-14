@@ -759,6 +759,7 @@ pub(crate) fn status_label(status: PipelineStatus) -> String {
     match status {
         PipelineStatus::Stopped => "stopped".to_string(),
         PipelineStatus::Running => "running".to_string(),
+        PipelineStatus::Failed => "failed".to_string(),
     }
 }
 

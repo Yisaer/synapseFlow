@@ -113,6 +113,8 @@ Current behavior:
 
 - in-process collection forwards the timeout to flow runtime collection
 - timeout is surfaced as HTTP `504 Gateway Timeout`
+- failed pipelines return an error that includes the failed processor and reason instead of a stale
+  stats snapshot
 
 Today, the in-process flow runtime only collects stats from already-running pipelines, so timeouts
 protect the request path and future-proof the API contract rather than
@@ -152,6 +154,8 @@ Current error surface:
 - `404` when the pipeline id is unknown
 - `400` when the pipeline exists but stats cannot be collected, for example because the pipeline is
   not running
+- `400` when the pipeline is failed; the error includes the failed processor and reason from the
+  runtime failure marker when available
 - `504` on timeout
 
 Processor-local failures do not turn the whole stats request into an error automatically. They are

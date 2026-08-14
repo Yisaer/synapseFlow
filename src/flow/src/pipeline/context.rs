@@ -1,8 +1,11 @@
 use crate::connector::{MemoryPubSubRegistry, MockSourceHandle, MqttClientManager};
+use crate::pipeline::PipelineRuntimeFailure;
 use crate::shared_stream::SharedStreamRegistry;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+pub(crate) type PipelineFailureReporter = Arc<dyn Fn(PipelineRuntimeFailure) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub(crate) struct MockSourceHandleRegistry {
@@ -24,6 +27,7 @@ pub(crate) struct PipelineContext {
     mock_source_handle_registry: MockSourceHandleRegistry,
     spawner: crate::runtime::TaskSpawner,
     property_context: Arc<RwLock<crate::PropertyContext>>,
+    pipeline_failure_reporter: Arc<RwLock<Option<PipelineFailureReporter>>>,
 }
 
 impl PipelineContext {
@@ -42,6 +46,7 @@ impl PipelineContext {
             mock_source_handle_registry: MockSourceHandleRegistry::default(),
             spawner,
             property_context: Arc::new(RwLock::new(crate::PropertyContext::default())),
+            pipeline_failure_reporter: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -75,5 +80,13 @@ impl PipelineContext {
 
     pub(crate) fn property_context_handle(&self) -> Arc<RwLock<crate::PropertyContext>> {
         Arc::clone(&self.property_context)
+    }
+
+    pub(crate) fn set_pipeline_failure_reporter(&self, reporter: PipelineFailureReporter) {
+        *self.pipeline_failure_reporter.write() = Some(reporter);
+    }
+
+    pub(crate) fn pipeline_failure_reporter(&self) -> Option<PipelineFailureReporter> {
+        self.pipeline_failure_reporter.read().clone()
     }
 }

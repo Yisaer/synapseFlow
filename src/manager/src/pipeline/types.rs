@@ -155,6 +155,10 @@ pub struct ListPipelineItem {
     pub id: String,
     pub revision: u64,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_runtime_error: Option<PipelineRuntimeFailureResponse>,
     pub flow_instance_id: String,
 }
 
@@ -163,9 +167,21 @@ pub struct GetPipelineResponse {
     pub id: String,
     pub revision: u64,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_runtime_error: Option<PipelineRuntimeFailureResponse>,
     pub spec: CreatePipelineRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule_status: Option<ScheduleStatus>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PipelineRuntimeFailureResponse {
+    pub processor_id: String,
+    pub processor_kind: String,
+    pub reason: String,
+    pub failed_at_ms: u64,
 }
 
 /// Scheduling status for a pipeline (returned in GET response).

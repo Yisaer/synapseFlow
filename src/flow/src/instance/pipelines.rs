@@ -2,11 +2,12 @@ use std::time::Duration;
 
 use crate::pipeline::{
     CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, PipelineError,
-    PipelineSnapshot, PipelineStopMode,
+    PipelineRuntimeFailure, PipelineSnapshot, PipelineStopMode,
 };
 use crate::processor::ProcessorPipeline;
 use crate::processor::ProcessorStatsEntry;
 use crate::{PipelineExplain, PipelineSink};
+use std::sync::Arc;
 
 use super::FlowInstance;
 
@@ -36,6 +37,18 @@ impl FlowInstance {
     /// Stop and delete a pipeline.
     pub async fn delete_pipeline(&self, id: &str) -> Result<(), PipelineError> {
         self.pipeline_manager.delete_pipeline(id).await
+    }
+
+    pub fn mark_pipeline_failed(&self, id: &str) -> Result<(), PipelineError> {
+        self.pipeline_manager.mark_pipeline_failed(id)
+    }
+
+    pub fn set_pipeline_failure_reporter(
+        &self,
+        reporter: Arc<dyn Fn(PipelineRuntimeFailure) + Send + Sync>,
+    ) {
+        self.pipeline_manager
+            .set_pipeline_failure_reporter(reporter);
     }
 
     pub async fn collect_pipeline_stats(

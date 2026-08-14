@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use storage::StorageManager;
+use storage::{StorageManager, StoredPipelineRuntimeFailure};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const STREAM_SHARED_REF_PERMITS: u32 = 1024;
@@ -103,12 +103,55 @@ impl AppState {
             ..state
         };
 
+        app_state.install_pipeline_failure_reporters();
+
         // Spawn the pipeline patrol scheduler.
         if patrol_interval_secs > 0 {
             app_state.spawn_scheduler(patrol_interval_secs);
         }
 
         Ok(app_state)
+    }
+
+    fn install_pipeline_failure_reporters(&self) {
+        for (_, instance) in self.instances.instances_snapshot() {
+            let storage = Arc::clone(&self.storage);
+            instance.set_pipeline_failure_reporter(Arc::new(move |failure| {
+                let revision = match storage.get_pipeline(&failure.pipeline_id) {
+                    Ok(Some(pipeline)) => pipeline.revision,
+                    Ok(None) => {
+                        tracing::warn!(
+                            pipeline_id = %failure.pipeline_id,
+                            "pipeline failure reporter skipped missing stored pipeline"
+                        );
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            pipeline_id = %failure.pipeline_id,
+                            error = %err,
+                            "pipeline failure reporter failed to load stored pipeline"
+                        );
+                        return;
+                    }
+                };
+                let marker = StoredPipelineRuntimeFailure {
+                    pipeline_id: failure.pipeline_id.clone(),
+                    revision,
+                    failed_at_ms: failure.failed_at_ms,
+                    processor_id: failure.processor_id,
+                    processor_kind: failure.processor_kind,
+                    reason: failure.reason,
+                };
+                if let Err(err) = storage.put_pipeline_runtime_failure(marker) {
+                    tracing::error!(
+                        pipeline_id = %failure.pipeline_id,
+                        error = %err,
+                        "pipeline failure reporter failed to persist runtime failure"
+                    );
+                }
+            }));
+        }
     }
 
     fn spawn_scheduler(&self, interval_secs: u64) {

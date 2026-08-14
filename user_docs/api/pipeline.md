@@ -48,7 +48,7 @@ Response:
 
 `GET /pipelines`
 
-Returns all persisted pipelines with a best-effort status label.
+Returns all persisted pipelines with a best-effort runtime status label.
 
 Response:
 
@@ -58,14 +58,13 @@ Response:
 
 `GET /pipelines/:id`
 
-Returns persisted pipeline spec and desired run state.
+Returns persisted pipeline spec, current status, and desired run state when it differs from the
+current status.
 
 Response:
 
 - `200 OK` with `GetPipelineResponse`.
 - `404 Not Found` if not present in storage.
-
-Note: `status` is derived from the **stored desired state**, not from the runtime snapshot.
 
 ### Upsert Pipeline
 
@@ -92,6 +91,8 @@ Response:
 `POST /pipelines/:id/start`
 
 Persists desired state as `running` and starts runtime execution.
+Starting a failed pipeline is an explicit retry; a successful start clears the runtime failure
+marker.
 
 Response:
 
@@ -105,7 +106,9 @@ Response:
 
 `POST /pipelines/:id/stop?mode=quick|graceful&timeout_ms=5000`
 
-Persists desired state as `stopped` and stops runtime execution.
+Persists desired state as `stopped` and stops runtime execution. For a scheduled failed pipeline,
+manual stop is allowed as a recovery action: it clears the runtime failure marker, writes
+`scheduled_stopped`, and lets the scheduler retry on a later patrol.
 
 Query parameters:
 
@@ -115,8 +118,8 @@ Query parameters:
 Response:
 
 - `200 OK` on success.
-- `409 Conflict` if the pipeline has `options.schedule`; scheduled pipeline lifecycle is
-  managed by the scheduler.
+- `409 Conflict` if the pipeline has `options.schedule` and does not have a matching runtime
+  failure marker; scheduled pipeline lifecycle is managed by the scheduler.
 - `404 Not Found` if pipeline is not present.
 - `409 Conflict` if the pipeline is busy processing another command.
 
@@ -145,6 +148,7 @@ Query parameters:
 Response:
 
 - `200 OK` with `ProcessorStatsEntry[]`
+- `400 Bad Request` if the pipeline is failed; the error includes the failed processor and reason
 - `404 Not Found` if pipeline is not present
 - `409 Conflict` if the pipeline is busy processing another command
 
@@ -186,7 +190,8 @@ Response:
 ### `PipelineScheduleRequest`
 
 `schedule` declares automatic pipeline start/stop windows. When present, the scheduler owns the
-pipeline lifecycle; manual start/stop endpoints return `409 Conflict`.
+pipeline lifecycle; manual start/stop endpoints return `409 Conflict`, except that manual stop is
+allowed to recover a scheduled failed pipeline with a matching runtime failure marker.
 
 ```json
 {
@@ -355,21 +360,34 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopped`, `scheduled_running`, or `scheduled_stopped`)
+- `status: string` (`running`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
 
 ### `ListPipelineItem`
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopped`, `scheduled_running`, or `scheduled_stopped`)
+- `status: string` (`running`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
+- `desired_status: string` (optional; present when stored desired state differs from `status`)
+- `last_runtime_error: PipelineRuntimeFailure` (optional; present when a matching runtime failure
+  marker exists)
 
 ### `GetPipelineResponse`
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopped`, `scheduled_running`, or `scheduled_stopped`)
+- `status: string` (`running`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
+- `desired_status: string` (optional; present when stored desired state differs from `status`)
+- `last_runtime_error: PipelineRuntimeFailure` (optional; present when a matching runtime failure
+  marker exists)
 - `spec: CreatePipelineRequest`
 - `schedule_status: ScheduleStatus` (optional; present when `spec.options.schedule` is present)
+
+### `PipelineRuntimeFailure`
+
+- `processor_id: string`
+- `processor_kind: string`
+- `reason: string`
+- `failed_at_ms: number`
 
 ### `ScheduleStatus`
 

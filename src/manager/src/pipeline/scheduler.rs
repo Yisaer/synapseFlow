@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use storage::{StoredPipelineDesiredState, StoredPipelineRunState};
 
+use super::runtime_failure::persist_generic_runtime_failure_marker;
 use super::types::{PipelineDatetimeRangeRequest, PipelineScheduleRequest, ScheduleStatus};
 use crate::storage_bridge;
 
@@ -181,7 +182,18 @@ pub(crate) async fn run_patrol(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
+    use axum::response::IntoResponse;
     use chrono::TimeZone;
+    use serde_json::Value as JsonValue;
+
+    fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
+        crate::FlowInstanceSpec {
+            id: crate::instances::DEFAULT_FLOW_INSTANCE_ID.to_string(),
+            ..crate::FlowInstanceSpec::default()
+        }
+    }
 
     fn schedule(
         cron: &str,
@@ -193,6 +205,29 @@ mod tests {
             duration_secs,
             datetime_ranges,
         }
+    }
+
+    fn scheduled_pipeline_request(id: &str) -> super::super::types::CreatePipelineRequest {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "revision": 7,
+            "flow_instance_id": crate::instances::DEFAULT_FLOW_INSTANCE_ID,
+            "sql": "select * from src",
+            "sinks": [
+                {
+                    "id": "sink",
+                    "type": "nop",
+                    "props": { "log": false }
+                }
+            ],
+            "options": {
+                "schedule": {
+                    "cron": "* * * * *",
+                    "duration_secs": 60
+                }
+            }
+        }))
+        .expect("decode scheduled pipeline request")
     }
 
     #[test]
@@ -251,6 +286,109 @@ mod tests {
                     .to_rfc3339()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn patrol_auto_start_failure_marks_failed_without_retrying() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = super::super::state::AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        let pipeline_req = scheduled_pipeline_request("scheduled_fail_pipe");
+        let stored = storage_bridge::stored_pipeline_from_request(&pipeline_req)
+            .expect("serialize scheduled pipeline");
+        state
+            .storage
+            .create_pipeline(stored.clone())
+            .expect("persist scheduled pipeline");
+
+        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+
+        let run_state = state
+            .storage
+            .get_pipeline_run_state("scheduled_fail_pipe")
+            .expect("read run state")
+            .expect("run state exists");
+        assert_eq!(
+            run_state.desired_state,
+            StoredPipelineDesiredState::ScheduledRunning
+        );
+        let marker = state
+            .storage
+            .get_pipeline_runtime_failure("scheduled_fail_pipe")
+            .expect("read failure marker")
+            .expect("failure marker exists");
+        assert_eq!(marker.revision, 7);
+        assert_eq!(marker.processor_id, "pipeline_runtime");
+        assert_eq!(marker.processor_kind, "scheduler_auto_start");
+
+        let response = super::super::handlers::list_pipelines(State(state.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read list body");
+        let payload: JsonValue = serde_json::from_slice(&body).expect("decode list body");
+        let item = payload
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("one list item");
+        assert_eq!(item["status"], "failed");
+        assert_eq!(item["desired_status"], "scheduled_running");
+        assert_eq!(
+            item["last_runtime_error"]["processor_kind"],
+            "scheduler_auto_start"
+        );
+
+        let first_failed_at_ms = marker.failed_at_ms;
+        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+        let marker = state
+            .storage
+            .get_pipeline_runtime_failure("scheduled_fail_pipe")
+            .expect("read failure marker")
+            .expect("failure marker exists");
+        assert_eq!(marker.failed_at_ms, first_failed_at_ms);
+        assert_eq!(marker.processor_kind, "scheduler_auto_start");
+
+        let response = super::super::handlers::stop_pipeline_handler(
+            State(state.clone()),
+            Path("scheduled_fail_pipe".to_string()),
+            Query(super::super::types::StopPipelineQuery::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(
+            state
+                .storage
+                .get_pipeline_runtime_failure("scheduled_fail_pipe")
+                .expect("read failure marker")
+                .is_none()
+        );
+        let run_state = state
+            .storage
+            .get_pipeline_run_state("scheduled_fail_pipe")
+            .expect("read run state")
+            .expect("run state exists");
+        assert_eq!(
+            run_state.desired_state,
+            StoredPipelineDesiredState::ScheduledStopped
+        );
+
+        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+        let marker = state
+            .storage
+            .get_pipeline_runtime_failure("scheduled_fail_pipe")
+            .expect("read failure marker")
+            .expect("failure marker exists");
+        assert_eq!(marker.revision, 7);
+        assert_eq!(marker.processor_kind, "scheduler_auto_start");
     }
 }
 
@@ -341,6 +479,28 @@ async fn patrol_pipeline(
     }
 
     if in_window && !is_running {
+        match storage.get_pipeline_runtime_failure(pipeline_id) {
+            Ok(Some(failure)) if failure.revision == stored.revision => {
+                tracing::warn!(
+                    pipeline_id,
+                    revision = stored.revision,
+                    processor_id = %failure.processor_id,
+                    processor_kind = %failure.processor_kind,
+                    "patrol: skipping auto-start for failed pipeline"
+                );
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    pipeline_id,
+                    %err,
+                    "patrol: failed to read pipeline runtime failure marker"
+                );
+                return;
+            }
+        }
+
         tracing::info!(
             pipeline_id,
             cron = %schedule_config.cron,
@@ -349,10 +509,13 @@ async fn patrol_pipeline(
 
         if let Err(err) = instance.start_pipeline(pipeline_id).await {
             tracing::error!(pipeline_id, %err, "patrol: failed to auto-start pipeline");
-            let _ = storage.put_pipeline_run_state(StoredPipelineRunState {
-                pipeline_id: pipeline_id.clone(),
-                desired_state: StoredPipelineDesiredState::ScheduledStopped,
-            });
+            persist_generic_runtime_failure_marker(
+                storage,
+                pipeline_id,
+                stored.revision,
+                "scheduler_auto_start",
+                err.to_string(),
+            );
         }
     } else if !in_window && is_running {
         tracing::info!(

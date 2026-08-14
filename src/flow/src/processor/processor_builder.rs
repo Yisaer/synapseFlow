@@ -9,6 +9,7 @@ use crate::codec::{
     SinkEncryptionConfig,
 };
 use crate::connector::{ConnectorRegistry, MqttClientManager};
+use crate::pipeline::PipelineRuntimeFailure;
 use crate::planner::physical::{DataDomain, PhysicalPlan};
 use crate::processor::base::{
     normalize_channel_capacity, LinkKind, LinkReceiver, ProcessorChannelCapacities,
@@ -36,13 +37,50 @@ use crate::shared_stream::{AppliedDecodeState, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 const PROCESSOR_START_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+type PipelineFailureHandler = Arc<dyn Fn(PipelineRuntimeFailure) + Send + Sync>;
+
+#[derive(Debug)]
+enum ProcessorTaskExitKind {
+    Completed,
+    Failed(String),
+    Panicked(String),
+}
+
+#[derive(Debug)]
+struct ProcessorTaskExit {
+    processor_id: String,
+    processor_kind: &'static str,
+    kind: ProcessorTaskExitKind,
+}
+
+impl ProcessorTaskExit {
+    fn reason(&self) -> String {
+        match &self.kind {
+            ProcessorTaskExitKind::Completed => {
+                "processor task exited unexpectedly with Ok(())".to_string()
+            }
+            ProcessorTaskExitKind::Failed(err) => err.clone(),
+            ProcessorTaskExitKind::Panicked(err) => format!("Join error: {err}"),
+        }
+    }
+}
+
+struct ProcessorTaskMonitor {
+    flow_instance_id: Arc<str>,
+    pipeline_id: String,
+    processor_id: String,
+    processor_kind: &'static str,
+    allow_normal_completion: bool,
+}
 
 #[derive(Clone)]
 pub(crate) struct SharedStreamPipelineOptions {
@@ -618,6 +656,9 @@ pub struct ProcessorPipeline {
     pub(crate) result_sink: Option<ResultCollectProcessor>,
     /// Join handles for all running processors
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
+    supervisor_abort_handles: Vec<AbortHandle>,
+    supervisor_shutdown: Arc<AtomicBool>,
+    supervisor_handle: Option<JoinHandle<()>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
     pipeline_id: String,
     flow_instance_id: Arc<str>,
@@ -632,15 +673,29 @@ pub struct ProcessorPipeline {
 impl ProcessorPipeline {
     fn wrap_processor_handle(
         spawner: &TaskSpawner,
-        flow_instance_id: Arc<str>,
-        pipeline_id: String,
-        processor_id: String,
-        processor_kind: &'static str,
+        monitor: ProcessorTaskMonitor,
         handle: JoinHandle<Result<(), ProcessorError>>,
+        task_exit_tx: mpsc::UnboundedSender<ProcessorTaskExit>,
     ) -> JoinHandle<Result<(), ProcessorError>> {
         spawner.spawn(async move {
+            let ProcessorTaskMonitor {
+                flow_instance_id,
+                pipeline_id,
+                processor_id,
+                processor_kind,
+                allow_normal_completion,
+            } = monitor;
             match handle.await {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => {
+                    if !allow_normal_completion {
+                        let _ = task_exit_tx.send(ProcessorTaskExit {
+                            processor_id,
+                            processor_kind,
+                            kind: ProcessorTaskExitKind::Completed,
+                        });
+                    }
+                    Ok(())
+                }
                 Ok(Err(err)) => {
                     tracing::error!(
                         flow_instance_id = %flow_instance_id,
@@ -650,9 +705,15 @@ impl ProcessorPipeline {
                         error = %err,
                         "processor task failed"
                     );
+                    let _ = task_exit_tx.send(ProcessorTaskExit {
+                        processor_id,
+                        processor_kind,
+                        kind: ProcessorTaskExitKind::Failed(err.to_string()),
+                    });
                     Err(err)
                 }
                 Err(join_err) => {
+                    let err = join_err.to_string();
                     tracing::error!(
                         flow_instance_id = %flow_instance_id,
                         pipeline_id = %pipeline_id,
@@ -661,9 +722,13 @@ impl ProcessorPipeline {
                         error = %join_err,
                         "processor task panicked"
                     );
+                    let _ = task_exit_tx.send(ProcessorTaskExit {
+                        processor_id,
+                        processor_kind,
+                        kind: ProcessorTaskExitKind::Panicked(err.clone()),
+                    });
                     Err(ProcessorError::ProcessingError(format!(
-                        "Join error: {}",
-                        join_err
+                        "Join error: {err}"
                     )))
                 }
             }
@@ -693,8 +758,8 @@ impl ProcessorPipeline {
         processor_id: String,
         processor_kind: &'static str,
         mut start: ProcessorStart,
-        flow_instance_id: Arc<str>,
-        pipeline_id: String,
+        allow_normal_completion: bool,
+        task_exit_tx: mpsc::UnboundedSender<ProcessorTaskExit>,
     ) -> Result<(), ProcessorError> {
         if let Err(err) =
             Self::await_processor_ready(&processor_id, processor_kind, &mut start).await
@@ -703,39 +768,106 @@ impl ProcessorPipeline {
             let _ = start.handle.await;
             return Err(err);
         }
+        self.supervisor_abort_handles
+            .push(start.handle.abort_handle());
         self.handles.push(Self::wrap_processor_handle(
             &self.spawner,
-            flow_instance_id,
-            pipeline_id,
-            processor_id,
-            processor_kind,
+            ProcessorTaskMonitor {
+                flow_instance_id: Arc::clone(&self.flow_instance_id),
+                pipeline_id: self.pipeline_id.clone(),
+                processor_id,
+                processor_kind,
+                allow_normal_completion,
+            },
             start.handle,
+            task_exit_tx,
         ));
         Ok(())
     }
 
+    fn allows_normal_processor_completion(&self) -> bool {
+        self.middle_processors
+            .iter()
+            .any(|processor| matches!(processor, PlanProcessor::TableScan(_)))
+    }
+
     async fn abort_started_processors(&mut self) {
+        for handle in &self.supervisor_abort_handles {
+            handle.abort();
+        }
         while let Some(handle) = self.handles.pop() {
             handle.abort();
             let _ = handle.await;
         }
+        self.supervisor_abort_handles.clear();
     }
 
     /// Start all processors in the pipeline. Subsequent calls are no-ops.
     pub async fn start(&mut self) -> Result<(), ProcessorError> {
+        self.start_with_failure_handler(Arc::new(|_| {})).await
+    }
+
+    pub(crate) async fn start_with_failure_handler(
+        &mut self,
+        failure_handler: PipelineFailureHandler,
+    ) -> Result<(), ProcessorError> {
         if !self.handles.is_empty() {
             return Ok(());
         }
-        if let Err(err) = self.start_inner().await {
+        self.supervisor_abort_handles.clear();
+        self.supervisor_shutdown.store(false, Ordering::Release);
+        let (task_exit_tx, task_exit_rx) = mpsc::unbounded_channel();
+        if let Err(err) = self.start_inner(task_exit_tx).await {
             self.abort_started_processors().await;
             return Err(err);
         }
+        self.spawn_supervisor(task_exit_rx, failure_handler);
         Ok(())
     }
 
-    async fn start_inner(&mut self) -> Result<(), ProcessorError> {
+    fn spawn_supervisor(
+        &mut self,
+        mut task_exit_rx: mpsc::UnboundedReceiver<ProcessorTaskExit>,
+        failure_handler: PipelineFailureHandler,
+    ) {
+        let abort_handles = self.supervisor_abort_handles.clone();
+        let shutdown = Arc::clone(&self.supervisor_shutdown);
         let flow_instance_id = Arc::clone(&self.flow_instance_id);
         let pipeline_id = self.pipeline_id.clone();
+        self.supervisor_handle = Some(self.spawner.spawn(async move {
+            while let Some(exit) = task_exit_rx.recv().await {
+                if shutdown.load(Ordering::Acquire) {
+                    continue;
+                }
+                let reason = exit.reason();
+                tracing::error!(
+                    flow_instance_id = %flow_instance_id,
+                    pipeline_id = %pipeline_id,
+                    processor_id = %exit.processor_id,
+                    processor_kind = exit.processor_kind,
+                    reason = %reason,
+                    "pipeline supervisor detected processor task exit"
+                );
+                for handle in &abort_handles {
+                    handle.abort();
+                }
+                failure_handler(PipelineRuntimeFailure {
+                    pipeline_id,
+                    failed_at_ms: unix_timestamp_ms(),
+                    processor_id: exit.processor_id,
+                    processor_kind: exit.processor_kind.to_string(),
+                    reason,
+                });
+                return;
+            }
+        }));
+    }
+
+    async fn start_inner(
+        &mut self,
+        task_exit_tx: mpsc::UnboundedSender<ProcessorTaskExit>,
+    ) -> Result<(), ProcessorError> {
+        let allow_normal_completion = self.allows_normal_processor_completion();
 
         if let Some(result_sink) = &mut self.result_sink {
             let processor_id = result_sink.id().to_string();
@@ -744,8 +876,8 @@ impl ProcessorPipeline {
                 processor_id,
                 "result_collect",
                 start,
-                Arc::clone(&flow_instance_id),
-                pipeline_id.clone(),
+                allow_normal_completion,
+                task_exit_tx.clone(),
             )
             .await?;
         }
@@ -763,8 +895,8 @@ impl ProcessorPipeline {
                     processor_id,
                     processor_kind,
                     start,
-                    Arc::clone(&flow_instance_id),
-                    pipeline_id.clone(),
+                    allow_normal_completion,
+                    task_exit_tx.clone(),
                 )
                 .await?;
             }
@@ -782,8 +914,8 @@ impl ProcessorPipeline {
                     processor_id,
                     processor_kind,
                     start,
-                    Arc::clone(&flow_instance_id),
-                    pipeline_id.clone(),
+                    allow_normal_completion,
+                    task_exit_tx.clone(),
                 )
                 .await?;
             }
@@ -795,8 +927,8 @@ impl ProcessorPipeline {
             processor_id,
             "control_source",
             start,
-            flow_instance_id,
-            pipeline_id,
+            allow_normal_completion,
+            task_exit_tx,
         )
         .await
     }
@@ -959,6 +1091,7 @@ impl ProcessorPipeline {
         &mut self,
         timeout_duration: std::time::Duration,
     ) -> Result<(), ProcessorError> {
+        self.supervisor_shutdown.store(true, Ordering::Release);
         let _ = self
             .send_barrier_via_data_with_ack(
                 BarrierControlSignalKind::StreamGracefulEnd,
@@ -974,6 +1107,7 @@ impl ProcessorPipeline {
         &mut self,
         timeout_duration: std::time::Duration,
     ) -> Result<(), ProcessorError> {
+        self.supervisor_shutdown.store(true, Ordering::Release);
         let _ = self
             .send_quick_end_via_control_with_ack(timeout_duration)
             .await?;
@@ -998,6 +1132,10 @@ impl ProcessorPipeline {
                     )));
                 }
             }
+        }
+        self.supervisor_abort_handles.clear();
+        if let Some(handle) = self.supervisor_handle.take() {
+            let _ = handle.await;
         }
         Ok(())
     }
@@ -1028,6 +1166,13 @@ impl ProcessorPipeline {
     pub fn take_output(&mut self) -> Option<mpsc::Receiver<StreamData>> {
         self.output.take()
     }
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Create a processor from a PhysicalPlan node
@@ -2120,6 +2265,9 @@ fn create_processor_pipeline_with_context(
         middle_processors,
         result_sink,
         handles: Vec::new(),
+        supervisor_abort_handles: Vec::new(),
+        supervisor_shutdown: Arc::new(AtomicBool::new(false)),
+        supervisor_handle: None,
         pipeline_id,
         flow_instance_id: Arc::clone(&context.flow_instance_id),
         ack_manager,
@@ -2196,6 +2344,205 @@ mod tests {
     use datatypes::{ConcreteDatatype, Schema, Value};
     use sqlparser::ast::{Expr, Value as SqlValue};
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+    use tokio::time::Duration as TokioDuration;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::from_handle(tokio::runtime::Handle::current())
+    }
+
+    fn empty_test_pipeline(spawner: TaskSpawner) -> ProcessorPipeline {
+        let channel_capacities = ProcessorChannelCapacities::new(4, 4);
+        let mut control_source = ControlSourceProcessor::new_with_channel_capacities(
+            "control_source",
+            channel_capacities,
+        );
+        let (ingress, ingress_rx) = mpsc::channel(channel_capacities.control);
+        control_source.set_ingress_input(ingress_rx);
+        ProcessorPipeline {
+            ingress,
+            output: None,
+            control_source,
+            middle_processors: Vec::new(),
+            result_sink: None,
+            handles: Vec::new(),
+            supervisor_abort_handles: Vec::new(),
+            supervisor_shutdown: Arc::new(AtomicBool::new(false)),
+            supervisor_handle: None,
+            pipeline_id: "test_pipe".to_string(),
+            flow_instance_id: Arc::<str>::from("default"),
+            ack_manager: Arc::new(AckManager::default()),
+            processor_stats: Vec::new(),
+            channel_capacities,
+            spawner,
+        }
+    }
+
+    async fn start_fake_processor(
+        pipeline: &mut ProcessorPipeline,
+        processor_id: &str,
+        processor_kind: &'static str,
+        handle: JoinHandle<Result<(), ProcessorError>>,
+        allow_normal_completion: bool,
+        task_exit_tx: mpsc::UnboundedSender<ProcessorTaskExit>,
+    ) {
+        pipeline
+            .start_processor(
+                processor_id.to_string(),
+                processor_kind,
+                ProcessorStart::ready(handle),
+                allow_normal_completion,
+                task_exit_tx,
+            )
+            .await
+            .expect("start fake processor");
+    }
+
+    async fn run_supervisor_failure_case(
+        processor_id: &str,
+        processor_kind: &'static str,
+        handle: JoinHandle<Result<(), ProcessorError>>,
+    ) -> PipelineRuntimeFailure {
+        let spawner = test_spawner();
+        let mut pipeline = empty_test_pipeline(spawner.clone());
+        let (task_exit_tx, task_exit_rx) = mpsc::unbounded_channel();
+        start_fake_processor(
+            &mut pipeline,
+            processor_id,
+            processor_kind,
+            handle,
+            false,
+            task_exit_tx,
+        )
+        .await;
+        let (failure_tx, failure_rx) = oneshot::channel();
+        let failure_tx = Arc::new(Mutex::new(Some(failure_tx)));
+        pipeline.spawn_supervisor(
+            task_exit_rx,
+            Arc::new(move |failure| {
+                if let Some(tx) = failure_tx.lock().unwrap().take() {
+                    let _ = tx.send(failure);
+                }
+            }),
+        );
+        let failure = tokio::time::timeout(TokioDuration::from_secs(2), failure_rx)
+            .await
+            .expect("timeout waiting for supervisor failure")
+            .expect("failure sender dropped");
+        pipeline.abort_started_processors().await;
+        failure
+    }
+
+    #[tokio::test]
+    async fn supervisor_reports_processor_err_as_failure() {
+        let spawner = test_spawner();
+        let handle = spawner.spawn(async {
+            Err(ProcessorError::ProcessingError(
+                "processor returned err".to_string(),
+            ))
+        });
+
+        let failure = run_supervisor_failure_case("err_processor", "test_kind", handle).await;
+
+        assert_eq!(failure.pipeline_id, "test_pipe");
+        assert_eq!(failure.processor_id, "err_processor");
+        assert_eq!(failure.processor_kind, "test_kind");
+        assert!(failure.reason.contains("processor returned err"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_reports_processor_panic_as_failure() {
+        let spawner = test_spawner();
+        let handle: JoinHandle<Result<(), ProcessorError>> =
+            spawner.spawn(async { panic!("processor panic") });
+
+        let failure = run_supervisor_failure_case("panic_processor", "test_kind", handle).await;
+
+        assert_eq!(failure.processor_id, "panic_processor");
+        assert_eq!(failure.processor_kind, "test_kind");
+        assert!(failure.reason.contains("Join error"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_reports_unexpected_ok_exit_as_failure() {
+        let spawner = test_spawner();
+        let handle = spawner.spawn(async { Ok(()) });
+
+        let failure = run_supervisor_failure_case("ok_processor", "test_kind", handle).await;
+
+        assert_eq!(failure.processor_id, "ok_processor");
+        assert_eq!(failure.processor_kind, "test_kind");
+        assert!(failure.reason.contains("unexpectedly with Ok"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_ignores_expected_ok_exit() {
+        let spawner = test_spawner();
+        let mut pipeline = empty_test_pipeline(spawner.clone());
+        let handle = spawner.spawn(async { Ok(()) });
+        let (task_exit_tx, task_exit_rx) = mpsc::unbounded_channel();
+        start_fake_processor(
+            &mut pipeline,
+            "bounded_processor",
+            "table_scan",
+            handle,
+            true,
+            task_exit_tx,
+        )
+        .await;
+        let (failure_tx, mut failure_rx) = mpsc::unbounded_channel();
+        pipeline.spawn_supervisor(
+            task_exit_rx,
+            Arc::new(move |failure| {
+                let _ = failure_tx.send(failure);
+            }),
+        );
+
+        let result = tokio::time::timeout(TokioDuration::from_millis(100), failure_rx.recv()).await;
+
+        if let Ok(Some(failure)) = result {
+            panic!("expected completion should not report failure: {failure:?}");
+        }
+        pipeline.abort_started_processors().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_ignores_task_exit_during_shutdown() {
+        let spawner = test_spawner();
+        let mut pipeline = empty_test_pipeline(spawner.clone());
+        let (release_tx, release_rx) = oneshot::channel();
+        let handle = spawner.spawn(async {
+            let _ = release_rx.await;
+            Ok(())
+        });
+        let (task_exit_tx, task_exit_rx) = mpsc::unbounded_channel();
+        start_fake_processor(
+            &mut pipeline,
+            "shutdown_processor",
+            "test_kind",
+            handle,
+            false,
+            task_exit_tx,
+        )
+        .await;
+        let (failure_tx, mut failure_rx) = mpsc::unbounded_channel();
+        pipeline.spawn_supervisor(
+            task_exit_rx,
+            Arc::new(move |failure| {
+                let _ = failure_tx.send(failure);
+            }),
+        );
+
+        pipeline.supervisor_shutdown.store(true, Ordering::Release);
+        release_tx.send(()).expect("release fake processor");
+        let result = tokio::time::timeout(TokioDuration::from_millis(100), failure_rx.recv()).await;
+
+        if let Ok(Some(failure)) = result {
+            panic!("shutdown exit should not report failure: {failure:?}");
+        }
+        pipeline.abort_started_processors().await;
+    }
 
     #[test]
     fn test_create_processor_from_physical_project() {

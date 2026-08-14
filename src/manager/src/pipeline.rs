@@ -1,6 +1,7 @@
 mod context;
 mod handlers;
 mod remote;
+mod runtime_failure;
 pub(crate) mod scheduler;
 mod spec;
 pub(crate) mod state;

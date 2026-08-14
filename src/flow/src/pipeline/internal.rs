@@ -198,7 +198,7 @@ impl PipelineManager {
         registries: PipelineRegistries,
     ) -> Self {
         Self {
-            pipelines: RwLock::new(HashMap::new()),
+            pipelines: Arc::new(RwLock::new(HashMap::new())),
             catalog,
             context,
             registries: RwLock::new(registries),
@@ -207,6 +207,13 @@ impl PipelineManager {
 
     pub(crate) fn replace_registries(&self, registries: PipelineRegistries) {
         *self.registries.write() = registries;
+    }
+
+    pub(crate) fn set_pipeline_failure_reporter(
+        &self,
+        reporter: super::context::PipelineFailureReporter,
+    ) {
+        self.context.set_pipeline_failure_reporter(reporter);
     }
 
     pub(crate) fn create_pipeline(
@@ -309,14 +316,36 @@ impl PipelineManager {
                 entry.streams = streams;
             }
 
+            entry.status = PipelineStatus::Running;
             entry
                 .pipeline
                 .take()
                 .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?
         };
 
+        let pipelines = Arc::clone(&self.pipelines);
+        let external_reporter = self.context.pipeline_failure_reporter();
+        let failure_handler = Arc::new(move |failure: PipelineRuntimeFailure| {
+            let mut marked_failed = false;
+            {
+                let mut guard = pipelines.write();
+                if let Some(entry) = guard.get_mut(&failure.pipeline_id) {
+                    if matches!(entry.status, PipelineStatus::Running) {
+                        entry.status = PipelineStatus::Failed;
+                        entry.pipeline = None;
+                        marked_failed = true;
+                    }
+                }
+            }
+            if marked_failed {
+                if let Some(reporter) = external_reporter.as_ref() {
+                    reporter(failure);
+                }
+            }
+        });
+
         let start_result = pipeline
-            .start()
+            .start_with_failure_handler(failure_handler)
             .await
             .map_err(|err| PipelineError::Runtime(err.to_string()));
 
@@ -326,12 +355,19 @@ impl PipelineManager {
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
         match start_result {
             Ok(()) => {
+                if matches!(entry.status, PipelineStatus::Failed) {
+                    entry.pipeline = None;
+                    return Err(PipelineError::Runtime(format!(
+                        "pipeline {pipeline_id} failed during startup"
+                    )));
+                }
                 entry.pipeline = Some(pipeline);
                 entry.status = PipelineStatus::Running;
                 Ok(())
             }
             Err(err) => {
                 entry.pipeline = None;
+                entry.status = PipelineStatus::Stopped;
                 Err(err)
             }
         }
@@ -361,6 +397,15 @@ impl PipelineManager {
         close_pipeline(pipeline, mode, timeout).await
     }
 
+    pub(crate) fn mark_pipeline_failed(&self, pipeline_id: &str) -> Result<(), PipelineError> {
+        let mut guard = self.pipelines.write();
+        let entry = guard
+            .get_mut(pipeline_id)
+            .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+        entry.status = PipelineStatus::Failed;
+        Ok(())
+    }
+
     /// Remove a pipeline runtime and close it if running.
     pub async fn delete_pipeline(&self, pipeline_id: &str) -> Result<(), PipelineError> {
         let maybe_entry = {
@@ -386,10 +431,18 @@ impl PipelineManager {
         let entry = guard
             .get(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
-        if !matches!(entry.status, PipelineStatus::Running) {
-            return Err(PipelineError::Runtime(format!(
-                "pipeline {pipeline_id} is not running"
-            )));
+        match entry.status {
+            PipelineStatus::Running => {}
+            PipelineStatus::Failed => {
+                return Err(PipelineError::Runtime(format!(
+                    "pipeline {pipeline_id} is failed"
+                )));
+            }
+            PipelineStatus::Stopped => {
+                return Err(PipelineError::Runtime(format!(
+                    "pipeline {pipeline_id} is not running"
+                )));
+            }
         }
         let pipeline = entry
             .pipeline

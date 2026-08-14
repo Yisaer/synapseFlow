@@ -8,12 +8,17 @@ use axum::response::IntoResponse;
 use flow::pipeline::{PipelineError, PipelineStopMode};
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
-use storage::{StorageError, StoredPipelineDesiredState, StoredPipelineRunState};
+use storage::{
+    StorageError, StoredPipelineDesiredState, StoredPipelineRunState, StoredPipelineRuntimeFailure,
+};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
 const EXPLAIN_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 use super::context::shared_mqtt_connector_keys_from_pipeline_request;
+use super::runtime_failure::{
+    matching_runtime_failure as matching_runtime_failure_marker, persist_start_failure_marker,
+};
 use super::spec::{
     build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
     validate_create_request,
@@ -21,7 +26,8 @@ use super::spec::{
 use super::state::AppState;
 use super::types::{
     CollectStatsQuery, CreatePipelineQuery, CreatePipelineRequest, CreatePipelineResponse,
-    GetPipelineResponse, ListPipelineItem, StopPipelineQuery, UpsertPipelineRequest,
+    GetPipelineResponse, ListPipelineItem, PipelineRuntimeFailureResponse, StopPipelineQuery,
+    UpsertPipelineRequest,
 };
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 
@@ -89,6 +95,43 @@ fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
         Some(StoredPipelineDesiredState::ScheduledStopped) => "scheduled_stopped".to_string(),
         _ => "stopped".to_string(),
     }
+}
+
+fn runtime_failure_response(
+    failure: &StoredPipelineRuntimeFailure,
+) -> PipelineRuntimeFailureResponse {
+    PipelineRuntimeFailureResponse {
+        processor_id: failure.processor_id.clone(),
+        processor_kind: failure.processor_kind.clone(),
+        reason: failure.reason.clone(),
+        failed_at_ms: failure.failed_at_ms,
+    }
+}
+
+fn matching_runtime_failure(
+    state: &AppState,
+    pipeline_id: &str,
+    revision: u64,
+) -> Result<Option<StoredPipelineRuntimeFailure>, String> {
+    matching_runtime_failure_marker(state.storage.as_ref(), pipeline_id, revision)
+}
+
+fn status_response_parts(
+    desired_status: String,
+    runtime_status: Option<String>,
+    failure: Option<&StoredPipelineRuntimeFailure>,
+) -> (
+    String,
+    Option<String>,
+    Option<PipelineRuntimeFailureResponse>,
+) {
+    let status = failure
+        .map(|_| "failed".to_string())
+        .or(runtime_status)
+        .unwrap_or_else(|| desired_status.clone());
+    let desired_status = (desired_status != status).then_some(desired_status);
+    let failure = failure.map(runtime_failure_response);
+    (status, desired_status, failure)
 }
 
 /// Validate a `:id` path segment against the resource-id grammar before any
@@ -346,20 +389,22 @@ pub async fn create_pipeline_handler(
         } else {
             match instance.start_pipeline(&pipeline_id).await {
                 Ok(_) => {
+                    let _ = state.storage.delete_pipeline_runtime_failure(&pipeline_id);
                     status = "running".to_string();
                 }
                 Err(err) => {
                     tracing::error!(
                         pipeline_id = %pipeline_id,
                         error = %err,
-                        "failed to start pipeline after create with start=true, leaving stopped"
+                        "failed to start pipeline after create with start=true"
                     );
-                    let _ = state
-                        .storage
-                        .put_pipeline_run_state(StoredPipelineRunState {
-                            pipeline_id: pipeline_id.clone(),
-                            desired_state: StoredPipelineDesiredState::Stopped,
-                        });
+                    persist_start_failure_marker(
+                        state.storage.as_ref(),
+                        &pipeline_id,
+                        req.revision,
+                        &err,
+                    );
+                    status = "failed".to_string();
                 }
             }
         }
@@ -660,19 +705,11 @@ pub async fn upsert_pipeline_handler(
         tracing::error!(
             pipeline_id = %id,
             error = %err,
-            "failed to start pipeline after upsert, leaving stopped"
+            "failed to start pipeline after upsert"
         );
-        let _ = state
-            .storage
-            .put_pipeline_run_state(StoredPipelineRunState {
-                pipeline_id: id.clone(),
-                desired_state: match desired_state {
-                    StoredPipelineDesiredState::ScheduledRunning => {
-                        StoredPipelineDesiredState::ScheduledStopped
-                    }
-                    _ => StoredPipelineDesiredState::Stopped,
-                },
-            });
+        persist_start_failure_marker(state.storage.as_ref(), &id, create_req.revision, &err);
+    } else {
+        let _ = state.storage.delete_pipeline_runtime_failure(&id);
     }
 
     let status = stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
@@ -745,11 +782,35 @@ pub async fn get_pipeline_handler(
         .schedule
         .as_ref()
         .map(super::scheduler::compute_schedule_status);
+    let desired_status = stored_state_label(run_state);
+    let failure = match matching_runtime_failure(&state, &id, stored.revision) {
+        Ok(failure) => failure,
+        Err(err) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+    let runtime_status = state
+        .local_instance(
+            spec.flow_instance_id
+                .as_deref()
+                .unwrap_or(DEFAULT_FLOW_INSTANCE_ID),
+        )
+        .and_then(|instance| {
+            instance
+                .list_pipelines()
+                .into_iter()
+                .find(|snapshot| snapshot.definition.id() == id)
+                .map(|snapshot| status_label(snapshot.status))
+        });
+    let (status, desired_status, last_runtime_error) =
+        status_response_parts(desired_status, runtime_status, failure.as_ref());
 
     Json(GetPipelineResponse {
         id: id.clone(),
         revision: stored.revision,
-        status: stored_state_label(run_state),
+        status,
+        desired_status,
+        last_runtime_error,
         spec,
         schedule_status,
     })
@@ -839,10 +900,24 @@ pub async fn collect_pipeline_stats_handler(
         }
     };
 
-    let (flow_instance_id, _) = match resolve_pipeline_spec(&state, &id).await {
+    let (flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
         Err(resp) => return resp,
     };
+    match matching_runtime_failure(&state, &id, pipeline_req.revision) {
+        Ok(Some(failure)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "pipeline {id} is failed: processor {} ({}) exited: {}",
+                    failure.processor_id, failure.processor_kind, failure.reason
+                ),
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+    }
 
     let timeout = Duration::from_millis(query.timeout_ms);
     let instance = match local_instance_response(&state, &flow_instance_id) {
@@ -939,6 +1014,7 @@ pub async fn start_pipeline_handler(
     };
     match instance.start_pipeline(&id).await {
         Ok(_) => {
+            let _ = state.storage.delete_pipeline_runtime_failure(&id);
             audit.log_success();
             (StatusCode::OK, format!("pipeline {id} started")).into_response()
         }
@@ -952,12 +1028,7 @@ pub async fn start_pipeline_handler(
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
         Err(err) => {
-            let _ = state
-                .storage
-                .put_pipeline_run_state(StoredPipelineRunState {
-                    pipeline_id: id.clone(),
-                    desired_state: StoredPipelineDesiredState::Stopped,
-                });
+            persist_start_failure_marker(state.storage.as_ref(), &id, pipeline_req.revision, &err);
             (
                 StatusCode::BAD_REQUEST,
                 format!("failed to start pipeline {id}: {err}"),
@@ -993,7 +1064,16 @@ pub async fn stop_pipeline_handler(
     let audit =
         ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(pipeline_req.revision));
 
-    if pipeline_req.options.schedule.is_some() {
+    let scheduled_failure = if pipeline_req.options.schedule.is_some() {
+        match matching_runtime_failure(&state, &id, pipeline_req.revision) {
+            Ok(failure) => failure,
+            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+        }
+    } else {
+        None
+    };
+
+    if pipeline_req.options.schedule.is_some() && scheduled_failure.is_none() {
         let err = format!(
             "pipeline {id} is scheduled; manual stop conflicts with scheduler-managed lifecycle"
         );
@@ -1014,7 +1094,11 @@ pub async fn stop_pipeline_handler(
         .storage
         .put_pipeline_run_state(StoredPipelineRunState {
             pipeline_id: id.clone(),
-            desired_state: StoredPipelineDesiredState::Stopped,
+            desired_state: if scheduled_failure.is_some() {
+                StoredPipelineDesiredState::ScheduledStopped
+            } else {
+                StoredPipelineDesiredState::Stopped
+            },
         })
     {
         return (
@@ -1030,11 +1114,18 @@ pub async fn stop_pipeline_handler(
     };
     match instance.stop_pipeline(&id, mode, timeout).await {
         Ok(_) => {
+            let _ = state.storage.delete_pipeline_runtime_failure(&id);
             audit.log_success();
             (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
         }
         Err(PipelineError::NotFound(_)) => {
-            (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
+            if scheduled_failure.is_some() {
+                let _ = state.storage.delete_pipeline_runtime_failure(&id);
+                audit.log_success();
+                (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
+            }
         }
         Err(err) => (
             StatusCode::BAD_REQUEST,
@@ -1172,18 +1263,19 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                             .into_response();
                     }
                 };
-                let status = if desired_status.starts_with("scheduled_") {
-                    desired_status
-                } else {
-                    runtime_status
-                        .get(&entry.id)
-                        .cloned()
-                        .unwrap_or(desired_status)
+                let failure = match matching_runtime_failure(&state, &entry.id, entry.revision) {
+                    Ok(failure) => failure,
+                    Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
                 };
+                let runtime_status = runtime_status.get(&entry.id).cloned();
+                let (status, desired_status, last_runtime_error) =
+                    status_response_parts(desired_status, runtime_status, failure.as_ref());
                 list.push(ListPipelineItem {
                     id: entry.id,
                     revision: entry.revision,
                     status,
+                    desired_status,
+                    last_runtime_error,
                     flow_instance_id,
                 });
             }
@@ -1200,10 +1292,15 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
 
 #[cfg(test)]
 mod tests {
-    use super::{create_pipeline_handler, start_pipeline_handler};
+    use super::{
+        collect_pipeline_stats_handler, create_pipeline_handler, list_pipelines,
+        start_pipeline_handler,
+    };
+    use crate::pipeline::runtime_failure::persist_start_failure_marker;
     use crate::pipeline::{AppState, CreatePipelineRequest, types};
     use crate::storage_bridge::{
         stored_mqtt_from_config, stored_pipeline_from_request, stored_stream_from_request,
+        stream_definition_from_stored,
     };
     use crate::stream::{
         CreateStreamRequest, MqttStreamPropsRequest, SchemaConfigRequest, StreamPropsRequest,
@@ -1215,7 +1312,9 @@ mod tests {
         response::IntoResponse,
     };
     use flow::connector::SharedMqttClientConfig;
+    use flow::pipeline::PipelineError;
     use serde_json::{Map as JsonMap, Value as JsonValue};
+    use storage::{StoredMemoryTopic, StoredMemoryTopicKind, StoredPipelineRuntimeFailure};
 
     fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
@@ -1286,6 +1385,129 @@ mod tests {
         }
     }
 
+    fn memory_stream_request(name: &str, topic: &str) -> CreateStreamRequest {
+        let schema_props = serde_json::json!({
+            "columns": [
+                {"name": "value", "data_type": "int64"}
+            ]
+        });
+        let JsonValue::Object(schema_fields) = schema_props else {
+            panic!("memory stream schema should encode as object");
+        };
+        let props = serde_json::json!({ "topic": topic });
+        let JsonValue::Object(props_fields) = props else {
+            panic!("memory stream props should encode as object");
+        };
+        CreateStreamRequest {
+            name: name.to_string(),
+            revision: 1,
+            stream_type: "memory".to_string(),
+            schema: SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: schema_fields,
+                r#ref: None,
+            },
+            props: StreamPropsRequest {
+                fields: props_fields,
+            },
+            shared: false,
+            decoder: crate::stream::DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        }
+    }
+
+    fn nop_pipeline_request(id: &str, stream: &str) -> CreatePipelineRequest {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "revision": 1,
+            "flow_instance_id": "default",
+            "sql": format!("select * from {stream}"),
+            "sinks": [
+                {
+                    "id": "sink",
+                    "type": "nop",
+                    "props": { "log": false }
+                }
+            ]
+        }))
+        .expect("decode nop pipeline request")
+    }
+
+    fn seed_failed_marker(state: &AppState, pipeline_id: &str, revision: u64) {
+        state
+            .storage
+            .put_pipeline_runtime_failure(StoredPipelineRuntimeFailure {
+                pipeline_id: pipeline_id.to_string(),
+                revision,
+                failed_at_ms: 1234,
+                processor_id: "PhysicalFilter_1".to_string(),
+                processor_kind: "filter".to_string(),
+                reason: "boom".to_string(),
+            })
+            .expect("persist failure marker");
+    }
+
+    #[test]
+    fn start_failure_marker_preserves_existing_processor_marker() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        seed_failed_marker(&state, "startup_failed_pipe", 1);
+
+        persist_start_failure_marker(
+            state.storage.as_ref(),
+            "startup_failed_pipe",
+            1,
+            &PipelineError::Runtime("generic startup failure".to_string()),
+        );
+
+        let marker = state
+            .storage
+            .get_pipeline_runtime_failure("startup_failed_pipe")
+            .expect("read failure marker")
+            .expect("failure marker exists");
+        assert_eq!(marker.processor_id, "PhysicalFilter_1");
+        assert_eq!(marker.processor_kind, "filter");
+        assert_eq!(marker.reason, "boom");
+    }
+
+    async fn seed_memory_stream(state: &AppState, stream: &str, topic: &str) {
+        state
+            .storage
+            .create_memory_topic(StoredMemoryTopic {
+                topic: topic.to_string(),
+                revision: 1,
+                kind: StoredMemoryTopicKind::Bytes,
+                capacity: 16,
+            })
+            .expect("persist memory topic");
+        let instance = state.instances.default_instance();
+        instance
+            .declare_memory_topic(topic, flow::connector::MemoryTopicKind::Bytes, 16)
+            .expect("declare runtime memory topic");
+        let stream_req = memory_stream_request(stream, topic);
+        let stored_stream =
+            stored_stream_from_request(&stream_req).expect("serialize memory stream request");
+        state
+            .storage
+            .create_stream(stored_stream.clone())
+            .expect("persist memory stream");
+        let definition =
+            stream_definition_from_stored(&stored_stream, instance.decoder_registry().as_ref())
+                .expect("build stream definition");
+        instance
+            .create_stream(definition, false)
+            .await
+            .expect("create runtime stream");
+    }
+
     fn mqtt_sink_request(id: &str, connector_key: &str) -> types::CreatePipelineSinkRequest {
         serde_json::from_value(serde_json::json!({
             "id": id,
@@ -1295,6 +1517,139 @@ mod tests {
             }
         }))
         .expect("decode mqtt sink request")
+    }
+
+    #[tokio::test]
+    async fn list_pipeline_reports_failed_marker() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        let pipeline_req = nop_pipeline_request("failed_pipe", "src");
+        state
+            .storage
+            .create_pipeline(
+                stored_pipeline_from_request(&pipeline_req)
+                    .expect("serialize stored pipeline request"),
+            )
+            .expect("persist pipeline");
+        state
+            .storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: "failed_pipe".to_string(),
+                desired_state: storage::StoredPipelineDesiredState::Running,
+            })
+            .expect("persist run state");
+        seed_failed_marker(&state, "failed_pipe", 1);
+
+        let response = list_pipelines(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read list body");
+        let payload: JsonValue = serde_json::from_slice(&body).expect("decode list body");
+        let item = payload
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("one list item");
+        assert_eq!(item["status"], "failed");
+        assert_eq!(item["desired_status"], "running");
+        assert_eq!(
+            item["last_runtime_error"]["processor_id"],
+            "PhysicalFilter_1"
+        );
+        assert_eq!(item["last_runtime_error"]["processor_kind"], "filter");
+        assert_eq!(item["last_runtime_error"]["reason"], "boom");
+    }
+
+    #[tokio::test]
+    async fn stats_failed_pipeline_returns_error_with_reason() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        let pipeline_req = nop_pipeline_request("failed_stats_pipe", "src");
+        state
+            .storage
+            .create_pipeline(
+                stored_pipeline_from_request(&pipeline_req)
+                    .expect("serialize stored pipeline request"),
+            )
+            .expect("persist pipeline");
+        seed_failed_marker(&state, "failed_stats_pipe", 1);
+
+        let response = collect_pipeline_stats_handler(
+            State(state),
+            Path("failed_stats_pipe".to_string()),
+            Query(types::CollectStatsQuery::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read stats body");
+        let message = String::from_utf8(body.to_vec()).expect("utf8 stats body");
+        assert!(message.contains("failed_stats_pipe"), "got: {message}");
+        assert!(message.contains("PhysicalFilter_1"), "got: {message}");
+        assert!(message.contains("filter"), "got: {message}");
+        assert!(message.contains("boom"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn start_failed_pipeline_clears_marker_on_success() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        seed_memory_stream(&state, "src", "input_topic").await;
+
+        let pipeline_req = nop_pipeline_request("retry_pipe", "src");
+        let create_response = create_pipeline_handler(
+            State(state.clone()),
+            Query(types::CreatePipelineQuery::default()),
+            axum::Json(pipeline_req),
+        )
+        .await
+        .into_response();
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        seed_failed_marker(&state, "retry_pipe", 1);
+
+        let response = start_pipeline_handler(State(state.clone()), Path("retry_pipe".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            state
+                .storage
+                .get_pipeline_runtime_failure("retry_pipe")
+                .expect("read failure marker")
+                .is_none()
+        );
+        let run_state = state
+            .storage
+            .get_pipeline_run_state("retry_pipe")
+            .expect("read run state")
+            .expect("run state exists");
+        assert_eq!(
+            run_state.desired_state,
+            storage::StoredPipelineDesiredState::Running
+        );
     }
 
     #[tokio::test]

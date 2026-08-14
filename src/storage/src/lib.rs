@@ -16,6 +16,8 @@ const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("stream
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
 const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pipeline_run_states");
+const PIPELINE_RUNTIME_FAILURES_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("pipeline_runtime_failures");
 const SCHEMAS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("schemas");
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
@@ -125,6 +127,16 @@ impl<'de> Deserialize<'de> for StoredPipelineDesiredState {
 pub struct StoredPipelineRunState {
     pub pipeline_id: String,
     pub desired_state: StoredPipelineDesiredState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredPipelineRuntimeFailure {
+    pub pipeline_id: String,
+    pub revision: u64,
+    pub failed_at_ms: u64,
+    pub processor_id: String,
+    pub processor_kind: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -295,6 +307,11 @@ impl MetadataStorage {
                 .open_table(PIPELINE_RUN_STATES_TABLE)
                 .map_err(StorageError::backend)?;
             let _ = run_states.remove(id).map_err(StorageError::backend)?;
+
+            let mut runtime_failures = txn
+                .open_table(PIPELINE_RUNTIME_FAILURES_TABLE)
+                .map_err(StorageError::backend)?;
+            let _ = runtime_failures.remove(id).map_err(StorageError::backend)?;
         }
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -327,6 +344,28 @@ impl MetadataStorage {
 
     pub fn delete_pipeline_run_state(&self, pipeline_id: &str) -> Result<(), StorageError> {
         self.delete_entry(PIPELINE_RUN_STATES_TABLE, pipeline_id)
+    }
+
+    pub fn put_pipeline_runtime_failure(
+        &self,
+        failure: StoredPipelineRuntimeFailure,
+    ) -> Result<(), StorageError> {
+        self.put_entry(
+            PIPELINE_RUNTIME_FAILURES_TABLE,
+            failure.pipeline_id.as_str(),
+            &failure,
+        )
+    }
+
+    pub fn get_pipeline_runtime_failure(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<StoredPipelineRuntimeFailure>, StorageError> {
+        self.get_entry(PIPELINE_RUNTIME_FAILURES_TABLE, pipeline_id)
+    }
+
+    pub fn delete_pipeline_runtime_failure(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        self.delete_entry(PIPELINE_RUNTIME_FAILURES_TABLE, pipeline_id)
     }
 
     pub fn create_mqtt_config(&self, config: StoredMqttClientConfig) -> Result<(), StorageError> {
@@ -510,6 +549,8 @@ impl MetadataStorage {
         txn.open_table(PIPELINES_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(PIPELINE_RUN_STATES_TABLE)
+            .map_err(StorageError::backend)?;
+        txn.open_table(PIPELINE_RUNTIME_FAILURES_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(SHARED_MQTT_CONFIGS_TABLE)
             .map_err(StorageError::backend)?;
@@ -950,6 +991,24 @@ impl StorageManager {
         self.metadata.delete_pipeline_run_state(pipeline_id)
     }
 
+    pub fn put_pipeline_runtime_failure(
+        &self,
+        failure: StoredPipelineRuntimeFailure,
+    ) -> Result<(), StorageError> {
+        self.metadata.put_pipeline_runtime_failure(failure)
+    }
+
+    pub fn get_pipeline_runtime_failure(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<StoredPipelineRuntimeFailure>, StorageError> {
+        self.metadata.get_pipeline_runtime_failure(pipeline_id)
+    }
+
+    pub fn delete_pipeline_runtime_failure(&self, pipeline_id: &str) -> Result<(), StorageError> {
+        self.metadata.delete_pipeline_runtime_failure(pipeline_id)
+    }
+
     pub fn create_mqtt_config(&self, config: StoredMqttClientConfig) -> Result<(), StorageError> {
         self.metadata.create_mqtt_config(config)
     }
@@ -1086,6 +1145,17 @@ mod tests {
         StoredPipelineRunState {
             pipeline_id: "pipe_1".to_string(),
             desired_state: StoredPipelineDesiredState::Running,
+        }
+    }
+
+    fn sample_pipeline_runtime_failure() -> StoredPipelineRuntimeFailure {
+        StoredPipelineRuntimeFailure {
+            pipeline_id: "pipe_1".to_string(),
+            revision: 1,
+            failed_at_ms: 1234,
+            processor_id: "processor_1".to_string(),
+            processor_kind: "test_processor".to_string(),
+            reason: "task failed".to_string(),
         }
     }
 
@@ -1268,6 +1338,55 @@ mod tests {
         manager.delete_stream(&stream.id).unwrap();
         manager.delete_pipeline(&pipeline.id).unwrap();
         manager.delete_mqtt_config(&mqtt.key).unwrap();
+    }
+
+    #[test]
+    fn pipeline_runtime_failure_roundtrip() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let failure = sample_pipeline_runtime_failure();
+
+        storage
+            .put_pipeline_runtime_failure(failure.clone())
+            .unwrap();
+
+        assert_eq!(
+            storage.get_pipeline_runtime_failure("pipe_1").unwrap(),
+            Some(failure)
+        );
+
+        storage.delete_pipeline_runtime_failure("pipe_1").unwrap();
+        assert!(storage
+            .get_pipeline_runtime_failure("pipe_1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn delete_pipeline_removes_runtime_failure_marker() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let pipeline = sample_pipeline();
+
+        storage.create_pipeline(pipeline.clone()).unwrap();
+        storage
+            .put_pipeline_run_state(sample_pipeline_run_state())
+            .unwrap();
+        storage
+            .put_pipeline_runtime_failure(sample_pipeline_runtime_failure())
+            .unwrap();
+
+        storage.delete_pipeline(&pipeline.id).unwrap();
+
+        assert!(storage.get_pipeline(&pipeline.id).unwrap().is_none());
+        assert!(storage
+            .get_pipeline_run_state(&pipeline.id)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_pipeline_runtime_failure(&pipeline.id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
