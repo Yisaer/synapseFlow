@@ -1,6 +1,6 @@
 # Syslog Logging Design
 
-This document defines the first syslog backend design for veloFlux logging.
+This document defines the syslog backend behavior for veloFlux logging.
 
 ## Background
 
@@ -20,14 +20,13 @@ migration.
 - Preserve structured logging context in the rendered syslog message body.
 - Keep syslog I/O off the main runtime execution path.
 - Support manager and embedded startup paths consistently.
+- Support default and custom Unix datagram sockets and remote UDP or TCP
+  destinations.
 
 ## Non-Goals
 
-- This design does not enable remote UDP syslog transport in the current
-  implementation.
-- This design does not enable remote TCP syslog transport in the current
-  implementation.
 - This design does not support multi-backend fan-out in the first version.
+- This design does not support TLS-encrypted syslog transport.
 - This design does not define host-process logging callbacks for the embedded
   runtime.
 
@@ -47,14 +46,11 @@ logging:
     enable: true
     level: info
     tag: "veloflux"
-    network: ""
-    address: ""
+    network: unixgram
+    address: /var/run/syslog
 ```
 
-This example is directly usable for local syslog. Leaving both
-`logging.syslog.network` and `logging.syslog.address` empty tells veloFlux to
-connect to the host local Unix datagram syslog socket by platform convention,
-such as `/var/run/syslog` on macOS or `/dev/log` on many Linux distributions.
+This example connects to the explicitly configured Unix datagram socket.
 
 Example local-syslog-focused snippet:
 
@@ -66,29 +62,58 @@ logging:
   syslog:
     enable: true
     tag: "veloflux"
-    network: ""
-    address: ""
+    network: unixgram
+    address: /var/run/syslog
 ```
+
+Example with a custom Unix datagram socket:
+
+```yaml
+logging:
+  output: syslog
+  syslog:
+    enable: true
+    network: unixgram
+    address: /run/custom/syslog.sock
+```
+
+Example with a remote UDP or TCP server:
+
+```yaml
+logging:
+  output: syslog
+  syslog:
+    enable: true
+    network: udp
+    address: syslog.example.com:514
+```
+
+Use `network: tcp` with the same `host:port` address format to select TCP.
 
 ### Fields
 
 #### `logging.syslog.network`
 
-Transport name aligned with eKuiper.
+Syslog transport name. Values are case-insensitive.
 
 Current behavior:
 
-- keep it empty to use the host local Unix datagram syslog socket
-- non-empty values are reserved for a future remote syslog enhancement
+- `unixgram`: connect to the Unix datagram socket path in `address`
+- `udp`: send datagrams to the `host:port` endpoint in `address`
+- `tcp`: connect to the `host:port` endpoint in `address`
+
+`unixgram` requires a Unix platform. Empty values are rejected.
 
 #### `logging.syslog.address`
 
-Remote endpoint address aligned with eKuiper.
+Destination selected by `logging.syslog.network`.
 
 Current behavior:
 
-- keep it empty to use the host local Unix datagram syslog socket
-- non-empty values are reserved for a future remote syslog enhancement
+- with `unixgram`: an absolute or relative Unix socket path
+- with `udp` or `tcp`: a resolvable `host:port` endpoint
+
+`network` and `address` must both be non-empty.
 
 #### `logging.syslog.enable`
 
@@ -134,6 +159,17 @@ way:
 
 The first version does not need a separate trace-specific syslog priority.
 
+## Transport Framing
+
+Unix datagram and UDP destinations send one formatted syslog record per
+datagram. TCP destinations use RFC 6587 octet-counting framing: each record is
+prefixed with its decimal byte length and one space. This preserves record
+boundaries even when the rendered event contains a newline.
+
+Each TCP connection attempt has a three-second timeout per resolved socket
+address. Hostname resolution itself uses the platform resolver and is not
+covered by this connection timeout.
+
 ## Message Body Shape
 
 The syslog message body should remain human-readable and preserve useful event
@@ -160,7 +196,7 @@ When `logging.output=syslog` is selected:
 1. load config;
 2. validate that `logging.syslog.enable=true`;
 3. resolve the effective runtime ident from `logging.syslog.tag`;
-4. resolve the platform local Unix datagram syslog socket and connect to it;
+4. resolve the configured destination and open its socket or connection;
 5. install the process-global subscriber;
 6. continue normal runtime startup.
 
@@ -176,15 +212,18 @@ If syslog writes fail after startup:
 
 - do not block processor or connector hot paths;
 - use bounded buffering;
-- attempt background recovery where practical;
+- reconnect in the background and retry the current record once;
 - tolerate bounded record loss;
-- emit rate-limited diagnostics for persistent backend failure.
+- retry connection setup when a later record arrives after a failed reconnect.
 
 ## Deployment Notes
 
 - Keep `logging.output=syslog` and `logging.syslog.enable=true` aligned.
-- Keep `logging.syslog.network=""` and `logging.syslog.address=""` for the
-  current local-Unix-datagram-syslog-only implementation.
+- Explicitly configure both `logging.syslog.network` and
+  `logging.syslog.address`.
+- Use `network=unixgram` with a socket path for a local endpoint.
+- Use `network=udp` or `network=tcp` with a `host:port` address for a remote
+  endpoint.
 - Prefer `include_source=false` in production unless file/line metadata is
   required for active debugging.
 - Prefer `disable_timestamp=true` when syslog already supplies the timestamp

@@ -591,14 +591,21 @@ mod tests {
             .is_ok());
 
         let mut collections = Vec::new();
-        while collections.len() < 2 {
-            match output_rx.recv().await.unwrap() {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv")
+            {
                 StreamData::Collection(c) => collections.push(c),
-                StreamData::Control(_) => {}
+                StreamData::Control(ControlSignal::Barrier(
+                    crate::processor::BarrierControlSignal::StreamGracefulEnd { .. },
+                )) => break,
                 other => panic!("unexpected output: {}", other.description()),
             }
         }
 
+        assert_eq!(collections.len(), 2);
         assert!(collections.iter().all(|c| c.rows().len() == 1));
         let mut seen = collections
             .iter()

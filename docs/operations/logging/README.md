@@ -37,8 +37,7 @@ existing `tracing` call sites and shared startup initialization flow.
 - This design does not add multi-destination fan-out in the first version.
 - This design does not replace `tracing` with a different application logging
   API.
-- This design does not define remote log ingestion pipelines beyond local
-  syslog.
+- This design does not provide TLS-encrypted syslog transport.
 - This design does not define runtime hot reload for logging config.
 
 ## Current Logging Architecture
@@ -93,13 +92,12 @@ logging:
     enable: false
     level: info
     tag: "veloflux"
-    network: ""
-    address: ""
+    network: unixgram
+    address: /var/run/syslog
 ```
 
-For local syslog deployments, the empty `network` and `address` values above
-are intentional and usable. They mean veloFlux should connect to the host local
-Unix datagram syslog socket instead of a remote syslog endpoint.
+When syslog output is enabled, both `network` and `address` must be explicitly
+configured. Empty values cause logging initialization to fail.
 
 ### Common Fields
 
@@ -125,10 +123,10 @@ Unix datagram syslog socket instead of a remote syslog endpoint.
   `logging.level`
 - `logging.syslog.tag`: base syslog tag used to derive the effective runtime
   ident
-- `logging.syslog.network`: transport name aligned with eKuiper; keep it empty
-  to use the host local Unix datagram syslog socket
-- `logging.syslog.address`: remote endpoint address aligned with eKuiper; keep
-  it empty to use the host local Unix datagram syslog socket
+- `logging.syslog.network`: required transport name; one of `unixgram`, `udp`,
+  or `tcp`
+- `logging.syslog.address`: Unix socket path for `unixgram`, or `host:port` for
+  `udp` and `tcp`
 
 ## Output Selection Semantics
 
@@ -152,33 +150,18 @@ single-sink backend model.
 
 ### Scope
 
-The configuration surface is aligned with eKuiper by exposing
-`logging.syslog.network` and `logging.syslog.address`.
+The configuration surface requires both `logging.syslog.network` and
+`logging.syslog.address`. A destination uses one of these combinations:
 
-In the current veloFlux implementation, both fields must be left empty and the
-backend will connect to the host local Unix datagram syslog socket path
-discovered by platform convention.
+- `unixgram` and a Unix socket path;
+- `udp` and a `host:port` endpoint;
+- `tcp` and a `host:port` endpoint.
 
-Examples include:
-
-- `/dev/log`
-- `/var/run/syslog`
-
-Remote UDP or TCP syslog transport is reserved for a future enhancement and is
-not enabled in the current implementation.
-
-### Why Local Syslog First
-
-Local syslog support addresses the main operational goal: integrating veloFlux
-with the host system log manager without changing application logging call
-sites.
-
-Compared with remote transport support, local syslog:
-
-- keeps the configuration surface small;
-- matches common Linux deployment patterns;
-- avoids transport policy complexity in the first rollout;
-- is easier to validate in manager deployments.
+Unix datagram and UDP transports send one record per datagram. TCP uses RFC
+6587 octet-counting framing. The backend opens the selected destination during
+startup and fails startup when initialization fails. Each TCP connection
+attempt has a three-second timeout per resolved socket address. Runtime write
+failures trigger a background reconnect and one retry of the current record.
 
 ### Message Identity
 

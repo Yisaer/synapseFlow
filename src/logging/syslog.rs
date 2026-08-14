@@ -1,7 +1,7 @@
 use crate::config::SyslogLoggingConfig;
 use std::io;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -11,15 +11,34 @@ use tracing::{Level, Metadata};
 use tracing_subscriber::fmt::writer::MakeWriter;
 
 #[cfg(unix)]
-use std::os::unix::net::UnixDatagram;
+use {
+    std::os::unix::net::UnixDatagram,
+    std::path::{Path, PathBuf},
+};
 
 const SYSLOG_QUEUE_CAPACITY: usize = 8192;
 const SYSLOG_USER_FACILITY_CODE: u8 = 1;
+const SYSLOG_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 enum SyslogDestination {
     #[cfg(unix)]
-    Local { paths: Vec<PathBuf> },
+    UnixDatagram {
+        path: PathBuf,
+    },
+    Udp {
+        address: String,
+    },
+    Tcp {
+        address: String,
+    },
+}
+
+enum SyslogConnection {
+    #[cfg(unix)]
+    UnixDatagram(UnixDatagram),
+    Udp(UdpSocket),
+    Tcp(TcpStream),
 }
 
 pub struct SyslogMakeWriter {
@@ -62,11 +81,7 @@ fn open_syslog_with_destination(
     destination: SyslogDestination,
     effective_app_name: &str,
 ) -> io::Result<(SyslogMakeWriter, SyslogWorkerGuard)> {
-    #[cfg(unix)]
-    let _ = open_destination(&destination)?;
-
-    #[cfg(not(unix))]
-    let _ = &destination;
+    let connection = open_destination(&destination)?;
 
     let (sender, receiver) = sync_channel(SYSLOG_QUEUE_CAPACITY);
     let app_name = Arc::<str>::from(effective_app_name.to_string());
@@ -82,6 +97,7 @@ fn open_syslog_with_destination(
                 worker_app_name,
                 receiver,
                 worker_shutdown,
+                connection,
             )
         })?;
     let make_writer = SyslogMakeWriter {
@@ -98,32 +114,41 @@ fn resolve_syslog_destination(cfg: &SyslogLoggingConfig) -> io::Result<SyslogDes
     let network = cfg.network.trim();
     let address = cfg.address.trim();
 
-    if network.is_empty() && address.is_empty() {
-        #[cfg(unix)]
-        {
-            return Ok(SyslogDestination::Local {
-                paths: default_local_syslog_paths(),
-            });
-        }
-        #[cfg(not(unix))]
-        {
-            return Err(io::Error::other(
-                "local syslog output requires Unix-domain socket support on this platform",
-            ));
-        }
-    }
-
     if network.is_empty() || address.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "logging.syslog.network and logging.syslog.address must either both be empty or both be set",
+            "logging.syslog.network and logging.syslog.address must both be explicitly configured",
         ));
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "remote syslog transport is not supported yet; leave logging.syslog.network and logging.syslog.address empty to use local syslog",
-    ))
+    match network.to_ascii_lowercase().as_str() {
+        "unixgram" => {
+            #[cfg(unix)]
+            {
+                Ok(SyslogDestination::UnixDatagram {
+                    path: PathBuf::from(address),
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                Err(io::Error::other(
+                    "logging.syslog.network=unixgram requires Unix-domain socket support",
+                ))
+            }
+        }
+        "udp" => Ok(SyslogDestination::Udp {
+            address: address.to_string(),
+        }),
+        "tcp" => Ok(SyslogDestination::Tcp {
+            address: address.to_string(),
+        }),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "unsupported logging.syslog.network {network:?}; expected unixgram, udp, or tcp"
+            ),
+        )),
+    }
 }
 
 impl SyslogMakeWriter {
@@ -197,25 +222,9 @@ fn run_syslog_worker(
     app_name: Arc<str>,
     receiver: Receiver<SyslogRecord>,
     shutdown: Arc<AtomicBool>,
+    connection: SyslogConnection,
 ) {
-    #[cfg(unix)]
-    {
-        run_syslog_worker_unix(destination, app_name, receiver, shutdown);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (destination, app_name, receiver, shutdown);
-    }
-}
-
-#[cfg(unix)]
-fn run_syslog_worker_unix(
-    destination: SyslogDestination,
-    app_name: Arc<str>,
-    receiver: Receiver<SyslogRecord>,
-    shutdown: Arc<AtomicBool>,
-) {
-    let mut socket = open_destination(&destination).ok();
+    let mut connection = Some(connection);
     let pid = std::process::id();
 
     loop {
@@ -228,51 +237,110 @@ fn run_syslog_worker_unix(
             Err(RecvTimeoutError::Disconnected) => break,
         };
         let payload = format_syslog_message(&app_name, pid, record.severity, &record.body);
-        if let Some(sock) = socket.as_ref() {
-            if sock.send(&payload).is_ok() {
+        if let Some(active_connection) = connection.as_mut() {
+            if active_connection.send(&payload).is_ok() {
                 continue;
             }
         }
 
-        socket = open_destination(&destination).ok();
-        if let Some(sock) = socket.as_ref() {
-            let _ = sock.send(&payload);
+        connection = open_destination(&destination).ok();
+        if let Some(active_connection) = connection.as_mut() {
+            if active_connection.send(&payload).is_err() {
+                connection = None;
+            }
         }
     }
 }
 
-#[cfg(unix)]
-fn open_destination(destination: &SyslogDestination) -> io::Result<UnixDatagram> {
+fn open_destination(destination: &SyslogDestination) -> io::Result<SyslogConnection> {
     match destination {
-        SyslogDestination::Local { paths } => open_local_syslog_socket(paths),
+        #[cfg(unix)]
+        SyslogDestination::UnixDatagram { path } => {
+            open_syslog_socket(path).map(SyslogConnection::UnixDatagram)
+        }
+        SyslogDestination::Udp { address } => open_udp_socket(address).map(SyslogConnection::Udp),
+        SyslogDestination::Tcp { address } => open_tcp_stream(address).map(SyslogConnection::Tcp),
     }
 }
 
-#[cfg(unix)]
-fn open_local_syslog_socket(paths: &[PathBuf]) -> io::Result<UnixDatagram> {
+fn open_tcp_stream(address: &str) -> io::Result<TcpStream> {
     let mut last_error = None;
-    for path in paths {
-        match open_syslog_socket(path) {
-            Ok(socket) => return Ok(socket),
-            Err(err) => last_error = Some((path.clone(), err)),
+
+    for destination in address.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&destination, SYSLOG_TCP_CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                stream.set_nodelay(true)?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                return Ok(stream);
+            }
+            Err(err) => last_error = Some(err),
         }
     }
 
-    if let Some((path, err)) = last_error {
-        return Err(io::Error::new(
-            err.kind(),
-            format!(
-                "failed to connect to local syslog socket via {}: {}",
-                path.display(),
-                err
-            ),
-        ));
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("syslog address {address:?} did not resolve to any socket address"),
+        )
+    }))
+}
+
+fn open_udp_socket(address: &str) -> io::Result<UdpSocket> {
+    let mut last_error = None;
+    let mut resolved_any = false;
+
+    for destination in address.to_socket_addrs()? {
+        resolved_any = true;
+        let bind_address = if destination.is_ipv4() {
+            SocketAddr::from(([0, 0, 0, 0], 0))
+        } else {
+            SocketAddr::from(([0_u16; 8], 0))
+        };
+        let socket = match UdpSocket::bind(bind_address) {
+            Ok(socket) => socket,
+            Err(err) => {
+                last_error = Some(err);
+                continue;
+            }
+        };
+        match socket.connect(destination) {
+            Ok(()) => return Ok(socket),
+            Err(err) => last_error = Some(err),
+        }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "no local syslog socket candidates are configured",
-    ))
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            if resolved_any {
+                format!("failed to connect UDP syslog socket to {address}")
+            } else {
+                format!("syslog address {address:?} did not resolve to any socket address")
+            },
+        )
+    }))
+}
+
+impl SyslogConnection {
+    fn send(&mut self, payload: &[u8]) -> io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Self::UnixDatagram(socket) => ensure_datagram_sent(socket.send(payload), payload.len()),
+            Self::Udp(socket) => ensure_datagram_sent(socket.send(payload), payload.len()),
+            Self::Tcp(stream) => stream.write_all(&format_tcp_frame(payload)),
+        }
+    }
+}
+
+fn ensure_datagram_sent(result: io::Result<usize>, expected: usize) -> io::Result<()> {
+    match result {
+        Ok(actual) if actual == expected => Ok(()),
+        Ok(actual) => Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("syslog datagram write sent {actual} of {expected} bytes"),
+        )),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(unix)]
@@ -280,23 +348,6 @@ fn open_syslog_socket(path: &Path) -> io::Result<UnixDatagram> {
     let socket = UnixDatagram::unbound()?;
     socket.connect(path)?;
     Ok(socket)
-}
-
-#[cfg(unix)]
-fn default_local_syslog_paths() -> Vec<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![PathBuf::from("/var/run/syslog")]
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        vec![
-            PathBuf::from("/dev/log"),
-            PathBuf::from("/var/run/log"),
-            PathBuf::from("/var/run/syslog"),
-        ]
-    }
 }
 
 fn format_syslog_message(
@@ -311,6 +362,15 @@ fn format_syslog_message(
     message.extend_from_slice(header.as_bytes());
     message.extend_from_slice(body);
     message
+}
+
+fn format_tcp_frame(payload: &[u8]) -> Vec<u8> {
+    let length = payload.len().to_string();
+    let mut frame = Vec::with_capacity(length.len() + 1 + payload.len());
+    frame.extend_from_slice(length.as_bytes());
+    frame.push(b' ');
+    frame.extend_from_slice(payload);
+    frame
 }
 
 impl SyslogSeverity {
@@ -337,6 +397,8 @@ impl SyslogSeverity {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Read;
+    use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_socket_path(name: &str) -> std::path::PathBuf {
@@ -374,40 +436,51 @@ mod tests {
         let err = resolve_syslog_destination(&cfg).expect_err("missing address should fail");
         assert!(err
             .to_string()
-            .contains("must either both be empty or both be set"));
+            .contains("must both be explicitly configured"));
     }
 
     #[test]
-    fn rejects_remote_syslog_transport_for_now() {
+    fn rejects_implicit_local_syslog_destination() {
+        let cfg = SyslogLoggingConfig::default();
+
+        let err = resolve_syslog_destination(&cfg).expect_err("implicit destination should fail");
+        assert!(err
+            .to_string()
+            .contains("must both be explicitly configured"));
+    }
+
+    #[test]
+    fn rejects_unsupported_network() {
         let cfg = SyslogLoggingConfig {
             enable: true,
             level: None,
             tag: "veloflux".to_string(),
-            network: "udp".to_string(),
+            network: "tls".to_string(),
             address: "127.0.0.1:514".to_string(),
         };
 
-        let err = resolve_syslog_destination(&cfg).expect_err("remote transport should fail");
-        assert!(err
-            .to_string()
-            .contains("remote syslog transport is not supported yet"));
+        let err = resolve_syslog_destination(&cfg).expect_err("unknown transport should fail");
+        assert!(err.to_string().contains("expected unixgram, udp, or tcp"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn worker_sends_record_to_local_socket() {
+    fn worker_sends_record_to_custom_unix_datagram_socket() {
         let path = unique_socket_path("syslog");
         let receiver = UnixDatagram::bind(&path).expect("bind unix datagram");
         receiver
             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .expect("set read timeout");
 
-        let destination = SyslogDestination::Local {
-            paths: vec![path.clone()],
+        let cfg = SyslogLoggingConfig {
+            enable: true,
+            level: None,
+            tag: "veloflux".to_string(),
+            network: "unixgram".to_string(),
+            address: path.to_string_lossy().into_owned(),
         };
         let (make_writer, guard) =
-            open_syslog_with_destination(destination, "veloflux-worker-default")
-                .expect("open syslog");
+            open_syslog(&cfg, "veloflux-worker-default").expect("open syslog");
         {
             let mut writer = make_writer.writer_for_level(Level::WARN);
             writer
@@ -423,5 +496,92 @@ mod tests {
 
         drop(guard);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn worker_sends_record_to_udp_server() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind UDP receiver");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+        let cfg = SyslogLoggingConfig {
+            enable: true,
+            level: None,
+            tag: "veloflux".to_string(),
+            network: "udp".to_string(),
+            address: receiver
+                .local_addr()
+                .expect("UDP receiver address")
+                .to_string(),
+        };
+        let (make_writer, guard) = open_syslog(&cfg, "veloflux-manager").expect("open syslog");
+
+        {
+            let mut writer = make_writer.writer_for_level(Level::INFO);
+            writer.write_all(b"UDP syslog message").expect("write info");
+        }
+
+        let mut buf = [0_u8; 512];
+        let (len, _) = receiver.recv_from(&mut buf).expect("receive UDP datagram");
+        let message = std::str::from_utf8(&buf[..len]).expect("UTF-8 syslog payload");
+        assert!(message.starts_with("<14>veloflux-manager["));
+        assert!(message.ends_with(": UDP syslog message"));
+
+        drop(guard);
+    }
+
+    #[test]
+    fn worker_sends_octet_counted_record_to_tcp_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind TCP listener");
+        let cfg = SyslogLoggingConfig {
+            enable: true,
+            level: None,
+            tag: "veloflux".to_string(),
+            network: "tcp".to_string(),
+            address: listener
+                .local_addr()
+                .expect("TCP listener address")
+                .to_string(),
+        };
+        let (make_writer, guard) = open_syslog(&cfg, "veloflux-embedded").expect("open syslog");
+        let (mut receiver, _) = listener.accept().expect("accept TCP connection");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+
+        {
+            let mut writer = make_writer.writer_for_level(Level::ERROR);
+            writer
+                .write_all(b"TCP syslog message")
+                .expect("write error");
+        }
+
+        let message = receive_octet_counted_message(&mut receiver);
+        let message = std::str::from_utf8(&message).expect("UTF-8 syslog payload");
+        assert!(message.starts_with("<11>veloflux-embedded["));
+        assert!(message.ends_with(": TCP syslog message"));
+
+        drop(guard);
+    }
+
+    fn receive_octet_counted_message(stream: &mut TcpStream) -> Vec<u8> {
+        let mut length = Vec::new();
+        loop {
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).expect("read frame length");
+            if byte[0] == b' ' {
+                break;
+            }
+            length.push(byte[0]);
+        }
+        let length = std::str::from_utf8(&length)
+            .expect("UTF-8 frame length")
+            .parse::<usize>()
+            .expect("numeric frame length");
+        let mut message = vec![0_u8; length];
+        stream
+            .read_exact(&mut message)
+            .expect("read framed syslog message");
+        message
     }
 }

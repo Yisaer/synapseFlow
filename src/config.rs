@@ -397,8 +397,8 @@ server:
         env.set(ENV_LOGGING_SYSLOG_ENABLE, "true");
         env.set(ENV_LOGGING_SYSLOG_LEVEL, "warn");
         env.set(ENV_LOGGING_SYSLOG_TAG, "vf-env");
-        env.set(ENV_LOGGING_SYSLOG_NETWORK, "");
-        env.set(ENV_LOGGING_SYSLOG_ADDRESS, "");
+        env.set(ENV_LOGGING_SYSLOG_NETWORK, "unixgram");
+        env.set(ENV_LOGGING_SYSLOG_ADDRESS, "/var/run/syslog");
         env.set(ENV_PROFILING_ADDR, "127.0.0.1:16060");
         env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
         env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
@@ -411,8 +411,8 @@ server:
         assert!(cfg.logging.syslog.enable);
         assert!(matches!(cfg.logging.syslog.level, Some(LogLevel::Warn)));
         assert_eq!(cfg.logging.syslog.tag, "vf-env");
-        assert!(cfg.logging.syslog.network.is_empty());
-        assert!(cfg.logging.syslog.address.is_empty());
+        assert_eq!(cfg.logging.syslog.network, "unixgram");
+        assert_eq!(cfg.logging.syslog.address, "/var/run/syslog");
         assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:16060"));
         assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
         assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
@@ -567,8 +567,8 @@ logging:
     enable: true
     level: error
     tag: "vf-test"
-    network: ""
-    address: ""
+    network: unixgram
+    address: /var/run/syslog
 "#;
         let path = unique_temp_path("logging");
         std::fs::write(&path, yaml).unwrap();
@@ -592,8 +592,8 @@ logging:
         assert!(cfg.logging.syslog.enable);
         assert!(matches!(cfg.logging.syslog.level, Some(LogLevel::Error)));
         assert_eq!(cfg.logging.syslog.tag, "vf-test");
-        assert!(cfg.logging.syslog.network.is_empty());
-        assert!(cfg.logging.syslog.address.is_empty());
+        assert_eq!(cfg.logging.syslog.network, "unixgram");
+        assert_eq!(cfg.logging.syslog.address, "/var/run/syslog");
 
         let _ = std::fs::remove_file(&path);
     }

@@ -18,11 +18,9 @@ logging:
     enable: false
     level: info
     tag: "veloflux"
-    # Leave both fields empty to use the host local Unix datagram syslog socket.
-    # On macOS this usually resolves to /var/run/syslog.
-    # On Linux this usually resolves to /dev/log.
-    network: ""
-    address: ""
+    # Use an explicit Unix datagram socket path.
+    network: unixgram
+    address: /var/run/syslog
 
 profiling:
   enabled: true
