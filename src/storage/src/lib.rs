@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use redb::{Database, ReadTransaction, ReadableTable, TableDefinition, WriteTransaction};
 use serde::de::DeserializeOwned;
@@ -212,6 +213,7 @@ pub struct UploadFileInfo {
 pub struct MetadataStorage {
     db: Database,
     db_path: PathBuf,
+    db_access_lock: Mutex<()>,
 }
 
 impl MetadataStorage {
@@ -235,6 +237,7 @@ impl MetadataStorage {
         let storage = Self {
             db,
             db_path: db_path.clone(),
+            db_access_lock: Mutex::new(()),
         };
         storage.ensure_tables()?;
         Ok(storage)
@@ -293,6 +296,7 @@ impl MetadataStorage {
     }
 
     pub fn delete_pipeline(&self, id: &str) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         {
             let mut pipelines = txn
@@ -321,6 +325,7 @@ impl MetadataStorage {
         &self,
         state: StoredPipelineRunState,
     ) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         {
             let mut table = txn
@@ -436,6 +441,7 @@ impl MetadataStorage {
     }
 
     pub fn export_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
         Ok(MetadataExportSnapshot {
             streams: Self::list_entries_in_read_txn(&txn, STREAMS_TABLE)?,
@@ -450,6 +456,7 @@ impl MetadataStorage {
     }
 
     pub fn replace_snapshot(&self, snapshot: MetadataExportSnapshot) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         Self::replace_table_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
@@ -499,6 +506,7 @@ impl MetadataStorage {
         snapshot: MetadataExportSnapshot,
         meta: Option<StoredInitApplyMeta>,
     ) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
@@ -542,7 +550,14 @@ impl MetadataStorage {
         base_dir.join("metadata.redb")
     }
 
+    fn lock_db(&self) -> Result<MutexGuard<'_, ()>, StorageError> {
+        self.db_access_lock
+            .lock()
+            .map_err(|err| StorageError::backend(format!("metadata storage lock poisoned: {err}")))
+    }
+
     fn ensure_tables(&self) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         txn.open_table(STREAMS_TABLE)
             .map_err(StorageError::backend)?;
@@ -573,6 +588,7 @@ impl MetadataStorage {
         key: &str,
         value: &T,
     ) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         {
             let mut table = txn.open_table(table).map_err(StorageError::backend)?;
@@ -594,6 +610,7 @@ impl MetadataStorage {
         key: &str,
         value: &T,
     ) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         Self::put_entry_in_txn(&txn, table, key, value)?;
         txn.commit().map_err(StorageError::backend)?;
@@ -605,6 +622,7 @@ impl MetadataStorage {
         table: TableDefinition<&str, &[u8]>,
         key: &str,
     ) -> Result<Option<T>, StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
         let table = txn.open_table(table).map_err(StorageError::backend)?;
         let result = match table.get(key).map_err(StorageError::backend)? {
@@ -622,6 +640,7 @@ impl MetadataStorage {
         table: TableDefinition<&str, &[u8]>,
         key: &str,
     ) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_write().map_err(StorageError::backend)?;
         {
             let mut table = txn.open_table(table).map_err(StorageError::backend)?;
@@ -638,6 +657,7 @@ impl MetadataStorage {
         &self,
         table: TableDefinition<&str, &[u8]>,
     ) -> Result<Vec<T>, StorageError> {
+        let _guard = self.lock_db()?;
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
         Self::list_entries_in_read_txn(&txn, table)
     }
