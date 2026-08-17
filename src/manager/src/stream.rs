@@ -13,9 +13,9 @@ use axum::{
 };
 use flow::DecoderRegistry;
 use flow::catalog::{
-    CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MockStreamProps,
-    MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig, VideoReconnectConfig,
-    VideoRtspTransport, VideoStreamProps,
+    CatalogError, EventtimeDefinition, FileStreamProps, HistoryStreamProps, MemoryStreamProps,
+    MockStreamProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
+    VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };
 use flow::processor::ProcessorStatsEntry;
 use flow::processor::{SamplerConfig, SamplingStrategy};
@@ -410,6 +410,12 @@ pub struct HistoryStreamPropsRequest {
 #[serde(default)]
 pub struct MemoryStreamPropsRequest {
     pub topic: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct FileStreamPropsRequest {
+    pub path: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -1315,6 +1321,7 @@ fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
         flow::catalog::StreamType::History => "history",
         flow::catalog::StreamType::Memory => "memory",
         flow::catalog::StreamType::NngPubSub => "nng_pubsub",
+        flow::catalog::StreamType::File => "file",
     }
 }
 
@@ -1373,6 +1380,11 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
             JsonValue::Object(map)
         }
         StreamProps::Video(video) => video_props_value(video),
+        StreamProps::File(file) => {
+            let mut map = JsonMap::new();
+            map.insert("path".to_string(), JsonValue::String(file.path.clone()));
+            JsonValue::Object(map)
+        }
         StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
         StreamProps::History(_) => JsonValue::Object(JsonMap::new()),
         StreamProps::NngPubSub(nng) => {
@@ -1467,6 +1479,21 @@ fn schema_from_columns(
     columns.map(Schema::new)
 }
 
+fn file_line_schema(stream_name: &str) -> Schema {
+    Schema::new(vec![
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "line".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "filename".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+    ])
+}
+
 pub(crate) fn resolve_schema_from_request(
     req: &CreateStreamRequest,
 ) -> Result<ResolvedSchema, String> {
@@ -1476,6 +1503,9 @@ pub(crate) fn resolve_schema_from_request(
             None,
             None,
         ));
+    }
+    if req.stream_type.eq_ignore_ascii_case("file") {
+        return Ok(ResolvedSchema::new(file_line_schema(&req.name), None, None));
     }
     if let Some(ref_name) = &req.schema.r#ref {
         validate_resource_id(ResourceIdKind::SchemaName, ref_name)
@@ -1566,6 +1596,23 @@ pub(crate) fn build_stream_props(
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "memory stream requires topic".to_string())?;
             Ok(StreamProps::Memory(MemoryStreamProps::new(topic)))
+        }
+        "file" => {
+            let file_props: FileStreamPropsRequest = serde_json::from_value(props.to_value())
+                .map_err(|err| format!("invalid file props: {err}"))?;
+            let path = file_props
+                .path
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "file stream requires path".to_string())?;
+            let metadata = std::fs::symlink_metadata(&path).map_err(|err| {
+                format!("file stream path `{path}` does not exist or is not accessible: {err}")
+            })?;
+            if !metadata.is_file() && !metadata.is_dir() {
+                return Err(format!(
+                    "file stream path `{path}` must be a regular file or directory"
+                ));
+            }
+            Ok(StreamProps::File(FileStreamProps::new(path)))
         }
         "nng_pubsub" => {
             let nng_props: NngPubSubStreamPropsRequest =
@@ -1687,6 +1734,33 @@ pub(crate) fn validate_stream_decoder_config(
 ) -> Result<(), String> {
     let stream_type = req.stream_type.to_ascii_lowercase();
     let is_none = decoder.kind() == "none";
+    if stream_type == "file" {
+        if req.shared {
+            return Err(format!(
+                "stream `{}` does not support shared=true for file streams",
+                req.name
+            ));
+        }
+        if !decoder.kind().eq_ignore_ascii_case("file_line") {
+            return Err(format!(
+                "stream `{}` requires decoder type `file_line` for file streams",
+                req.name
+            ));
+        }
+        if req.eventtime.is_some() {
+            return Err(format!(
+                "stream `{}` does not support eventtime for file streams",
+                req.name
+            ));
+        }
+        if req.sampler.is_some() {
+            return Err(format!(
+                "stream `{}` does not support sampler for file streams",
+                req.name
+            ));
+        }
+        return Ok(());
+    }
     if stream_type == "video" {
         if req.shared {
             return Err(format!(

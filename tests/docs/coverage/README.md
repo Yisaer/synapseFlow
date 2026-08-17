@@ -21,6 +21,7 @@ coverage tooling.
 - `features/planner.yaml`
 - `features/processor.yaml`
 - `features/pipeline.yaml`
+- `features/decoder.yaml`
 - `features/source.yaml`
 - `features/sink.yaml`
 - `features/stream.yaml`
@@ -46,6 +47,7 @@ Feature IDs use dot-separated lowercase segments:
   - `planner`
   - `processor`
   - `pipeline`
+  - `decoder`
   - `source`
   - `sink`
   - `stream`

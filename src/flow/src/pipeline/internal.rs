@@ -10,10 +10,10 @@ use crate::connector::sink::video::{
 };
 use crate::connector::source::video::{VideoReconnectRuntimeConfig, VideoRtspTransportConfig};
 use crate::connector::{
-    HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, KuraSinkConfig, MemorySinkConfig,
-    MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
-    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector, NngPubSubSourceConfig, VideoSinkConfig,
-    VideoSourceConfig, VideoSourceConnector,
+    FileSourceConfig, FileSourceConnector, HistorySourceConfig, HistorySourceConnector,
+    KuksaSinkConfig, KuraSinkConfig, MemorySinkConfig, MemorySourceConfig, MemorySourceConnector,
+    MemoryTopicKind, MockSourceConnector, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    NngPubSubSourceConfig, VideoSinkConfig, VideoSourceConfig, VideoSourceConnector,
 };
 #[cfg(feature = "nng_pubsub")]
 use crate::connector::{NngPubSubSinkConfig, NngPubSubSourceConnector};
@@ -1202,6 +1202,16 @@ pub(super) fn attach_sources_from_catalog(
 
                     let connector = HistorySourceConnector::new(
                         processor_id.clone(),
+                        config,
+                        context.spawner().clone(),
+                    )
+                    .with_channel_capacity(data_channel_capacity);
+                    ds.add_connector(Box::new(connector));
+                }
+                StreamProps::File(props) => {
+                    let config = FileSourceConfig::new(props.path.clone());
+                    let connector = FileSourceConnector::new(
+                        format!("{processor_id}_file_source_connector"),
                         config,
                         context.spawner().clone(),
                     )

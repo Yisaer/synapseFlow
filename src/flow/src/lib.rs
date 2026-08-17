@@ -31,10 +31,10 @@ mod test_support;
 
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
-    Catalog, CatalogError, CatalogRelation, EventtimeDefinition, HistoryTableProps,
-    MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
-    StreamType, TableCapabilities, TableDefinition, TableProps, TableScanCapability, TableType,
-    VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
+    Catalog, CatalogError, CatalogRelation, EventtimeDefinition, FileStreamProps,
+    HistoryTableProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
+    StreamDefinition, StreamProps, StreamType, TableCapabilities, TableDefinition, TableProps,
+    TableScanCapability, TableType, VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };
 pub use codec::{
     AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec, CsvEncoder,

@@ -4,7 +4,9 @@ use datatypes::{
     BytesType, ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType,
     StructField, StructType, TimestampValue, Value,
 };
-use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+use flow::catalog::{
+    FileStreamProps, MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
+};
 use flow::connector::MemoryTopicKind;
 use flow::model::{batch_from_columns_simple, Message, RecordBatch, Tuple};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition, SourceDefinition, SourceInputConfig};
@@ -15,6 +17,9 @@ use flow::SinkEncoderConfig;
 use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
@@ -679,6 +684,33 @@ struct SourceOnChangeJsonCase {
     expected_outputs: Vec<Option<JsonValue>>,
 }
 
+struct FileSourceJsonCase {
+    name: &'static str,
+    source_name: &'static str,
+    sql: &'static str,
+    covers: &'static [&'static str],
+    setup: FileSourceSetup,
+    expected_initial_outputs: Vec<JsonValue>,
+    writes: Vec<FileSourceWriteStep>,
+}
+
+enum FileSourceSetup {
+    File {
+        filename: &'static str,
+        contents: &'static [u8],
+    },
+    Directory {
+        files: Vec<(&'static str, &'static [u8])>,
+        nested_files: Vec<(&'static str, &'static str, &'static [u8])>,
+    },
+}
+
+struct FileSourceWriteStep {
+    filename: &'static str,
+    bytes: &'static [u8],
+    expected_output: Option<JsonValue>,
+}
+
 async fn install_memory_json_stream_schema_with_name(
     instance: &FlowInstance,
     input_topic: &str,
@@ -862,6 +894,160 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
         .delete_pipeline(&pipeline_id)
         .await
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", name));
+}
+
+fn write_file(path: &Path, contents: &[u8]) {
+    let mut file = File::create(path).expect("create test file");
+    file.write_all(contents).expect("write test file");
+}
+
+fn append_file(path: &Path, contents: &[u8]) {
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open test file for append");
+    file.write_all(contents).expect("append test file");
+}
+
+fn materialize_file_source_setup(root: &Path, setup: &FileSourceSetup) -> String {
+    match setup {
+        FileSourceSetup::File { filename, contents } => {
+            let path = root.join(filename);
+            write_file(&path, contents);
+            path.to_string_lossy().into_owned()
+        }
+        FileSourceSetup::Directory {
+            files,
+            nested_files,
+        } => {
+            for (filename, contents) in files {
+                write_file(&root.join(filename), contents);
+            }
+            for (dirname, filename, contents) in nested_files {
+                let dir = root.join(dirname);
+                fs::create_dir_all(&dir).expect("create nested test directory");
+                write_file(&dir.join(filename), contents);
+            }
+            root.to_string_lossy().into_owned()
+        }
+    }
+}
+
+fn file_source_write_path(root: &Path, filename: &str) -> PathBuf {
+    root.join(filename)
+}
+
+async fn install_file_stream(instance: &FlowInstance, source_name: &str, path: String) {
+    let schema = Schema::new(vec![
+        ColumnSchema::new(
+            source_name.to_string(),
+            "line".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+        ColumnSchema::new(
+            source_name.to_string(),
+            "filename".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+    ]);
+    let definition = StreamDefinition::new(
+        source_name.to_string(),
+        Arc::new(schema),
+        StreamProps::File(FileStreamProps::new(path)),
+        StreamDecoderConfig::new("file_line", JsonMap::new()),
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create file stream");
+}
+
+async fn run_file_source_json_case(case: FileSourceJsonCase) {
+    println!("Running test: {}", case.name);
+    assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
+
+    let dir = tempfile::tempdir().expect("create temp file source dir");
+    let source_path = materialize_file_source_setup(dir.path(), &case.setup);
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (_input_topic, output_topic) = make_memory_topics("pipeline_file_source_stream", case.name);
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_file_stream(&instance, case.source_name, source_path).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        case.sql,
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
+
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    for (idx, expected) in case.expected_initial_outputs.into_iter().enumerate() {
+        let actual = recv_next_json(&mut output, timeout_duration).await;
+        assert_eq!(
+            normalize_json(actual),
+            normalize_json(expected),
+            "Wrong initial file source JSON for test: {} output={}",
+            case.name,
+            idx
+        );
+    }
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    for (idx, write) in case.writes.into_iter().enumerate() {
+        append_file(
+            &file_source_write_path(dir.path(), write.filename),
+            write.bytes,
+        );
+        match write.expected_output {
+            Some(expected) => {
+                let actual = recv_next_json(&mut output, timeout_duration).await;
+                assert_eq!(
+                    normalize_json(actual),
+                    normalize_json(expected),
+                    "Wrong file source JSON for test: {} write={}",
+                    case.name,
+                    idx
+                );
+            }
+            None => {
+                assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+            }
+        }
+    }
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", case.name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
 // coverage-covers: parser.select.alias_computing, planner.physical.output_layout_fixed_slots, sink.connector.memory_output
@@ -1456,6 +1642,58 @@ async fn pipeline_table_driven_queries() {
 
     for test_case in test_cases {
         run_test_case(test_case).await;
+    }
+}
+
+// coverage-covers: source.file.stream, decoder.file_line, sink.connector.memory_output
+#[tokio::test]
+async fn pipeline_table_driven_file_source_stream() {
+    let test_cases = vec![
+        FileSourceJsonCase {
+            name: "file_source_reads_existing_line_and_appended_complete_line",
+            source_name: "file_logs",
+            sql: "SELECT line, filename FROM file_logs",
+            covers: &["source.file.stream", "decoder.file_line"],
+            setup: FileSourceSetup::File {
+                filename: "app.log",
+                contents: b"ready\n",
+            },
+            expected_initial_outputs: vec![serde_json::json!([
+                { "line": "ready", "filename": "app.log" }
+            ])],
+            writes: vec![
+                FileSourceWriteStep {
+                    filename: "app.log",
+                    bytes: b"part",
+                    expected_output: None,
+                },
+                FileSourceWriteStep {
+                    filename: "app.log",
+                    bytes: b"ial\n",
+                    expected_output: Some(serde_json::json!([
+                        { "line": "partial", "filename": "app.log" }
+                    ])),
+                },
+            ],
+        },
+        FileSourceJsonCase {
+            name: "file_source_directory_reads_direct_files_only",
+            source_name: "file_logs",
+            sql: "SELECT line, filename FROM file_logs",
+            covers: &["source.file.stream", "decoder.file_line"],
+            setup: FileSourceSetup::Directory {
+                files: vec![("direct.log", b"direct\n")],
+                nested_files: vec![("nested", "nested.log", b"nested\n")],
+            },
+            expected_initial_outputs: vec![serde_json::json!([
+                { "line": "direct", "filename": "direct.log" }
+            ])],
+            writes: vec![],
+        },
+    ];
+
+    for test_case in test_cases {
+        run_file_source_json_case(test_case).await;
     }
 }
 

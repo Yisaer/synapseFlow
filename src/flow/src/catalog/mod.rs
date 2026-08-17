@@ -45,6 +45,8 @@ pub enum StreamProps {
     Memory(MemoryStreamProps),
     /// Stream is backed by an NNG pub/sub subscriber.
     NngPubSub(NngPubSubStreamProps),
+    /// Stream is backed by file append notifications.
+    File(FileStreamProps),
 }
 
 /// Supported stream types recognized by the catalog.
@@ -62,6 +64,8 @@ pub enum StreamType {
     Memory,
     /// Stream backed by an NNG pub/sub source.
     NngPubSub,
+    /// Stream backed by file append notifications.
+    File,
 }
 
 /// Additional metadata associated with a table definition.
@@ -165,6 +169,18 @@ impl MqttStreamProps {
     ) -> Self {
         self.protocol_version = Some(protocol_version);
         self
+    }
+}
+
+/// Properties for file-backed streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStreamProps {
+    pub path: String,
+}
+
+impl FileStreamProps {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
     }
 }
 
@@ -327,6 +343,7 @@ impl StreamDefinition {
             StreamProps::History(_) => StreamType::History,
             StreamProps::Memory(_) => StreamType::Memory,
             StreamProps::NngPubSub(_) => StreamType::NngPubSub,
+            StreamProps::File(_) => StreamType::File,
         };
         Self {
             id: id.into(),

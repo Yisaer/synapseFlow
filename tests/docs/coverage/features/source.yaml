@@ -42,6 +42,13 @@ features:
       - docs/runtime/sources/mqtt.md
     status: active
 
+  - id: source.file.stream
+    title: File source stream
+    summary: Consume file source stream lines through the documented notify-based log tailing contract.
+    doc_refs:
+      - docs/runtime/sources/file.md
+    status: active
+
   - id: source.nng_pubsub.bytes_input
     title: NNG pub/sub source bytes input
     summary: Consume NNG pub/sub framed bytes through the documented source runtime contract.

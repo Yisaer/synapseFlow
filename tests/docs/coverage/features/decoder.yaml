@@ -1,0 +1,7 @@
+features:
+  - id: decoder.file_line
+    title: File line decoder
+    summary: Decode file source line frames into the built-in line and filename fields.
+    doc_refs:
+      - docs/runtime/sources/file.md
+    status: active

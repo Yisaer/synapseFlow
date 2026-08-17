@@ -1,4 +1,6 @@
-use super::decoder::{proto::ProtobufDecoder, JsonDecoder, RecordDecoder};
+use super::decoder::{
+    proto::ProtobufDecoder, FileLineDecoder, JsonDecoder, RecordDecoder, FILE_LINE_DECODER_KIND,
+};
 use super::encoder::SinkEncoderFactory;
 use super::CodecError;
 use crate::catalog::StreamDecoderConfig;
@@ -92,6 +94,12 @@ impl DecoderRegistry {
                     schema,
                     Arc::clone(bundle),
                 )) as Arc<_>)
+            }),
+        );
+        self.register_decoder(
+            FILE_LINE_DECODER_KIND,
+            Arc::new(|_config, schema, stream_name| {
+                Ok(Arc::new(FileLineDecoder::new(stream_name.to_string(), schema)?) as Arc<_>)
             }),
         );
     }

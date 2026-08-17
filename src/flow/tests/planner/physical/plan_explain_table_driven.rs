@@ -26,7 +26,7 @@ use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind}
 use flow::Catalog;
 use flow::EventtimeDefinition;
 use flow::{
-    CommonSinkProps, CustomFunc, MqttStreamProps, NopSinkConfig, PipelineExplain,
+    CommonSinkProps, CustomFunc, FileStreamProps, MqttStreamProps, NopSinkConfig, PipelineExplain,
     PipelineExplainConfig, PipelineRegistries, PipelineSink, PipelineSinkConnector,
     SinkConnectorConfig, SinkEncoderConfig, SinkOutputConfig, StreamDecoderConfig,
     StreamDefinition, StreamProps,
@@ -277,6 +277,25 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::none(),
     );
 
+    let file_logs_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "file_logs".to_string(),
+            "line".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+        ColumnSchema::new(
+            "file_logs".to_string(),
+            "filename".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+    ]));
+    let file_logs_def = StreamDefinition::new(
+        "file_logs",
+        Arc::clone(&file_logs_schema),
+        StreamProps::File(FileStreamProps::new("/tmp/app.log")),
+        StreamDecoderConfig::new("file_line", JsonMap::new()),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
@@ -293,6 +312,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("memory_bytes".to_string(), Arc::new(memory_bytes_def));
     stream_defs.insert("vehicle_stream".to_string(), Arc::new(vehicle_stream_def));
     stream_defs.insert("camera".to_string(), Arc::new(camera_def));
+    stream_defs.insert("file_logs".to_string(), Arc::new(file_logs_def));
 
     stream_defs
 }
@@ -1184,6 +1204,18 @@ fn plan_explain_table_driven() {
             sql: "SELECT a FROM memory_bytes",
             options: PipelineOptions::default(),
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=memory_bytes","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=memory_bytes","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "file_source_uses_file_line_decoder_and_builtin_schema",
+            sql: "SELECT line, filename FROM file_logs",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=file_logs","decoder=file_line","schema=[line, filename]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[line; filename]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=file_logs","schema=[line, filename]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=file_line","schema=[line, filename]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[line; filename]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "file_source_keeps_filename_for_filter_while_projecting_line",
+            sql: "SELECT line FROM file_logs WHERE filename = 'app.log'",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=file_logs","decoder=file_line","schema=[line, filename]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=filename = 'app.log'"],"operator":"Filter"}],"id":"Project_2","info":["fields=[line]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=file_logs","schema=[line, filename]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=file_line","schema=[line, filename]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=filename = 'app.log'"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[line]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "stateful_where_before_project",

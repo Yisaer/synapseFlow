@@ -9,12 +9,15 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use bytes::Bytes;
 use datatypes::{
-    ConcreteDatatype, ListType, ListValue, Schema, StructField, StructType, StructValue,
-    TimestampValue, Value,
+    ColumnSchema, ConcreteDatatype, ListType, ListValue, Schema, StringType, StructField,
+    StructType, StructValue, TimestampValue, Value,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+pub const FILE_LINE_DECODER_KIND: &str = "file_line";
+const FILE_LINE_FRAME_FILENAME_LEN_BYTES: usize = 4;
 
 /// Errors that can occur while decoding payloads.
 #[derive(thiserror::Error, Debug)]
@@ -237,6 +240,115 @@ impl JsonDecoder {
         }
         Ok(tuples)
     }
+}
+
+/// Decoder for file source stream payloads.
+pub struct FileLineDecoder {
+    stream_name: Arc<str>,
+    schema_keys: Arc<[Arc<str>]>,
+}
+
+impl FileLineDecoder {
+    pub fn new(stream_name: impl Into<String>, schema: Arc<Schema>) -> Result<Self, CodecError> {
+        validate_file_line_schema(&schema)?;
+        let stream_name: Arc<str> = Arc::<str>::from(stream_name.into());
+        let schema_keys: Arc<[Arc<str>]> = Arc::from(
+            schema
+                .column_schemas()
+                .iter()
+                .map(|col| Arc::<str>::from(col.name.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        Ok(Self {
+            stream_name,
+            schema_keys,
+        })
+    }
+}
+
+impl RecordDecoder for FileLineDecoder {
+    fn decode_with_projection(
+        &self,
+        payload: &[u8],
+        projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError> {
+        let (filename, line) = parse_file_line_frame(payload)?;
+        let filename = String::from_utf8(filename.to_vec())?;
+        let line = String::from_utf8(line.to_vec())?;
+
+        let keys = projection
+            .and_then(|projection| projection.output_slots())
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.schema_keys));
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys.iter() {
+            let value = match key.as_ref() {
+                "line" => Value::String(line.clone()),
+                "filename" => Value::String(filename.clone()),
+                _ => Value::Null,
+            };
+            values.push(Arc::new(value));
+        }
+
+        let message = Arc::new(Message::new_shared_keys(
+            Arc::clone(&self.stream_name),
+            keys,
+            values,
+        ));
+        Ok(RecordBatch::new(vec![Tuple::new(vec![message])])?)
+    }
+}
+
+fn validate_file_line_schema(schema: &Schema) -> Result<(), CodecError> {
+    let columns = schema.column_schemas();
+    let expected = [
+        ColumnSchema::new(
+            String::new(),
+            "line".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+        ColumnSchema::new(
+            String::new(),
+            "filename".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+    ];
+    if columns.len() != expected.len() {
+        return Err(CodecError::Other(
+            "file_line decoder requires schema columns `line string, filename string`".to_string(),
+        ));
+    }
+    for (column, expected) in columns.iter().zip(expected.iter()) {
+        if column.name != expected.name || column.data_type != expected.data_type {
+            return Err(CodecError::Other(
+                "file_line decoder requires schema columns `line string, filename string`"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_file_line_frame(payload: &[u8]) -> Result<(&[u8], &[u8]), CodecError> {
+    if payload.len() < FILE_LINE_FRAME_FILENAME_LEN_BYTES {
+        return Err(CodecError::Other(
+            "file_line payload frame is shorter than filename length header".to_string(),
+        ));
+    }
+    let mut len_bytes = [0_u8; FILE_LINE_FRAME_FILENAME_LEN_BYTES];
+    len_bytes.copy_from_slice(&payload[..FILE_LINE_FRAME_FILENAME_LEN_BYTES]);
+    let filename_len = u32::from_le_bytes(len_bytes) as usize;
+    let filename_start = FILE_LINE_FRAME_FILENAME_LEN_BYTES;
+    let filename_end = filename_start + filename_len;
+    if payload.len() < filename_end {
+        return Err(CodecError::Other(
+            "file_line payload frame has truncated filename".to_string(),
+        ));
+    }
+    Ok((
+        &payload[filename_start..filename_end],
+        &payload[filename_end..],
+    ))
 }
 
 impl RecordDecoder for JsonDecoder {
@@ -492,16 +604,85 @@ fn json_to_struct_value_with_datatype_and_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connector::source::file::encode_file_line_frame;
     use datatypes::{
         BytesType, ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField,
         StructType, TimestampType, TimestampValue, Value,
     };
     use serde_json::Map as JsonMap;
+    use std::path::Path;
 
     fn decode_one(decoder: &JsonDecoder, payload: &[u8]) -> Tuple {
         let mut rows = decoder.decode(payload).expect("decode batch").into_rows();
         assert_eq!(rows.len(), 1, "expected exactly one decoded tuple");
         rows.pop().expect("one row")
+    }
+
+    fn file_line_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "logs".to_string(),
+                "line".to_string(),
+                ConcreteDatatype::String(StringType),
+            ),
+            ColumnSchema::new(
+                "logs".to_string(),
+                "filename".to_string(),
+                ConcreteDatatype::String(StringType),
+            ),
+        ]))
+    }
+
+    #[test]
+    fn file_line_decoder_decodes_frame() {
+        let decoder = FileLineDecoder::new("logs", file_line_schema()).expect("decoder");
+        let payload = encode_file_line_frame(Path::new("/tmp/app.log"), b"hello")
+            .expect("encode file line frame");
+
+        let tuple = decoder
+            .decode(&payload)
+            .expect("decode file line frame")
+            .into_rows()
+            .pop()
+            .expect("one tuple");
+
+        assert_eq!(
+            tuple.value_by_name("logs", "line"),
+            Some(&Value::String("hello".to_string()))
+        );
+        assert_eq!(
+            tuple.value_by_name("logs", "filename"),
+            Some(&Value::String("app.log".to_string()))
+        );
+    }
+
+    #[test]
+    fn file_line_decoder_honors_output_slots() {
+        let decoder = FileLineDecoder::new("logs", file_line_schema()).expect("decoder");
+        let payload = encode_file_line_frame(Path::new("/tmp/app.log"), b"hello")
+            .expect("encode file line frame");
+        let projection =
+            DecodeProjection::from_top_level_columns_with_version(&["line".to_string()], 1)
+                .with_output_slots(Arc::from(vec![Arc::<str>::from("line")]));
+
+        let tuple = decoder
+            .decode_with_projection(&payload, Some(&projection))
+            .expect("decode file line frame")
+            .into_rows()
+            .pop()
+            .expect("one tuple");
+
+        let entries = tuple.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, ("logs", "line"));
+        assert_eq!(entries[0].1, &Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn file_line_decoder_rejects_malformed_frame() {
+        let decoder = FileLineDecoder::new("logs", file_line_schema()).expect("decoder");
+        let err = decoder.decode(&[1, 0, 0]).expect_err("malformed frame");
+        assert!(err.to_string().contains("shorter than filename length"));
     }
 
     #[test]

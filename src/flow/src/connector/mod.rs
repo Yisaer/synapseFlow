@@ -101,6 +101,8 @@ pub use sink::mqtt::MqttSinkConfig;
 pub use sink::video::{VideoSinkConfig, VideoSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
+pub use source::file::FileSourceConfig;
+pub(crate) use source::file::FileSourceConnector;
 pub use source::history::HistorySourceConfig;
 pub(crate) use source::history::HistorySourceConnector;
 pub use source::memory::{MemorySourceConfig, MemorySourceConnector};
