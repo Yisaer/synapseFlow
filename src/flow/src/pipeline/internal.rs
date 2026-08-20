@@ -216,6 +216,10 @@ impl PipelineManager {
         self.context.set_pipeline_failure_reporter(reporter);
     }
 
+    pub(crate) fn set_checkpoint_store(&self, store: Arc<dyn crate::checkpoint::CheckpointStore>) {
+        self.context.set_checkpoint_store(store);
+    }
+
     pub(crate) fn create_pipeline(
         &self,
         request: CreatePipelineRequest,
@@ -314,6 +318,19 @@ impl PipelineManager {
                         .map_err(PipelineError::BuildFailure)?;
                 entry.pipeline = Some(pipeline);
                 entry.streams = streams;
+            }
+
+            if entry.definition.options().checkpoint_enabled {
+                entry
+                    .pipeline
+                    .as_mut()
+                    .ok_or_else(|| {
+                        PipelineError::Runtime(
+                            "pipeline runtime missing before checkpoint restore".to_string(),
+                        )
+                    })?
+                    .restore_latest_checkpoint()
+                    .map_err(|err| PipelineError::Runtime(err.to_string()))?;
             }
 
             entry.status = PipelineStatus::Running;
@@ -702,9 +719,11 @@ fn build_pipeline_runtime(
                     registries,
                     eventtime,
                     context.spawner().clone(),
-                ),
+                )
+                .with_checkpoint_store(context.checkpoint_store()),
                 ProcessorPipelineOptions::default()
-                    .with_data_channel_capacity(definition.options().data_channel_capacity),
+                    .with_data_channel_capacity(definition.options().data_channel_capacity)
+                    .with_checkpoint_enabled(definition.options().checkpoint_enabled),
             )
             .map_err(|err| err.to_string())
         })?;

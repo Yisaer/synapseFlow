@@ -136,10 +136,10 @@ impl JsonOutput {
     }
 }
 
-/// Test execution of the "latest" samler strategy.
+/// Test execution of the "latest" sampler strategy.
 /// We send 5 values within a single interval window (200ms).
 /// Expected result: Only ONE output value, which is the 5th (latest) value.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_sampler_execution_latest_strategy() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -161,7 +161,7 @@ async fn test_sampler_execution_latest_strategy() {
         .expect("pipeline creation should succeed");
 
     pipeline.start().await.expect("start pipeline");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
 
     // Send 5 JSON messages as raw bytes: {"x": 1}, ..., {"x": 5}
     for i in 1..=5 {
@@ -170,9 +170,28 @@ async fn test_sampler_execution_latest_strategy() {
             .send_stream_data("latest_stream", StreamData::bytes(payload))
             .await
             .expect("send data");
-        // Tiny sleep to ensure order but still well within 200ms interval
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    let sampler_stats = pipeline
+        .processor_stats()
+        .iter()
+        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
+        .cloned()
+        .expect("sampler stats should exist");
+    for _ in 0..20 {
+        if sampler_stats.snapshot().stats.custom["messages_in"] == 5 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        sampler_stats.snapshot().stats.custom["messages_in"],
+        5,
+        "sampler should consume all inputs before the sampling tick"
+    );
+
+    tokio::time::advance(interval).await;
+    tokio::task::yield_now().await;
 
     let mut output = JsonOutput::new(
         pipeline
@@ -195,18 +214,9 @@ async fn test_sampler_execution_latest_strategy() {
     );
 
     // Verify stats: Sampler should have 5 inputs and 1 output
-    let stats = pipeline.processor_stats();
-    let _ = stats
-        .iter()
-        .find(|s| {
-            let snap = s.snapshot().stats;
-            // Identify sampler by behavior: 5 in, 1 out (and ideally name)
-            // Or just check if name contains "sampler"
-            s.processor_id.to_lowercase().contains("sampler")
-                && snap.custom["messages_in"] == 5
-                && snap.custom["messages_out"] == 1
-        })
-        .expect("Sampler stats not found or incorrect (expected 5 in, 1 out)");
+    let stats = sampler_stats.snapshot().stats;
+    assert_eq!(stats.custom["messages_in"], 5);
+    assert_eq!(stats.custom["messages_out"], 1);
 
     // Attempt to close pipeline, but don't block indefinitely if it hangs (test artifact)
     let _ = timeout(

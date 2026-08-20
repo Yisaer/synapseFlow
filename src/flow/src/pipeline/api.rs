@@ -700,6 +700,7 @@ impl PipelineScheduleDatetimeRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineOptions {
     pub data_channel_capacity: usize,
+    pub checkpoint_enabled: bool,
     pub eventtime: EventtimeOptions,
     pub schedule: Option<PipelineScheduleConfig>,
     #[doc(hidden)]
@@ -710,6 +711,7 @@ impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             data_channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
+            checkpoint_enabled: false,
             eventtime: EventtimeOptions::default(),
             schedule: None,
             shared_slice_projection_enabled: None,

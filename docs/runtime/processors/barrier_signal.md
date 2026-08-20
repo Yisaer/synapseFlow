@@ -112,14 +112,19 @@ Rules:
 - **No overlap**: while a barrier is pending, receiving a different `(barrier_id, kind)` is an
   error.
 - **No duplicates**: receiving more than `expected_upstreams` for the same key is an error.
-- **No upstream identity requirement**: synchronization uses only the expected upstream count and
-  arrival count.
+- **Ordinary barriers use arrival count**: existing non-checkpoint barriers do not require upstream
+  identity.
+- **Checkpoint barriers track upstream identity**: data-channel checkpoint alignment records the
+  upstream index and pauses an upstream after its checkpoint arrives. This prevents post-checkpoint
+  data from that upstream from crossing the aligned boundary.
 
 Handling:
 
 - `Instant` signals are forwarded immediately.
 - `Barrier` signals are swallowed until the barrier reaches “complete”, then forwarded exactly
   once.
+- A paused checkpoint upstream resumes after all upstreams reach the same checkpoint. Its queued
+  post-checkpoint data is then polled after the aligned barrier has been forwarded.
 - If the forwarded signal is terminal, the processor forwards it and then stops.
 
 ## Testing Notes

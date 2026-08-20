@@ -1170,37 +1170,53 @@ pub async fn delete_pipeline_handler(
     audit.set_revision(Some(stored.revision));
     let flow_instance_id = match storage_bridge::pipeline_request_from_stored(&stored) {
         Ok(req) => match defaulted_flow_instance_id(req.flow_instance_id.as_deref()) {
-            Ok(id) => Some(id),
+            Ok(id) => id,
             Err(err) => {
-                tracing::warn!(pipeline_id = %id, error = %err, "invalid stored flow_instance_id while deleting pipeline");
-                None
+                let err = format!(
+                    "failed to resolve flow instance for pipeline {id} checkpoint cleanup: {err}"
+                );
+                audit.log_failure(&err);
+                return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
             }
         },
         Err(err) => {
-            tracing::warn!(pipeline_id = %id, error = %err, "failed to decode stored pipeline while deleting");
-            None
+            let err = format!("failed to decode pipeline {id} for checkpoint cleanup: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     };
-    if let Some(flow_instance_id) = flow_instance_id.as_deref() {
-        if let Some(instance) = state.local_instance(flow_instance_id) {
-            match instance.delete_pipeline(&id).await {
-                Ok(_) | Err(PipelineError::NotFound(_)) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        pipeline_id = %id,
-                        flow_instance_id = %flow_instance_id,
-                        error = %err,
-                        "failed to delete pipeline from in-process runtime"
-                    );
-                }
+    if let Some(instance) = state.local_instance(&flow_instance_id) {
+        match instance.delete_pipeline(&id).await {
+            Ok(_) | Err(PipelineError::NotFound(_)) => {}
+            Err(err) => {
+                tracing::warn!(
+                    pipeline_id = %id,
+                    flow_instance_id = %flow_instance_id,
+                    error = %err,
+                    "failed to delete pipeline from in-process runtime"
+                );
             }
-        } else {
-            tracing::warn!(
-                pipeline_id = %id,
-                flow_instance_id = %flow_instance_id,
-                "local flow instance unavailable while deleting pipeline"
-            );
         }
+    } else {
+        tracing::warn!(
+            pipeline_id = %id,
+            flow_instance_id = %flow_instance_id,
+            "local flow instance unavailable while deleting pipeline"
+        );
+    }
+
+    let checkpoint_storage = match state.storage.checkpoint_storage() {
+        Ok(storage) => storage,
+        Err(err) => {
+            let err = format!("failed to open checkpoint storage for pipeline {id}: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+    if let Err(err) = checkpoint_storage.clear_records(&flow_instance_id, &id) {
+        let err = format!("failed to remove checkpoints for pipeline {id}: {err}");
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
 
     if let Err(err) = state.storage.delete_pipeline(&id) {

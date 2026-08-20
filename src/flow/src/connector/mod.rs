@@ -4,8 +4,10 @@
 //! - Sink connectors consume encoded payloads and push them outward.
 
 use futures::stream::Stream;
+use std::future::Future;
 use std::pin::Pin;
 
+use crate::checkpoint::CheckpointState;
 use crate::model::Collection;
 
 pub mod memory_pubsub;
@@ -23,6 +25,10 @@ pub use redact::{mask_url_userinfo, url_has_userinfo};
 pub type ConnectorStream =
     Pin<Box<dyn Stream<Item = Result<ConnectorEvent, ConnectorError>> + Send>>;
 
+/// Future returned when a source connector is asked to establish a checkpoint boundary.
+pub type SourceCheckpointRequest =
+    Pin<Box<dyn Future<Output = Result<Option<CheckpointState>, ConnectorError>> + Send>>;
+
 /// Events emitted by an upstream connector.
 pub enum ConnectorEvent {
     /// Binary payload received from the source.
@@ -31,6 +37,8 @@ pub enum ConnectorEvent {
     Collection(Box<dyn Collection>),
     /// The connector has no more data to produce.
     EndOfStream,
+    /// All payloads before this event belong to the requested checkpoint boundary.
+    CheckpointFence { checkpoint_id: u64 },
 }
 
 impl std::fmt::Debug for ConnectorEvent {
@@ -42,6 +50,10 @@ impl std::fmt::Debug for ConnectorEvent {
                 .finish(),
             ConnectorEvent::Collection(_) => f.debug_tuple("Collection").finish(),
             ConnectorEvent::EndOfStream => f.write_str("EndOfStream"),
+            ConnectorEvent::CheckpointFence { checkpoint_id } => f
+                .debug_struct("CheckpointFence")
+                .field("checkpoint_id", checkpoint_id)
+                .finish(),
         }
     }
 }
@@ -52,6 +64,40 @@ pub trait SourceConnector: Send + Sync + 'static {
     fn id(&self) -> &str;
     /// Subscribe to the underlying source and obtain an async payload stream.
     fn subscribe(&mut self) -> Result<ConnectorStream, ConnectorError>;
+
+    /// Request a checkpoint boundary without stopping the connector immediately.
+    ///
+    /// The returned future resolves when the connector has stopped producing new payloads and
+    /// emitted a [`ConnectorEvent::CheckpointFence`] after all payloads produced before the
+    /// boundary.
+    fn request_checkpoint(
+        &mut self,
+        _checkpoint_id: u64,
+    ) -> Result<SourceCheckpointRequest, ConnectorError> {
+        Err(ConnectorError::Other(format!(
+            "source connector `{}` does not support checkpoint fences",
+            self.id()
+        )))
+    }
+
+    /// Validate connector-owned checkpoint state without staging it for startup.
+    fn validate_checkpoint(&self, _state: &CheckpointState) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Other(format!(
+            "source connector `{}` does not support checkpoint restore",
+            self.id()
+        )))
+    }
+
+    /// Restore connector-owned state before [`SourceConnector::subscribe`] starts the source.
+    fn restore_checkpoint(&mut self, _state: &CheckpointState) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Other(format!(
+            "source connector `{}` does not support checkpoint restore",
+            self.id()
+        )))
+    }
+
+    /// Discard connector-owned checkpoint state staged before startup.
+    fn clear_checkpoint_restore(&mut self) {}
 
     /// Signal that no further data should be produced (default no-op).
     fn close(&mut self) -> Result<(), ConnectorError> {

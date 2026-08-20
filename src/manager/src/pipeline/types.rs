@@ -88,6 +88,8 @@ pub struct PipelineOptionsRequest {
     #[serde(rename = "data_channel_capacity")]
     pub data_channel_capacity: usize,
     #[serde(default)]
+    pub checkpoint: CheckpointOptionsRequest,
+    #[serde(default)]
     pub eventtime: EventtimeOptionsRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<PipelineScheduleRequest>,
@@ -97,10 +99,17 @@ impl Default for PipelineOptionsRequest {
     fn default() -> Self {
         Self {
             data_channel_capacity: 16,
+            checkpoint: CheckpointOptionsRequest::default(),
             eventtime: EventtimeOptionsRequest::default(),
             schedule: None,
         }
     }
+}
+
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
+pub struct CheckpointOptionsRequest {
+    pub enabled: bool,
 }
 
 impl PipelineOptionsRequest {

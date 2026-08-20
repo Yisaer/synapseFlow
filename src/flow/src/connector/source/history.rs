@@ -313,6 +313,9 @@ mod tests {
                     panic!("history source should not emit collections");
                 }
                 Ok(ConnectorEvent::EndOfStream) => break,
+                Ok(ConnectorEvent::CheckpointFence { .. }) => {
+                    panic!("history source should not emit checkpoint fences")
+                }
                 Err(e) => panic!("Connector error: {}", e),
             }
         }

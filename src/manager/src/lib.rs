@@ -6,6 +6,7 @@
 
 mod audit;
 mod capabilities;
+mod checkpoint_storage;
 mod export;
 mod function;
 mod import;
@@ -43,6 +44,7 @@ use storage::StorageManager;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
+pub use checkpoint_storage::DurableCheckpointStore;
 pub use instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec, build_in_process_flow_instance,
     find_default_flow_instance_spec, new_default_flow_instance,

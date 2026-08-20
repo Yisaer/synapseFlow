@@ -7,6 +7,7 @@
 pub mod aggregation;
 mod backpressure_hub;
 pub mod catalog;
+pub mod checkpoint;
 pub mod codec;
 pub mod connector;
 mod deadlock;
@@ -35,6 +36,11 @@ pub use catalog::{
     HistoryTableProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
     StreamDefinition, StreamProps, StreamType, TableCapabilities, TableDefinition, TableProps,
     TableScanCapability, TableType, VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
+};
+pub use checkpoint::{
+    CheckpointError, CheckpointManifest, CheckpointMode, CheckpointSnapshotCollector,
+    CheckpointState, CheckpointStore, InMemoryCheckpointStore, OperatorSnapshot,
+    CHECKPOINT_FORMAT_VERSION,
 };
 pub use codec::{
     AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec, CsvEncoder,

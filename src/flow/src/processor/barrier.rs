@@ -54,6 +54,10 @@ impl BarrierAligner {
         }
     }
 
+    pub(crate) fn is_pending(&self) -> bool {
+        self.state.is_some()
+    }
+
     pub fn on_barrier(
         &mut self,
         signal: BarrierControlSignal,

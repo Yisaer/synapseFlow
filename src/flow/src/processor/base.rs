@@ -5,6 +5,7 @@
 //! - DataSourceProcessor: Processes data from PhysicalDatasource
 //! - ResultCollectProcessor: Final destination, prints received data
 
+use crate::checkpoint::{CheckpointSnapshotCollector, OperatorSnapshot};
 use crate::processor::{ControlSignal, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
 use futures::stream::{BoxStream, SelectAll};
@@ -236,6 +237,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn broadcast(capacity: usize) -> Self {
         Self::new(LinkKind::Broadcast, capacity)
     }
@@ -322,6 +324,46 @@ pub(crate) trait Processor: Send + Sync {
     /// Get the processor identifier
     fn id(&self) -> &str;
 
+    /// Return the stable semantic key used to match persisted checkpoint state.
+    fn checkpoint_key(&self) -> &str {
+        self.id()
+    }
+
+    /// Attach the optional in-memory snapshot collector used by checkpoint-aware participants.
+    ///
+    /// Ordinary processors keep the default no-op implementation and only forward checkpoint
+    /// barriers. Stateful participants can override this method and use the collector from their
+    /// data-channel checkpoint handling without serializing state on the hot path.
+    fn set_checkpoint_snapshot_collector(
+        &mut self,
+        _collector: Option<Arc<CheckpointSnapshotCollector>>,
+    ) {
+    }
+
+    /// Validate one previously committed snapshot without changing processor state.
+    fn validate_checkpoint(&self, snapshot: &OperatorSnapshot) -> Result<(), ProcessorError> {
+        Err(ProcessorError::InvalidConfiguration(format!(
+            "processor `{}` does not support checkpoint state version {}",
+            self.checkpoint_key(),
+            snapshot.state_version
+        )))
+    }
+
+    /// Restore one previously committed snapshot before the processor task starts.
+    ///
+    /// Processors without recoverable state reject snapshots by default. Stateful participants
+    /// can override this method and restore their in-memory state without involving storage.
+    fn restore_checkpoint(&mut self, snapshot: &OperatorSnapshot) -> Result<(), ProcessorError> {
+        Err(ProcessorError::InvalidConfiguration(format!(
+            "processor `{}` does not support checkpoint restore for state version {}",
+            self.id(),
+            snapshot.state_version
+        )))
+    }
+
+    /// Discard checkpoint state staged before processor startup.
+    fn clear_checkpoint_restore(&mut self) {}
+
     /// Start the processor asynchronously.
     ///
     /// Processors with external startup work should resolve the readiness receiver only after
@@ -382,6 +424,94 @@ pub(crate) enum FanInStream<T> {
     SingleMpsc(mpsc::Receiver<T>),
     SingleBroadcast(BroadcastStream<T>),
     Many(SelectAll<BoxStream<'static, Result<T, BroadcastStreamRecvError>>>),
+}
+
+pub(crate) enum IndexedInput<T> {
+    Item { upstream: usize, item: T },
+    Closed,
+}
+
+pub(crate) struct PausableFanInStream<T> {
+    inputs: Vec<PausableInput<T>>,
+    active: Vec<bool>,
+    closed: Vec<bool>,
+    cursor: usize,
+}
+
+enum PausableInput<T> {
+    Broadcast(BroadcastStream<T>),
+    Mpsc(mpsc::Receiver<T>),
+}
+
+impl<T> PausableFanInStream<T> {
+    pub(crate) fn pause(&mut self, upstream: usize) {
+        if let Some(active) = self.active.get_mut(upstream) {
+            *active = false;
+        }
+    }
+
+    pub(crate) fn resume_all(&mut self) {
+        for (active, closed) in self.active.iter_mut().zip(&self.closed) {
+            if !closed {
+                *active = true;
+            }
+        }
+    }
+}
+
+impl<T> Stream for PausableFanInStream<T>
+where
+    T: Clone + Unpin + Send + 'static,
+{
+    type Item = Result<IndexedInput<T>, BroadcastStreamRecvError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let input_count = this.inputs.len();
+        let mut has_open_input = false;
+
+        for offset in 0..input_count {
+            let upstream = (this.cursor + offset) % input_count;
+            if this.closed[upstream] || !this.active[upstream] {
+                if !this.closed[upstream] {
+                    has_open_input = true;
+                }
+                continue;
+            }
+            has_open_input = true;
+
+            let poll_result = match &mut this.inputs[upstream] {
+                PausableInput::Broadcast(stream) => Pin::new(stream).poll_next(cx),
+                PausableInput::Mpsc(receiver) => {
+                    Pin::new(receiver).poll_recv(cx).map(|item| item.map(Ok))
+                }
+            };
+
+            match poll_result {
+                Poll::Ready(Some(Ok(item))) => {
+                    this.cursor = (upstream + 1) % input_count;
+                    return Poll::Ready(Some(Ok(IndexedInput::Item { upstream, item })));
+                }
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(skipped)))) => {
+                    this.cursor = (upstream + 1) % input_count;
+                    return Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(skipped))));
+                }
+                Poll::Ready(None) => {
+                    this.closed[upstream] = true;
+                    this.active[upstream] = false;
+                    this.cursor = (upstream + 1) % input_count;
+                    return Poll::Ready(Some(Ok(IndexedInput::Closed)));
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        if !has_open_input {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
 }
 
 impl<T> FanInStream<T> {
@@ -452,6 +582,27 @@ pub(crate) fn fan_in_control_streams(
     inputs: Vec<LinkReceiver<ControlSignal>>,
 ) -> ControlInputStream {
     fan_in_receivers(inputs)
+}
+
+pub(crate) fn fan_in_streams_indexed<T>(inputs: Vec<LinkReceiver<T>>) -> PausableFanInStream<T>
+where
+    T: Clone + Unpin + Send + 'static,
+{
+    let input_count = inputs.len();
+    PausableFanInStream {
+        inputs: inputs
+            .into_iter()
+            .map(|input| match input {
+                LinkReceiver::Broadcast(receiver) => {
+                    PausableInput::Broadcast(BroadcastStream::new(receiver))
+                }
+                LinkReceiver::Mpsc(receiver) => PausableInput::Mpsc(receiver),
+            })
+            .collect(),
+        active: vec![true; input_count],
+        closed: vec![false; input_count],
+        cursor: 0,
+    }
 }
 
 /// Send data over a link while applying cooperative backpressure.

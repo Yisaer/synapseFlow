@@ -1,5 +1,6 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition};
+use crate::checkpoint::CheckpointStore;
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry, MergerRegistry};
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
@@ -306,6 +307,11 @@ impl FlowInstance {
     /// Install the process-wide static property snapshot during startup.
     pub fn set_property_context(&self, ctx: PropertyContext) {
         *self.property_ctx.write() = ctx;
+    }
+
+    /// Install the durable checkpoint store used by subsequently built pipelines.
+    pub fn set_checkpoint_store(&self, store: Arc<dyn CheckpointStore>) {
+        self.pipeline_manager.set_checkpoint_store(store);
     }
 
     pub fn shared_registries(&self) -> FlowInstanceSharedRegistries {

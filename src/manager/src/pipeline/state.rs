@@ -1,3 +1,4 @@
+use crate::DurableCheckpointStore;
 use crate::FlowInstanceSpec;
 use crate::instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstances, build_in_process_flow_instance,
@@ -102,6 +103,18 @@ impl AppState {
             declared_instances: Arc::new(declared_instances),
             ..state
         };
+
+        let checkpoint_store = Arc::new(DurableCheckpointStore::new(
+            app_state
+                .storage
+                .checkpoint_storage()
+                .map_err(|err| format!("open checkpoint storage: {err}"))?,
+        ));
+        for (_, instance) in app_state.instances.instances_snapshot() {
+            instance.set_checkpoint_store(
+                Arc::clone(&checkpoint_store) as Arc<dyn flow::CheckpointStore>
+            );
+        }
 
         app_state.install_pipeline_failure_reporters();
 

@@ -316,6 +316,80 @@ fn prevent_duplicate_pipeline() {
 }
 
 #[test]
+fn final_checkpoint_failure_leaves_pipeline_stopped() {
+    let runtime = Runtime::new().expect("runtime");
+    runtime.block_on(async move {
+        let stream_name = format!("checkpoint_failure_{}", Uuid::new_v4().simple());
+        let pipeline_id = format!("checkpoint_failure_pipe_{}", Uuid::new_v4().simple());
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            stream_name.clone(),
+            "value".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        )]));
+        let catalog = Arc::new(Catalog::new());
+        catalog.upsert(StreamDefinition::new(
+            stream_name.clone(),
+            schema,
+            StreamProps::Mock(MockStreamProps::default()),
+            StreamDecoderConfig::json(),
+        ));
+
+        let spawner = test_spawner();
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
+        let context = crate::pipeline::PipelineContext::new(
+            "default",
+            shared_stream_registry,
+            MqttClientManager::new("default", spawner.clone()),
+            MemoryPubSubRegistry::new(),
+            spawner,
+        );
+        let manager = PipelineManager::new(
+            Arc::clone(&catalog),
+            context,
+            PipelineRegistries::new_with_builtin(),
+        );
+        manager.set_checkpoint_store(Arc::new(crate::checkpoint::InMemoryCheckpointStore::new()));
+        let definition = PipelineDefinition::new(
+            pipeline_id.clone(),
+            format!("SELECT value FROM {stream_name}"),
+            Vec::new(),
+        )
+        .with_options(PipelineOptions {
+            checkpoint_enabled: true,
+            ..PipelineOptions::default()
+        });
+        manager
+            .create_pipeline(CreatePipelineRequest::new(definition))
+            .expect("create checkpoint pipeline");
+        manager
+            .start_pipeline(&pipeline_id)
+            .await
+            .expect("start checkpoint pipeline");
+
+        manager
+            .stop_pipeline(
+                &pipeline_id,
+                PipelineStopMode::Graceful,
+                Duration::from_millis(20),
+            )
+            .await
+            .expect_err("mock source should reject the final checkpoint");
+
+        let snapshot = manager
+            .list()
+            .into_iter()
+            .find(|snapshot| snapshot.definition.id() == pipeline_id)
+            .expect("pipeline snapshot");
+        assert_eq!(snapshot.status, PipelineStatus::Stopped);
+        let stats_err = manager
+            .collect_stats(&pipeline_id, Duration::from_millis(20))
+            .await
+            .expect_err("stopped pipeline should not expose running stats");
+        assert!(stats_err.to_string().contains("is not running"));
+    });
+}
+
+#[test]
 fn attach_sources_accepts_shared_stream_only_pipeline() {
     let runtime = Runtime::new().expect("runtime");
     runtime.block_on(async move {

@@ -2,6 +2,7 @@
 //!
 //! Defines the data types that flow between processors in the stream processing pipeline.
 
+use crate::checkpoint::CheckpointMode;
 use crate::model::Collection;
 use bytes::Bytes;
 use std::time::SystemTime;
@@ -52,6 +53,7 @@ pub enum ControlSignal {
 /// `barrier_id` values and constructing the corresponding [`BarrierControlSignal`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BarrierControlSignalKind {
+    Checkpoint { mode: CheckpointMode },
     StreamGracefulEnd,
     SyncTest,
 }
@@ -59,6 +61,10 @@ pub enum BarrierControlSignalKind {
 impl BarrierControlSignalKind {
     pub fn with_id(self, barrier_id: u64) -> BarrierControlSignal {
         match self {
+            BarrierControlSignalKind::Checkpoint { mode } => BarrierControlSignal::Checkpoint {
+                checkpoint_id: barrier_id,
+                mode,
+            },
             BarrierControlSignalKind::StreamGracefulEnd => {
                 BarrierControlSignal::StreamGracefulEnd { barrier_id }
             }
@@ -69,6 +75,10 @@ impl BarrierControlSignalKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BarrierControlSignal {
+    Checkpoint {
+        checkpoint_id: u64,
+        mode: CheckpointMode,
+    },
     StreamGracefulEnd {
         barrier_id: u64,
     },
@@ -84,6 +94,7 @@ pub enum BarrierControlSignal {
 impl BarrierControlSignal {
     pub fn barrier_id(&self) -> u64 {
         match self {
+            BarrierControlSignal::Checkpoint { checkpoint_id, .. } => *checkpoint_id,
             BarrierControlSignal::StreamGracefulEnd { barrier_id } => *barrier_id,
             BarrierControlSignal::SyncTest { barrier_id } => *barrier_id,
         }
@@ -91,6 +102,9 @@ impl BarrierControlSignal {
 
     pub fn kind(&self) -> BarrierControlSignalKind {
         match self {
+            BarrierControlSignal::Checkpoint { mode, .. } => {
+                BarrierControlSignalKind::Checkpoint { mode: *mode }
+            }
             BarrierControlSignal::StreamGracefulEnd { .. } => {
                 BarrierControlSignalKind::StreamGracefulEnd
             }
@@ -118,14 +132,33 @@ impl ControlSignal {
         matches!(
             self,
             ControlSignal::Barrier(BarrierControlSignal::StreamGracefulEnd { .. })
+                | ControlSignal::Barrier(BarrierControlSignal::Checkpoint {
+                    mode: CheckpointMode::Final,
+                    ..
+                })
                 | ControlSignal::Instant(InstantControlSignal::StreamQuickEnd { .. })
         )
+    }
+
+    pub fn checkpoint_mode(&self) -> Option<CheckpointMode> {
+        match self {
+            ControlSignal::Barrier(BarrierControlSignal::Checkpoint { mode, .. }) => Some(*mode),
+            _ => None,
+        }
+    }
+
+    pub fn is_checkpoint(&self) -> bool {
+        self.checkpoint_mode().is_some()
     }
 
     pub fn is_graceful_end(&self) -> bool {
         matches!(
             self,
             ControlSignal::Barrier(BarrierControlSignal::StreamGracefulEnd { .. })
+                | ControlSignal::Barrier(BarrierControlSignal::Checkpoint {
+                    mode: CheckpointMode::Final,
+                    ..
+                })
         )
     }
 }
@@ -368,6 +401,14 @@ impl StreamData {
 
 /// Convenience methods for common control signals
 impl StreamData {
+    /// Create a checkpoint barrier on the data channel.
+    pub fn checkpoint(checkpoint_id: u64, mode: CheckpointMode) -> Self {
+        StreamData::control(ControlSignal::Barrier(BarrierControlSignal::Checkpoint {
+            checkpoint_id,
+            mode,
+        }))
+    }
+
     /// Create stream end signal with an explicit barrier id.
     pub fn stream_graceful_end(barrier_id: u64) -> Self {
         StreamData::control(ControlSignal::Barrier(

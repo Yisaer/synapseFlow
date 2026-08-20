@@ -13,6 +13,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod checkpoint;
+
+pub use checkpoint::{CheckpointStorage, StoredCheckpoint};
+
 const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
 const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
@@ -47,6 +51,8 @@ pub enum StorageError {
     NotFound(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl StorageError {
@@ -210,10 +216,14 @@ pub struct UploadFileInfo {
     pub modified_at: u64,
 }
 
+pub(crate) struct RedbBackend {
+    pub(crate) db: Database,
+    pub(crate) db_access_lock: Mutex<()>,
+}
+
 pub struct MetadataStorage {
-    db: Database,
+    backend: std::sync::Arc<RedbBackend>,
     db_path: PathBuf,
-    db_access_lock: Mutex<()>,
 }
 
 impl MetadataStorage {
@@ -235,9 +245,11 @@ impl MetadataStorage {
         };
 
         let storage = Self {
-            db,
+            backend: std::sync::Arc::new(RedbBackend {
+                db,
+                db_access_lock: Mutex::new(()),
+            }),
             db_path: db_path.clone(),
-            db_access_lock: Mutex::new(()),
         };
         storage.ensure_tables()?;
         Ok(storage)
@@ -249,6 +261,11 @@ impl MetadataStorage {
 
     pub fn path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Open the independent checkpoint namespace on the same redb backend.
+    pub fn checkpoint_storage(&self) -> Result<CheckpointStorage, StorageError> {
+        CheckpointStorage::from_backend(std::sync::Arc::clone(&self.backend))
     }
 
     pub fn create_stream(&self, stream: StoredStream) -> Result<(), StorageError> {
@@ -297,7 +314,11 @@ impl MetadataStorage {
 
     pub fn delete_pipeline(&self, id: &str) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         {
             let mut pipelines = txn
                 .open_table(PIPELINES_TABLE)
@@ -326,7 +347,11 @@ impl MetadataStorage {
         state: StoredPipelineRunState,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         {
             let mut table = txn
                 .open_table(PIPELINE_RUN_STATES_TABLE)
@@ -442,7 +467,11 @@ impl MetadataStorage {
 
     pub fn export_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_read()
+            .map_err(StorageError::backend)?;
         Ok(MetadataExportSnapshot {
             streams: Self::list_entries_in_read_txn(&txn, STREAMS_TABLE)?,
             schemas: Self::list_entries_in_read_txn(&txn, SCHEMAS_TABLE)?,
@@ -457,7 +486,11 @@ impl MetadataStorage {
 
     pub fn replace_snapshot(&self, snapshot: MetadataExportSnapshot) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         Self::replace_table_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
         })?;
@@ -507,7 +540,11 @@ impl MetadataStorage {
         meta: Option<StoredInitApplyMeta>,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
         })?;
@@ -551,14 +588,19 @@ impl MetadataStorage {
     }
 
     fn lock_db(&self) -> Result<MutexGuard<'_, ()>, StorageError> {
-        self.db_access_lock
+        self.backend
+            .db_access_lock
             .lock()
             .map_err(|err| StorageError::backend(format!("metadata storage lock poisoned: {err}")))
     }
 
     fn ensure_tables(&self) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         txn.open_table(STREAMS_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(PIPELINES_TABLE)
@@ -589,7 +631,11 @@ impl MetadataStorage {
         value: &T,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         {
             let mut table = txn.open_table(table).map_err(StorageError::backend)?;
             if table.get(key).map_err(StorageError::backend)?.is_some() {
@@ -611,7 +657,11 @@ impl MetadataStorage {
         value: &T,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         Self::put_entry_in_txn(&txn, table, key, value)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -623,7 +673,11 @@ impl MetadataStorage {
         key: &str,
     ) -> Result<Option<T>, StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_read()
+            .map_err(StorageError::backend)?;
         let table = txn.open_table(table).map_err(StorageError::backend)?;
         let result = match table.get(key).map_err(StorageError::backend)? {
             Some(value) => {
@@ -641,7 +695,11 @@ impl MetadataStorage {
         key: &str,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
         {
             let mut table = txn.open_table(table).map_err(StorageError::backend)?;
             let removed = table.remove(key).map_err(StorageError::backend)?;
@@ -658,7 +716,11 @@ impl MetadataStorage {
         table: TableDefinition<&str, &[u8]>,
     ) -> Result<Vec<T>, StorageError> {
         let _guard = self.lock_db()?;
-        let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        let txn = self
+            .backend
+            .db
+            .begin_read()
+            .map_err(StorageError::backend)?;
         Self::list_entries_in_read_txn(&txn, table)
     }
 
@@ -817,7 +879,7 @@ fn collect_upload_entries(
     Ok(())
 }
 
-/// Facade that exposes storage capabilities; currently only metadata, future namespaces can be added.
+/// Facade that exposes metadata and independent checkpoint storage capabilities.
 pub struct StorageManager {
     metadata: MetadataStorage,
     base_dir: PathBuf,
@@ -838,6 +900,11 @@ impl StorageManager {
 
     pub fn metadata(&self) -> &MetadataStorage {
         &self.metadata
+    }
+
+    /// Open the independent checkpoint namespace on the shared redb backend.
+    pub fn checkpoint_storage(&self) -> Result<CheckpointStorage, StorageError> {
+        self.metadata.checkpoint_storage()
     }
 
     pub fn base_dir(&self) -> &Path {

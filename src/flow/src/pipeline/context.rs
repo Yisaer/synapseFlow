@@ -1,3 +1,4 @@
+use crate::checkpoint::CheckpointStore;
 use crate::connector::{MemoryPubSubRegistry, MockSourceHandle, MqttClientManager};
 use crate::pipeline::PipelineRuntimeFailure;
 use crate::shared_stream::SharedStreamRegistry;
@@ -28,6 +29,7 @@ pub(crate) struct PipelineContext {
     spawner: crate::runtime::TaskSpawner,
     property_context: Arc<RwLock<crate::PropertyContext>>,
     pipeline_failure_reporter: Arc<RwLock<Option<PipelineFailureReporter>>>,
+    checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
 }
 
 impl PipelineContext {
@@ -47,6 +49,7 @@ impl PipelineContext {
             spawner,
             property_context: Arc::new(RwLock::new(crate::PropertyContext::default())),
             pipeline_failure_reporter: Arc::new(RwLock::new(None)),
+            checkpoint_store: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -88,5 +91,13 @@ impl PipelineContext {
 
     pub(crate) fn pipeline_failure_reporter(&self) -> Option<PipelineFailureReporter> {
         self.pipeline_failure_reporter.read().clone()
+    }
+
+    pub(crate) fn set_checkpoint_store(&self, store: Arc<dyn CheckpointStore>) {
+        *self.checkpoint_store.write() = Some(store);
+    }
+
+    pub(crate) fn checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {
+        self.checkpoint_store.read().clone()
     }
 }

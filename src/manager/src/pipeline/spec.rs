@@ -741,6 +741,7 @@ pub(crate) fn build_pipeline_definition(
     });
     let options = PipelineOptions {
         data_channel_capacity: req.options.data_channel_capacity,
+        checkpoint_enabled: req.options.checkpoint.enabled,
         eventtime: flow::pipeline::EventtimeOptions {
             enabled: req.options.eventtime.enabled,
             late_tolerance: Duration::from_millis(req.options.eventtime.late_tolerance_ms),

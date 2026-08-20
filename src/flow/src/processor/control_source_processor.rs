@@ -103,6 +103,15 @@ impl ControlSourceProcessor {
         self.next_control_signal_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    pub(crate) fn advance_control_signal_id_to_at_least(&self, next_id: u64) {
+        self.next_control_signal_id
+            .fetch_max(next_id, Ordering::Relaxed);
+    }
+
+    pub(crate) fn control_signal_id_allocator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.next_control_signal_id)
+    }
+
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
         send_with_backpressure(

@@ -1,15 +1,20 @@
-use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
+use crate::checkpoint::CheckpointState;
+use crate::connector::{
+    ConnectorError, ConnectorEvent, ConnectorStream, SourceCheckpointRequest, SourceConnector,
+};
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::time::{Duration, UNIX_EPOCH};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, warn};
 
@@ -36,7 +41,20 @@ pub(crate) struct FileSourceConnector {
     config: FileSourceConfig,
     channel_capacity: usize,
     shutdown: Option<Arc<AtomicBool>>,
+    checkpoint_tx: Option<std_mpsc::Sender<FileSourceCommand>>,
+    restored_state: Option<FileSourceRestoreState>,
     spawner: TaskSpawner,
+}
+
+struct FileSourceRestoreState {
+    cursors: HashMap<PathBuf, FileCursor>,
+}
+
+enum FileSourceCommand {
+    Checkpoint {
+        checkpoint_id: u64,
+        response: oneshot::Sender<Result<Option<CheckpointState>, ConnectorError>>,
+    },
 }
 
 impl FileSourceConnector {
@@ -46,6 +64,8 @@ impl FileSourceConnector {
             config,
             channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             shutdown: None,
+            checkpoint_tx: None,
+            restored_state: None,
             spawner,
         }
     }
@@ -70,19 +90,75 @@ impl SourceConnector for FileSourceConnector {
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
         let shutdown = Arc::new(AtomicBool::new(false));
         self.shutdown = Some(Arc::clone(&shutdown));
+        let (checkpoint_tx, checkpoint_rx) = std_mpsc::channel();
+        self.checkpoint_tx = Some(checkpoint_tx);
         let connector_id = self.id.clone();
+        let restored_state = self.restored_state.take();
 
         let _task = self.spawner.spawn_blocking(move || {
-            run_file_source(connector_id, source_path, sender, shutdown);
+            run_file_source(
+                connector_id,
+                source_path,
+                sender,
+                shutdown,
+                checkpoint_rx,
+                restored_state,
+            );
         });
 
         Ok(Box::pin(ReceiverStream::new(receiver)))
+    }
+
+    fn request_checkpoint(
+        &mut self,
+        checkpoint_id: u64,
+    ) -> Result<SourceCheckpointRequest, ConnectorError> {
+        let checkpoint_tx = self.checkpoint_tx.as_ref().ok_or_else(|| {
+            ConnectorError::Other(format!("file source `{}` is not active", self.id))
+        })?;
+        let (response_tx, response_rx) = oneshot::channel();
+        checkpoint_tx
+            .send(FileSourceCommand::Checkpoint {
+                checkpoint_id,
+                response: response_tx,
+            })
+            .map_err(|_| {
+                ConnectorError::Other(format!(
+                    "file source `{}` checkpoint worker is not available",
+                    self.id
+                ))
+            })?;
+        Ok(Box::pin(async move {
+            response_rx.await.map_err(|_| {
+                ConnectorError::Other("file source checkpoint response was dropped".to_string())
+            })?
+        }))
+    }
+
+    fn restore_checkpoint(&mut self, state: &CheckpointState) -> Result<(), ConnectorError> {
+        if self.shutdown.is_some() {
+            return Err(ConnectorError::Other(format!(
+                "file source `{}` checkpoint must be restored before subscribe",
+                self.id
+            )));
+        }
+        self.restored_state = Some(parse_restore_state(state, &self.config.path)?);
+        Ok(())
+    }
+
+    fn validate_checkpoint(&self, state: &CheckpointState) -> Result<(), ConnectorError> {
+        parse_restore_state(state, &self.config.path).map(|_| ())
+    }
+
+    fn clear_checkpoint_restore(&mut self) {
+        self.restored_state = None;
     }
 
     fn close(&mut self) -> Result<(), ConnectorError> {
         if let Some(shutdown) = self.shutdown.take() {
             shutdown.store(true, Ordering::Release);
         }
+        self.checkpoint_tx.take();
         info!(connector_id = %self.id, "file source closed");
         Ok(())
     }
@@ -110,11 +186,233 @@ fn validate_source_path(path: &Path) -> Result<PathBuf, ConnectorError> {
     Ok(canonical)
 }
 
+fn parse_restore_state(
+    state: &CheckpointState,
+    configured_source_path: &Path,
+) -> Result<FileSourceRestoreState, ConnectorError> {
+    let state = checkpoint_map(state, "root state")?;
+    let connector_kind = checkpoint_string(
+        required_checkpoint_field(state, "connector_kind")?,
+        "connector_kind",
+    )?;
+    if connector_kind != "file" {
+        return Err(invalid_checkpoint(format!(
+            "connector_kind must be `file`, got `{connector_kind}`"
+        )));
+    }
+
+    let configured_source_path = validate_source_path(configured_source_path)?;
+    let source_path = PathBuf::from(checkpoint_string(
+        required_checkpoint_field(state, "source_path")?,
+        "source_path",
+    )?);
+    if source_path != configured_source_path {
+        return Err(invalid_checkpoint(format!(
+            "source path mismatch: expected `{}`, got `{}`",
+            configured_source_path.display(),
+            source_path.display()
+        )));
+    }
+
+    let metadata = fs::symlink_metadata(&configured_source_path).map_err(|err| {
+        ConnectorError::Other(format!(
+            "failed to inspect file stream path `{}` while restoring checkpoint: {err}",
+            configured_source_path.display()
+        ))
+    })?;
+    let expected_mode = if metadata.is_file() {
+        "file"
+    } else if metadata.is_dir() {
+        "directory"
+    } else {
+        return Err(invalid_checkpoint(format!(
+            "configured source path `{}` is not a regular file or directory",
+            configured_source_path.display()
+        )));
+    };
+    let mode = checkpoint_string(required_checkpoint_field(state, "mode")?, "mode")?;
+    if mode != expected_mode {
+        return Err(invalid_checkpoint(format!(
+            "source mode mismatch: expected `{expected_mode}`, got `{mode}`"
+        )));
+    }
+
+    let cursors = match required_checkpoint_field(state, "cursors")? {
+        CheckpointState::Array(cursors) => cursors,
+        _ => return Err(invalid_checkpoint("cursors must be an array")),
+    };
+    let mut restored_cursors = HashMap::with_capacity(cursors.len());
+    let mut seen_paths = HashSet::with_capacity(cursors.len());
+    for (index, cursor) in cursors.iter().enumerate() {
+        let cursor = checkpoint_map(cursor, &format!("cursor at index {index}"))?;
+        let path = PathBuf::from(checkpoint_string(
+            required_checkpoint_field(cursor, "path")?,
+            "cursor.path",
+        )?);
+        if path.as_os_str().is_empty() {
+            return Err(invalid_checkpoint(format!(
+                "cursor at index {index} has an empty path"
+            )));
+        }
+        let path_is_valid = if expected_mode == "file" {
+            path == configured_source_path
+        } else {
+            path.parent() == Some(configured_source_path.as_path()) && path.file_name().is_some()
+        };
+        if !path_is_valid {
+            return Err(invalid_checkpoint(format!(
+                "cursor path `{}` is outside source `{}`",
+                path.display(),
+                configured_source_path.display()
+            )));
+        }
+        if !seen_paths.insert(path.clone()) {
+            return Err(invalid_checkpoint(format!(
+                "duplicate cursor path `{}`",
+                path.display()
+            )));
+        }
+
+        let offset = checkpoint_unsigned(
+            required_checkpoint_field(cursor, "offset")?,
+            "cursor.offset",
+        )?;
+        let pending = checkpoint_bytes(
+            required_checkpoint_field(cursor, "pending")?,
+            "cursor.pending",
+        )?;
+        let file_length = checkpoint_unsigned(
+            required_checkpoint_field(cursor, "file_length")?,
+            "cursor.file_length",
+        )?;
+        if offset > file_length {
+            return Err(invalid_checkpoint(format!(
+                "cursor `{}` offset {offset} exceeds file_length {file_length}",
+                path.display()
+            )));
+        }
+        if u64::try_from(pending.len()).map_or(true, |pending_len| pending_len > offset) {
+            return Err(invalid_checkpoint(format!(
+                "cursor `{}` pending bytes exceed its offset",
+                path.display()
+            )));
+        }
+        let last_update_unix_ms = checkpoint_optional_timestamp(
+            required_checkpoint_field(cursor, "last_update_unix_ms")?,
+            "cursor.last_update_unix_ms",
+        )?;
+        let file_identity = checkpoint_optional_string(
+            required_checkpoint_field(cursor, "file_identity")?,
+            "cursor.file_identity",
+        )?;
+        if file_identity.as_ref().is_some_and(String::is_empty) {
+            return Err(invalid_checkpoint(format!(
+                "cursor `{}` has an empty file_identity",
+                path.display()
+            )));
+        }
+
+        restored_cursors.insert(
+            path.clone(),
+            FileCursor {
+                path,
+                offset,
+                pending,
+                file_length,
+                last_update_unix_ms,
+                file_identity,
+            },
+        );
+    }
+
+    Ok(FileSourceRestoreState {
+        cursors: restored_cursors,
+    })
+}
+
+fn required_checkpoint_field<'a>(
+    state: &'a BTreeMap<String, CheckpointState>,
+    field: &str,
+) -> Result<&'a CheckpointState, ConnectorError> {
+    state
+        .get(field)
+        .ok_or_else(|| invalid_checkpoint(format!("missing `{field}`")))
+}
+
+fn checkpoint_map<'a>(
+    state: &'a CheckpointState,
+    label: &str,
+) -> Result<&'a BTreeMap<String, CheckpointState>, ConnectorError> {
+    match state {
+        CheckpointState::Map(state) => Ok(state),
+        _ => Err(invalid_checkpoint(format!("{label} must be a map"))),
+    }
+}
+
+fn checkpoint_string<'a>(
+    state: &'a CheckpointState,
+    label: &str,
+) -> Result<&'a str, ConnectorError> {
+    match state {
+        CheckpointState::String(value) => Ok(value),
+        _ => Err(invalid_checkpoint(format!("{label} must be a string"))),
+    }
+}
+
+fn checkpoint_bytes(state: &CheckpointState, label: &str) -> Result<Vec<u8>, ConnectorError> {
+    match state {
+        CheckpointState::Bytes(value) => Ok(value.clone()),
+        _ => Err(invalid_checkpoint(format!("{label} must be bytes"))),
+    }
+}
+
+fn checkpoint_unsigned(state: &CheckpointState, label: &str) -> Result<u64, ConnectorError> {
+    match state {
+        CheckpointState::Unsigned(value) => Ok(*value),
+        _ => Err(invalid_checkpoint(format!("{label} must be unsigned"))),
+    }
+}
+
+fn checkpoint_optional_timestamp(
+    state: &CheckpointState,
+    label: &str,
+) -> Result<Option<i64>, ConnectorError> {
+    match state {
+        CheckpointState::Null => Ok(None),
+        CheckpointState::Signed(value) if *value >= 0 => Ok(Some(*value)),
+        _ => Err(invalid_checkpoint(format!(
+            "{label} must be null or a non-negative signed integer"
+        ))),
+    }
+}
+
+fn checkpoint_optional_string(
+    state: &CheckpointState,
+    label: &str,
+) -> Result<Option<String>, ConnectorError> {
+    match state {
+        CheckpointState::Null => Ok(None),
+        CheckpointState::String(value) => Ok(Some(value.clone())),
+        _ => Err(invalid_checkpoint(format!(
+            "{label} must be null or a string"
+        ))),
+    }
+}
+
+fn invalid_checkpoint(message: impl Into<String>) -> ConnectorError {
+    ConnectorError::Other(format!(
+        "invalid file source checkpoint: {}",
+        message.into()
+    ))
+}
+
 fn run_file_source(
     connector_id: String,
     source_path: PathBuf,
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     shutdown: Arc<AtomicBool>,
+    checkpoint_rx: std_mpsc::Receiver<FileSourceCommand>,
+    restored_state: Option<FileSourceRestoreState>,
 ) {
     info!(
         connector_id = %connector_id,
@@ -122,7 +420,7 @@ fn run_file_source(
         "starting file source"
     );
 
-    let mut state = match FileSourceState::new(source_path) {
+    let mut state = match FileSourceState::new(source_path, restored_state) {
         Ok(state) => state,
         Err(err) => {
             let _ = sender.blocking_send(Err(err));
@@ -159,6 +457,28 @@ fn run_file_source(
     }
 
     while !shutdown.load(Ordering::Acquire) {
+        match checkpoint_rx.try_recv() {
+            Ok(FileSourceCommand::Checkpoint {
+                checkpoint_id,
+                response,
+            }) => {
+                let result = state.snapshot();
+                match result {
+                    Ok(snapshot) => {
+                        let _ = sender
+                            .blocking_send(Ok(ConnectorEvent::CheckpointFence { checkpoint_id }));
+                        let _ = response.send(Ok(Some(snapshot)));
+                    }
+                    Err(err) => {
+                        let _ = sender.blocking_send(Err(err.clone()));
+                        let _ = response.send(Err(err));
+                        return;
+                    }
+                }
+            }
+            Err(std_mpsc::TryRecvError::Empty) => {}
+            Err(std_mpsc::TryRecvError::Disconnected) => return,
+        }
         match event_rx.recv_timeout(SHUTDOWN_CHECK_INTERVAL) {
             Ok(Ok(event)) => {
                 if state.handle_event(event, &sender).is_err() {
@@ -194,7 +514,10 @@ enum FileSourceMode {
 }
 
 impl FileSourceState {
-    fn new(source_path: PathBuf) -> Result<Self, ConnectorError> {
+    fn new(
+        source_path: PathBuf,
+        restored_state: Option<FileSourceRestoreState>,
+    ) -> Result<Self, ConnectorError> {
         let metadata = fs::symlink_metadata(&source_path).map_err(|err| {
             ConnectorError::Other(format!(
                 "failed to inspect file stream path `{}`: {err}",
@@ -214,7 +537,9 @@ impl FileSourceState {
                 mode: FileSourceMode::File {
                     target: source_path.clone(),
                 },
-                cursors: HashMap::new(),
+                cursors: restored_state
+                    .map(|state| state.cursors)
+                    .unwrap_or_default(),
             });
         }
         if metadata.is_dir() {
@@ -222,7 +547,9 @@ impl FileSourceState {
                 source_path: source_path.clone(),
                 watch_path: source_path,
                 mode: FileSourceMode::Directory,
-                cursors: HashMap::new(),
+                cursors: restored_state
+                    .map(|state| state.cursors)
+                    .unwrap_or_default(),
             });
         }
         Err(ConnectorError::Other(format!(
@@ -326,12 +653,49 @@ impl FileSourceState {
             .or_insert_with(|| FileCursor::new(path));
         cursor.read_available_lines(sender)
     }
+
+    fn snapshot(&mut self) -> Result<CheckpointState, ConnectorError> {
+        let mut files = Vec::with_capacity(self.cursors.len());
+        for cursor in self.cursors.values_mut() {
+            cursor.refresh_metadata()?;
+            files.push(cursor.snapshot());
+        }
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut state = BTreeMap::new();
+        state.insert(
+            "connector_kind".to_string(),
+            CheckpointState::String("file".to_string()),
+        );
+        state.insert(
+            "source_path".to_string(),
+            CheckpointState::String(self.source_path.to_string_lossy().into_owned()),
+        );
+        state.insert(
+            "mode".to_string(),
+            CheckpointState::String(
+                match self.mode {
+                    FileSourceMode::File { .. } => "file",
+                    FileSourceMode::Directory => "directory",
+                }
+                .to_string(),
+            ),
+        );
+        state.insert(
+            "cursors".to_string(),
+            CheckpointState::Array(files.into_iter().map(|(_, snapshot)| snapshot).collect()),
+        );
+        Ok(CheckpointState::Map(state))
+    }
 }
 
 struct FileCursor {
     path: PathBuf,
     offset: u64,
     pending: Vec<u8>,
+    file_length: u64,
+    last_update_unix_ms: Option<i64>,
+    file_identity: Option<String>,
 }
 
 impl FileCursor {
@@ -340,7 +704,78 @@ impl FileCursor {
             path,
             offset: 0,
             pending: Vec::new(),
+            file_length: 0,
+            last_update_unix_ms: None,
+            file_identity: None,
         }
+    }
+
+    fn refresh_metadata(&mut self) -> Result<(), ConnectorError> {
+        let Some(metadata) = regular_file_metadata_without_symlink(&self.path).map_err(|err| {
+            ConnectorError::Other(format!(
+                "failed to inspect file stream source file `{}`: {err}",
+                self.path.display()
+            ))
+        })?
+        else {
+            return Ok(());
+        };
+        self.reconcile_metadata(&metadata);
+        Ok(())
+    }
+
+    fn reconcile_metadata(&mut self, metadata: &fs::Metadata) {
+        let current_identity = file_identity(metadata);
+        let identity_changed = self
+            .file_identity
+            .as_ref()
+            .zip(current_identity.as_ref())
+            .is_some_and(|(previous, current)| previous != current);
+        if identity_changed || metadata.len() < self.offset {
+            self.offset = 0;
+            self.pending.clear();
+        }
+        self.file_length = metadata.len();
+        self.last_update_unix_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+        self.file_identity = current_identity;
+    }
+
+    fn snapshot(&self) -> (String, CheckpointState) {
+        let mut state = BTreeMap::new();
+        state.insert(
+            "path".to_string(),
+            CheckpointState::String(self.path.to_string_lossy().into_owned()),
+        );
+        state.insert("offset".to_string(), CheckpointState::Unsigned(self.offset));
+        state.insert(
+            "pending".to_string(),
+            CheckpointState::Bytes(self.pending.clone()),
+        );
+        state.insert(
+            "file_length".to_string(),
+            CheckpointState::Unsigned(self.file_length),
+        );
+        state.insert(
+            "last_update_unix_ms".to_string(),
+            self.last_update_unix_ms
+                .map(CheckpointState::Signed)
+                .unwrap_or(CheckpointState::Null),
+        );
+        state.insert(
+            "file_identity".to_string(),
+            self.file_identity
+                .clone()
+                .map(CheckpointState::String)
+                .unwrap_or(CheckpointState::Null),
+        );
+        (
+            self.path.to_string_lossy().into_owned(),
+            CheckpointState::Map(state),
+        )
     }
 
     fn read_available_lines(
@@ -358,10 +793,7 @@ impl FileCursor {
             None => return Ok(()),
         };
         let file_len = metadata.len();
-        if file_len < self.offset {
-            self.offset = 0;
-            self.pending.clear();
-        }
+        self.reconcile_metadata(&metadata);
         if file_len == self.offset {
             return Ok(());
         }
@@ -383,11 +815,8 @@ impl FileCursor {
         if !metadata.is_file() {
             return Ok(());
         }
+        self.reconcile_metadata(&metadata);
         let file_len = metadata.len();
-        if file_len < self.offset {
-            self.offset = 0;
-            self.pending.clear();
-        }
         if file_len == self.offset {
             return Ok(());
         }
@@ -467,6 +896,18 @@ fn regular_file_metadata_without_symlink(path: &Path) -> std::io::Result<Option<
         return Ok(None);
     }
     Ok(Some(metadata))
+}
+
+fn file_identity(metadata: &fs::Metadata) -> Option<String> {
+    #[cfg(unix)]
+    {
+        Some(format!("{}:{}", metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
 
 fn open_regular_file_without_following_symlink(path: &Path) -> std::io::Result<File> {
@@ -558,7 +999,7 @@ mod tests {
         let path = dir.path().join("app.log");
         write_file(&path, b"first\nsecond\r\npartial");
         let (sender, mut receiver) = mpsc::channel(8);
-        let mut state = FileSourceState::new(path).expect("file source state");
+        let mut state = FileSourceState::new(path, None).expect("file source state");
 
         state
             .read_initial_files(&sender)
@@ -579,7 +1020,7 @@ mod tests {
         let path = dir.path().join("app.log");
         write_file(&path, b"part");
         let (sender, mut receiver) = mpsc::channel(8);
-        let mut state = FileSourceState::new(path.clone()).expect("file source state");
+        let mut state = FileSourceState::new(path.clone(), None).expect("file source state");
 
         state
             .read_initial_files(&sender)
@@ -603,7 +1044,7 @@ mod tests {
         let path = dir.path().join("app.log");
         write_file(&path, b"old line one\nold line two\n");
         let (sender, mut receiver) = mpsc::channel(8);
-        let mut state = FileSourceState::new(path.clone()).expect("file source state");
+        let mut state = FileSourceState::new(path.clone(), None).expect("file source state");
 
         state
             .read_initial_files(&sender)
@@ -635,7 +1076,8 @@ mod tests {
         write_file(&direct, b"direct\n");
         write_file(&nested, b"nested\n");
         let (sender, mut receiver) = mpsc::channel(8);
-        let mut state = FileSourceState::new(dir.path().to_path_buf()).expect("file source state");
+        let mut state =
+            FileSourceState::new(dir.path().to_path_buf(), None).expect("file source state");
 
         state
             .read_initial_files(&sender)
@@ -675,7 +1117,8 @@ mod tests {
         let link = dir.path().join("link.log");
         write_file(&target, b"secret\n");
         let (sender, mut receiver) = mpsc::channel(8);
-        let mut state = FileSourceState::new(dir.path().to_path_buf()).expect("file source state");
+        let mut state =
+            FileSourceState::new(dir.path().to_path_buf(), None).expect("file source state");
 
         state
             .read_initial_files(&sender)
@@ -703,7 +1146,7 @@ mod tests {
         write_file(&path, b"visible\n");
         write_file(&target, b"secret\n");
         let (sender, mut receiver) = mpsc::channel(8);
-        let mut state = FileSourceState::new(path.clone()).expect("file source state");
+        let mut state = FileSourceState::new(path.clone(), None).expect("file source state");
 
         state
             .read_initial_files(&sender)

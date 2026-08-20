@@ -4,6 +4,10 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use crate::aggregation::AggregateFunctionRegistry;
+use crate::checkpoint::{
+    CheckpointError, CheckpointManifest, CheckpointSnapshotCollector, CheckpointStore,
+    OperatorSnapshot, CHECKPOINT_FORMAT_VERSION,
+};
 use crate::codec::{
     AesGcmStreamWriter, DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder,
     SinkEncryptionConfig,
@@ -21,13 +25,13 @@ use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggi
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
-    CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
-    DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, EosWindowProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, MemoryCollectionMaterializeProcessor,
-    OrderProcessor, Processor, ProcessorError, ProcessorStart, ProjectProcessor,
-    ResultCollectProcessor, RowDiffProcessor, SamplerProcessor, SharedStreamProcessor,
-    SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor, SinkProcessor,
-    SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
+    CheckpointCoordinator, CheckpointTrigger, CollectionLayoutNormalizeProcessor, ComputeProcessor,
+    ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor,
+    EmptySuppressProcessor, EosWindowProcessor, FilterProcessor, Ingress, InstantControlSignal,
+    MemoryCollectionMaterializeProcessor, OrderProcessor, Processor, ProcessorError,
+    ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
+    SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor,
+    SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
     StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TableScanProcessor,
     TumblingWindowProcessor, WatermarkProcessor,
 };
@@ -170,6 +174,7 @@ pub(crate) struct ProcessorPipelineDependencies {
 
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Arc<MergerRegistry>,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
 }
 
 impl ProcessorPipelineDependencies {
@@ -193,19 +198,27 @@ impl ProcessorPipelineDependencies {
             spawner,
             eventtime,
             merger_registry: registries.merger_registry(),
+            checkpoint_store: None,
         }
+    }
+
+    pub(crate) fn with_checkpoint_store(mut self, store: Option<Arc<dyn CheckpointStore>>) -> Self {
+        self.checkpoint_store = store;
+        self
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProcessorPipelineOptions {
     pub(crate) data_channel_capacity: usize,
+    pub(crate) checkpoint_enabled: bool,
 }
 
 impl Default for ProcessorPipelineOptions {
     fn default() -> Self {
         Self {
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
+            checkpoint_enabled: false,
         }
     }
 }
@@ -213,6 +226,11 @@ impl Default for ProcessorPipelineOptions {
 impl ProcessorPipelineOptions {
     pub(crate) fn with_data_channel_capacity(mut self, capacity: usize) -> Self {
         self.data_channel_capacity = normalize_channel_capacity(capacity);
+        self
+    }
+
+    pub(crate) fn with_checkpoint_enabled(mut self, enabled: bool) -> Self {
+        self.checkpoint_enabled = enabled;
         self
     }
 
@@ -238,6 +256,9 @@ struct ProcessorBuilderContext {
     merger_registry: Option<Arc<MergerRegistry>>,
     shared_stream: Option<SharedStreamPipelineOptions>,
     channel_capacities: ProcessorChannelCapacities,
+    checkpoint_enabled: bool,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    checkpoint_keys: HashMap<String, String>,
     output_link_kinds: HashMap<i64, LinkKind>,
     spawner: TaskSpawner,
 }
@@ -384,6 +405,40 @@ impl PlanProcessor {
         }
     }
 
+    pub fn checkpoint_key(&self) -> &str {
+        match self {
+            PlanProcessor::Aggregation(p) => p.checkpoint_key(),
+            PlanProcessor::DataSource(p) => p.checkpoint_key(),
+            PlanProcessor::TableScan(p) => p.checkpoint_key(),
+            PlanProcessor::Decoder(p) => p.checkpoint_key(),
+            PlanProcessor::CollectionLayoutNormalize(p) => p.checkpoint_key(),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.checkpoint_key(),
+            PlanProcessor::SharedSource(p) => p.checkpoint_key(),
+            PlanProcessor::SourceChangeGate(p) => p.checkpoint_key(),
+            PlanProcessor::Compute(p) => p.checkpoint_key(),
+            PlanProcessor::Order(p) => p.checkpoint_key(),
+            PlanProcessor::Project(p) => p.checkpoint_key(),
+            PlanProcessor::RowDiff(p) => p.checkpoint_key(),
+            PlanProcessor::EmptySuppress(p) => p.checkpoint_key(),
+            PlanProcessor::StatefulFunction(p) => p.checkpoint_key(),
+            PlanProcessor::Filter(p) => p.checkpoint_key(),
+            PlanProcessor::Batch(p) => p.checkpoint_key(),
+            PlanProcessor::SinkEncoder(p) => p.checkpoint_key(),
+            PlanProcessor::SinkCompress(p) => p.checkpoint_key(),
+            PlanProcessor::SinkEncrypt(p) => p.checkpoint_key(),
+            PlanProcessor::StreamingAggregation(p) => p.checkpoint_key(),
+            PlanProcessor::Watermark(p) => p.checkpoint_key(),
+            PlanProcessor::TumblingWindow(p) => p.checkpoint_key(),
+            PlanProcessor::SlidingWindow(p) => p.checkpoint_key(),
+            PlanProcessor::StateWindow(p) => p.checkpoint_key(),
+            PlanProcessor::EosWindow(p) => p.checkpoint_key(),
+            PlanProcessor::Sink(p) => p.checkpoint_key(),
+            PlanProcessor::ResultCollect(p) => p.checkpoint_key(),
+            PlanProcessor::Barrier(p) => p.checkpoint_key(),
+            PlanProcessor::Sampler(p) => p.checkpoint_key(),
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             PlanProcessor::Aggregation(_) => "aggregation",
@@ -415,6 +470,154 @@ impl PlanProcessor {
             PlanProcessor::ResultCollect(_) => "result_collect",
             PlanProcessor::Barrier(_) => "barrier",
             PlanProcessor::Sampler(_) => "sampler",
+        }
+    }
+
+    pub fn set_checkpoint_snapshot_collector(
+        &mut self,
+        collector: Option<Arc<CheckpointSnapshotCollector>>,
+    ) {
+        match self {
+            PlanProcessor::Aggregation(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::DataSource(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::TableScan(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Decoder(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::CollectionLayoutNormalize(p) => {
+                p.set_checkpoint_snapshot_collector(collector)
+            }
+            PlanProcessor::MemoryCollectionMaterialize(p) => {
+                p.set_checkpoint_snapshot_collector(collector)
+            }
+            PlanProcessor::SharedSource(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::SourceChangeGate(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Compute(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Order(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Project(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::RowDiff(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::EmptySuppress(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::StatefulFunction(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Filter(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Batch(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::SinkEncoder(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::SinkCompress(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::SinkEncrypt(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::StreamingAggregation(p) => {
+                p.set_checkpoint_snapshot_collector(collector)
+            }
+            PlanProcessor::Watermark(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::TumblingWindow(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::SlidingWindow(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::StateWindow(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::EosWindow(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Sink(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::ResultCollect(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Barrier(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Sampler(p) => p.set_checkpoint_snapshot_collector(collector),
+        }
+    }
+
+    pub fn restore_checkpoint(
+        &mut self,
+        snapshot: &OperatorSnapshot,
+    ) -> Result<(), ProcessorError> {
+        match self {
+            PlanProcessor::Aggregation(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::DataSource(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::TableScan(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Decoder(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::CollectionLayoutNormalize(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::SharedSource(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::SourceChangeGate(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Compute(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Order(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Project(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::RowDiff(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::EmptySuppress(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::StatefulFunction(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Filter(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Batch(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::SinkEncoder(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::SinkCompress(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::SinkEncrypt(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::StreamingAggregation(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Watermark(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::TumblingWindow(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::SlidingWindow(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::StateWindow(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::EosWindow(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Sink(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::ResultCollect(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Barrier(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Sampler(p) => p.restore_checkpoint(snapshot),
+        }
+    }
+
+    pub fn validate_checkpoint(&self, snapshot: &OperatorSnapshot) -> Result<(), ProcessorError> {
+        match self {
+            PlanProcessor::Aggregation(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::DataSource(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::TableScan(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Decoder(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::CollectionLayoutNormalize(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::SharedSource(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::SourceChangeGate(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Compute(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Order(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Project(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::RowDiff(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::EmptySuppress(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::StatefulFunction(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Filter(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Batch(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::SinkEncoder(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::SinkCompress(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::SinkEncrypt(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::StreamingAggregation(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Watermark(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::TumblingWindow(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::SlidingWindow(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::StateWindow(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::EosWindow(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Sink(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::ResultCollect(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Barrier(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Sampler(p) => p.validate_checkpoint(snapshot),
+        }
+    }
+
+    pub fn clear_checkpoint_restore(&mut self) {
+        match self {
+            PlanProcessor::Aggregation(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::DataSource(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::TableScan(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Decoder(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::CollectionLayoutNormalize(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::SharedSource(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::SourceChangeGate(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Compute(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Order(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Project(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::RowDiff(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::EmptySuppress(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::StatefulFunction(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Filter(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Batch(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::SinkEncoder(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::SinkCompress(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::SinkEncrypt(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::StreamingAggregation(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Watermark(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::TumblingWindow(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::SlidingWindow(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::StateWindow(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::EosWindow(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Sink(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::ResultCollect(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Barrier(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Sampler(p) => p.clear_checkpoint_restore(),
         }
     }
 
@@ -664,6 +867,12 @@ pub struct ProcessorPipeline {
     flow_instance_id: Arc<str>,
     /// Allows callers to wait for specific control signals to reach the tail.
     ack_manager: Arc<AckManager>,
+    /// Runtime handle for injecting data-channel checkpoint barriers.
+    checkpoint_coordinator: CheckpointCoordinator,
+    /// In-memory snapshots collected while checkpoint barriers pass through participants.
+    checkpoint_snapshot_collector: Arc<CheckpointSnapshotCollector>,
+    checkpoint_enabled: bool,
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     /// Processor-local stats handles (one per processor instance).
     processor_stats: Vec<ProcessorStatsHandle>,
     channel_capacities: ProcessorChannelCapacities,
@@ -800,6 +1009,10 @@ impl ProcessorPipeline {
             let _ = handle.await;
         }
         self.supervisor_abort_handles.clear();
+        if let Some(handle) = self.supervisor_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 
     /// Start all processors in the pipeline. Subsequent calls are no-ops.
@@ -1066,6 +1279,254 @@ impl ProcessorPipeline {
         &self.pipeline_id
     }
 
+    /// Load and restore the latest committed checkpoint before processor tasks start.
+    pub fn restore_latest_checkpoint(&mut self) -> Result<(), ProcessorError> {
+        if !self.checkpoint_enabled {
+            return Ok(());
+        }
+        let store = Arc::clone(self.checkpoint_store.as_ref().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration(
+                "checkpoint store is not configured for this pipeline".to_string(),
+            )
+        })?);
+        let manifest = match store.load_latest(&self.flow_instance_id, &self.pipeline_id) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return Ok(()),
+            Err(
+                CheckpointError::InvalidManifest(reason) | CheckpointError::Incompatible(reason),
+            ) => {
+                self.clear_incompatible_checkpoint(store.as_ref(), &reason)?;
+                return Ok(());
+            }
+            Err(err) => return Err(ProcessorError::ProcessingError(err.to_string())),
+        };
+        if let Err(err) = manifest.validate() {
+            self.clear_incompatible_checkpoint(store.as_ref(), &err.to_string())?;
+            return Ok(());
+        }
+        if manifest.checkpoint_format_version != CHECKPOINT_FORMAT_VERSION {
+            self.clear_incompatible_checkpoint(
+                store.as_ref(),
+                &format!(
+                    "checkpoint format version mismatch: expected {}, got {}",
+                    CHECKPOINT_FORMAT_VERSION, manifest.checkpoint_format_version
+                ),
+            )?;
+            return Ok(());
+        }
+        if manifest.flow_instance_id != self.flow_instance_id.as_ref()
+            || manifest.pipeline_id != self.pipeline_id
+        {
+            return Err(ProcessorError::InvalidConfiguration(
+                "checkpoint identity does not match the pipeline runtime".to_string(),
+            ));
+        }
+
+        for snapshot in &manifest.operator_snapshots {
+            if let Err(err) = self.validate_operator_snapshot(snapshot) {
+                self.clear_incompatible_checkpoint(store.as_ref(), &err.to_string())?;
+                return Ok(());
+            }
+        }
+        for snapshot in &manifest.operator_snapshots {
+            if let Err(err) = self.restore_operator_snapshot(snapshot) {
+                self.clear_incompatible_checkpoint(store.as_ref(), &err.to_string())?;
+                return Ok(());
+            }
+        }
+        let Some(next_signal_id) = manifest.checkpoint_id.checked_add(1) else {
+            self.clear_incompatible_checkpoint(
+                store.as_ref(),
+                "checkpoint id space is exhausted for this pipeline",
+            )?;
+            return Ok(());
+        };
+        self.control_source
+            .advance_control_signal_id_to_at_least(next_signal_id);
+        Ok(())
+    }
+
+    fn validate_operator_snapshot(
+        &self,
+        snapshot: &OperatorSnapshot,
+    ) -> Result<(), ProcessorError> {
+        let key = snapshot.checkpoint_key.as_str();
+        let control_matches = usize::from(self.control_source.checkpoint_key() == key);
+        let middle_matches = self
+            .middle_processors
+            .iter()
+            .filter(|processor| processor.checkpoint_key() == key)
+            .count();
+        let result_matches = usize::from(
+            self.result_sink
+                .as_ref()
+                .is_some_and(|processor| processor.checkpoint_key() == key),
+        );
+        let match_count = control_matches + middle_matches + result_matches;
+        if match_count != 1 {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "checkpoint key `{key}` matched {match_count} processors in the physical plan"
+            )));
+        }
+
+        let expected_kind = if control_matches == 1 {
+            "control_source"
+        } else if let Some(processor) = self
+            .middle_processors
+            .iter()
+            .find(|processor| processor.checkpoint_key() == key)
+        {
+            processor.kind()
+        } else {
+            "result_collect"
+        };
+        if expected_kind != snapshot.operator_kind {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "checkpoint operator kind mismatch for `{key}`: expected {expected_kind}, got {}",
+                snapshot.operator_kind
+            )));
+        }
+
+        if control_matches == 1 {
+            return self.control_source.validate_checkpoint(snapshot);
+        }
+        if let Some(processor) = self
+            .middle_processors
+            .iter()
+            .find(|processor| processor.checkpoint_key() == key)
+        {
+            return processor.validate_checkpoint(snapshot);
+        }
+        if let Some(processor) = self.result_sink.as_ref() {
+            return processor.validate_checkpoint(snapshot);
+        }
+        Err(ProcessorError::InvalidConfiguration(format!(
+            "checkpoint processor `{key}` disappeared during validation"
+        )))
+    }
+
+    fn restore_operator_snapshot(
+        &mut self,
+        snapshot: &OperatorSnapshot,
+    ) -> Result<(), ProcessorError> {
+        let key = snapshot.checkpoint_key.as_str();
+        if self.control_source.checkpoint_key() == key {
+            return self.control_source.restore_checkpoint(snapshot);
+        }
+        if let Some(processor) = self
+            .middle_processors
+            .iter_mut()
+            .find(|processor| processor.checkpoint_key() == key)
+        {
+            return processor.restore_checkpoint(snapshot);
+        }
+        if let Some(processor) = self
+            .result_sink
+            .as_mut()
+            .filter(|processor| processor.checkpoint_key() == key)
+        {
+            return processor.restore_checkpoint(snapshot);
+        }
+        Err(ProcessorError::InvalidConfiguration(format!(
+            "checkpoint processor `{}` disappeared during restore",
+            snapshot.checkpoint_key
+        )))
+    }
+
+    fn clear_incompatible_checkpoint(
+        &mut self,
+        store: &dyn CheckpointStore,
+        reason: &str,
+    ) -> Result<(), ProcessorError> {
+        self.control_source.clear_checkpoint_restore();
+        for processor in &mut self.middle_processors {
+            processor.clear_checkpoint_restore();
+        }
+        if let Some(processor) = &mut self.result_sink {
+            processor.clear_checkpoint_restore();
+        }
+        tracing::warn!(
+            pipeline_id = %self.pipeline_id,
+            reason,
+            "clearing incompatible checkpoint and starting without restored state"
+        );
+        store
+            .clear(&self.flow_instance_id, &self.pipeline_id)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
+    }
+
+    /// Inject a regular checkpoint barrier through the data channel and wait
+    /// until it reaches the pipeline tail.
+    pub async fn request_checkpoint(
+        &self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<u64, ProcessorError> {
+        if !self.checkpoint_enabled {
+            return Err(ProcessorError::InvalidConfiguration(
+                "checkpointing is disabled for this pipeline".to_string(),
+            ));
+        }
+        let checkpoint_id = self
+            .checkpoint_coordinator
+            .request_checkpoint(timeout_duration)
+            .await?;
+        self.commit_checkpoint(checkpoint_id).await?;
+        Ok(checkpoint_id)
+    }
+
+    /// Inject the terminal checkpoint barrier used by graceful pipeline end.
+    pub async fn request_final_checkpoint(
+        &self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<u64, ProcessorError> {
+        if !self.checkpoint_enabled {
+            return Err(ProcessorError::InvalidConfiguration(
+                "checkpointing is disabled for this pipeline".to_string(),
+            ));
+        }
+        let checkpoint_id = self
+            .checkpoint_coordinator
+            .request_final_checkpoint(timeout_duration)
+            .await?;
+        self.commit_checkpoint(checkpoint_id).await?;
+        Ok(checkpoint_id)
+    }
+
+    /// Return the in-memory collector used by checkpoint-aware processors.
+    pub fn checkpoint_snapshot_collector(&self) -> Arc<CheckpointSnapshotCollector> {
+        Arc::clone(&self.checkpoint_snapshot_collector)
+    }
+
+    async fn commit_checkpoint(&self, checkpoint_id: u64) -> Result<(), ProcessorError> {
+        let store = self.checkpoint_store.as_ref().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration(
+                "checkpoint store is not configured for this pipeline".to_string(),
+            )
+        })?;
+        let created_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?
+            .as_millis() as i64;
+        let operator_snapshots = self
+            .checkpoint_snapshot_collector
+            .collect(checkpoint_id)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+        let manifest = CheckpointManifest {
+            checkpoint_format_version: CHECKPOINT_FORMAT_VERSION,
+            flow_instance_id: self.flow_instance_id.to_string(),
+            pipeline_id: self.pipeline_id.clone(),
+            checkpoint_id,
+            created_at_unix_ms,
+            operator_snapshots,
+        };
+        store
+            .commit(manifest)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+        self.checkpoint_snapshot_collector
+            .clear(checkpoint_id)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
+    }
+
     pub fn data_channel_capacity(&self) -> usize {
         self.channel_capacities.data
     }
@@ -1086,19 +1547,29 @@ impl ProcessorPipeline {
         self.graceful_close(timeout_duration).await
     }
 
-    /// Gracefully close the pipeline by sending StreamEnd via the data channel.
+    /// Gracefully close the pipeline by sending one final checkpoint via the data channel.
     pub async fn graceful_close(
         &mut self,
         timeout_duration: std::time::Duration,
     ) -> Result<(), ProcessorError> {
         self.supervisor_shutdown.store(true, Ordering::Release);
-        let _ = self
-            .send_barrier_via_data_with_ack(
+        let terminal_result = if self.checkpoint_enabled {
+            self.request_final_checkpoint(timeout_duration)
+                .await
+                .map(|_| ())
+        } else {
+            self.send_barrier_via_data_with_ack(
                 BarrierControlSignalKind::StreamGracefulEnd,
                 timeout_duration,
             )
-            .await?;
+            .await
+            .map(|_| ())
+        };
         self.replace_ingress_sender();
+        if let Err(err) = terminal_result {
+            self.abort_started_processors().await;
+            return Err(err);
+        }
         self.await_all_handles().await
     }
 
@@ -1210,9 +1681,15 @@ fn create_processor_from_plan_node(
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
             let schema = ds.schema();
+            let checkpoint_key = context.checkpoint_keys.get(&plan_name).ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(format!(
+                    "missing checkpoint key for datasource `{plan_name}`"
+                ))
+            })?;
             let mut processor = DataSourceProcessor::with_custom_id_and_channel_capacities(
                 None, // plan_index is no longer needed as we use plan_name for ID
                 processor_id.clone(),
+                checkpoint_key,
                 ds.source_name().to_string(),
                 schema,
                 channel_capacities,
@@ -1910,6 +2387,42 @@ fn build_processors_recursive(
     Ok(())
 }
 
+fn build_checkpoint_keys(physical_plan: &Arc<PhysicalPlan>) -> HashMap<String, String> {
+    fn visit(
+        plan: &Arc<PhysicalPlan>,
+        visited: &mut HashSet<String>,
+        source_occurrences: &mut HashMap<String, usize>,
+        checkpoint_keys: &mut HashMap<String, String>,
+    ) {
+        let plan_name = plan.get_plan_name();
+        if !visited.insert(plan_name.clone()) {
+            return;
+        }
+        if let PhysicalPlan::DataSource(source) = plan.as_ref() {
+            let occurrence = source_occurrences
+                .entry(source.source_name().to_string())
+                .or_default();
+            checkpoint_keys.insert(
+                plan_name,
+                format!("datasource:{}:{}", source.source_name(), *occurrence),
+            );
+            *occurrence += 1;
+        }
+        for child in plan.children() {
+            visit(child, visited, source_occurrences, checkpoint_keys);
+        }
+    }
+
+    let mut checkpoint_keys = HashMap::new();
+    visit(
+        physical_plan,
+        &mut HashSet::new(),
+        &mut HashMap::new(),
+        &mut checkpoint_keys,
+    );
+    checkpoint_keys
+}
+
 /// Collect leaf node indices from PhysicalPlan tree
 fn collect_leaf_indices(plan: Arc<PhysicalPlan>) -> Vec<i64> {
     use std::collections::HashSet;
@@ -2152,6 +2665,12 @@ fn create_processor_pipeline_with_context(
     physical_plan: Arc<PhysicalPlan>,
     mut context: ProcessorBuilderContext,
 ) -> Result<ProcessorPipeline, ProcessorError> {
+    if context.checkpoint_enabled && context.checkpoint_store.is_none() {
+        return Err(ProcessorError::InvalidConfiguration(
+            "checkpoint store is required when checkpointing is enabled".to_string(),
+        ));
+    }
+    context.checkpoint_keys = build_checkpoint_keys(&physical_plan);
     context.output_link_kinds = classify_output_link_kinds(&physical_plan);
     let link_kind_counts = count_pipeline_link_kinds(&physical_plan, &context.output_link_kinds);
     let channel_capacities = context.channel_capacities;
@@ -2160,6 +2679,11 @@ fn create_processor_pipeline_with_context(
     let (ingress_sender, ingress_receiver) = mpsc::channel(channel_capacities.control);
     control_source.set_ingress_input(ingress_receiver);
     let ack_manager = Arc::new(AckManager::default());
+    let checkpoint_coordinator = CheckpointCoordinator::new(CheckpointTrigger::new(
+        ingress_sender.clone(),
+        Arc::clone(&ack_manager),
+        control_source.control_signal_id_allocator(),
+    ));
 
     let mut processor_map = ProcessorMap::new();
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
@@ -2176,6 +2700,13 @@ fn create_processor_pipeline_with_context(
 
     // Get all processors first
     let mut middle_processors = processor_map.get_all_processors();
+    let checkpoint_snapshot_collector = Arc::new(CheckpointSnapshotCollector::new());
+    control_source
+        .set_checkpoint_snapshot_collector(Some(Arc::clone(&checkpoint_snapshot_collector)));
+    for processor in &mut middle_processors {
+        processor
+            .set_checkpoint_snapshot_collector(Some(Arc::clone(&checkpoint_snapshot_collector)));
+    }
 
     // Extract ResultCollect processor (if any) to serve as pipeline output
     // In multi-sink scenarios, there should be only one top-level ResultCollect processor
@@ -2235,6 +2766,8 @@ fn create_processor_pipeline_with_context(
     }
 
     if let Some(collector) = &mut result_sink {
+        collector
+            .set_checkpoint_snapshot_collector(Some(Arc::clone(&checkpoint_snapshot_collector)));
         let id = collector.id().to_string();
         if !seen_ids.insert(id.clone()) {
             return Err(ProcessorError::InvalidConfiguration(format!(
@@ -2271,6 +2804,10 @@ fn create_processor_pipeline_with_context(
         pipeline_id,
         flow_instance_id: Arc::clone(&context.flow_instance_id),
         ack_manager,
+        checkpoint_coordinator,
+        checkpoint_snapshot_collector,
+        checkpoint_enabled: context.checkpoint_enabled,
+        checkpoint_store: context.checkpoint_store,
         processor_stats,
         channel_capacities,
         spawner: context.spawner.clone(),
@@ -2301,6 +2838,9 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
                 DEFAULT_DATA_CHANNEL_CAPACITY,
                 DEFAULT_CONTROL_CHANNEL_CAPACITY,
             ),
+            checkpoint_enabled: false,
+            checkpoint_store: None,
+            checkpoint_keys: HashMap::new(),
             spawner,
         },
     )
@@ -2327,6 +2867,9 @@ pub(crate) fn create_processor_pipeline(
             shared_stream: None,
             output_link_kinds: HashMap::new(),
             channel_capacities: options.channel_capacities(),
+            checkpoint_enabled: options.checkpoint_enabled,
+            checkpoint_store: dependencies.checkpoint_store,
+            checkpoint_keys: HashMap::new(),
             spawner: dependencies.spawner,
         },
     )
@@ -2360,6 +2903,12 @@ mod tests {
         );
         let (ingress, ingress_rx) = mpsc::channel(channel_capacities.control);
         control_source.set_ingress_input(ingress_rx);
+        let ack_manager = Arc::new(AckManager::default());
+        let checkpoint_coordinator = CheckpointCoordinator::new(CheckpointTrigger::new(
+            ingress.clone(),
+            Arc::clone(&ack_manager),
+            control_source.control_signal_id_allocator(),
+        ));
         ProcessorPipeline {
             ingress,
             output: None,
@@ -2372,7 +2921,11 @@ mod tests {
             supervisor_handle: None,
             pipeline_id: "test_pipe".to_string(),
             flow_instance_id: Arc::<str>::from("default"),
-            ack_manager: Arc::new(AckManager::default()),
+            ack_manager,
+            checkpoint_coordinator,
+            checkpoint_snapshot_collector: Arc::new(CheckpointSnapshotCollector::new()),
+            checkpoint_enabled: false,
+            checkpoint_store: None,
             processor_stats: Vec::new(),
             channel_capacities,
             spawner,
@@ -2544,6 +3097,53 @@ mod tests {
         pipeline.abort_started_processors().await;
     }
 
+    #[tokio::test]
+    async fn graceful_close_aborts_runtime_when_final_checkpoint_fails() {
+        struct TaskDropGuard(Arc<AtomicBool>);
+
+        impl Drop for TaskDropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let spawner = test_spawner();
+        let mut pipeline = empty_test_pipeline(spawner.clone());
+        pipeline.checkpoint_enabled = true;
+
+        let task_dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped_on_abort = Arc::clone(&task_dropped);
+        let (started_tx, started_rx) = oneshot::channel();
+        let handle = spawner.spawn(async move {
+            let _guard = TaskDropGuard(task_dropped_on_abort);
+            let _ = started_tx.send(());
+            std::future::pending::<Result<(), ProcessorError>>().await
+        });
+        let (task_exit_tx, task_exit_rx) = mpsc::unbounded_channel();
+        start_fake_processor(
+            &mut pipeline,
+            "checkpoint_processor",
+            "test_kind",
+            handle,
+            false,
+            task_exit_tx,
+        )
+        .await;
+        pipeline.spawn_supervisor(task_exit_rx, Arc::new(|_| {}));
+        started_rx.await.expect("fake processor should start");
+
+        let err = pipeline
+            .graceful_close(TokioDuration::from_millis(10))
+            .await
+            .expect_err("final checkpoint should time out");
+
+        assert!(matches!(err, ProcessorError::Timeout));
+        assert!(task_dropped.load(Ordering::Acquire));
+        assert!(pipeline.handles.is_empty());
+        assert!(pipeline.supervisor_abort_handles.is_empty());
+        assert!(pipeline.supervisor_handle.is_none());
+    }
+
     #[test]
     fn test_create_processor_from_physical_project() {
         // Create a simple data source
@@ -2611,6 +3211,9 @@ mod tests {
                 DEFAULT_DATA_CHANNEL_CAPACITY,
                 DEFAULT_CONTROL_CHANNEL_CAPACITY,
             ),
+            checkpoint_enabled: false,
+            checkpoint_store: None,
+            checkpoint_keys: HashMap::new(),
             spawner,
         };
         let result = create_processor_from_plan_node(&physical_project, &context)
