@@ -215,6 +215,9 @@ Notes:
   in separate key ranges.
 - An unrecognized value (unknown string, unknown `mode`, or out-of-range `bits`)
   is a hard configuration error at decoder construction.
+- A GBF payload may instead declare `format.bus_id_ref` alongside `id_ref`.
+  That mode matches the structured `(bus_id, can_id)` pair, preserves all CAN
+  ID bits, and requires `can_id_mapping` to be omitted.
 
 > **Migration (issue #217).** Earlier versions applied the synthetic
 > `(bus_id << 12) | msg_id` rule implicitly. That mapping is now **opt-in**.

@@ -66,6 +66,76 @@ No archive entry may exist outside the root entry and companion directory. The p
 
 `dbc_path` is relative to the companion directory, not to the entry file and not to the process working directory. `can_id_mapping` also accepts `{ "mode": "bus_shift", "bits": 12 }`.
 
+### Separate bus and CAN IDs
+
+For multi-bus inputs, prefer carrying the bus ID and the complete CAN ID in
+separate fields. This preserves the full 29-bit CAN ID and avoids allocating a
+fixed number of bits to a synthetic packed ID:
+
+```json
+{
+  "signal_name_pattern": "b{bus_id}_{msg_id_hex_lower}_{sig_name}",
+  "structure": {
+    "type": "struct",
+    "fields": [
+      { "name": "ts", "type": "u64be" },
+      { "name": "total_len", "type": "u16be" },
+      {
+        "name": "frames",
+        "type": "sequence",
+        "length_ref": "total_len",
+        "length_unit": "bytes",
+        "structure": {
+          "type": "struct",
+          "fields": [
+            { "name": "bus_id", "type": "u8" },
+            { "name": "can_id", "type": "u32be" },
+            { "name": "data_len", "type": "u8" },
+            {
+              "name": "payload",
+              "type": "bytes",
+              "length_ref": "data_len",
+              "format": {
+                "bus_id_ref": "bus_id",
+                "id_ref": "can_id"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "type": "can",
+    "props": {
+      "dbc_path": "format"
+    }
+  }
+}
+```
+
+`bus_id_ref` may reference an earlier `u8`, `u16be`, `u16le`, `u32be`, or
+`u32le` field in the same frame structure. When it is present, VeloFlux matches
+frames by the structured `(bus_id, can_id)` pair. `can_id_mapping` must be
+omitted; configuring both is rejected.
+
+Zero-valued fields are consumed according to the declared frame structure; the
+decoder does not treat leading zero bytes as implicit padding. For example, a
+CAN-only envelope may declare `{ "name": "frame_type", "type": "u8", "const": 0 }`
+as the first frame field.
+
+A root sequence may be followed by fixed-width integer trailer fields. Their
+sizes are included when splitting concatenated packets, so a declaration such
+as `{ "name": "crc", "type": "u16be" }` consumes a two-byte trailer. GBF does
+not currently validate the checksum value. Variable-length trailer fields are
+not supported.
+
+For a DBC directory, filenames use `{bus_id}_{bus_name}.dbc`, for example
+`1_chassis.dbc` and `2_powertrain.dbc`. The short pattern above produces
+SQL-safe names such as `b1_100_WheelSpeed` without requiring quoted identifiers.
+It includes the message ID because signal names need not be unique across
+messages on the same bus.
+
 ## SOME/IP entry
 
 The packet `structure` is defined in the same way. The private format section is:

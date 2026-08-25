@@ -9,7 +9,8 @@ use manager::{ParsedSchema, register_schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use crate::decoder::can::CanIdMapping;
+use crate::codec::gbf_parser::GbfParser;
+use crate::decoder::can::{CanFrameIdentityMapping, CanIdMapping};
 use crate::schema::arxml::{CompiledArxmlSchema, compile_arxml_schema};
 use crate::schema::dbc::{CompiledDbcSchema, compile_dbc_schema};
 
@@ -56,7 +57,7 @@ pub enum CompiledGbfFormat {
     Can {
         schema: Arc<CompiledDbcSchema>,
         clamp_to_range: bool,
-        can_id_mapping: CanIdMapping,
+        identity_mapping: CanFrameIdentityMapping,
     },
     SomeIp {
         schema: Arc<CompiledArxmlSchema>,
@@ -70,13 +71,23 @@ impl CompiledGbfSchema {
         clamp_to_range: bool,
         can_id_mapping: CanIdMapping,
     ) -> Result<Self, flow::codec::CodecError> {
-        let parser = crate::codec::gbf_parser::GbfParser::new(layout)?;
+        let parser = GbfParser::new(layout)?;
+        Self::can_with_parser(parser, schema, clamp_to_range, can_id_mapping)
+    }
+
+    fn can_with_parser(
+        parser: GbfParser,
+        schema: Arc<CompiledDbcSchema>,
+        clamp_to_range: bool,
+        can_id_mapping: CanIdMapping,
+    ) -> Result<Self, flow::codec::CodecError> {
+        let identity_mapping = resolve_can_identity_mapping(&parser, can_id_mapping)?;
         Ok(Self {
             parser,
             format: CompiledGbfFormat::Can {
                 schema,
                 clamp_to_range,
-                can_id_mapping,
+                identity_mapping,
             },
         })
     }
@@ -85,11 +96,15 @@ impl CompiledGbfSchema {
         layout: GbfSchema,
         schema: Arc<CompiledArxmlSchema>,
     ) -> Result<Self, flow::codec::CodecError> {
-        let parser = crate::codec::gbf_parser::GbfParser::new(layout)?;
-        Ok(Self {
+        let parser = GbfParser::new(layout)?;
+        Ok(Self::someip_with_parser(parser, schema))
+    }
+
+    fn someip_with_parser(parser: GbfParser, schema: Arc<CompiledArxmlSchema>) -> Self {
+        Self {
             parser,
             format: CompiledGbfFormat::SomeIp { schema },
-        })
+        }
     }
 
     pub fn format(&self) -> &CompiledGbfFormat {
@@ -98,6 +113,19 @@ impl CompiledGbfSchema {
 
     pub fn parser(&self) -> crate::codec::gbf_parser::GbfParser {
         self.parser.clone()
+    }
+}
+
+pub(crate) fn resolve_can_identity_mapping(
+    parser: &GbfParser,
+    can_id_mapping: CanIdMapping,
+) -> Result<CanFrameIdentityMapping, flow::codec::CodecError> {
+    match (parser.has_bus_id_ref(), can_id_mapping) {
+        (true, CanIdMapping::Raw) => Ok(CanFrameIdentityMapping::BusAndCanId),
+        (true, CanIdMapping::BusShift { .. }) => Err(flow::codec::CodecError::Other(
+            "GBF `bus_id_ref` must not be combined with `CanIdMapping::BusShift`".to_string(),
+        )),
+        (false, mapping) => Ok(CanFrameIdentityMapping::Mapped(mapping)),
     }
 }
 
@@ -131,24 +159,38 @@ fn parse_gbf_schema(
                 .get("clamp_to_range")
                 .and_then(JsonValue::as_bool)
                 .unwrap_or(true);
+            let parser = GbfParser::new(layout).map_err(|err| err.to_string())?;
+            if parser.has_bus_id_ref() && document.format.props.contains_key("can_id_mapping") {
+                return Err(
+                    "GBF CAN format must not configure `can_id_mapping` when `bus_id_ref` is present"
+                        .to_string(),
+                );
+            }
             let can_id_mapping =
                 CanIdMapping::from_prop(document.format.props.get("can_id_mapping"))
                     .map_err(|err| err.to_string())?;
             let path = path_to_str(&dbc_path)?;
             let (schema, compiled) = compile_dbc_schema(stream_name, path, pattern)?;
-            let compiled =
-                CompiledGbfSchema::can(layout.clone(), compiled, clamp_to_range, can_id_mapping)
-                    .map_err(|err| err.to_string())?;
+            let compiled = CompiledGbfSchema::can_with_parser(
+                parser,
+                compiled,
+                clamp_to_range,
+                can_id_mapping,
+            )
+            .map_err(|err| err.to_string())?;
             Ok((schema, None, Some(Arc::new(compiled))))
         }
         "someip" | "arxml" => {
+            let parser = GbfParser::new(layout).map_err(|err| err.to_string())?;
+            if parser.has_bus_id_ref() {
+                return Err("GBF `bus_id_ref` is supported only for CAN format".to_string());
+            }
             let arxml_path =
                 required_member_path(&member_root, &document.format.props, "arxml_path")?;
             let pattern = document.signal_name_pattern.as_deref().unwrap_or("{field}");
             let path = path_to_str(&arxml_path)?;
             let (schema, compiled) = compile_arxml_schema(stream_name, path, pattern)?;
-            let compiled =
-                CompiledGbfSchema::someip(layout, compiled).map_err(|err| err.to_string())?;
+            let compiled = CompiledGbfSchema::someip_with_parser(parser, compiled);
             Ok((schema, None, Some(Arc::new(compiled))))
         }
         other => Err(format!("unsupported GBF format type `{other}`")),
@@ -223,6 +265,8 @@ pub struct Field {
 pub struct FormatSpec {
     /// Reference to the field containing the message ID.
     pub id_ref: Option<String>,
+    /// Optional reference to a separate CAN bus ID field.
+    pub bus_id_ref: Option<String>,
 }
 
 impl GbfSchema {
@@ -396,6 +440,71 @@ mod tests {
 
         assert!(schema.contains_column("Bus0__100__StandardUnsigned"));
         assert!(!schema.contains_column("StandardUnsigned"));
+        std::fs::remove_dir_all(root).expect("remove test source");
+    }
+
+    #[test]
+    fn complete_gbf_schema_rejects_bus_id_ref_with_can_id_mapping() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "veloflux-gbf-bus-id-conflict-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create source root");
+        let entry = root.join("vehicle.json");
+        let document = serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "bus_id", "type": "u8" },
+                                { "name": "can_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "bus_id_ref": "bus_id",
+                                        "id_ref": "can_id"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "format": {
+                "type": "can",
+                "props": {
+                    "dbc_path": "format/vehicle.dbc",
+                    "can_id_mapping": "raw"
+                }
+            }
+        });
+        std::fs::write(
+            &entry,
+            serde_json::to_vec_pretty(&document).expect("encode entry"),
+        )
+        .expect("write entry");
+        let props = JsonMap::from_iter([(
+            "schema_path".to_string(),
+            JsonValue::String(entry.to_string_lossy().into_owned()),
+        )]);
+
+        let err = parse_gbf_schema("vehicle", &props).expect_err("conflict must fail");
+        assert!(err.contains("must not configure `can_id_mapping`"));
         std::fs::remove_dir_all(root).expect("remove test source");
     }
 }

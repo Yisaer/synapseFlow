@@ -10,8 +10,16 @@ use std::collections::HashMap;
 /// A parsed frame from a GBF packet.
 #[derive(Debug, Clone)]
 pub struct GbfFrame {
+    pub bus_id: Option<u32>,
     pub can_id: u32,
     pub payload: Vec<u8>,
+}
+
+/// Schema-extracted identity for one embedded payload frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GbfFrameId {
+    pub bus_id: Option<u32>,
+    pub format_id: u32,
 }
 
 /// Field name mappings extracted from schema for dynamic encoding/decoding.
@@ -25,6 +33,8 @@ pub struct SchemaFieldMap {
     pub sequence_item_type: String,
     /// CAN ID field name in frame items (e.g., "can_id")  
     pub frame_id_field: String,
+    /// Optional separate CAN bus ID field referenced by the payload format.
+    pub bus_id_field: Option<String>,
     /// Payload field name in frame items (e.g., "payload")
     pub frame_payload_field: String,
 }
@@ -124,12 +134,17 @@ impl SchemaFieldMap {
                 ))
             })?
             .clone();
+        let bus_id_field = payload_field
+            .format
+            .as_ref()
+            .and_then(|format| format.bus_id_ref.clone());
 
         Ok(Self {
             timestamp_field,
             sequence_field,
             sequence_item_type,
             frame_id_field,
+            bus_id_field,
             frame_payload_field,
         })
     }
@@ -176,6 +191,7 @@ pub(crate) enum OptFieldType {
     Bytes {
         length_ref_index: usize,
         format_id_ref_index: Option<usize>,
+        bus_id_ref_index: Option<usize>,
     },
 }
 
@@ -352,9 +368,40 @@ impl GbfParser {
                     } else {
                         None
                     };
+                    let bus_id_ref_idx = if let Some(name) = field
+                        .format
+                        .as_ref()
+                        .and_then(|format| format.bus_id_ref.as_ref())
+                    {
+                        let idx = *name_to_index.get(name).ok_or_else(|| {
+                            CodecError::Other(format!(
+                                "bytes field '{}' has unknown bus_id_ref '{}'",
+                                field.name, name
+                            ))
+                        })?;
+                        const BUS_ID_INTEGER_TYPES: &[&str] =
+                            &["u8", "u16be", "u16le", "u32be", "u32le"];
+                        let target_type = fields_def[idx].field_type.as_str();
+                        if !BUS_ID_INTEGER_TYPES.contains(&target_type) {
+                            return Err(CodecError::Other(format!(
+                                "bytes field '{}' has bus_id_ref '{}' pointing to unsupported field type '{}'; bus_id_ref must refer to an integer field (u8/u16*/u32*)",
+                                field.name, name, target_type
+                            )));
+                        }
+                        if idx >= i {
+                            return Err(CodecError::Other(format!(
+                                "bytes field '{}' has bus_id_ref '{}' that must refer to an earlier field",
+                                field.name, name
+                            )));
+                        }
+                        Some(idx)
+                    } else {
+                        None
+                    };
                     OptFieldType::Bytes {
                         length_ref_index: ref_idx,
                         format_id_ref_index: id_ref_idx,
+                        bus_id_ref_index: bus_id_ref_idx,
                     }
                 }
                 _ => {
@@ -387,12 +434,13 @@ impl GbfParser {
 
         // Calculate packet header size (all fixed fields before the sequence)
         let header_size = self.calculate_header_size(&self.packet_def);
+        let trailer_size = self.calculate_trailer_size(&self.packet_def);
 
         while cursor + header_size <= payload.len() {
             if let Some((len_offset, len_size)) = self.find_length_field_offset(&self.packet_def) {
                 let len_bytes = &payload[cursor + len_offset..cursor + len_offset + len_size];
                 let body_len = self.parse_uint(len_bytes, len_size) as usize;
-                let packet_size = header_size + body_len;
+                let packet_size = header_size + body_len + trailer_size;
 
                 if cursor + packet_size > payload.len() {
                     break;
@@ -412,19 +460,20 @@ impl GbfParser {
     /// Parse a single packet into timestamp and frames based on the schema.
     pub fn parse_packet(&self, packet: &[u8]) -> Result<(u64, Vec<GbfFrame>), CodecError> {
         let mut frames = Vec::new();
-        let timestamp = self.parse_packet_with(packet, &mut |can_id, payload| {
+        let timestamp = self.parse_packet_with(packet, &mut |frame_id, payload| {
             frames.push(GbfFrame {
-                can_id,
+                bus_id: frame_id.bus_id,
+                can_id: frame_id.format_id,
                 payload: payload.to_vec(),
             });
         })?;
         Ok((timestamp, frames))
     }
 
-    /// Parse a packet, invoking `sink(can_id, payload)` for each frame without
+    /// Parse a packet, invoking `sink(frame_id, payload)` for each frame without
     /// allocating a per-frame payload buffer. Returns the packet timestamp. Each
     /// payload slice borrows from `packet` and is only valid for that call.
-    pub fn parse_packet_with<F: FnMut(u32, &[u8])>(
+    pub fn parse_packet_with<F: FnMut(GbfFrameId, &[u8])>(
         &self,
         packet: &[u8],
         sink: &mut F,
@@ -589,10 +638,14 @@ impl GbfParser {
         Ok(timestamp)
     }
 
-    /// Parse frames from a sequence buffer, invoking `sink(can_id, payload)` for
+    pub fn has_bus_id_ref(&self) -> bool {
+        self.field_map.bus_id_field.is_some()
+    }
+
+    /// Parse frames from a sequence buffer, invoking `sink(frame_id, payload)` for
     /// each frame without allocating a per-frame payload buffer. Each payload
     /// slice borrows from `buffer` and is only valid for that invocation.
-    fn parse_frames_into<F: FnMut(u32, &[u8])>(
+    fn parse_frames_into<F: FnMut(GbfFrameId, &[u8])>(
         &self,
         buffer: &[u8],
         frame_type: &OptTypeDef,
@@ -604,18 +657,11 @@ impl GbfParser {
         let mut context = vec![0u64; frame_type.storage_size];
 
         while cursor < buffer.len() {
-            // Skip padding (0x00 bytes)
-            while cursor < buffer.len() && buffer[cursor] == 0 {
-                cursor += 1;
-            }
-            if cursor >= buffer.len() {
-                break;
-            }
-
             let mut frame_cursor = cursor;
             // Reset context for this frame
             context.fill(0);
             let mut can_id: Option<u32> = None;
+            let mut bus_id: Option<u32> = None;
             let mut payload_start = 0usize;
             let mut payload_len = 0usize;
             let mut magic_ok = true;
@@ -757,6 +803,7 @@ impl GbfParser {
                     OptFieldType::Bytes {
                         length_ref_index,
                         format_id_ref_index,
+                        bus_id_ref_index,
                     } => {
                         let len = context[*length_ref_index] as usize;
                         let clamped_len = len.min(buffer.len() - frame_cursor);
@@ -768,6 +815,7 @@ impl GbfParser {
                             payload_start = frame_cursor;
                             payload_len = clamped_len;
                             can_id = Some(context[*id_idx] as u32);
+                            bus_id = bus_id_ref_index.map(|idx| context[idx] as u32);
                         }
 
                         frame_cursor += clamped_len;
@@ -784,7 +832,13 @@ impl GbfParser {
             if frame_cursor > cursor
                 && let Some(cid) = can_id
             {
-                sink(cid, &buffer[payload_start..payload_start + payload_len]);
+                sink(
+                    GbfFrameId {
+                        bus_id,
+                        format_id: cid,
+                    },
+                    &buffer[payload_start..payload_start + payload_len],
+                );
             }
 
             if frame_cursor == cursor {
@@ -809,6 +863,27 @@ impl GbfParser {
             }
         }
         size
+    }
+
+    /// Calculate the size of fixed fields after the sequence.
+    fn calculate_trailer_size(&self, type_def: &OptTypeDef) -> usize {
+        let Some(sequence_index) = type_def
+            .fields
+            .iter()
+            .position(|field| matches!(field.kind, OptFieldType::Sequence { .. }))
+        else {
+            return 0;
+        };
+        type_def.fields[sequence_index + 1..]
+            .iter()
+            .try_fold(0usize, |size, field| match field.kind {
+                OptFieldType::U8 { .. } => Some(size + 1),
+                OptFieldType::U16Be { .. } | OptFieldType::U16Le { .. } => Some(size + 2),
+                OptFieldType::U32Be { .. } | OptFieldType::U32Le { .. } => Some(size + 4),
+                OptFieldType::U64Be | OptFieldType::U64Le => Some(size + 8),
+                OptFieldType::Sequence { .. } | OptFieldType::Bytes { .. } => None,
+            })
+            .unwrap_or(0)
     }
 
     /// Find the offset and size of the length field.
@@ -862,6 +937,102 @@ impl GbfParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_separate_bus_and_can_ids() {
+        let schema: GbfSchema = serde_json::from_value(serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "length_unit": "bytes",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "bus_id", "type": "u8" },
+                                { "name": "can_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "bus_id_ref": "bus_id",
+                                        "id_ref": "can_id"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("schema");
+        let parser = GbfParser::new(schema).expect("parser");
+        assert!(parser.has_bus_id_ref());
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&42_u64.to_be_bytes());
+        packet.extend_from_slice(&9_u16.to_be_bytes());
+        packet.extend_from_slice(&[0x55, 7]);
+        packet.extend_from_slice(&0x1fff_ffff_u32.to_be_bytes());
+        packet.push(2);
+        packet.extend_from_slice(&[0xaa, 0xbb]);
+
+        let (timestamp, frames) = parser.parse_packet(&packet).expect("packet");
+        assert_eq!(timestamp, 42);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].bus_id, Some(7));
+        assert_eq!(frames[0].can_id, 0x1fff_ffff);
+        assert_eq!(frames[0].payload, [0xaa, 0xbb]);
+    }
+
+    #[test]
+    fn rejects_invalid_bus_id_ref() {
+        let schema: GbfSchema = serde_json::from_value(serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "can_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "bus_id_ref": "missing_bus_id",
+                                        "id_ref": "can_id"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("schema");
+
+        let err = match GbfParser::new(schema) {
+            Ok(_) => panic!("unknown bus_id_ref must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("unknown bus_id_ref"));
+    }
     use crate::schema::gbf::GbfSchema;
 
     fn get_standard_schema() -> GbfSchema {

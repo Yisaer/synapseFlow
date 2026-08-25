@@ -1,8 +1,9 @@
 //! Pluggable payload decoder abstraction for GBF frames.
 //!
-//! The GBF transport layer extracts `(timestamp, format_id, payload)` tuples
-//! from binary packets.  This module defines the trait that payload decoders
-//! implement to convert those tuples into structured output rows.
+//! The GBF transport layer extracts `(timestamp, optional_bus_id, format_id,
+//! payload)` tuples from binary packets. This module defines the trait that
+//! payload decoders implement to convert those tuples into structured output
+//! rows.
 
 use flow::model::Tuple;
 use flow::planner::decode_projection::DecodeProjection;
@@ -17,6 +18,12 @@ impl FrameIdentity {
     #[inline]
     pub const fn gbf(format_id: u32) -> Self {
         Self(format_id as u64)
+    }
+
+    /// Preserve separate bus and CAN IDs without sacrificing CAN-ID bits.
+    #[inline]
+    pub const fn gbf_bus(bus_id: u32, format_id: u32) -> Self {
+        Self(((bus_id as u64) << 32) | format_id as u64)
     }
 
     /// Build an AUTOSAR BusMirror identity.
@@ -46,6 +53,8 @@ impl FrameIdentity {
 pub struct GbfPayloadFrame<'a> {
     /// Packet timestamp.
     pub timestamp: u64,
+    /// Separate CAN bus ID when the GBF schema configures `bus_id_ref`.
+    pub bus_id: Option<u32>,
     /// Message / format identifier (CAN ID or SOME/IP message ID).
     pub format_id: u32,
     /// Raw payload bytes (borrowed from the transport buffer).

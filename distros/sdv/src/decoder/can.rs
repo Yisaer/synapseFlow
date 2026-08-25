@@ -85,9 +85,44 @@ pub enum CanIdMapping {
     BusShift { bits: u32 },
 }
 
+/// Identity policy for matching wire frames to DBC `(bus.id, msg.id)` entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanFrameIdentityMapping {
+    /// The wire carries one ID transformed according to the configured mapping.
+    Mapped(CanIdMapping),
+    /// The wire carries independent bus and CAN ID fields.
+    BusAndCanId,
+}
+
+impl CanFrameIdentityMapping {
+    #[inline]
+    pub fn schema_identity(self, bus_id: u32, msg_id: u32) -> FrameIdentity {
+        match self {
+            Self::Mapped(mapping) => mapping.frame_identity(bus_id, msg_id),
+            Self::BusAndCanId => FrameIdentity::gbf_bus(bus_id, msg_id),
+        }
+    }
+
+    #[inline]
+    pub fn wire_identity(self, bus_id: Option<u32>, can_id: u32) -> FrameIdentity {
+        match self {
+            Self::Mapped(_) => FrameIdentity::gbf(can_id),
+            Self::BusAndCanId => FrameIdentity::gbf_bus(bus_id.unwrap_or(u32::MAX), can_id),
+        }
+    }
+
+    #[inline]
+    fn overlaps(self, bus_id: u32, msg_id: u32) -> bool {
+        match self {
+            Self::Mapped(mapping) => mapping.overlaps(bus_id, msg_id),
+            Self::BusAndCanId => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DbcIdentityMapping {
-    Can(CanIdMapping),
+    Can(CanFrameIdentityMapping),
     BusMirror,
 }
 
@@ -95,8 +130,16 @@ impl DbcIdentityMapping {
     #[inline]
     fn frame_identity(self, bus_id: u32, msg_id: u32) -> FrameIdentity {
         match self {
-            Self::Can(mapping) => mapping.frame_identity(bus_id, msg_id),
+            Self::Can(mapping) => mapping.schema_identity(bus_id, msg_id),
             Self::BusMirror => FrameIdentity::busmirror_bus(bus_id, msg_id),
+        }
+    }
+
+    #[inline]
+    fn wire_identity(self, bus_id: Option<u32>, format_id: u32) -> FrameIdentity {
+        match self {
+            Self::Can(mapping) => mapping.wire_identity(bus_id, format_id),
+            Self::BusMirror => FrameIdentity::gbf(format_id),
         }
     }
 }
@@ -295,7 +338,13 @@ impl CanMuxKeyResolver {
     /// `mapping` must match the one passed to [`CanDecoder::new`] so the selector
     /// map and the message map are keyed identically (issue #217).
     pub fn from_dbc(dbc: &DbcJson, mapping: CanIdMapping) -> Option<Self> {
-        Self::from_dbc_with_identity(dbc, |bus_id, msg_id| mapping.frame_identity(bus_id, msg_id))
+        Self::from_dbc_with_mapping(dbc, CanFrameIdentityMapping::Mapped(mapping))
+    }
+
+    pub fn from_dbc_with_mapping(dbc: &DbcJson, mapping: CanFrameIdentityMapping) -> Option<Self> {
+        Self::from_dbc_with_identity(dbc, |bus_id, msg_id| {
+            mapping.schema_identity(bus_id, msg_id)
+        })
     }
 
     /// Build a resolver for the BusMirror composite identity space.
@@ -603,6 +652,7 @@ pub struct CanDecoder {
     /// Cached Null value to avoid allocating new Arc on every decode
     null_value: Arc<Value>,
     projection_cache: Mutex<Option<ProjectionCache>>,
+    identity_mapping: DbcIdentityMapping,
 }
 
 impl CanDecoder {
@@ -631,7 +681,7 @@ impl CanDecoder {
             schema,
             &dbc,
             clamp_to_range,
-            DbcIdentityMapping::Can(mapping),
+            DbcIdentityMapping::Can(CanFrameIdentityMapping::Mapped(mapping)),
             |bus_id, bus_name, message, signal_name| {
                 compiled.column_name(bus_id, bus_name, message, signal_name)
             },
@@ -646,6 +696,24 @@ impl CanDecoder {
         compiled: &CompiledDbcSchema,
         clamp_to_range: bool,
         mapping: CanIdMapping,
+    ) -> Result<Self, CodecError> {
+        Self::build_from_compiled_with_mapping(
+            source_name,
+            schema,
+            dbc,
+            compiled,
+            clamp_to_range,
+            CanFrameIdentityMapping::Mapped(mapping),
+        )
+    }
+
+    pub fn build_from_compiled_with_mapping(
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        dbc: &DbcJson,
+        compiled: &CompiledDbcSchema,
+        clamp_to_range: bool,
+        mapping: CanFrameIdentityMapping,
     ) -> Result<Self, CodecError> {
         Self::build(
             source_name,
@@ -792,6 +860,7 @@ impl CanDecoder {
             ts_index,
             null_value: Arc::new(Value::Null),
             projection_cache: Mutex::new(None),
+            identity_mapping,
         })
     }
 
@@ -1080,7 +1149,9 @@ impl PayloadDecoder for CanDecoder {
             .into_iter()
             .map(|frame| DbcFrame {
                 timestamp: frame.timestamp,
-                identity: FrameIdentity::gbf(frame.format_id),
+                identity: self
+                    .identity_mapping
+                    .wire_identity(frame.bus_id, frame.format_id),
                 payload: frame.payload,
             })
             .collect();

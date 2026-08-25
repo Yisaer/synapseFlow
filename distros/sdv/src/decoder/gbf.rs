@@ -9,9 +9,13 @@
 
 use std::sync::Arc;
 
-use super::can::{CanDecoder, CanIdMapping, CanMuxKeyResolver, DbcWindowAccumulator};
-use super::payload::{FrameIdentity, GbfPayloadFrame, PayloadDecoder};
-use crate::schema::gbf::{CompiledGbfFormat, CompiledGbfSchema, GbfSchema};
+use super::can::{
+    CanDecoder, CanFrameIdentityMapping, CanIdMapping, CanMuxKeyResolver, DbcWindowAccumulator,
+};
+use super::payload::{GbfPayloadFrame, PayloadDecoder};
+use crate::schema::gbf::{
+    CompiledGbfFormat, CompiledGbfSchema, GbfSchema, resolve_can_identity_mapping,
+};
 use datatypes::Schema;
 use flow::{
     Merger,
@@ -53,16 +57,16 @@ impl GbfDecoder {
             CompiledGbfFormat::Can {
                 schema: dbc,
                 clamp_to_range,
-                can_id_mapping,
+                identity_mapping,
             } => {
                 let dbc_json = dbc.dbc();
-                let payload_decoder = Box::new(CanDecoder::build_from_compiled(
+                let payload_decoder = Box::new(CanDecoder::build_from_compiled_with_mapping(
                     source_name,
                     schema,
                     &dbc_json,
                     dbc,
                     *clamp_to_range,
-                    *can_id_mapping,
+                    *identity_mapping,
                 )?);
                 Ok(Self {
                     parser: compiled.parser(),
@@ -94,15 +98,22 @@ impl GbfDecoder {
         clamp_to_range: bool,
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
-        let can_decoder = Box::new(CanDecoder::new(
+        let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
+        let identity_mapping = resolve_can_identity_mapping(&parser, mapping)?;
+        let compiled = crate::schema::dbc::CompiledDbcSchema::new(
+            dbc,
+            pattern.as_deref().unwrap_or("{sig_name}"),
+        )
+        .map_err(CodecError::Other)?;
+        let dbc = compiled.dbc();
+        let can_decoder = Box::new(CanDecoder::build_from_compiled_with_mapping(
             source_name,
             schema,
-            dbc,
-            pattern,
+            &dbc,
+            &compiled,
             clamp_to_range,
-            mapping,
+            identity_mapping,
         )?);
-        let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
         Ok(Self {
             parser,
             payload_decoder: can_decoder,
@@ -141,19 +152,24 @@ impl RecordDecoder for GbfDecoder {
         // frame and then remapped to a second `Vec<CanFrame>` — pure overhead the
         // signal whitelist couldn't elide (issue emqx/VeloFlux#56). Reused across
         // packets within this payload.
-        let mut frame_slots: Vec<(u32, u32, u32)> = Vec::new();
+        let mut frame_slots: Vec<(Option<u32>, u32, u32, u32)> = Vec::new();
 
         for packet in packets {
             frame_slots.clear();
             let base = packet.as_ptr() as usize;
             let timestamp = self
                 .parser
-                .parse_packet_with(packet, &mut |can_id, fpayload| {
+                .parse_packet_with(packet, &mut |frame_id, fpayload| {
                     // `parse_packet_with` always emits sub-slices of `packet`, so
                     // the pointer offset is a valid index back into it (zero-copy).
                     let off = (fpayload.as_ptr() as usize - base) as u32;
                     debug_assert!(off as usize + fpayload.len() <= packet.len());
-                    frame_slots.push((can_id, off, fpayload.len() as u32));
+                    frame_slots.push((
+                        frame_id.bus_id,
+                        frame_id.format_id,
+                        off,
+                        fpayload.len() as u32,
+                    ));
                 })?;
 
             // If packet has no frames (e.g., heartbeat or all invalid), decode a
@@ -161,14 +177,16 @@ impl RecordDecoder for GbfDecoder {
             let payload_frames: Vec<GbfPayloadFrame<'_>> = if frame_slots.is_empty() {
                 vec![GbfPayloadFrame {
                     timestamp,
+                    bus_id: None,
                     format_id: u32::MAX,
                     payload: &[],
                 }]
             } else {
                 frame_slots
                     .iter()
-                    .map(|&(can_id, off, len)| GbfPayloadFrame {
+                    .map(|&(bus_id, can_id, off, len)| GbfPayloadFrame {
                         timestamp,
+                        bus_id,
                         format_id: can_id,
                         payload: &packet[off as usize..off as usize + len as usize],
                     })
@@ -196,11 +214,12 @@ impl RecordDecoder for GbfDecoder {
 ///
 /// The GBF layer parses outer packets only. The inner format handler is currently
 /// CAN/DBC: unknown CAN IDs are discarded at merge time, non-multiplexed frames
-/// are keyed by CAN ID, and multiplexed frames are keyed by `(CAN ID, mux value)`.
-/// The sampler calls this type through the generic [`Merger`] trait.
+/// use the configured CAN identity, and multiplexed frames additionally include
+/// the mux value. The sampler calls this type through the generic [`Merger`] trait.
 pub struct GbfFusedMerger {
     parser: crate::codec::gbf_parser::GbfParser,
     accumulator: DbcWindowAccumulator,
+    identity_mapping: CanFrameIdentityMapping,
 }
 
 impl GbfFusedMerger {
@@ -213,21 +232,23 @@ impl GbfFusedMerger {
             CompiledGbfFormat::Can {
                 schema: dbc,
                 clamp_to_range,
-                can_id_mapping,
+                identity_mapping,
             } => {
                 let dbc_json = dbc.dbc();
-                let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc_json, *can_id_mapping);
-                let decoder = CanDecoder::build_from_compiled(
+                let mux_resolver =
+                    CanMuxKeyResolver::from_dbc_with_mapping(&dbc_json, *identity_mapping);
+                let decoder = CanDecoder::build_from_compiled_with_mapping(
                     source_name,
                     schema,
                     &dbc_json,
                     dbc,
                     *clamp_to_range,
-                    *can_id_mapping,
+                    *identity_mapping,
                 )?;
                 Ok(Self {
                     parser: compiled.parser(),
                     accumulator: DbcWindowAccumulator::new(decoder, mux_resolver),
+                    identity_mapping: *identity_mapping,
                 })
             }
             CompiledGbfFormat::SomeIp { .. } => Err(CodecError::Other(
@@ -246,13 +267,27 @@ impl GbfFusedMerger {
         clamp_to_range: bool,
         mapping: CanIdMapping,
     ) -> Result<Self, CodecError> {
-        let mux_resolver = CanMuxKeyResolver::from_dbc(&dbc, mapping);
-        let can_decoder =
-            CanDecoder::new(source_name, schema, dbc, pattern, clamp_to_range, mapping)?;
         let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
+        let identity_mapping = resolve_can_identity_mapping(&parser, mapping)?;
+        let compiled = crate::schema::dbc::CompiledDbcSchema::new(
+            dbc,
+            pattern.as_deref().unwrap_or("{sig_name}"),
+        )
+        .map_err(CodecError::Other)?;
+        let dbc = compiled.dbc();
+        let mux_resolver = CanMuxKeyResolver::from_dbc_with_mapping(&dbc, identity_mapping);
+        let can_decoder = CanDecoder::build_from_compiled_with_mapping(
+            source_name,
+            schema,
+            &dbc,
+            &compiled,
+            clamp_to_range,
+            identity_mapping,
+        )?;
         Ok(Self {
             parser,
             accumulator: DbcWindowAccumulator::new(can_decoder, mux_resolver),
+            identity_mapping,
         })
     }
 
@@ -272,10 +307,15 @@ impl Merger for GbfFusedMerger {
         let Self {
             parser,
             accumulator,
+            identity_mapping,
         } = self;
         for packet in parser.split_packets(data) {
-            let timestamp = parser.parse_packet_with(packet, &mut |can_id, payload| {
-                accumulator.merge_frame(0, FrameIdentity::gbf(can_id), payload);
+            let timestamp = parser.parse_packet_with(packet, &mut |frame_id, payload| {
+                accumulator.merge_frame(
+                    0,
+                    identity_mapping.wire_identity(frame_id.bus_id, frame_id.format_id),
+                    payload,
+                );
             })?;
             accumulator.observe_timestamp(timestamp);
         }
@@ -382,6 +422,42 @@ mod tests {
         serde_json::from_str(json).expect("parse u32 can id schema")
     }
 
+    fn get_bus_id_ref_schema() -> GbfSchema {
+        serde_json::from_value(serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "length_unit": "bytes",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "bus_id", "type": "u8" },
+                                { "name": "can_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "id_ref": "can_id",
+                                        "bus_id_ref": "bus_id"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("parse bus-id-ref schema")
+    }
+
     fn get_test_decoder() -> GbfDecoder {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
         let dbc = load_dbc_json(path.to_str().unwrap()).expect("load sim.json");
@@ -429,6 +505,50 @@ mod tests {
         registry
             .instantiate(&config, "can", schema)
             .expect("build CAN-over-GBF from DBC artifact");
+    }
+
+    #[test]
+    fn programmatic_constructors_reject_bus_shift_with_bus_id_ref() {
+        let dbc_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/sim.json");
+        let dbc = load_dbc_json(dbc_path.to_str().unwrap()).expect("load sim.json");
+        let compiled = Arc::new(
+            CompiledDbcSchema::new(dbc.clone(), "{sig_name}").expect("compile DBC schema"),
+        );
+        let schema = Arc::new(compiled.schema("can"));
+        let mapping = CanIdMapping::BusShift { bits: 12 };
+
+        let decoder_error = GbfDecoder::new(
+            "can",
+            Arc::clone(&schema),
+            get_bus_id_ref_schema(),
+            dbc.clone(),
+            None,
+            true,
+            mapping,
+        )
+        .err()
+        .expect("decoder must reject conflicting mapping");
+        assert!(decoder_error.to_string().contains("must not be combined"));
+
+        let merger_error = GbfFusedMerger::new(
+            "can",
+            Arc::clone(&schema),
+            get_bus_id_ref_schema(),
+            dbc,
+            None,
+            true,
+            mapping,
+        )
+        .err()
+        .expect("merger must reject conflicting mapping");
+        assert!(merger_error.to_string().contains("must not be combined"));
+
+        let compiled_error =
+            CompiledGbfSchema::can(get_bus_id_ref_schema(), compiled, true, mapping)
+                .err()
+                .expect("compiled schema must reject conflicting mapping");
+        assert!(compiled_error.to_string().contains("must not be combined"));
     }
 
     #[test]

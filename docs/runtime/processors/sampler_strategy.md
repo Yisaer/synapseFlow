@@ -118,8 +118,10 @@ For a CAN-format GBF schema, the fused merger keeps newest-wins semantics within
 
 - CAN IDs are represented as `u32` inside the decoder and merger. The GBF schema can still choose a narrower field type, such as `u16be`, when the source format uses one.
 - Frames with CAN IDs that are absent from the DBC are discarded during merge.
-- Non-multiplexed CAN IDs are keyed by CAN ID.
-- Multiplexed CAN IDs are keyed by `(can_id, mux_value)`.
+- Without `bus_id_ref`, non-multiplexed frames are keyed by the mapped CAN ID.
+- With `bus_id_ref`, non-multiplexed frames are keyed by `(bus_id, can_id)` and
+  preserve the complete CAN ID.
+- Multiplexed frames additionally include `mux_value` in the key.
 - Repeated frames with the same key keep only the newest payload.
 
 The mux value is decoded from the payload using the DBC multiplexer signal definition. Future GBF inner formats must add explicit inner handlers with their own key semantics; they must not fall back to generic GBF byte merging.

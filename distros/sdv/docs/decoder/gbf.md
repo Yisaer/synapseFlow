@@ -5,7 +5,7 @@ The GBF decoder parses an outer binary packet and decodes each embedded payload 
 ```text
 bytes
   -> compiled GBF packet layout
-  -> { timestamp, format_id, payload } frames
+  -> { timestamp, optional_bus_id, format_id, payload } frames
   -> compiled CAN or SOME/IP format
   -> record batch
 ```
@@ -74,6 +74,20 @@ Content-Type: application/json
 
 Packet layout, `format.type`, private DBC/ARXML paths, signal naming, CAN ID mapping, and clamping all belong to the GBF entry. The decoder never reloads these values from stream configuration.
 
+For multi-bus CAN packets, the payload format may reference separate bus and
+CAN ID fields:
+
+```json
+"format": {
+  "bus_id_ref": "bus_id",
+  "id_ref": "can_id"
+}
+```
+
+This mode uses `(bus_id, can_id)` for DBC lookup and preserves a complete
+29-bit CAN ID in a `u32` field. Do not configure `format.props.can_id_mapping`
+when `bus_id_ref` is present.
+
 ## Fused packer merger
 
 The SDV GBF merger uses the same `CompiledGbfSchema` as the normal decoder:
@@ -92,6 +106,10 @@ The SDV GBF merger uses the same `CompiledGbfSchema` as the normal decoder:
 }
 ```
 
-The fused merger currently supports the CAN format. Within one sampling interval, non-multiplexed frames use the CAN ID as their key, multiplexed frames use `(can_id, mux_value)`, and repeated keys keep the newest payload. Unknown CAN IDs are discarded.
+The fused merger currently supports the CAN format. Within one sampling interval,
+non-multiplexed frames use the configured CAN identity as their key. With
+`bus_id_ref`, this is `(bus_id, can_id)`; multiplexed frames use
+`(bus_id, can_id, mux_value)`. Repeated keys keep the newest payload. Unknown
+identities are discarded.
 
 See [GBF Schema](../schema/gbf.md) for the entry grammar and multi-file source layout.

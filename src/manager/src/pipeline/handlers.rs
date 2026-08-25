@@ -14,6 +14,7 @@ use storage::{
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
 const EXPLAIN_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+type PipelineHandlerError = Box<axum::response::Response>;
 
 use super::context::shared_mqtt_connector_keys_from_pipeline_request;
 use super::runtime_failure::{
@@ -146,7 +147,7 @@ fn pipeline_path_id_error(id: &str) -> Option<axum::response::Response> {
 fn local_instance_response(
     state: &AppState,
     flow_instance_id: &str,
-) -> Result<std::sync::Arc<flow::FlowInstance>, Box<axum::response::Response>> {
+) -> Result<std::sync::Arc<flow::FlowInstance>, PipelineHandlerError> {
     state.local_instance(flow_instance_id).ok_or_else(|| {
         Box::new(
             (
@@ -161,47 +162,55 @@ fn local_instance_response(
 async fn resolve_pipeline_spec(
     state: &AppState,
     pipeline_id: &str,
-) -> Result<(String, CreatePipelineRequest), axum::response::Response> {
+) -> Result<(String, CreatePipelineRequest), PipelineHandlerError> {
     let stored = match state.storage.get_pipeline(pipeline_id) {
         Ok(Some(pipeline)) => pipeline,
         Ok(None) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("pipeline {pipeline_id} not found"),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("pipeline {pipeline_id} not found"),
+                )
+                    .into_response(),
+            ));
         }
         Err(err) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read pipeline {pipeline_id} from storage: {err}"),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to read pipeline {pipeline_id} from storage: {err}"),
+                )
+                    .into_response(),
+            ));
         }
     };
 
     let mut req = match storage_bridge::pipeline_request_from_stored(&stored) {
         Ok(req) => req,
         Err(err) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to decode stored pipeline {pipeline_id}: {err}"),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to decode stored pipeline {pipeline_id}: {err}"),
+                )
+                    .into_response(),
+            ));
         }
     };
     let flow_instance_id = defaulted_flow_instance_id(req.flow_instance_id.as_deref())
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err).into_response())?;
+        .map_err(|err| Box::new((StatusCode::INTERNAL_SERVER_ERROR, err).into_response()))?;
     req.flow_instance_id = Some(flow_instance_id.clone());
 
     if !state.is_declared_instance(&flow_instance_id) {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "pipeline {pipeline_id} references undeclared flow instance {flow_instance_id}"
-            ),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "pipeline {pipeline_id} references undeclared flow instance {flow_instance_id}"
+                ),
+            )
+                .into_response(),
+        ));
     }
     Ok((flow_instance_id, req))
 }
@@ -210,7 +219,7 @@ async fn try_acquire_shared_mqtt_pipeline_ops(
     state: &AppState,
     pipeline_id: &str,
     pipeline_req: &CreatePipelineRequest,
-) -> Result<Vec<OwnedSemaphorePermit>, axum::response::Response> {
+) -> Result<Vec<OwnedSemaphorePermit>, PipelineHandlerError> {
     let keys = match shared_mqtt_connector_keys_from_pipeline_request(
         state.instances.default_instance().as_ref(),
         state.storage.as_ref(),
@@ -218,7 +227,7 @@ async fn try_acquire_shared_mqtt_pipeline_ops(
         pipeline_req,
     ) {
         Ok(keys) => keys,
-        Err(resp) => return Err(*resp),
+        Err(resp) => return Err(resp),
     };
 
     match state
@@ -226,12 +235,14 @@ async fn try_acquire_shared_mqtt_pipeline_ops(
         .await
     {
         Ok(permits) => Ok(permits),
-        Err(TryAcquireError::NoPermits) => Err(shared_mqtt_busy_response(&keys)),
-        Err(TryAcquireError::Closed) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "shared mqtt operation guard closed".to_string(),
-        )
-            .into_response()),
+        Err(TryAcquireError::NoPermits) => Err(Box::new(shared_mqtt_busy_response(&keys))),
+        Err(TryAcquireError::Closed) => Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "shared mqtt operation guard closed".to_string(),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -239,20 +250,22 @@ async fn try_acquire_referenced_stream_ops(
     state: &AppState,
     pipeline_req: &CreatePipelineRequest,
     instance: &flow::FlowInstance,
-) -> Result<Vec<OwnedSemaphorePermit>, axum::response::Response> {
+) -> Result<Vec<OwnedSemaphorePermit>, PipelineHandlerError> {
     let streams = referenced_streams_from_pipeline_sql(pipeline_req, instance)
-        .map_err(|err| (StatusCode::BAD_REQUEST, err).into_response())?;
+        .map_err(|err| Box::new((StatusCode::BAD_REQUEST, err).into_response()))?;
     match state
         .try_acquire_stream_ref_ops(streams.iter().cloned())
         .await
     {
         Ok(permits) => Ok(permits),
-        Err(TryAcquireError::NoPermits) => Err(stream_refs_busy_response(&streams)),
-        Err(TryAcquireError::Closed) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "stream operation guard closed".to_string(),
-        )
-            .into_response()),
+        Err(TryAcquireError::NoPermits) => Err(Box::new(stream_refs_busy_response(&streams))),
+        Err(TryAcquireError::Closed) => Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream operation guard closed".to_string(),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -305,7 +318,7 @@ pub async fn create_pipeline_handler(
     let _shared_mqtt_permits =
         match try_acquire_shared_mqtt_pipeline_ops(&state, &req.id, &req).await {
             Ok(permits) => permits,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     let instance = match local_instance_response(&state, &flow_instance_id) {
@@ -316,7 +329,7 @@ pub async fn create_pipeline_handler(
     let _stream_permits =
         match try_acquire_referenced_stream_ops(&state, &req, instance.as_ref()).await {
             Ok(permits) => permits,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     let encoder_registry = instance.encoder_registry();
@@ -581,7 +594,7 @@ pub async fn upsert_pipeline_handler(
     let _shared_mqtt_permits =
         match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &create_req).await {
             Ok(permits) => permits,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     let instance = match local_instance_response(&state, &flow_instance_id) {
@@ -592,7 +605,7 @@ pub async fn upsert_pipeline_handler(
     let _stream_permits =
         match try_acquire_referenced_stream_ops(&state, &create_req, instance.as_ref()).await {
             Ok(permits) => permits,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     let encoder_registry = instance.encoder_registry();
@@ -826,7 +839,7 @@ pub async fn explain_pipeline_handler(
     }
     let (flow_instance_id, _) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let instance = match local_instance_response(&state, &flow_instance_id) {
@@ -902,7 +915,7 @@ pub async fn collect_pipeline_stats_handler(
 
     let (flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match matching_runtime_failure(&state, &id, pipeline_req.revision) {
         Ok(Some(failure)) => {
@@ -971,7 +984,7 @@ pub async fn start_pipeline_handler(
     };
     let (flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let audit = ResourceMutationLog::new(
         "pipeline",
@@ -991,7 +1004,7 @@ pub async fn start_pipeline_handler(
     let _shared_mqtt_permits =
         match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
             Ok(permits) => permits,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     if let Err(err) = state
@@ -1059,7 +1072,7 @@ pub async fn stop_pipeline_handler(
     };
     let (flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let audit =
         ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(pipeline_req.revision));
