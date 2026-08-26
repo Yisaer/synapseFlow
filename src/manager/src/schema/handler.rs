@@ -157,7 +157,7 @@ async fn create_schema_locked(
         }
     }
 
-    named_schema_store().insert_resolved(name, schema, proto_bundle, artifact);
+    named_schema_store().insert_resolved(name, req.revision, schema, proto_bundle, artifact);
     audit.log_success();
     let body = if include_type {
         serde_json::json!({

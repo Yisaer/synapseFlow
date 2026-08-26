@@ -28,6 +28,13 @@ features:
       - docs/planner/optimize/logical/common_subexpression_elimination.md
     status: active
 
+  - id: planner.logical.schema_version_binding
+    title: Schema version binding
+    summary: Bind schema_version() to the input stream's named schema revision during planning.
+    doc_refs:
+      - docs/syntax/functions/schema_version.md
+    status: active
+
   - id: planner.eventtime.hidden_column_preservation
     title: Eventtime hidden column preservation
     summary: Preserve hidden eventtime columns required by eventtime planning across projection and source-input pruning.

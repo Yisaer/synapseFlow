@@ -287,6 +287,10 @@ pub struct StreamDefinition {
     id: String,
     stream_type: StreamType,
     schema: Arc<Schema>,
+    /// Revision of the referenced named schema.
+    ///
+    /// Inline schemas do not have an independent revision and leave this unset.
+    schema_version: Option<u64>,
     props: StreamProps,
     decoder: StreamDecoderConfig,
     eventtime: Option<EventtimeDefinition>,
@@ -349,6 +353,7 @@ impl StreamDefinition {
             id: id.into(),
             stream_type,
             schema,
+            schema_version: None,
             props,
             decoder,
             eventtime: None,
@@ -366,6 +371,11 @@ impl StreamDefinition {
         self
     }
 
+    pub fn with_schema_version(mut self, schema_version: u64) -> Self {
+        self.schema_version = Some(schema_version);
+        self
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -376,6 +386,10 @@ impl StreamDefinition {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    pub fn schema_version(&self) -> Option<u64> {
+        self.schema_version
     }
 
     pub fn props(&self) -> &StreamProps {

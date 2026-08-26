@@ -258,6 +258,7 @@ pub struct NamedSchemaStore {
 #[derive(Clone)]
 pub(crate) struct ResolvedSchema {
     pub(crate) logical_schema: Arc<Schema>,
+    pub(crate) schema_version: Option<u64>,
     pub(crate) proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
     pub(crate) artifact: Option<SchemaArtifact>,
 }
@@ -270,6 +271,7 @@ impl ResolvedSchema {
     ) -> Self {
         Self {
             logical_schema: Arc::new(schema),
+            schema_version: None,
             proto_bundle,
             artifact,
         }
@@ -283,20 +285,21 @@ impl NamedSchemaStore {
         }
     }
 
-    pub fn insert(&self, name: String, schema: Schema) {
-        self.insert_resolved(name, schema, None, None);
+    pub fn insert(&self, name: String, revision: u64, schema: Schema) {
+        self.insert_resolved(name, revision, schema, None, None);
     }
 
     pub fn insert_resolved(
         &self,
         name: String,
+        revision: u64,
         schema: Schema,
         proto_bundle: Option<Arc<ProtoDescriptorBundle>>,
         artifact: Option<SchemaArtifact>,
     ) {
-        self.schemas
-            .write()
-            .insert(name, ResolvedSchema::new(schema, proto_bundle, artifact));
+        let mut resolved = ResolvedSchema::new(schema, proto_bundle, artifact);
+        resolved.schema_version = Some(revision);
+        self.schemas.write().insert(name, resolved);
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Schema>> {
@@ -625,6 +628,9 @@ pub async fn create_stream_handler(
         stream_props,
         decoder,
     );
+    if let Some(schema_version) = resolved_schema.schema_version {
+        definition = definition.with_schema_version(schema_version);
+    }
     if let Some(cfg) = &req.eventtime {
         definition = definition.with_eventtime(EventtimeDefinition::new(
             cfg.column.clone(),
@@ -1084,6 +1090,9 @@ pub async fn upsert_stream_handler(
         stream_props,
         decoder,
     );
+    if let Some(schema_version) = resolved_schema.schema_version {
+        definition = definition.with_schema_version(schema_version);
+    }
     if let Some(cfg) = &new_req.eventtime {
         definition = definition.with_eventtime(EventtimeDefinition::new(
             cfg.column.clone(),

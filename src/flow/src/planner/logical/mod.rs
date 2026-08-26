@@ -2,8 +2,9 @@ use crate::catalog::{StreamDefinition, TableDefinition, TableProps};
 use crate::pipeline::SourceInputConfig;
 use parser::window as parser_window;
 use parser::SelectStmt;
-use sqlparser::ast::Expr;
+use sqlparser::ast::{visit_expressions_mut, Expr, Value as SqlValue};
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use datatypes::ConcreteDatatype;
@@ -195,6 +196,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
 ) -> Result<Arc<LogicalPlan>, String> {
     let mut select_stmt = select_stmt;
 
+    bind_schema_version(&mut select_stmt, stream_defs, table_defs)?;
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_window_metadata_function_placement(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
@@ -411,6 +413,186 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
 
     verify_logical_plan(root.as_ref())?;
     Ok(root)
+}
+
+fn bind_schema_version(
+    select_stmt: &mut SelectStmt,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    table_defs: &HashMap<String, Arc<TableDefinition>>,
+) -> Result<(), String> {
+    fn bind_expr(
+        expr: &mut Expr,
+        source_names: &[String],
+        stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+        table_defs: &HashMap<String, Arc<TableDefinition>>,
+    ) -> Result<(), String> {
+        match visit_expressions_mut(expr, |expr| {
+            let Expr::Function(function) = expr else {
+                return ControlFlow::Continue(());
+            };
+            if !function
+                .name
+                .to_string()
+                .eq_ignore_ascii_case("schema_version")
+            {
+                return ControlFlow::Continue(());
+            }
+
+            if !function.args.is_empty() {
+                return ControlFlow::Break("schema_version() takes zero arguments".to_string());
+            }
+            if function.filter.is_some() {
+                return ControlFlow::Break("schema_version() does not support FILTER".to_string());
+            }
+            if function.over.is_some() {
+                return ControlFlow::Break("schema_version() does not support OVER".to_string());
+            }
+            if !function.order_by.is_empty() {
+                return ControlFlow::Break(
+                    "schema_version() does not support ORDER BY".to_string(),
+                );
+            }
+            if function.distinct || function.null_treatment.is_some() || function.special {
+                return ControlFlow::Break(
+                    "schema_version() does not support function modifiers".to_string(),
+                );
+            }
+
+            let [source_name] = source_names else {
+                return ControlFlow::Break(
+                    "schema_version() requires exactly one stream source".to_string(),
+                );
+            };
+            if table_defs.contains_key(source_name) {
+                return ControlFlow::Break(
+                    "schema_version() is not supported for table sources".to_string(),
+                );
+            }
+            let Some(stream) = stream_defs.get(source_name) else {
+                return ControlFlow::Break(format!(
+                    "stream {source_name} missing catalog definition for schema_version()"
+                ));
+            };
+            let Some(schema_version) = stream.schema_version() else {
+                return ControlFlow::Break(
+                    "schema_version() requires a named schema reference".to_string(),
+                );
+            };
+            let Ok(schema_version) = i64::try_from(schema_version) else {
+                return ControlFlow::Break(format!(
+                    "schema version {schema_version} exceeds the SQL integer range"
+                ));
+            };
+            *expr = Expr::Value(SqlValue::Number(schema_version.to_string(), false));
+            ControlFlow::Continue(())
+        }) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(err) => Err(err),
+        }
+    }
+
+    let source_names = select_stmt
+        .source_infos
+        .iter()
+        .map(|source| source.name.clone())
+        .collect::<Vec<_>>();
+    let bind = |expr: &mut Expr| bind_expr(expr, &source_names, stream_defs, table_defs);
+
+    for field in &mut select_stmt.select_fields {
+        bind(&mut field.expr)?;
+    }
+    if let Some(expr) = &mut select_stmt.where_condition {
+        bind(expr)?;
+    }
+    if let Some(expr) = &mut select_stmt.having {
+        bind(expr)?;
+    }
+    for expr in &mut select_stmt.group_by_exprs {
+        bind(expr)?;
+    }
+    for item in &mut select_stmt.order_by {
+        bind(&mut item.expr)?;
+    }
+    for expr in select_stmt.aggregate_mappings.values_mut() {
+        bind(expr)?;
+    }
+    for entry in &mut select_stmt.stateful_mappings {
+        for expr in &mut entry.spec.args {
+            bind(expr)?;
+        }
+        if let Some(expr) = &mut entry.spec.when {
+            bind(expr)?;
+        }
+        for expr in &mut entry.spec.partition_by {
+            bind(expr)?;
+        }
+        bind(&mut entry.spec.original_expr)?;
+    }
+    for entry in &mut select_stmt.acc_mappings {
+        for expr in &mut entry.spec.args {
+            bind(expr)?;
+        }
+        bind(&mut entry.spec.original_expr)?;
+    }
+    if let Some(window) = &mut select_stmt.window {
+        match window {
+            parser_window::Window::Tumbling {
+                partition_by,
+                filter,
+                ..
+            }
+            | parser_window::Window::Count {
+                partition_by,
+                filter,
+                ..
+            } => {
+                for expr in partition_by {
+                    bind(expr)?;
+                }
+                if let Some(expr) = filter {
+                    bind(expr)?;
+                }
+            }
+            parser_window::Window::Sliding {
+                partition_by,
+                trigger_condition,
+                filter,
+                ..
+            } => {
+                for expr in partition_by {
+                    bind(expr)?;
+                }
+                if let Some(expr) = trigger_condition {
+                    bind(expr)?;
+                }
+                if let Some(expr) = filter {
+                    bind(expr)?;
+                }
+            }
+            parser_window::Window::State {
+                open,
+                emit,
+                partition_by,
+                filter,
+            } => {
+                bind(open)?;
+                bind(emit)?;
+                for expr in partition_by {
+                    bind(expr)?;
+                }
+                if let Some(expr) = filter {
+                    bind(expr)?;
+                }
+            }
+            parser_window::Window::Eos { filter } => {
+                if let Some(expr) = filter {
+                    bind(expr)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn verify_logical_plan(plan: &LogicalPlan) -> Result<(), String> {

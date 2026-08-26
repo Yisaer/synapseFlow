@@ -2,9 +2,11 @@ use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
     StructType,
 };
-use flow::catalog::MemoryStreamProps;
+use flow::catalog::{HistoryTableProps, MemoryStreamProps, TableDefinition, TableProps};
 use flow::planner::decode_projection::{ListIndexSelection, ProjectionNode};
-use flow::planner::logical::{create_logical_plan, LogicalPlan};
+use flow::planner::logical::{
+    create_logical_plan, create_logical_plan_with_table_defs_and_source_inputs, LogicalPlan,
+};
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::{
@@ -178,7 +180,8 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         Arc::clone(&stream_schema),
         StreamProps::Mqtt(MqttStreamProps::default()),
         StreamDecoderConfig::json(),
-    );
+    )
+    .with_schema_version(7);
 
     let demo_schema = Arc::new(Schema::new(vec![
         ColumnSchema::new(
@@ -426,6 +429,12 @@ fn logical_optimizer_table_driven() {
             sql: "SELECT a AS x, a AS y, 1 AS one, 1 AS another_one FROM stream",
             covers: &["planner.logical.common_subexpression_elimination"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as x; a as y; 1 as one; 1 as another_one]"],"operator":"Project"}"##,
+        },
+        LogicalOptimizerCase {
+            name: "logical_planner_binds_schema_version_as_literal",
+            sql: "SELECT schema_version() FROM stream WHERE schema_version() >= 7",
+            covers: &["planner.logical.schema_version_binding"],
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=7 >= 7"],"operator":"Filter"}],"id":"Project_2","info":["fields=[7 as schema_version()]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_select_star_disables_top_level_pruning",
@@ -928,4 +937,74 @@ fn create_logical_plan_last_hit_time_unix_ms_placement_table_driven() {
             }
         }
     }
+}
+
+#[test]
+fn create_logical_plan_schema_version_validation_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "rejects_arguments",
+            sql: "SELECT schema_version(1) FROM stream",
+            expected: "schema_version() takes zero arguments",
+        },
+        Case {
+            name: "rejects_inline_schema",
+            sql: "SELECT schema_version() FROM stream_prune",
+            expected: "schema_version() requires a named schema reference",
+        },
+        Case {
+            name: "rejects_multiple_sources",
+            sql: "SELECT schema_version() FROM stream, users",
+            expected: "schema_version() requires exactly one stream source",
+        },
+    ];
+
+    for case in cases {
+        let stream_defs = setup_streams();
+        let select_stmt = parse_sql(case.sql)
+            .unwrap_or_else(|err| panic!("case={} parse failed: {err}", case.name));
+        let err = create_logical_plan(select_stmt, Vec::new(), &stream_defs)
+            .expect_err("case should fail logical planning");
+        println!("{}\n{}", case.sql, err);
+        assert!(
+            err.contains(case.expected),
+            "case={} expected err to contain {:?}, got: {err}",
+            case.name,
+            case.expected,
+        );
+    }
+
+    let table_name = "history_table";
+    let table_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        table_name.to_string(),
+        "ts".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]));
+    let table_defs = HashMap::from([(
+        table_name.to_string(),
+        Arc::new(TableDefinition::new(
+            table_name,
+            table_schema,
+            TableProps::History(HistoryTableProps::new("history", "vehicle")),
+            StreamDecoderConfig::json(),
+        )),
+    )]);
+    let sql = "SELECT schema_version() FROM history_table";
+    let select_stmt = parse_sql(sql).expect("parse table schema version query");
+    let err = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        Vec::new(),
+        &HashMap::new(),
+        &table_defs,
+        &HashMap::new(),
+    )
+    .expect_err("table schema_version() should fail logical planning");
+    println!("{sql}\n{err}");
+    assert!(err.contains("schema_version() is not supported for table sources"));
 }

@@ -77,6 +77,9 @@ pub fn stream_definition_from_stored(
         props,
         decoder,
     );
+    if let Some(schema_version) = resolved_schema.schema_version {
+        definition = definition.with_schema_version(schema_version);
+    }
     if let Some(cfg) = &req.eventtime {
         definition = definition.with_eventtime(EventtimeDefinition::new(
             cfg.column.clone(),
@@ -259,6 +262,7 @@ pub(crate) fn hydrate_schemas_from_storage(storage: &StorageManager) -> Result<u
             Ok((schema, proto_bundle, artifact)) => {
                 named_schema_store().insert_resolved(
                     stored.name.clone(),
+                    stored.revision,
                     schema,
                     proto_bundle,
                     artifact,

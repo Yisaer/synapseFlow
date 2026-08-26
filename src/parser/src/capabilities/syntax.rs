@@ -471,24 +471,46 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                 &["<func>(<arg> [, <arg> ...])"],
                 &["SELECT concat(a, b) FROM s"],
                 &[],
-                vec![feature(
-                    "expr.function_call.window_metadata",
-                    "Window metadata function call",
-                    SyntaxFeatureStatus::Partial,
-                    Some("Project metadata for the current window emission."),
-                    Some(
-                        "`window_start()` and `window_end()` are zero-argument built-in function calls. The parser preserves them as function expressions; planner and runtime support define where they are valid and how the metadata is evaluated.",
+                vec![
+                    feature(
+                        "expr.function_call.window_metadata",
+                        "Window metadata function call",
+                        SyntaxFeatureStatus::Partial,
+                        Some("Project metadata for the current window emission."),
+                        Some(
+                            "`window_start()` and `window_end()` are zero-argument built-in function calls. The parser preserves them as function expressions; planner and runtime support define where they are valid and how the metadata is evaluated.",
+                        ),
+                        None,
+                        &["zero_arguments", "requires_window_metadata_context"],
+                        &[],
+                        &["window_start()", "window_end()"],
+                        &[
+                            "SELECT window_start(), window_end(), sum(a) FROM s GROUP BY tumblingwindow('ss', 10)",
+                        ],
+                        &[],
+                        vec![],
                     ),
-                    None,
-                    &["zero_arguments", "requires_window_metadata_context"],
-                    &[],
-                    &["window_start()", "window_end()"],
-                    &[
-                        "SELECT window_start(), window_end(), sum(a) FROM s GROUP BY tumblingwindow('ss', 10)",
-                    ],
-                    &[],
-                    vec![],
-                )],
+                    feature(
+                        "expr.function_call.schema_version",
+                        "Schema version function call",
+                        SyntaxFeatureStatus::Supported,
+                        Some("Read the named schema revision bound to the input stream."),
+                        Some(
+                            "`schema_version()` is replaced with an integer literal during planning and remains fixed for the compiled pipeline.",
+                        ),
+                        None,
+                        &[
+                            "zero_arguments",
+                            "exactly_one_stream_source",
+                            "requires_named_schema_reference",
+                        ],
+                        &[],
+                        &["schema_version()"],
+                        &["SELECT schema_version() FROM s"],
+                        &[],
+                        vec![],
+                    ),
+                ],
             ),
             feature(
                 "expr.between",

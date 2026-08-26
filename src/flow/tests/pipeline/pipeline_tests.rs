@@ -1050,6 +1050,84 @@ async fn run_file_source_json_case(case: FileSourceJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
+// coverage-covers: planner.logical.schema_version_binding, sink.connector.memory_output
+#[tokio::test]
+async fn pipeline_outputs_bound_schema_version() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_schema_version", "bound_named_schema_revision");
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+
+    let schema = Schema::new(vec![ColumnSchema::new(
+        "stream".to_string(),
+        "a".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]);
+    let definition = StreamDefinition::new(
+        "stream",
+        Arc::new(schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        StreamDecoderConfig::new("none", JsonMap::new()),
+    )
+    .with_schema_version(7);
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create stream");
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = "pipe_schema_version";
+    let pipeline = PipelineDefinition::new(
+        pipeline_id,
+        "SELECT schema_version() AS version FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic)),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(pipeline_id)
+        .await
+        .expect("start pipeline");
+
+    let input = batch_from_columns_simple(vec![(
+        "stream".to_string(),
+        "a".to_string(),
+        vec![Value::Int64(1), Value::Int64(2)],
+    )])
+    .expect("create input batch");
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(input), timeout_duration).await;
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = build_expected_json(
+        2,
+        &[ColumnCheck {
+            expected_name: "version".to_string(),
+            expected_values: vec![Value::Int64(7), Value::Int64(7)],
+        }],
+    );
+    assert_eq!(normalize_json(actual), normalize_json(expected));
+
+    instance
+        .stop_pipeline(pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
 // coverage-covers: parser.select.alias_computing, planner.physical.output_layout_fixed_slots, sink.connector.memory_output
 #[tokio::test]
 async fn pipeline_table_driven_queries() {
