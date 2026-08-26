@@ -1,3 +1,4 @@
+mod file_source_checkpoint;
 mod http_sink_e2e;
 mod pipeline_stats;
 mod proto_decoder_e2e;

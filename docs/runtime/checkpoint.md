@@ -205,16 +205,16 @@ request is asynchronous: the connector establishes a production boundary, emits 
 `ConnectorEvent::CheckpointFence` after all payloads produced before the boundary, and returns an
 owned in-memory `CheckpointState`. The fence is an internal connector event and is not forwarded as
 a pipeline data-channel checkpoint signal. The current `FileSourceConnector` implements this
-protocol and records the source path, file mode, per-file byte offset, pending partial-line bytes,
-file length, modification time, and file identity. After emitting the fence, the file worker may
-resume producing post-fence payloads. Those payloads remain ordered after the fence in the connector
-event stream.
+protocol and records the source path, file mode, and each file's last emitted byte offset and file
+identity. Runtime read offsets and pending partial-line bytes are not persisted. After emitting the
+fence, the file worker may resume producing post-fence payloads. Those payloads remain ordered after
+the fence in the connector event stream.
 
 When a `DataSourceProcessor` receives a checkpoint on its data input, it stops polling its ordinary
 inputs, requests the connector boundary, and continues forwarding connector payloads. The processor
 consumes the connector event stream directly so the fence is ordered after every pre-fence payload.
 After receiving the matching fence, it records an `OperatorSnapshot` with kind `datasource` and
-state version `1`, then forwards the checkpoint. For `Continue`, it returns to its ordinary event
+state version `2`, then forwards the checkpoint. For `Continue`, it returns to its ordinary event
 loop and consumes post-fence payloads after the barrier. For `Final`, it closes the connector and
 exits. If the request, snapshot, or fence fails, the checkpoint is not forwarded.
 
@@ -228,17 +228,14 @@ The current file datasource snapshot schema is:
 OperatorSnapshot {
     checkpoint_key: "datasource:<source name>:<same-source occurrence>"
     operator_kind: "datasource"
-    state_version: 1
+    state_version: 2
     state: {
         connector_kind: "file"
         source_path: <canonical source path>
         mode: "file" | "directory"
         cursors: [{
             path
-            offset
-            pending
-            file_length
-            last_update_unix_ms
+            offset: <byte position after the last emitted complete line>
             file_identity
         }]
     }
@@ -300,11 +297,12 @@ physical-plan traversal and distinguishes multiple references to the same source
 on global plan indexes. Adding or removing a reference to the same source may intentionally change
 the affected keys and invalidate its previous snapshots.
 
-At file-source startup, existing files resume at the stored byte offset and retain pending partial
-line bytes. Files without a cursor start at offset zero. A shorter file or a changed file identity
-resets its cursor and pending bytes to zero; ordinary append growth retains the stored offset even
-when the modification timestamp changes. A restored cursor for a currently missing directory file
-is retained so a later file at the same path can be checked against the stored identity.
+At file-source startup, existing files resume at the stored byte offset with an empty runtime
+pending buffer. Because the stored offset is the position after the last emitted complete line, any
+incomplete trailing bytes are read again. Files without a cursor start at offset zero. A file that
+is shorter than the stored offset or has a changed file identity resets its cursor to zero; ordinary
+append growth retains the stored offset. A restored cursor for a currently missing directory file is
+retained so a later file at the same path can be checked against the stored identity.
 
 Snapshots that are present are compatibility checked as one unit:
 
@@ -312,8 +310,8 @@ Snapshots that are present are compatibility checked as one unit:
 - a processor-kind mismatch is incompatible
 - an unsupported state version is incompatible
 - a file connector-kind or source-path mismatch is incompatible
-- an invalid file snapshot structure, duplicate cursor, out-of-scope cursor path, offset, pending
-  buffer, timestamp, or file identity is incompatible
+- an invalid file snapshot structure, duplicate cursor, out-of-scope cursor path, offset, or file
+  identity is incompatible
 
 Any such incompatibility clears all checkpoints for that pipeline and starts with empty state. The
 runtime never restores only a compatible subset of a manifest. A cleanup failure prevents startup.

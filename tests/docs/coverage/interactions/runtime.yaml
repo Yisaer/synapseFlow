@@ -9,6 +9,14 @@ interactions:
       - stream.window.tumbling
     status: active
 
+  - id: runtime.file_source.checkpoint_recovery
+    title: File source checkpoint recovery
+    summary: Validate that file source offsets resume from the latest committed pipeline checkpoint without replaying emitted lines.
+    features:
+      - source.file.stream
+      - pipeline.runtime.checkpoint_recovery
+    status: active
+
   - id: runtime.alias_projection.encoder_transform
     title: Alias projection encoder transform
     summary: Validate that encoder transforms observe SQL-visible alias output after projection.

@@ -13,7 +13,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, warn};
@@ -277,30 +277,6 @@ fn parse_restore_state(
             required_checkpoint_field(cursor, "offset")?,
             "cursor.offset",
         )?;
-        let pending = checkpoint_bytes(
-            required_checkpoint_field(cursor, "pending")?,
-            "cursor.pending",
-        )?;
-        let file_length = checkpoint_unsigned(
-            required_checkpoint_field(cursor, "file_length")?,
-            "cursor.file_length",
-        )?;
-        if offset > file_length {
-            return Err(invalid_checkpoint(format!(
-                "cursor `{}` offset {offset} exceeds file_length {file_length}",
-                path.display()
-            )));
-        }
-        if u64::try_from(pending.len()).map_or(true, |pending_len| pending_len > offset) {
-            return Err(invalid_checkpoint(format!(
-                "cursor `{}` pending bytes exceed its offset",
-                path.display()
-            )));
-        }
-        let last_update_unix_ms = checkpoint_optional_timestamp(
-            required_checkpoint_field(cursor, "last_update_unix_ms")?,
-            "cursor.last_update_unix_ms",
-        )?;
         let file_identity = checkpoint_optional_string(
             required_checkpoint_field(cursor, "file_identity")?,
             "cursor.file_identity",
@@ -317,9 +293,8 @@ fn parse_restore_state(
             FileCursor {
                 path,
                 offset,
-                pending,
-                file_length,
-                last_update_unix_ms,
+                read_offset: offset,
+                pending: Vec::new(),
                 file_identity,
             },
         );
@@ -359,30 +334,10 @@ fn checkpoint_string<'a>(
     }
 }
 
-fn checkpoint_bytes(state: &CheckpointState, label: &str) -> Result<Vec<u8>, ConnectorError> {
-    match state {
-        CheckpointState::Bytes(value) => Ok(value.clone()),
-        _ => Err(invalid_checkpoint(format!("{label} must be bytes"))),
-    }
-}
-
 fn checkpoint_unsigned(state: &CheckpointState, label: &str) -> Result<u64, ConnectorError> {
     match state {
         CheckpointState::Unsigned(value) => Ok(*value),
         _ => Err(invalid_checkpoint(format!("{label} must be unsigned"))),
-    }
-}
-
-fn checkpoint_optional_timestamp(
-    state: &CheckpointState,
-    label: &str,
-) -> Result<Option<i64>, ConnectorError> {
-    match state {
-        CheckpointState::Null => Ok(None),
-        CheckpointState::Signed(value) if *value >= 0 => Ok(Some(*value)),
-        _ => Err(invalid_checkpoint(format!(
-            "{label} must be null or a non-negative signed integer"
-        ))),
     }
 }
 
@@ -691,10 +646,11 @@ impl FileSourceState {
 
 struct FileCursor {
     path: PathBuf,
+    /// Byte position immediately after the last complete line sent to the pipeline.
     offset: u64,
+    /// Next byte position to read during the current connector run.
+    read_offset: u64,
     pending: Vec<u8>,
-    file_length: u64,
-    last_update_unix_ms: Option<i64>,
     file_identity: Option<String>,
 }
 
@@ -703,9 +659,8 @@ impl FileCursor {
         Self {
             path,
             offset: 0,
+            read_offset: 0,
             pending: Vec::new(),
-            file_length: 0,
-            last_update_unix_ms: None,
             file_identity: None,
         }
     }
@@ -733,14 +688,12 @@ impl FileCursor {
             .is_some_and(|(previous, current)| previous != current);
         if identity_changed || metadata.len() < self.offset {
             self.offset = 0;
+            self.read_offset = 0;
+            self.pending.clear();
+        } else if metadata.len() < self.read_offset {
+            self.read_offset = self.offset;
             self.pending.clear();
         }
-        self.file_length = metadata.len();
-        self.last_update_unix_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .and_then(|duration| i64::try_from(duration.as_millis()).ok());
         self.file_identity = current_identity;
     }
 
@@ -751,20 +704,6 @@ impl FileCursor {
             CheckpointState::String(self.path.to_string_lossy().into_owned()),
         );
         state.insert("offset".to_string(), CheckpointState::Unsigned(self.offset));
-        state.insert(
-            "pending".to_string(),
-            CheckpointState::Bytes(self.pending.clone()),
-        );
-        state.insert(
-            "file_length".to_string(),
-            CheckpointState::Unsigned(self.file_length),
-        );
-        state.insert(
-            "last_update_unix_ms".to_string(),
-            self.last_update_unix_ms
-                .map(CheckpointState::Signed)
-                .unwrap_or(CheckpointState::Null),
-        );
         state.insert(
             "file_identity".to_string(),
             self.file_identity
@@ -794,7 +733,7 @@ impl FileCursor {
         };
         let file_len = metadata.len();
         self.reconcile_metadata(&metadata);
-        if file_len == self.offset {
+        if file_len == self.read_offset {
             return Ok(());
         }
 
@@ -817,21 +756,22 @@ impl FileCursor {
         }
         self.reconcile_metadata(&metadata);
         let file_len = metadata.len();
-        if file_len == self.offset {
+        if file_len == self.read_offset {
             return Ok(());
         }
 
-        file.seek(SeekFrom::Start(self.offset)).map_err(|err| {
-            warn!(
-                path = %self.path.display(),
-                offset = self.offset,
-                error = %err,
-                "failed to seek file stream source file"
-            );
-        })?;
+        file.seek(SeekFrom::Start(self.read_offset))
+            .map_err(|err| {
+                warn!(
+                    path = %self.path.display(),
+                    offset = self.read_offset,
+                    error = %err,
+                    "failed to seek file stream source file"
+                );
+            })?;
 
         let mut buffer = [0_u8; READ_BUFFER_SIZE];
-        let mut remaining = file_len - self.offset;
+        let mut remaining = file_len - self.read_offset;
         while remaining > 0 {
             let read_len = if remaining > buffer.len() as u64 {
                 buffer.len()
@@ -848,7 +788,7 @@ impl FileCursor {
             if bytes_read == 0 {
                 break;
             }
-            self.offset += bytes_read as u64;
+            self.read_offset += bytes_read as u64;
             remaining -= bytes_read as u64;
             self.pending.extend_from_slice(&buffer[..bytes_read]);
             self.emit_complete_lines(sender)?;
@@ -862,16 +802,16 @@ impl FileCursor {
         sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     ) -> Result<(), ()> {
         while let Some(newline_pos) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.pending.drain(..=newline_pos).collect::<Vec<_>>();
-            if line.last() == Some(&b'\n') {
-                line.pop();
-            }
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            let payload = encode_file_line_frame(&self.path, &line).map_err(|err| {
-                let _ = sender.blocking_send(Err(err));
-            })?;
+            let consumed = newline_pos + 1;
+            let line_end = if newline_pos > 0 && self.pending[newline_pos - 1] == b'\r' {
+                newline_pos - 1
+            } else {
+                newline_pos
+            };
+            let payload =
+                encode_file_line_frame(&self.path, &self.pending[..line_end]).map_err(|err| {
+                    let _ = sender.blocking_send(Err(err));
+                })?;
             if sender
                 .blocking_send(Ok(ConnectorEvent::Payload(payload)))
                 .is_err()
@@ -879,6 +819,8 @@ impl FileCursor {
                 debug!(path = %self.path.display(), "file source receiver closed");
                 return Err(());
             }
+            self.pending.drain(..consumed);
+            self.offset += consumed as u64;
         }
 
         Ok(())
@@ -1035,6 +977,94 @@ mod tests {
         assert_eq!(
             drain_payloads(&mut receiver),
             vec![("app.log".to_string(), "partial".to_string())]
+        );
+    }
+
+    #[test]
+    fn file_source_checkpoint_restores_from_last_emitted_offset() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        write_file(&path, b"complete\npartial");
+        let path = fs::canonicalize(path).expect("canonical file path");
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut state = FileSourceState::new(path.clone(), None).expect("file source state");
+
+        state
+            .read_initial_files(&sender)
+            .expect("read initial files");
+        assert_eq!(
+            drain_payloads(&mut receiver),
+            vec![("app.log".to_string(), "complete".to_string())]
+        );
+
+        let cursor = state.cursors.get(&path).expect("file cursor");
+        assert_eq!(cursor.offset, b"complete\n".len() as u64);
+        assert_eq!(cursor.read_offset, b"complete\npartial".len() as u64);
+        assert_eq!(cursor.pending, b"partial");
+
+        let snapshot = state.snapshot().expect("snapshot file source");
+        let snapshot_map = checkpoint_map(&snapshot, "root state").expect("snapshot map");
+        let CheckpointState::Array(cursors) = snapshot_map.get("cursors").expect("cursors") else {
+            panic!("cursors must be an array");
+        };
+        let cursor_snapshot = checkpoint_map(&cursors[0], "cursor").expect("cursor snapshot");
+        assert_eq!(
+            cursor_snapshot.get("offset"),
+            Some(&CheckpointState::Unsigned(b"complete\n".len() as u64))
+        );
+        assert!(!cursor_snapshot.contains_key("pending"));
+        assert!(!cursor_snapshot.contains_key("file_length"));
+        assert!(!cursor_snapshot.contains_key("last_update_unix_ms"));
+
+        let restored = parse_restore_state(&snapshot, &path).expect("parse checkpoint");
+        append_file(&path, b"-done\n");
+        let (restored_sender, mut restored_receiver) = mpsc::channel(8);
+        let mut restored_state =
+            FileSourceState::new(path, Some(restored)).expect("restored file source state");
+        restored_state
+            .read_initial_files(&restored_sender)
+            .expect("read restored file");
+
+        assert_eq!(
+            drain_payloads(&mut restored_receiver),
+            vec![("app.log".to_string(), "partial-done".to_string())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_source_checkpoint_resets_emitted_offset_after_file_replacement() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        let replacement = dir.path().join("replacement.log");
+        write_file(&path, b"old\n");
+        write_file(&replacement, b"replacement\n");
+        let path = fs::canonicalize(path).expect("canonical file path");
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut state = FileSourceState::new(path.clone(), None).expect("file source state");
+
+        state
+            .read_initial_files(&sender)
+            .expect("read initial files");
+        assert_eq!(
+            drain_payloads(&mut receiver),
+            vec![("app.log".to_string(), "old".to_string())]
+        );
+        let snapshot = state.snapshot().expect("snapshot file source");
+        let restored = parse_restore_state(&snapshot, &path).expect("parse checkpoint");
+
+        fs::remove_file(&path).expect("remove original file");
+        fs::rename(&replacement, &path).expect("install replacement file");
+        let (restored_sender, mut restored_receiver) = mpsc::channel(8);
+        let mut restored_state =
+            FileSourceState::new(path, Some(restored)).expect("restored file source state");
+        restored_state
+            .read_initial_files(&restored_sender)
+            .expect("read replacement file");
+
+        assert_eq!(
+            drain_payloads(&mut restored_receiver),
+            vec![("app.log".to_string(), "replacement".to_string())]
         );
     }
 

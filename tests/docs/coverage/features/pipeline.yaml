@@ -20,3 +20,10 @@ features:
     doc_refs:
       - docs/runtime/pipelines/stats.md
     status: active
+
+  - id: pipeline.runtime.checkpoint_recovery
+    title: Pipeline checkpoint recovery
+    summary: Restore compatible processor state from the latest committed pipeline checkpoint.
+    doc_refs:
+      - docs/runtime/checkpoint.md
+    status: active

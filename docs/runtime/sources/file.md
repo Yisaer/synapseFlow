@@ -38,20 +38,27 @@ in memory and are emitted only after a later write completes the line with `\n`.
 
 ## Runtime Behavior
 
-On every pipeline start, the connector reads the configured file or all direct regular files in the
-configured directory from byte offset `0`. After the initial read, filesystem notifications wake the
-same read path for subsequent writes.
+Without a compatible checkpoint, the connector reads the configured file or all direct regular
+files in the configured directory from byte offset `0`. With checkpointing enabled, a restarted
+pipeline resumes each known file from the byte offset immediately after its last emitted complete
+line. Filesystem notifications wake the same read path for subsequent writes.
 
 Directory mode is non-recursive. Only direct child regular files are considered. A new direct child
 file is read from byte offset `0` when it appears or is first observed through a filesystem event.
 
 The connector keeps in-memory per-file cursors:
 
-- `offset`: the next byte position to read.
+- `offset`: the byte position immediately after the last complete line sent to the pipeline.
+- `read_offset`: the next byte position to read during the current connector run.
 - `pending`: bytes after the last complete newline.
 
-If a watched file shrinks below the stored offset, the connector treats it as truncation, resets the
-offset to `0`, clears `pending`, and resumes reading from the beginning.
+Only `offset` and the file identity are persisted for checkpoint recovery. `read_offset` and
+`pending` are runtime-only state. A restarted connector begins reading at `offset`, so an incomplete
+trailing line is read again instead of being stored in the checkpoint.
+
+If a watched file is replaced or shrinks below `offset`, the connector resets both offsets to `0`,
+clears `pending`, and resumes reading from the beginning. If only the runtime-only partial tail is
+truncated, the connector discards `pending` and reads that tail again from `offset`.
 
 Ordering is guaranteed within a single file because each file cursor is read sequentially. Directory
 mode does not define a total order across different files.

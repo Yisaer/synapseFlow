@@ -24,6 +24,8 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+const DATASOURCE_CHECKPOINT_STATE_VERSION: u32 = 2;
+
 /// DataSourceProcessor - reads data from PhysicalDatasource
 ///
 /// This processor:
@@ -297,7 +299,7 @@ impl DataSourceProcessor {
                                         OperatorSnapshot::new(
                                             checkpoint_key,
                                             "datasource",
-                                            1,
+                                            DATASOURCE_CHECKPOINT_STATE_VERSION,
                                             state,
                                         ),
                                     )
@@ -396,7 +398,7 @@ impl Processor for DataSourceProcessor {
                 snapshot.operator_kind
             )));
         }
-        if snapshot.state_version != 1 {
+        if snapshot.state_version != DATASOURCE_CHECKPOINT_STATE_VERSION {
             return Err(ProcessorError::InvalidConfiguration(format!(
                 "unsupported datasource checkpoint state version: {}",
                 snapshot.state_version
