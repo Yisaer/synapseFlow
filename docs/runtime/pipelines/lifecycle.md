@@ -136,6 +136,8 @@ Current persistence behavior:
 - stop writes `stopped` before runtime converge
 - processor-fatal runtime failures persist a runtime failure marker without rewriting desired state
 - upsert preserves the previous desired state when possible
+- scheduled create, upsert, and startup hydration enter `scheduled_stopped`; patrol evaluates the
+  current schedule before writing `scheduled_running` and starting the runtime
 - revision orders artifact definitions; operational start/stop state changes do
   not increment it
 

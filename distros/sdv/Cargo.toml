@@ -26,7 +26,7 @@ itoa = "1"
 ryu = "1"
 arxml_converter = { path = "./arxml_converter" }
 
-chrono = "=0.4.38"  # Pin to version before quarter() method was added
+chrono = "=0.4.42"
 can-dbc = "10"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"

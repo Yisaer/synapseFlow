@@ -206,30 +206,43 @@ allowed to recover a scheduled failed pipeline with a matching runtime failure m
 }
 ```
 
-- `cron: string` (required): 5-field cron expression, `minute hour day-of-month month day-of-week`.
-- `duration_secs: number` (required): run duration after each cron fire. Must be greater than `0`.
+- `cron: string` (optional): Linux-compatible 5-field cron expression evaluated in UTC,
+  `minute hour day-of-month month day-of-week`, or one of the supported recurring nicknames
+  `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`, `@midnight`, and `@hourly`. Day of week
+  uses `0-7`, with both `0` and `7` representing Sunday. If day-of-month and day-of-week are both
+  restricted, either field may match. `@reboot` is not supported.
+- `duration_secs: number` (optional): required when `cron` is present and forbidden without
+  `cron`. It defines the run duration after each cron fire and must be greater than `0`.
 - `datetime_ranges: PipelineDatetimeRangeRequest[]` (optional): absolute UTC timestamp ranges in
-  milliseconds. Missing or empty means no datetime restriction.
+  milliseconds. When cron is absent, at least one range is required and the ranges define the
+  complete run windows.
 
-The effective run window is:
+At least one scheduling mode must be present: `cron` with `duration_secs`, or one or more
+`datetime_ranges`. The effective run window is:
 
 ```text
-[cron_fire, cron_fire + duration_secs) intersect any datetime_range
+cron only:              (cron_fire, cron_fire + duration_secs)
+datetime ranges only:   any (begin_timestamp_ms, end_timestamp_ms)
+cron and ranges:        (cron_fire, cron_fire + duration_secs) intersect any datetime_range
 ```
 
 If `cron` matches but `datetime_ranges` is non-empty and the current timestamp is outside every
 range, the pipeline does not start. If a cron window crosses the end of a matched datetime range,
 the pipeline stops at the range end.
 
+On create, upsert, or process restart, a scheduled pipeline first enters `scheduled_stopped`. The
+patrol scheduler evaluates the current window before starting it.
+
 ### `PipelineDatetimeRangeRequest`
 
-Datetime ranges use `[begin_timestamp_ms, end_timestamp_ms)` semantics.
+Datetime ranges use `(begin_timestamp_ms, end_timestamp_ms)` semantics. Multiple ranges are
+combined with OR semantics.
 
 - `begin_timestamp_ms: number` (required): non-negative Unix timestamp in milliseconds.
 - `end_timestamp_ms: number` (required): non-negative Unix timestamp in milliseconds and greater
   than `begin_timestamp_ms`.
-- At most 128 normalized ranges are accepted. Ranges are sorted and overlapping or adjacent ranges
-  are merged before persistence.
+- At most 128 normalized ranges are accepted. Ranges are sorted and overlapping ranges are merged
+  before persistence. Adjacent ranges remain separate so their shared open boundary stays inactive.
 
 ### `CreatePipelineSinkRequest`
 
@@ -391,14 +404,14 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 
 ### `ScheduleStatus`
 
-- `cron: string`
-- `duration_secs: number`
+- `cron: string` (optional; omitted for datetime-range-only schedules)
+- `duration_secs: number` (optional; omitted for datetime-range-only schedules)
 - `datetime_ranges: PipelineDatetimeRangeRequest[]` (omitted when empty)
 - `in_window: boolean`
 - `previous_fire_at: string` (optional RFC 3339 UTC timestamp)
 - `next_fire_at: string` (optional RFC 3339 UTC timestamp)
-- `auto_stop_at: string` (optional RFC 3339 UTC timestamp). When `datetime_ranges` clips the
-  current cron window, this is the clipped range end.
+- `auto_stop_at: string` (optional RFC 3339 UTC timestamp). For a datetime-range-only schedule this
+  is the active range end. When a datetime range clips a cron window, this is the clipped range end.
 
 ### `ProcessorStatsEntry`
 

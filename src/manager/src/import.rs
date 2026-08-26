@@ -1361,6 +1361,33 @@ mod tests {
     }
 
     #[test]
+    fn validate_snapshot_preserves_datetime_range_only_schedule() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.pipelines[0].definition.options.schedule = Some(
+            serde_json::from_value(serde_json::json!({
+                "datetime_ranges": [{
+                    "begin_timestamp_ms": 1_000,
+                    "end_timestamp_ms": 2_000
+                }]
+            }))
+            .expect("deserialize schedule"),
+        );
+
+        let snapshot = validate_and_build_snapshot(&bundle, None, &is_default_instance)
+            .expect("build snapshot");
+        let normalized =
+            crate::storage_bridge::pipeline_request_from_stored(&snapshot.pipelines[0])
+                .expect("decode normalized pipeline");
+        let schedule = normalized.options.schedule.expect("schedule exists");
+
+        assert_eq!(schedule.cron, None);
+        assert_eq!(schedule.duration_secs, None);
+        assert_eq!(schedule.datetime_ranges.len(), 1);
+        assert_eq!(schedule.datetime_ranges[0].begin_timestamp_ms, 1_000);
+        assert_eq!(schedule.datetime_ranges[0].end_timestamp_ms, 2_000);
+    }
+
+    #[test]
     fn deserialize_pipeline_legacy_scheduled_run_state_as_scheduled_running() {
         let mut value =
             serde_json::to_value(sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a"))

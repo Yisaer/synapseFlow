@@ -853,4 +853,38 @@ mod tests {
             serde_json::to_value(&second_bundle.resources).expect("serialize second resources")
         );
     }
+
+    #[test]
+    fn build_resource_manifest_preserves_datetime_range_only_schedule() {
+        let dir = tempdir().expect("create tempdir");
+        let storage = StorageManager::new(dir.path()).expect("create storage");
+        let mut pipeline = sample_pipeline_request();
+        pipeline.options.schedule = Some(
+            serde_json::from_value(serde_json::json!({
+                "datetime_ranges": [{
+                    "begin_timestamp_ms": 1_000,
+                    "end_timestamp_ms": 2_000
+                }]
+            }))
+            .expect("deserialize schedule"),
+        );
+        storage
+            .create_pipeline(stored_pipeline_from_request(&pipeline).expect("store pipeline"))
+            .expect("create pipeline");
+
+        let manifest = build_resource_manifest(&storage, "test-bundle-1".to_string())
+            .expect("build resource manifest");
+        let schedule = manifest.resources.pipelines[0]
+            .definition
+            .options
+            .schedule
+            .as_ref()
+            .expect("schedule exists");
+
+        assert_eq!(schedule.cron, None);
+        assert_eq!(schedule.duration_secs, None);
+        assert_eq!(schedule.datetime_ranges.len(), 1);
+        assert_eq!(schedule.datetime_ranges[0].begin_timestamp_ms, 1_000);
+        assert_eq!(schedule.datetime_ranges[0].end_timestamp_ms, 2_000);
+    }
 }

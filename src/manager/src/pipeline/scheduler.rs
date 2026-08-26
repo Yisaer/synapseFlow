@@ -1,6 +1,8 @@
 use chrono::Utc;
-use cron::Schedule;
-use std::str::FromStr;
+use croner::{
+    Cron,
+    parser::{CronParser, Seconds, Year},
+};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::{StoredPipelineDesiredState, StoredPipelineRunState};
@@ -9,105 +11,133 @@ use super::runtime_failure::persist_generic_runtime_failure_marker;
 use super::types::{PipelineDatetimeRangeRequest, PipelineScheduleRequest, ScheduleStatus};
 use crate::storage_bridge;
 
-/// Validate a 5-field cron expression.
-pub(crate) fn validate_cron_expression(expr: &str) -> Result<(), String> {
+/// Parse a Linux-compatible 5-field cron expression.
+fn parse_cron_expression(expr: &str) -> Result<Cron, String> {
     let trimmed = expr.trim();
     if trimmed.is_empty() {
         return Err("cron expression must not be empty".to_string());
     }
-    // cron crate uses 7-field (sec min hour dom month dow year) by default.
-    // For 5-field (min hour dom month dow), prepend "0 " for seconds and append " *" for year.
-    let seven_field = format!("0 {} *", trimmed);
-    Schedule::from_str(&seven_field).map_err(|err| format!("invalid cron expression: {err}"))?;
-    Ok(())
-}
 
-/// Parse a 5-field cron expression into a `cron::Schedule`.
-/// Returns None if the expression is empty or invalid.
-fn parse_cron_schedule(expr: &str) -> Option<Schedule> {
-    let trimmed = expr.trim();
-    if trimmed.is_empty() {
-        return None;
+    if trimmed.eq_ignore_ascii_case("@reboot") {
+        return Err("@reboot is not supported for recurring pipeline schedules".to_string());
     }
-    let seven_field = format!("0 {} *", trimmed);
-    Schedule::from_str(&seven_field).ok()
+
+    let normalized = if trimmed.eq_ignore_ascii_case("@midnight") {
+        "@daily"
+    } else {
+        trimmed
+    };
+
+    CronParser::builder()
+        .seconds(Seconds::Disallowed)
+        .year(Year::Disallowed)
+        .build()
+        .parse(normalized)
+        .map_err(|err| format!("invalid cron expression: {err}"))
 }
 
-/// Check whether `now` falls within a scheduling window and return the most
-/// recent cron fire-time that defines the current window.
+/// Validate a Linux-compatible 5-field cron expression.
+pub(crate) fn validate_cron_expression(expr: &str) -> Result<(), String> {
+    parse_cron_expression(expr).map(|_| ())
+}
+
+/// Return the end of the cron window containing `now`.
 ///
-/// A window is [fire, fire + duration_secs). `now` is in-window iff there
-/// exists a cron fire such that fire <= now < fire + duration_secs.
-fn find_active_window(
-    schedule: &Schedule,
+/// A cron window is open on both sides to match eKuiper schedule semantics:
+/// `fire < now < fire + duration_secs`.
+fn active_cron_window_end_ms(
+    schedule: &Cron,
     now: chrono::DateTime<Utc>,
     duration_secs: u64,
-) -> Option<chrono::DateTime<Utc>> {
-    // Search backwards from `now` up to `duration_secs + 60` seconds.
-    let search_start = now - chrono::Duration::seconds(duration_secs as i64 + 60);
-    let upcoming = schedule.after(&search_start);
-    let mut last_fire: Option<chrono::DateTime<Utc>> = None;
-    for fire in upcoming {
-        if fire > now {
-            break;
-        }
-        last_fire = Some(fire);
-    }
-    last_fire.filter(|fire| {
-        let window_end = *fire + chrono::Duration::seconds(duration_secs as i64);
-        now < window_end
-    })
+) -> Result<Option<i64>, String> {
+    let duration_ms = i64::try_from(duration_secs)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| "schedule duration is too large".to_string())?;
+    let search_now = chrono::DateTime::from_timestamp(now.timestamp(), 0)
+        .ok_or_else(|| "schedule evaluation time is out of range".to_string())?;
+    // Cron occurrences have second precision. Include the truncated search second only when
+    // `now` is already past it; at an exact fire boundary, select the preceding occurrence so
+    // an overlapping earlier window remains active.
+    let include_search_second = search_now < now;
+    let Some(fire) = schedule
+        .find_previous_occurrence(&search_now, include_search_second)
+        .ok()
+    else {
+        return Ok(None);
+    };
+    let fire_ms = fire.timestamp_millis();
+    let window_end_ms = fire_ms
+        .checked_add(duration_ms)
+        .ok_or_else(|| "schedule window end is out of range".to_string())?;
+    let now_ms = now.timestamp_millis();
+    Ok((fire < now && now_ms < window_end_ms).then_some(window_end_ms))
 }
 
 fn datetime_range_contains(range: &PipelineDatetimeRangeRequest, timestamp_ms: i64) -> bool {
-    range.begin_timestamp_ms <= timestamp_ms && timestamp_ms < range.end_timestamp_ms
+    range.begin_timestamp_ms < timestamp_ms && timestamp_ms < range.end_timestamp_ms
 }
 
-fn effective_window_end_ms(
+fn active_datetime_range_end_ms(
     schedule_config: &PipelineScheduleRequest,
-    active_fire: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
 ) -> Option<i64> {
-    let cron_window_end_ms =
-        active_fire.timestamp_millis() + (schedule_config.duration_secs as i64) * 1000;
-    if schedule_config.datetime_ranges.is_empty() {
-        return Some(cron_window_end_ms);
-    }
-
     let now_ms = now.timestamp_millis();
     schedule_config
         .datetime_ranges
         .iter()
         .filter(|range| datetime_range_contains(range, now_ms))
-        .map(|range| cron_window_end_ms.min(range.end_timestamp_ms))
+        .map(|range| range.end_timestamp_ms)
         .max()
 }
 
-/// Find the most recent cron fire that is <= `reference`.
-/// Searches backwards up to 2 years; worst case ~1M iterations for minutely
-/// cron but only called from the GET handler, not the hot patrol loop.
-fn find_previous_fire(
-    schedule: &Schedule,
-    reference: chrono::DateTime<Utc>,
-) -> Option<chrono::DateTime<Utc>> {
-    for days_back in 0..(365 * 2) {
-        let search_from = reference - chrono::Duration::days(days_back as i64);
-        let mut upcoming = schedule.after(&search_from);
-        if let Some(first) = upcoming.next() {
-            if first > reference {
-                continue;
-            }
-            let mut last_fire = first;
-            for fire in upcoming {
-                if fire > reference {
-                    return Some(last_fire);
-                }
-                last_fire = fire;
-            }
-            return Some(last_fire);
+struct ScheduleEvaluation {
+    active_window_end_ms: Option<i64>,
+    previous_fire_at: Option<chrono::DateTime<Utc>>,
+    next_fire_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn evaluate_schedule_at(
+    schedule_config: &PipelineScheduleRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<ScheduleEvaluation, String> {
+    let cron = match (&schedule_config.cron, schedule_config.duration_secs) {
+        (Some(expression), Some(duration_secs)) => {
+            Some((parse_cron_expression(expression)?, duration_secs))
         }
-    }
-    None
+        (None, None) if !schedule_config.datetime_ranges.is_empty() => None,
+        (Some(_), None) => return Err("schedule duration is missing".to_string()),
+        (None, Some(_)) => return Err("schedule cron expression is missing".to_string()),
+        (None, None) => return Err("schedule has no run window".to_string()),
+    };
+
+    let active_range_end_ms = active_datetime_range_end_ms(schedule_config, now);
+    let has_datetime_restriction = !schedule_config.datetime_ranges.is_empty();
+
+    let (active_window_end_ms, previous_fire_at, next_fire_at) =
+        if let Some((cron, duration_secs)) = cron {
+            let cron_window_end_ms = active_cron_window_end_ms(&cron, now, duration_secs)?;
+            let active_window_end_ms = cron_window_end_ms.and_then(|cron_end| {
+                if has_datetime_restriction {
+                    active_range_end_ms.map(|range_end| cron_end.min(range_end))
+                } else {
+                    Some(cron_end)
+                }
+            });
+            let search_now = chrono::DateTime::from_timestamp(now.timestamp(), 0)
+                .ok_or_else(|| "schedule evaluation time is out of range".to_string())?;
+            let previous_fire_at = cron.find_previous_occurrence(&search_now, true).ok();
+            let next_fire_at = cron.find_next_occurrence(&search_now, false).ok();
+            (active_window_end_ms, previous_fire_at, next_fire_at)
+        } else {
+            (active_range_end_ms, None, None)
+        };
+
+    Ok(ScheduleEvaluation {
+        active_window_end_ms,
+        previous_fire_at,
+        next_fire_at,
+    })
 }
 
 /// Compute the `ScheduleStatus` for a pipeline at the current time.
@@ -119,25 +149,10 @@ fn compute_schedule_status_at(
     schedule_config: &PipelineScheduleRequest,
     now: chrono::DateTime<Utc>,
 ) -> ScheduleStatus {
-    let cron_schedule = parse_cron_schedule(&schedule_config.cron);
-
-    let next_fire_at = cron_schedule
+    let evaluation = evaluate_schedule_at(schedule_config, now).ok();
+    let active_window_end_ms = evaluation
         .as_ref()
-        .and_then(|s| s.after(&now).next())
-        .map(|t| t.to_rfc3339());
-
-    let previous_fire_at = cron_schedule
-        .as_ref()
-        .and_then(|s| find_previous_fire(s, now))
-        .map(|t| t.to_rfc3339());
-
-    let active_window_end_ms = cron_schedule
-        .as_ref()
-        .and_then(|s| find_active_window(s, now, schedule_config.duration_secs))
-        .and_then(|fire| effective_window_end_ms(schedule_config, fire, now));
-
-    let in_window = active_window_end_ms.is_some();
-
+        .and_then(|evaluation| evaluation.active_window_end_ms);
     let auto_stop_at = active_window_end_ms
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|t| t.to_rfc3339());
@@ -146,9 +161,14 @@ fn compute_schedule_status_at(
         cron: schedule_config.cron.clone(),
         duration_secs: schedule_config.duration_secs,
         datetime_ranges: schedule_config.datetime_ranges.clone(),
-        in_window,
-        previous_fire_at,
-        next_fire_at,
+        in_window: active_window_end_ms.is_some(),
+        previous_fire_at: evaluation
+            .as_ref()
+            .and_then(|evaluation| evaluation.previous_fire_at)
+            .map(|time| time.to_rfc3339()),
+        next_fire_at: evaluation
+            .and_then(|evaluation| evaluation.next_fire_at)
+            .map(|time| time.to_rfc3339()),
         auto_stop_at,
     }
 }
@@ -201,8 +221,18 @@ mod tests {
         datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
     ) -> PipelineScheduleRequest {
         PipelineScheduleRequest {
-            cron: cron.to_string(),
-            duration_secs,
+            cron: Some(cron.to_string()),
+            duration_secs: Some(duration_secs),
+            datetime_ranges,
+        }
+    }
+
+    fn datetime_range_schedule(
+        datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
+    ) -> PipelineScheduleRequest {
+        PipelineScheduleRequest {
+            cron: None,
+            duration_secs: None,
             datetime_ranges,
         }
     }
@@ -286,6 +316,169 @@ mod tests {
                     .to_rfc3339()
             )
         );
+    }
+
+    #[test]
+    fn datetime_range_only_schedule_uses_open_boundaries() {
+        let begin = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 1, 1, 11, 0, 0).unwrap();
+        let req = datetime_range_schedule(vec![PipelineDatetimeRangeRequest {
+            begin_timestamp_ms: begin.timestamp_millis(),
+            end_timestamp_ms: end.timestamp_millis(),
+        }]);
+
+        for (now, expected) in [
+            (begin - chrono::Duration::milliseconds(1), false),
+            (begin, false),
+            (begin + chrono::Duration::milliseconds(1), true),
+            (end, false),
+            (end + chrono::Duration::milliseconds(1), false),
+        ] {
+            assert_eq!(
+                compute_schedule_status_at(&req, now).in_window,
+                expected,
+                "unexpected range-only result at {now}"
+            );
+        }
+
+        let status = compute_schedule_status_at(&req, begin + chrono::Duration::seconds(1));
+        assert_eq!(status.cron, None);
+        assert_eq!(status.duration_secs, None);
+        assert_eq!(status.previous_fire_at, None);
+        assert_eq!(status.next_fire_at, None);
+        assert_eq!(status.auto_stop_at, Some(end.to_rfc3339()));
+    }
+
+    #[test]
+    fn datetime_range_only_schedule_matches_any_range() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let second_end = now + chrono::Duration::hours(1);
+        let req = datetime_range_schedule(vec![
+            PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: (now - chrono::Duration::hours(2)).timestamp_millis(),
+                end_timestamp_ms: (now - chrono::Duration::hours(1)).timestamp_millis(),
+            },
+            PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: (now - chrono::Duration::hours(1)).timestamp_millis(),
+                end_timestamp_ms: second_end.timestamp_millis(),
+            },
+        ]);
+
+        let status = compute_schedule_status_at(&req, now);
+
+        assert!(status.in_window);
+        assert_eq!(status.auto_stop_at, Some(second_end.to_rfc3339()));
+    }
+
+    #[test]
+    fn cron_schedule_uses_open_boundaries() {
+        let fire = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
+        let req = schedule("0 10 * * *", 30, Vec::new());
+
+        assert!(!compute_schedule_status_at(&req, fire).in_window);
+        assert!(
+            compute_schedule_status_at(&req, fire + chrono::Duration::milliseconds(1)).in_window
+        );
+        assert!(!compute_schedule_status_at(&req, fire + chrono::Duration::seconds(30)).in_window);
+    }
+
+    #[test]
+    fn cron_schedule_keeps_overlapping_window_active_at_next_fire() {
+        let next_fire = Utc.with_ymd_and_hms(2026, 1, 1, 10, 10, 0).unwrap();
+        let req = schedule("*/10 * * * *", 15 * 60, Vec::new());
+
+        let at_fire = compute_schedule_status_at(&req, next_fire);
+        assert!(at_fire.in_window);
+        assert_eq!(
+            at_fire.auto_stop_at,
+            Some(
+                Utc.with_ymd_and_hms(2026, 1, 1, 10, 15, 0)
+                    .unwrap()
+                    .to_rfc3339()
+            )
+        );
+
+        let after_fire =
+            compute_schedule_status_at(&req, next_fire + chrono::Duration::milliseconds(1));
+        assert!(after_fire.in_window);
+        assert_eq!(
+            after_fire.auto_stop_at,
+            Some(
+                Utc.with_ymd_and_hms(2026, 1, 1, 10, 25, 0)
+                    .unwrap()
+                    .to_rfc3339()
+            )
+        );
+    }
+
+    #[test]
+    fn linux_weekday_numbers_use_sunday_zero_or_seven_and_monday_one() {
+        let saturday = Utc.with_ymd_and_hms(2026, 1, 3, 23, 59, 0).unwrap();
+        let sunday = Utc.with_ymd_and_hms(2026, 1, 4, 0, 0, 0).unwrap();
+        let monday = Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap();
+
+        for expression in ["0 0 * * 0", "0 0 * * 7"] {
+            let schedule = parse_cron_expression(expression).expect("parse Sunday schedule");
+            assert_eq!(
+                schedule
+                    .find_next_occurrence(&saturday, false)
+                    .expect("find Sunday occurrence"),
+                sunday
+            );
+        }
+
+        let schedule = parse_cron_expression("0 0 * * 1").expect("parse Monday schedule");
+        assert_eq!(
+            schedule
+                .find_next_occurrence(&saturday, false)
+                .expect("find Monday occurrence"),
+            monday
+        );
+    }
+
+    #[test]
+    fn linux_day_of_month_and_day_of_week_use_or_semantics() {
+        let schedule =
+            parse_cron_expression("30 4 1,15 * FRI").expect("parse combined day schedule");
+        let before_month_day = Utc.with_ymd_and_hms(2026, 1, 1, 4, 29, 0).unwrap();
+        let month_day = Utc.with_ymd_and_hms(2026, 1, 1, 4, 30, 0).unwrap();
+        let friday = Utc.with_ymd_and_hms(2026, 1, 2, 4, 30, 0).unwrap();
+
+        assert_eq!(
+            schedule
+                .find_next_occurrence(&before_month_day, false)
+                .expect("find day-of-month occurrence"),
+            month_day
+        );
+        assert_eq!(
+            schedule
+                .find_next_occurrence(&month_day, false)
+                .expect("find day-of-week occurrence"),
+            friday
+        );
+    }
+
+    #[test]
+    fn linux_cron_parser_accepts_supported_forms_and_rejects_invalid_forms() {
+        for expression in [
+            "*/10 8-17 * JAN,MAR MON-FRI",
+            "@yearly",
+            "@annually",
+            "@monthly",
+            "@weekly",
+            "@daily",
+            "@midnight",
+            "@hourly",
+        ] {
+            validate_cron_expression(expression).expect("accept supported cron expression");
+        }
+
+        for expression in ["0 0 * *", "0 0 0 * * *", "0 0 * * 8", "@reboot"] {
+            assert!(
+                validate_cron_expression(expression).is_err(),
+                "expected expression to be rejected: {expression}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -390,6 +583,66 @@ mod tests {
         assert_eq!(marker.revision, 7);
         assert_eq!(marker.processor_kind, "scheduler_auto_start");
     }
+
+    #[tokio::test]
+    async fn patrol_reconciles_active_datetime_range_only_schedule() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = super::super::state::AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        let now_ms = Utc::now().timestamp_millis();
+        let pipeline_req: super::super::types::CreatePipelineRequest =
+            serde_json::from_value(serde_json::json!({
+                "id": "range_only_fail_pipe",
+                "revision": 8,
+                "flow_instance_id": crate::instances::DEFAULT_FLOW_INSTANCE_ID,
+                "sql": "select * from src",
+                "sinks": [{
+                    "id": "sink",
+                    "type": "nop",
+                    "props": { "log": false }
+                }],
+                "options": {
+                    "schedule": {
+                        "datetime_ranges": [{
+                            "begin_timestamp_ms": now_ms - 60_000,
+                            "end_timestamp_ms": now_ms + 60_000
+                        }]
+                    }
+                }
+            }))
+            .expect("decode range-only pipeline request");
+        let stored = storage_bridge::stored_pipeline_from_request(&pipeline_req)
+            .expect("serialize range-only pipeline");
+        state
+            .storage
+            .create_pipeline(stored.clone())
+            .expect("persist range-only pipeline");
+
+        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+
+        let run_state = state
+            .storage
+            .get_pipeline_run_state("range_only_fail_pipe")
+            .expect("read run state")
+            .expect("run state exists");
+        assert_eq!(
+            run_state.desired_state,
+            StoredPipelineDesiredState::ScheduledRunning
+        );
+        let marker = state
+            .storage
+            .get_pipeline_runtime_failure("range_only_fail_pipe")
+            .expect("read failure marker")
+            .expect("failure marker exists");
+        assert_eq!(marker.revision, 8);
+        assert_eq!(marker.processor_kind, "scheduler_auto_start");
+    }
 }
 
 async fn patrol_pipeline(
@@ -411,23 +664,20 @@ async fn patrol_pipeline(
         return;
     };
 
-    let cron_schedule = match parse_cron_schedule(&schedule_config.cron) {
-        Some(s) => s,
-        None => {
+    let now = Utc::now();
+    let evaluation = match evaluate_schedule_at(schedule_config, now) {
+        Ok(evaluation) => evaluation,
+        Err(err) => {
             tracing::warn!(
                 pipeline_id,
-                cron = %schedule_config.cron,
-                "patrol: invalid cron expression"
+                cron = ?schedule_config.cron,
+                %err,
+                "patrol: invalid schedule configuration"
             );
             return;
         }
     };
-
-    let now = Utc::now();
-    let active_window_end_ms =
-        find_active_window(&cron_schedule, now, schedule_config.duration_secs)
-            .and_then(|fire| effective_window_end_ms(schedule_config, fire, now));
-    let in_window = active_window_end_ms.is_some();
+    let in_window = evaluation.active_window_end_ms.is_some();
 
     let expected_desired_state = if in_window {
         StoredPipelineDesiredState::ScheduledRunning
@@ -503,7 +753,7 @@ async fn patrol_pipeline(
 
         tracing::info!(
             pipeline_id,
-            cron = %schedule_config.cron,
+            cron = ?schedule_config.cron,
             "patrol: auto-starting pipeline"
         );
 
@@ -520,7 +770,7 @@ async fn patrol_pipeline(
     } else if !in_window && is_running {
         tracing::info!(
             pipeline_id,
-            cron = %schedule_config.cron,
+            cron = ?schedule_config.cron,
             "patrol: auto-stopping pipeline (scheduled window ended)"
         );
 

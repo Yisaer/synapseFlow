@@ -59,13 +59,14 @@ pub struct UpsertPipelineRequest {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PipelineScheduleRequest {
-    /// 5-field cron expression: "min hour dom month dow".
-    pub cron: String,
-    /// How long each scheduled run lasts, in seconds.
-    /// Must be greater than 0.
-    pub duration_secs: u64,
-    /// Absolute UTC timestamp ranges in which the cron windows are effective.
-    /// Empty means no datetime restriction.
+    /// Optional Linux-compatible 5-field cron expression or supported recurring nickname.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    /// How long each cron-triggered run lasts, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+    /// Absolute UTC timestamp ranges in which the pipeline may run.
+    /// When cron is absent, these ranges define the complete run windows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
 }
@@ -134,7 +135,7 @@ fn normalize_datetime_ranges(ranges: &mut Vec<PipelineDatetimeRangeRequest>) {
 
     for range in ranges.drain(..) {
         if let Some(last) = merged.last_mut()
-            && range.begin_timestamp_ms <= last.end_timestamp_ms
+            && range.begin_timestamp_ms < last.end_timestamp_ms
         {
             last.end_timestamp_ms = last.end_timestamp_ms.max(range.end_timestamp_ms);
             continue;
@@ -196,8 +197,10 @@ pub struct PipelineRuntimeFailureResponse {
 /// Scheduling status for a pipeline (returned in GET response).
 #[derive(Serialize)]
 pub struct ScheduleStatus {
-    pub cron: String,
-    pub duration_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub datetime_ranges: Vec<PipelineDatetimeRangeRequest>,
     /// Whether current time falls within an active scheduling window.
@@ -209,7 +212,7 @@ pub struct ScheduleStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_fire_at: Option<String>,
     /// Timestamp when the current scheduled run will be auto-stopped, in RFC 3339 UTC.
-    /// Only present when in_window is true and the run was started by the scheduler.
+    /// Only present when the current time is inside an effective schedule window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_stop_at: Option<String>,
 }

@@ -73,11 +73,12 @@ pub use model::{Collection, RecordBatch};
 pub use pipeline::{
     CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, HttpBodyConfig,
     HttpMultipartConfig, HttpSinkProps, KuksaSinkProps, KuraSinkProps, MemorySinkProps,
-    MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
-    PipelineOptions, PipelineRuntimeFailure, PipelineScheduleConfig, PipelineScheduleDatetimeRange,
-    PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig,
-    SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
-    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineCronScheduleConfig,
+    PipelineDefinition, PipelineError, PipelineOptions, PipelineRuntimeFailure,
+    PipelineScheduleConfig, PipelineScheduleDatetimeRange, PipelineSnapshot, PipelineStatus,
+    PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig, SinkType, SourceDefinition,
+    SourceInputConfig, SourceInputMode, SourceOnChangeConfig, VideoCodec, VideoContainer,
+    VideoRollingConfig, VideoSinkProps,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};

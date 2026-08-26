@@ -25,8 +25,8 @@ url = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "multipart"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-parquet = "53.0.0"
-arrow = "53.0.0"
+parquet = "54.3.1"
+arrow = "54.3.1"
 kuksa-rust-sdk = "0.2.2"
 http = "1"
 tonic = { version = "0.14", default-features = false, features = ["transport", "channel", "codegen"] }

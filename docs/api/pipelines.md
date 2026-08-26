@@ -55,26 +55,37 @@ manual stop is allowed when the current revision has a matching runtime failure 
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `cron` | string | Required 5-field cron expression: `minute hour day-of-month month day-of-week`. |
-| `duration_secs` | integer | Required run duration after each cron fire. Must be greater than `0`. |
-| `datetime_ranges` | array | Optional UTC timestamp ranges in milliseconds. Missing or empty means no datetime restriction. |
+| `cron` | string | Optional Linux-compatible 5-field cron expression or supported recurring nickname. Expressions are evaluated in UTC. See [Pipeline Schedule Cron Syntax](../syntax/pipeline_schedule_cron.md). |
+| `duration_secs` | integer | Required when `cron` is present and forbidden without `cron`. Must be greater than `0`. |
+| `datetime_ranges` | array | Optional UTC timestamp ranges in milliseconds. When cron is absent, at least one range is required and the ranges define the complete run windows. |
 
-Each datetime range uses `[begin_timestamp_ms, end_timestamp_ms)` semantics:
+At least one scheduling mode must be present: `cron` with `duration_secs`, or one or more
+`datetime_ranges`. Each datetime range uses `(begin_timestamp_ms, end_timestamp_ms)` semantics:
 
 - `begin_timestamp_ms` must be non-negative.
 - `end_timestamp_ms` must be non-negative.
 - `begin_timestamp_ms` must be less than `end_timestamp_ms`.
-- At most 128 normalized ranges are accepted.
+- At most 128 normalized ranges are accepted. Multiple ranges are combined with OR semantics.
 
-The effective run window is the intersection of the cron window and the datetime range set:
+Cron windows also use open boundaries. The effective run window depends on the configured modes:
 
 ```text
-[cron_fire, cron_fire + duration_secs) intersect any datetime_range
+cron only:              (cron_fire, cron_fire + duration_secs)
+datetime ranges only:   any (begin_timestamp_ms, end_timestamp_ms)
+cron and ranges:        (cron_fire, cron_fire + duration_secs) intersect any datetime_range
 ```
+
+Multiple cron windows are combined with OR semantics. When consecutive windows overlap, the
+pipeline remains scheduled to run across the overlap instead of being stopped and restarted at the
+next cron fire.
 
 If the cron window crosses the end of the matched datetime range, the pipeline is stopped at the
 range end. `GET /pipelines/:id` returns `schedule_status.auto_stop_at` as the effective current
 window end, not just the raw cron duration end.
+
+On create, upsert, or process restart, a scheduled pipeline first enters `ScheduledStopped`. The
+patrol scheduler evaluates the current window before starting it; a persisted
+`ScheduledRunning` value is not used to bypass the current schedule.
 
 Scheduled pipeline desired state is stored separately from manual lifecycle state:
 

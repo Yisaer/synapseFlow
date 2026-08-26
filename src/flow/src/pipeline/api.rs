@@ -651,34 +651,43 @@ impl PipelineDefinition {
     }
 }
 
-/// Cron-based schedule configuration for automatic pipeline start/stop.
+/// Schedule configuration for automatic pipeline start/stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineScheduleConfig {
-    /// 5-field cron expression: "min hour dom month dow"
-    pub cron: String,
-    /// How long the pipeline runs after each cron trigger, in seconds.
-    /// Must be greater than 0.
-    pub duration_secs: u64,
-    /// Absolute timestamp ranges in which cron windows may run.
-    /// Empty means no datetime restriction.
+    /// Optional cron window configuration.
+    pub cron: Option<PipelineCronScheduleConfig>,
+    /// Absolute timestamp ranges in which the pipeline may run.
+    /// When cron is absent, these ranges define the complete run windows.
     pub datetime_ranges: Vec<PipelineScheduleDatetimeRange>,
 }
 
 impl PipelineScheduleConfig {
-    pub fn new(cron: impl Into<String>, duration_secs: u64) -> Self {
-        Self {
-            cron: cron.into(),
-            duration_secs,
-            datetime_ranges: Vec::new(),
-        }
-    }
-
-    pub fn with_datetime_ranges(
-        mut self,
+    pub fn new(
+        cron: Option<PipelineCronScheduleConfig>,
         datetime_ranges: Vec<PipelineScheduleDatetimeRange>,
     ) -> Self {
-        self.datetime_ranges = datetime_ranges;
-        self
+        Self {
+            cron,
+            datetime_ranges,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineCronScheduleConfig {
+    /// Linux-compatible 5-field cron expression or supported recurring nickname.
+    pub expression: String,
+    /// How long the pipeline runs after each cron trigger, in seconds.
+    /// Must be greater than 0.
+    pub duration_secs: u64,
+}
+
+impl PipelineCronScheduleConfig {
+    pub fn new(expression: impl Into<String>, duration_secs: u64) -> Self {
+        Self {
+            expression: expression.into(),
+            duration_secs,
+        }
     }
 }
 

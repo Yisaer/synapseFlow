@@ -98,6 +98,20 @@ fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
     }
 }
 
+fn desired_state_after_upsert(
+    is_scheduled: bool,
+    old_desired_state: StoredPipelineDesiredState,
+) -> StoredPipelineDesiredState {
+    match (is_scheduled, old_desired_state) {
+        (true, _) => StoredPipelineDesiredState::ScheduledStopped,
+        (
+            false,
+            StoredPipelineDesiredState::Running | StoredPipelineDesiredState::ScheduledRunning,
+        ) => StoredPipelineDesiredState::Running,
+        (false, _) => StoredPipelineDesiredState::Stopped,
+    }
+}
+
 fn runtime_failure_response(
     failure: &StoredPipelineRuntimeFailure,
 ) -> PipelineRuntimeFailureResponse {
@@ -682,17 +696,8 @@ pub async fn upsert_pipeline_handler(
             .into_response();
     }
 
-    let desired_state = match (create_req.options.schedule.is_some(), old_desired_state) {
-        (true, StoredPipelineDesiredState::ScheduledRunning) => {
-            StoredPipelineDesiredState::ScheduledRunning
-        }
-        (true, _) => StoredPipelineDesiredState::ScheduledStopped,
-        (
-            false,
-            StoredPipelineDesiredState::Running | StoredPipelineDesiredState::ScheduledRunning,
-        ) => StoredPipelineDesiredState::Running,
-        (false, _) => StoredPipelineDesiredState::Stopped,
-    };
+    let desired_state =
+        desired_state_after_upsert(create_req.options.schedule.is_some(), old_desired_state);
 
     if let Err(err) = state
         .storage
@@ -1322,8 +1327,8 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_pipeline_stats_handler, create_pipeline_handler, list_pipelines,
-        start_pipeline_handler,
+        collect_pipeline_stats_handler, create_pipeline_handler, desired_state_after_upsert,
+        list_pipelines, start_pipeline_handler,
     };
     use crate::pipeline::runtime_failure::persist_start_failure_marker;
     use crate::pipeline::{AppState, CreatePipelineRequest, types};
@@ -1343,13 +1348,28 @@ mod tests {
     use flow::connector::SharedMqttClientConfig;
     use flow::pipeline::PipelineError;
     use serde_json::{Map as JsonMap, Value as JsonValue};
-    use storage::{StoredMemoryTopic, StoredMemoryTopicKind, StoredPipelineRuntimeFailure};
+    use storage::{
+        StoredMemoryTopic, StoredMemoryTopicKind, StoredPipelineDesiredState,
+        StoredPipelineRuntimeFailure,
+    };
 
     fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: "default".to_string(),
             ..crate::FlowInstanceSpec::default()
         }
+    }
+
+    #[test]
+    fn scheduled_upsert_resets_previous_running_state() {
+        assert_eq!(
+            desired_state_after_upsert(true, StoredPipelineDesiredState::ScheduledRunning),
+            StoredPipelineDesiredState::ScheduledStopped
+        );
+        assert_eq!(
+            desired_state_after_upsert(true, StoredPipelineDesiredState::Running),
+            StoredPipelineDesiredState::ScheduledStopped
+        );
     }
 
     fn shared_mqtt_cfg(key: &str) -> SharedMqttClientConfig {

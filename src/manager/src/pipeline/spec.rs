@@ -218,14 +218,35 @@ pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(),
         return Err("options.data_channel_capacity must be greater than 0".to_string());
     }
     if let Some(schedule) = &req.options.schedule {
-        if schedule.cron.trim().is_empty() {
-            return Err("options.schedule.cron must not be empty".to_string());
+        match (&schedule.cron, schedule.duration_secs) {
+            (Some(cron), Some(duration_secs)) => {
+                if cron.trim().is_empty() {
+                    return Err("options.schedule.cron must not be empty".to_string());
+                }
+                if duration_secs == 0 {
+                    return Err("options.schedule.duration_secs must be greater than 0".to_string());
+                }
+                crate::pipeline::scheduler::validate_cron_expression(cron)
+                    .map_err(|err| format!("invalid options.schedule.cron: {err}"))?;
+            }
+            (Some(_), None) => {
+                return Err(
+                    "options.schedule.duration_secs is required when cron is present".to_string(),
+                );
+            }
+            (None, Some(_)) => {
+                return Err(
+                    "options.schedule.cron is required when duration_secs is present".to_string(),
+                );
+            }
+            (None, None) if schedule.datetime_ranges.is_empty() => {
+                return Err(
+                    "options.schedule must define cron with duration_secs or datetime_ranges"
+                        .to_string(),
+                );
+            }
+            (None, None) => {}
         }
-        if schedule.duration_secs == 0 {
-            return Err("options.schedule.duration_secs must be greater than 0".to_string());
-        }
-        crate::pipeline::scheduler::validate_cron_expression(&schedule.cron)
-            .map_err(|err| format!("invalid options.schedule.cron: {err}"))?;
         if schedule.datetime_ranges.len() > MAX_SCHEDULE_DATETIME_RANGES {
             return Err(format!(
                 "options.schedule.datetime_ranges must contain at most {MAX_SCHEDULE_DATETIME_RANGES} ranges"
@@ -726,18 +747,24 @@ pub(crate) fn build_pipeline_definition(
         sinks.push(sink_definition);
     }
     let schedule = req.options.schedule.as_ref().map(|s| {
-        flow::pipeline::PipelineScheduleConfig::new(s.cron.trim(), s.duration_secs)
-            .with_datetime_ranges(
-                s.datetime_ranges
-                    .iter()
-                    .map(|range| {
-                        flow::pipeline::PipelineScheduleDatetimeRange::new(
-                            range.begin_timestamp_ms,
-                            range.end_timestamp_ms,
-                        )
-                    })
-                    .collect(),
-            )
+        let cron = s
+            .cron
+            .as_ref()
+            .zip(s.duration_secs)
+            .map(|(cron, duration_secs)| {
+                flow::pipeline::PipelineCronScheduleConfig::new(cron.trim(), duration_secs)
+            });
+        let datetime_ranges = s
+            .datetime_ranges
+            .iter()
+            .map(|range| {
+                flow::pipeline::PipelineScheduleDatetimeRange::new(
+                    range.begin_timestamp_ms,
+                    range.end_timestamp_ms,
+                )
+            })
+            .collect();
+        flow::pipeline::PipelineScheduleConfig::new(cron, datetime_ranges)
     });
     let options = PipelineOptions {
         data_channel_capacity: req.options.data_channel_capacity,
@@ -870,6 +897,72 @@ mod tests {
             }
         }))
         .expect("deserialize pipeline request")
+    }
+
+    fn request_with_schedule(schedule: serde_json::Value) -> CreatePipelineRequest {
+        let mut request = sample_request_with_encoder(json!({ "type": "json" }));
+        request.options.schedule =
+            Some(serde_json::from_value(schedule).expect("deserialize pipeline schedule request"));
+        request
+    }
+
+    #[test]
+    fn validate_schedule_accepts_cron_and_datetime_range_only_modes() {
+        for schedule in [
+            json!({
+                "cron": "*/10 * * * *",
+                "duration_secs": 60
+            }),
+            json!({
+                "datetime_ranges": [{
+                    "begin_timestamp_ms": 1_000,
+                    "end_timestamp_ms": 2_000
+                }]
+            }),
+            json!({
+                "cron": "*/10 * * * *",
+                "duration_secs": 60,
+                "datetime_ranges": [{
+                    "begin_timestamp_ms": 1_000,
+                    "end_timestamp_ms": 2_000
+                }]
+            }),
+        ] {
+            let request = request_with_schedule(schedule);
+            validate_create_request(&request).expect("accept valid schedule mode");
+        }
+    }
+
+    #[test]
+    fn validate_schedule_rejects_incomplete_or_empty_modes() {
+        for (schedule, expected_error) in [
+            (
+                json!({}),
+                "options.schedule must define cron with duration_secs or datetime_ranges",
+            ),
+            (
+                json!({ "cron": "*/10 * * * *" }),
+                "options.schedule.duration_secs is required when cron is present",
+            ),
+            (
+                json!({ "duration_secs": 60 }),
+                "options.schedule.cron is required when duration_secs is present",
+            ),
+            (
+                json!({ "cron": "", "duration_secs": 60 }),
+                "options.schedule.cron must not be empty",
+            ),
+            (
+                json!({ "cron": "*/10 * * * *", "duration_secs": 0 }),
+                "options.schedule.duration_secs must be greater than 0",
+            ),
+        ] {
+            let request = request_with_schedule(schedule);
+            assert_eq!(
+                validate_create_request(&request).expect_err("reject invalid schedule mode"),
+                expected_error
+            );
+        }
     }
 
     #[tokio::test]

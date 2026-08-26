@@ -426,6 +426,16 @@ async fn restore_pipeline(
         .create_pipeline(flow::CreatePipelineRequest::new(def))
         .map_err(|e| e.to_string())?;
 
+    let is_scheduled = req.options.schedule.is_some();
+    if is_scheduled {
+        storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: pipeline.id.clone(),
+                desired_state: storage::StoredPipelineDesiredState::ScheduledStopped,
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
     if let Some(failure) = storage
         .get_pipeline_runtime_failure(&pipeline.id)
         .map_err(|e| e.to_string())?
@@ -445,6 +455,10 @@ async fn restore_pipeline(
         return Ok(());
     }
 
+    if is_scheduled {
+        return Ok(());
+    }
+
     match storage
         .get_pipeline_run_state(&pipeline.id)
         .map_err(|e| e.to_string())?
@@ -453,7 +467,6 @@ async fn restore_pipeline(
             if matches!(
                 state.desired_state,
                 storage::StoredPipelineDesiredState::Running
-                    | storage::StoredPipelineDesiredState::ScheduledRunning
             ) =>
         {
             if let Err(err) = instance.start_pipeline(&pipeline.id).await {
@@ -719,6 +732,30 @@ mod tests {
         .expect("deserialize pipeline request")
     }
 
+    #[test]
+    fn stored_pipeline_roundtrip_preserves_datetime_range_only_schedule() {
+        let mut request = sample_pipeline_request("range_pipe", "range_stream");
+        request.options.schedule = Some(
+            serde_json::from_value(json!({
+                "datetime_ranges": [{
+                    "begin_timestamp_ms": 1_000,
+                    "end_timestamp_ms": 2_000
+                }]
+            }))
+            .expect("deserialize range-only schedule"),
+        );
+
+        let stored = stored_pipeline_from_request(&request).expect("serialize pipeline");
+        let decoded = pipeline_request_from_stored(&stored).expect("deserialize pipeline");
+        let schedule = decoded.options.schedule.expect("schedule exists");
+
+        assert_eq!(schedule.cron, None);
+        assert_eq!(schedule.duration_secs, None);
+        assert_eq!(schedule.datetime_ranges.len(), 1);
+        assert_eq!(schedule.datetime_ranges[0].begin_timestamp_ms, 1_000);
+        assert_eq!(schedule.datetime_ranges[0].end_timestamp_ms, 2_000);
+    }
+
     // Plan-cache behavior is intentionally tested in the flow crate. The manager's storage bridge
     // only restores pipelines from their persisted SQL specification.
     #[tokio::test]
@@ -849,5 +886,62 @@ mod tests {
             .find(|snapshot| snapshot.definition.id() == "failed_pipe")
             .expect("failed pipeline restored");
         assert_eq!(snapshot.status, flow::pipeline::PipelineStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn hydrate_scheduled_pipeline_resets_previous_running_state() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        )
+        .expect("create flow instance");
+        let instances = FlowInstances::new(instance);
+
+        let stream_req = sample_stream_request("scheduled_stream");
+        storage
+            .create_stream(stored_stream_from_request(&stream_req).expect("serialize stream"))
+            .expect("store stream");
+        let mut pipeline_req = sample_pipeline_request("scheduled_pipe", "scheduled_stream");
+        pipeline_req.options.schedule = Some(
+            serde_json::from_value(json!({
+                "datetime_ranges": [{
+                    "begin_timestamp_ms": 1_000,
+                    "end_timestamp_ms": 2_000
+                }]
+            }))
+            .expect("deserialize schedule"),
+        );
+        let stored_pipeline =
+            stored_pipeline_from_request(&pipeline_req).expect("serialize pipeline");
+        storage
+            .create_pipeline(stored_pipeline.clone())
+            .expect("store pipeline");
+        storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: stored_pipeline.id.clone(),
+                desired_state: storage::StoredPipelineDesiredState::ScheduledRunning,
+            })
+            .expect("store scheduled running state");
+
+        hydrate_runtime_from_storage(&storage, &instances)
+            .await
+            .expect("hydrate runtime from storage");
+
+        let run_state = storage
+            .get_pipeline_run_state("scheduled_pipe")
+            .expect("read run state")
+            .expect("run state exists");
+        assert_eq!(
+            run_state.desired_state,
+            storage::StoredPipelineDesiredState::ScheduledStopped
+        );
+        let snapshot = instances
+            .default_instance()
+            .list_pipelines()
+            .into_iter()
+            .find(|snapshot| snapshot.definition.id() == "scheduled_pipe")
+            .expect("scheduled pipeline restored");
+        assert_eq!(snapshot.status, flow::pipeline::PipelineStatus::Stopped);
     }
 }
