@@ -101,41 +101,20 @@ fn build_file_sink_props(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "file sink requires props.path".to_string())?;
-    let filename_prefix = render_connector_string(
+    let filename_pattern = render_connector_string(
         properties,
-        &req.filename_prefix.unwrap_or_default(),
+        &req.filename_pattern
+            .unwrap_or_else(|| flow::connector::sink::file::DEFAULT_FILENAME_PATTERN.to_string()),
         pipeline_id,
         sink_id,
-        "props.filename_prefix",
+        "props.filename_pattern",
     )?;
-    let filename_suffix = render_connector_string(
-        properties,
-        &req.filename_suffix.unwrap_or_default(),
-        pipeline_id,
-        sink_id,
-        "props.filename_suffix",
-    )?;
-    validate_file_name_part("filename_prefix", filename_prefix.expose())?;
-    validate_file_name_part("filename_suffix", filename_suffix.expose())?;
-    if matches!(filename_suffix.expose(), "." | "..") {
-        return Err("file sink filename_suffix must not be `.` or `..`".to_string());
-    }
+    flow::connector::sink::file::validate_filename_pattern(filename_pattern.expose())?;
     let retention = FileRetentionConfig {
         max_file_count: req.retention.max_file_count.unwrap_or(0),
         max_file_age_days: req.retention.max_file_age_days.unwrap_or(0),
     };
-    Ok(FileSinkProps::new(path, filename_prefix)
-        .with_filename_suffix(filename_suffix)
-        .with_retention(retention))
-}
-
-fn validate_file_name_part(field: &str, value: &str) -> Result<(), String> {
-    if value.contains('/') || value.contains('\\') {
-        return Err(format!(
-            "file sink {field} must not contain path separators"
-        ));
-    }
-    Ok(())
+    Ok(FileSinkProps::new(path, filename_pattern).with_retention(retention))
 }
 
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
@@ -1662,8 +1641,7 @@ mod tests {
                     "type": "file",
                     "props": {
                         "path": "/tmp/veloflux-file-sink-test",
-                        "filename_prefix": "speed_",
-                        "filename_suffix": ".json",
+                        "filename_pattern": "speed_{write_start_ms}_{seq}.json",
                         "retention": {
                             "max_file_count": 10,
                             "max_file_age_days": 7
@@ -1692,10 +1670,27 @@ mod tests {
             panic!("expected file sink props");
         };
         assert_eq!(file.path, "/tmp/veloflux-file-sink-test");
-        assert_eq!(file.filename_prefix.expose(), "speed_");
-        assert_eq!(file.filename_suffix.expose(), ".json");
+        assert_eq!(
+            file.filename_pattern.expose(),
+            "speed_{write_start_ms}_{seq}.json"
+        );
         assert_eq!(file.retention.max_file_count, 10);
         assert_eq!(file.retention.max_file_age_days, 7);
+    }
+
+    #[test]
+    fn file_sink_request_rejects_removed_filename_affixes() {
+        let result = serde_json::from_value::<FileSinkPropsRequest>(json!({
+            "path": "/tmp/veloflux-file-sink-test",
+            "filename_prefix": "speed_",
+            "filename_suffix": ".json"
+        }));
+        let error = match result {
+            Ok(_) => panic!("removed file name affixes must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[tokio::test]
@@ -1714,8 +1709,7 @@ mod tests {
                 "type": "file",
                 "props": {
                     "path": "/tmp/veloflux-file-properties",
-                    "filename_prefix": "vehicle_{{ prop(\"vin\") }}_",
-                    "filename_suffix": ".{{ prop(\"format\") }}"
+                    "filename_pattern": "vehicle_{{ prop(\"vin\") }}_{write_start_ms}_{seq}.{{ prop(\"format\") }}"
                 },
                 "encoder": { "type": "json" }
             }],
@@ -1736,10 +1730,11 @@ mod tests {
             panic!("expected file sink");
         };
 
-        assert_eq!(file.filename_prefix.expose(), "vehicle_VIN-123_");
-        assert_eq!(file.filename_suffix.expose(), ".json");
-        assert!(file.filename_prefix.is_sensitive());
-        assert!(file.filename_suffix.is_sensitive());
+        assert_eq!(
+            file.filename_pattern.expose(),
+            "vehicle_VIN-123_{write_start_ms}_{seq}.json"
+        );
+        assert!(file.filename_pattern.is_sensitive());
     }
 
     #[tokio::test]
@@ -1758,8 +1753,7 @@ mod tests {
                 "type": "file",
                 "props": {
                     "path": "/tmp/veloflux-file-properties",
-                    "filename_prefix": "{{ prop(\"vin\") }}_",
-                    "filename_suffix": ".json"
+                    "filename_pattern": "{{ prop(\"vin\") }}_{write_start_ms}_{seq}.json"
                 },
                 "encoder": { "type": "json" }
             }],
@@ -1777,7 +1771,7 @@ mod tests {
             build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
                 .expect_err("rendered path separator should fail");
 
-        assert!(err.contains("filename_prefix must not contain path separators"));
+        assert!(err.contains("filename_pattern must not contain path separators"));
         assert!(!err.contains("bad/name"));
     }
 
@@ -1795,7 +1789,7 @@ mod tests {
                     "type": "file",
                     "props": {
                         "path": "/tmp/veloflux-file-sink-test",
-                        "filename_suffix": ".json.gz.vfe"
+                        "filename_pattern": "{write_start_ms}_{seq}.json.gz.vfe"
                     },
                     "delivery": {
                         "compression": {

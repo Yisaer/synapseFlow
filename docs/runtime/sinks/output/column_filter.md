@@ -44,7 +44,10 @@ Add `include_columns` and `exclude_columns` as mutually exclusive fields under `
     {
       "id": "file_all",
       "type": "file",
-      "props": { "path": "/data", "filename_prefix": "vehicle_" },
+      "props": {
+        "path": "/data",
+        "filename_pattern": "vehicle_{write_start_ms}_{seq}"
+      },
       "encoder": { "type": "json" },
       "output": {}
     },

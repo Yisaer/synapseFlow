@@ -25,8 +25,7 @@ The initial template-enabled connector fields are:
 - MQTT sink `props.user_properties[].value`;
 - HTTP sink `props.headers.*` values;
 - HTTP multipart `props.body.fields.*` values.
-- File sink `props.filename_prefix`;
-- File sink `props.filename_suffix`.
+- File sink `props.filename_pattern`.
 
 Other connector fields are not interpreted as templates and retain their
 literal configuration value. In particular, HTTP `auth` and `secret_headers`

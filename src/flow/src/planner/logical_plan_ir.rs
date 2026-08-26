@@ -474,12 +474,8 @@ fn file_sink_from_ir_settings(
     if path.trim().is_empty() {
         return Err("file sink settings missing path".to_string());
     }
-    let filename_prefix = file_name_affix_from_ir(obj, "filename_prefix")?;
-    let filename_suffix = file_name_affix_from_ir(obj, "filename_suffix")?;
-    crate::connector::sink::file::validate_file_name_affixes(
-        filename_prefix.expose(),
-        filename_suffix.expose(),
-    )?;
+    let filename_pattern = file_name_pattern_from_ir(obj)?;
+    crate::connector::sink::file::validate_filename_pattern(filename_pattern.expose())?;
     let retention = obj.get("retention").and_then(|v| v.as_object());
     let max_file_count = retention
         .and_then(|retention| retention.get("max_file_count"))
@@ -494,8 +490,7 @@ fn file_sink_from_ir_settings(
         sink_name,
         pipeline_id,
         path,
-        filename_prefix,
-        filename_suffix,
+        filename_pattern,
         retention: crate::connector::sink::file::FileRetentionConfig {
             max_file_count,
             max_file_age_days,
@@ -503,21 +498,23 @@ fn file_sink_from_ir_settings(
     })
 }
 
-fn file_name_affix_from_ir(
+fn file_name_pattern_from_ir(
     settings: &JsonMap<String, JsonValue>,
-    field: &str,
 ) -> Result<crate::ConnectorString, String> {
-    match settings.get(field) {
-        None => Ok(crate::ConnectorString::plain("")),
+    const FIELD: &str = "filename_pattern";
+    match settings.get(FIELD) {
+        None => Ok(crate::ConnectorString::plain(
+            crate::connector::sink::file::DEFAULT_FILENAME_PATTERN,
+        )),
         Some(JsonValue::String(value)) => Ok(crate::ConnectorString::plain(value.clone())),
         Some(JsonValue::Object(marker))
             if marker.get("sensitive").and_then(JsonValue::as_bool) == Some(true) =>
         {
             Err(format!(
-                "file sink settings {field} contains a redacted sensitive value and cannot be restored"
+                "file sink settings {FIELD} contains a redacted sensitive value and cannot be restored"
             ))
         }
-        Some(_) => Err(format!("file sink settings {field} must be a string")),
+        Some(_) => Err(format!("file sink settings {FIELD} must be a string")),
     }
 }
 
@@ -1090,8 +1087,7 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "sink_name": cfg.sink_name,
                 "pipeline_id": cfg.pipeline_id,
                 "path": cfg.path,
-                "filename_prefix": connector_string_to_ir(&cfg.filename_prefix),
-                "filename_suffix": connector_string_to_ir(&cfg.filename_suffix),
+                "filename_pattern": connector_string_to_ir(&cfg.filename_pattern),
                 "retention": {
                     "max_file_count": cfg.retention.max_file_count,
                     "max_file_age_days": cfg.retention.max_file_age_days,
@@ -1296,8 +1292,7 @@ mod tests {
             sink_name: "sink_1".to_string(),
             pipeline_id: "pipe_1".to_string(),
             path: "/tmp/vf-file".to_string(),
-            filename_prefix: "speed_".into(),
-            filename_suffix: ".json".into(),
+            filename_pattern: "speed_{write_start_ms}_{seq}.json".into(),
             retention: crate::connector::sink::file::FileRetentionConfig {
                 max_file_count: 10,
                 max_file_age_days: 7,
@@ -1311,31 +1306,30 @@ mod tests {
         assert_eq!(decoded.sink_name, "sink_1");
         assert_eq!(decoded.pipeline_id, "pipe_1");
         assert_eq!(decoded.path, "/tmp/vf-file");
-        assert_eq!(decoded.filename_prefix.expose(), "speed_");
-        assert_eq!(decoded.filename_suffix.expose(), ".json");
+        assert_eq!(
+            decoded.filename_pattern.expose(),
+            "speed_{write_start_ms}_{seq}.json"
+        );
         assert_eq!(decoded.retention.max_file_count, 10);
         assert_eq!(decoded.retention.max_file_age_days, 7);
     }
 
     #[test]
-    fn file_sink_ir_redacts_sensitive_filename_affixes() {
+    fn file_sink_ir_redacts_sensitive_filename_pattern() {
         let connector = SinkConnectorConfig::File(crate::connector::sink::file::FileSinkConfig {
             sink_name: "sink_1".to_string(),
             pipeline_id: "pipe_1".to_string(),
             path: "/tmp/vf-file".to_string(),
-            filename_prefix: crate::ConnectorString::sensitive("VIN-123_"),
-            filename_suffix: crate::ConnectorString::sensitive(".private"),
+            filename_pattern: crate::ConnectorString::sensitive(
+                "VIN-123_{write_start_ms}_{seq}.private",
+            ),
             retention: crate::connector::sink::file::FileRetentionConfig::default(),
         });
 
         let (_, settings) = connector_to_ir(&connector);
 
         assert_eq!(
-            settings.get("filename_prefix"),
-            Some(&serde_json::json!({ "sensitive": true }))
-        );
-        assert_eq!(
-            settings.get("filename_suffix"),
+            settings.get("filename_pattern"),
             Some(&serde_json::json!({ "sensitive": true }))
         );
         assert!(!settings.to_string().contains("VIN-123"));
@@ -1343,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn file_sink_ir_defaults_missing_filename_affixes() {
+    fn file_sink_ir_defaults_missing_filename_pattern() {
         let settings = serde_json::json!({
             "sink_name": "sink_1",
             "pipeline_id": "pipe_1",
@@ -1352,16 +1346,15 @@ mod tests {
 
         let decoded = file_sink_from_ir_settings(&settings).expect("decode file sink config");
 
-        assert_eq!(decoded.filename_prefix.expose(), "");
-        assert_eq!(decoded.filename_suffix.expose(), "");
+        assert_eq!(
+            decoded.filename_pattern.expose(),
+            crate::connector::sink::file::DEFAULT_FILENAME_PATTERN
+        );
     }
 
     #[test]
-    fn file_sink_ir_rejects_non_string_filename_affixes() {
-        for (field, value) in [
-            ("filename_prefix", serde_json::json!(123)),
-            ("filename_suffix", serde_json::json!([".json"])),
-        ] {
+    fn file_sink_ir_rejects_non_string_filename_pattern() {
+        for value in [serde_json::json!(123), serde_json::json!([".json"])] {
             let mut settings = serde_json::json!({
                 "sink_name": "sink_1",
                 "pipeline_id": "pipe_1",
@@ -1370,37 +1363,32 @@ mod tests {
             settings
                 .as_object_mut()
                 .expect("settings object")
-                .insert(field.to_string(), value);
+                .insert("filename_pattern".to_string(), value);
 
             let err = file_sink_from_ir_settings(&settings)
-                .expect_err("non-string affix must be rejected");
+                .expect_err("non-string pattern must be rejected");
             assert!(
-                err.contains(&format!("{field} must be a string")),
-                "unexpected error for {field}: {err}"
+                err.contains("filename_pattern must be a string"),
+                "unexpected error: {err}"
             );
         }
     }
 
     #[test]
-    fn file_sink_ir_rejects_redacted_sensitive_filename_affixes() {
-        for field in ["filename_prefix", "filename_suffix"] {
-            let mut settings = serde_json::json!({
-                "sink_name": "sink_1",
-                "pipeline_id": "pipe_1",
-                "path": "/tmp/vf-file"
-            });
-            settings
-                .as_object_mut()
-                .expect("settings object")
-                .insert(field.to_string(), serde_json::json!({ "sensitive": true }));
+    fn file_sink_ir_rejects_redacted_sensitive_filename_pattern() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": "/tmp/vf-file",
+            "filename_pattern": { "sensitive": true }
+        });
 
-            let err = file_sink_from_ir_settings(&settings)
-                .expect_err("redacted sensitive affix must not be restored as empty");
-            assert!(
-                err.contains(&format!("{field} contains a redacted sensitive value")),
-                "unexpected error for {field}: {err}"
-            );
-        }
+        let err = file_sink_from_ir_settings(&settings)
+            .expect_err("redacted sensitive pattern must not be restored as default");
+        assert!(
+            err.contains("filename_pattern contains a redacted sensitive value"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1408,8 +1396,7 @@ mod tests {
         let settings = serde_json::json!({
             "sink_name": "sink_1",
             "path": "/tmp/vf-file",
-            "filename_prefix": "speed_",
-            "filename_suffix": ".json"
+            "filename_pattern": "speed_{write_start_ms}_{seq}.json"
         });
 
         let err = file_sink_from_ir_settings(&settings).expect_err("missing pipeline_id");
@@ -1426,8 +1413,7 @@ mod tests {
             "sink_name": "sink_1",
             "pipeline_id": " ",
             "path": "/tmp/vf-file",
-            "filename_prefix": "speed_",
-            "filename_suffix": ".json"
+            "filename_pattern": "speed_{write_start_ms}_{seq}.json"
         });
 
         let err = file_sink_from_ir_settings(&settings).expect_err("empty pipeline_id");
@@ -1444,8 +1430,7 @@ mod tests {
             "sink_name": "sink_1",
             "pipeline_id": "pipe_1",
             "path": " ",
-            "filename_prefix": "speed_",
-            "filename_suffix": ".json"
+            "filename_pattern": "speed_{write_start_ms}_{seq}.json"
         });
 
         let err = file_sink_from_ir_settings(&settings).expect_err("empty path");
@@ -1454,58 +1439,53 @@ mod tests {
     }
 
     #[test]
-    fn file_sink_ir_rejects_filename_prefix_path_separator() {
+    fn file_sink_ir_rejects_filename_pattern_path_separator() {
         let settings = serde_json::json!({
             "sink_name": "sink_1",
             "pipeline_id": "pipe_1",
             "path": "/tmp/vf-file",
-            "filename_prefix": "speed/",
-            "filename_suffix": ".json"
+            "filename_pattern": "speed/{write_start_ms}_{seq}.json"
         });
 
-        let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_prefix");
+        let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_pattern");
 
         assert!(
-            err.contains("filename_prefix must not contain path separators"),
+            err.contains("filename_pattern must not contain path separators"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn file_sink_ir_rejects_filename_suffix_path_separator() {
+    fn file_sink_ir_rejects_unknown_filename_pattern_placeholder() {
         let settings = serde_json::json!({
             "sink_name": "sink_1",
             "pipeline_id": "pipe_1",
             "path": "/tmp/vf-file",
-            "filename_prefix": "speed_",
-            "filename_suffix": "/data.json"
+            "filename_pattern": "speed_{unknown}_{seq}.json"
         });
 
-        let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_suffix");
+        let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_pattern");
 
         assert!(
-            err.contains("filename_suffix must not contain path separators"),
+            err.contains("unsupported placeholder `{unknown}`"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn file_sink_ir_rejects_reserved_filename_suffix() {
-        for suffix in [".", ".."] {
-            let settings = serde_json::json!({
-                "sink_name": "sink_1",
-                "pipeline_id": "pipe_1",
-                "path": "/tmp/vf-file",
-                "filename_prefix": "speed_",
-                "filename_suffix": suffix
-            });
+    fn file_sink_ir_rejects_filename_pattern_without_seq() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": "/tmp/vf-file",
+            "filename_pattern": "speed_{write_start_ms}.json"
+        });
 
-            let err = file_sink_from_ir_settings(&settings).expect_err("invalid filename_suffix");
+        let err = file_sink_from_ir_settings(&settings).expect_err("missing seq");
 
-            assert!(
-                err.contains("filename_suffix must not be `.` or `..`"),
-                "unexpected error for suffix {suffix}: {err}"
-            );
-        }
+        assert!(
+            err.contains("must contain `{seq}`"),
+            "unexpected error: {err}"
+        );
     }
 }

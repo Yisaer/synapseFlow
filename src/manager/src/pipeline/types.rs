@@ -659,11 +659,10 @@ pub struct MemorySinkPropsRequest {
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FileSinkPropsRequest {
     pub path: Option<String>,
-    pub filename_prefix: Option<String>,
-    pub filename_suffix: Option<String>,
+    pub filename_pattern: Option<String>,
     pub retention: FileRetentionConfigRequest,
 }
 

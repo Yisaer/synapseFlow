@@ -11,8 +11,7 @@ the connector does not inspect rows, schema, output mode, or encoder format.
   "type": "file",
   "props": {
     "path": "/var/lib/veloflux/output",
-    "filename_prefix": "speed_",
-    "filename_suffix": ".json",
+    "filename_pattern": "speed_{write_start_ms}_{write_end_ms}_{seq}.json",
     "retention": {
       "max_file_count": 100,
       "max_file_age_days": 7
@@ -33,9 +32,8 @@ the connector does not inspect rows, schema, output mode, or encoder format.
 |----------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Must be `file`. |
 | `props.path` | string | Yes | - | Local output directory. |
-| `props.filename_prefix` | string | No | `""` | Prefix before the timestamp. It may use static property templates, may be empty, and must not render path separators. |
-| `props.filename_suffix` | string | No | `""` | Suffix after the sequence. It may use static property templates, may be empty, and must not render path separators. |
-| `props.retention.max_file_count` | integer | No | `0` | Maximum generated files to keep for this prefix/suffix scope. `0` disables count pruning. |
+| `props.filename_pattern` | string | No | `"{write_start_ms}_{seq}"` | Complete final filename pattern. It may use static property templates and the runtime placeholders described below. |
+| `props.retention.max_file_count` | integer | No | `0` | Maximum generated files to keep for this filename pattern scope. `0` disables count pruning. |
 | `props.retention.max_file_age_days` | integer | No | `0` | Maximum generated file age in days. `0` disables age pruning. |
 | `encoder.type` | string | No | `json` | Encoder kind. `none` is rejected for file sinks. |
 
@@ -50,13 +48,13 @@ PhysicalSinkEncoder -> EncodedDelivery -> FileSinkConnector delivery -> one file
 The file sink does not add delimiters, newlines, headers, or framing. If the output should be
 newline-delimited JSON or another framed format, that behavior belongs to the encoder.
 
-For CSV output, select the built-in CSV encoder and choose a `.csv` suffix explicitly:
+For CSV output, select the built-in CSV encoder and include a `.csv` extension explicitly:
 
 ```json
 {
   "props": {
     "path": "/var/lib/veloflux/output",
-    "filename_suffix": ".csv"
+    "filename_pattern": "{write_start_ms}_{seq}.csv"
   },
   "encoder": {
     "type": "csv",
@@ -102,43 +100,51 @@ rolling behavior consistent across sink types that share common batching.
 
 ## Filename Format
 
-Generated filenames use:
+The default filename pattern is:
 
 ```text
-{filename_prefix}{ts_ms}_{seq}{filename_suffix}
+{write_start_ms}_{seq}
 ```
 
-Example:
-
-```text
-speed_1779945123456_000001.json
-speed_1779945123456_000002.json
-```
-
-`ts_ms` is the file sink wall-clock UTC epoch milliseconds when the payload write starts. `seq` is a
-six-digit collision retry sequence in the same timestamp bucket.
-
-`filename_prefix` and `filename_suffix` are fixed affixes:
-
-- `filename_prefix: "speed_"` includes the separator before the timestamp.
-- `filename_prefix: ""` produces names such as `1779945123456_000001.json`.
-- `filename_suffix: ".jsonl.gz"` is allowed.
-- `filename_suffix: ""` intentionally produces extension-less files such as
-  `speed_1779945123456_000001`.
-
-Both affixes support process-wide static property templates:
+For example, this pattern includes both ends of the successful write attempt:
 
 ```json
 {
-  "filename_prefix": "vehicle_{{ prop(\"vin\") }}_",
-  "filename_suffix": ".{{ prop(\"format\") }}"
+  "filename_pattern": "speed_{write_start_ms}_{write_end_ms}_{seq}.json"
 }
 ```
 
-Templates are rendered once when the pipeline is applied. The rendered affixes
-must satisfy the normal filename validation: neither may contain `/` or `\`,
-and the suffix must not be `.` or `..`. `props.path` remains literal and is not
-template-enabled.
+It produces names such as:
+
+```text
+speed_1779945123456_1779945123472_000001.json
+speed_1779945123456_1779945123472_000002.json
+```
+
+Supported runtime placeholders are:
+
+- `{write_start_ms}`: wall-clock Unix epoch milliseconds captured when the delivery write starts.
+- `{write_end_ms}`: wall-clock Unix epoch milliseconds captured after the temporary file has been
+  fully written and flushed, before the final name is published.
+- `{seq}`: a six-digit collision retry sequence. This placeholder is required so existing files are
+  never overwritten.
+
+The pattern must contain `{seq}` and at least one of `{write_start_ms}` or `{write_end_ms}`. Each
+placeholder may appear at most once. Placeholders must be separated by literal text so generated
+names can be matched unambiguously for retention. Unknown placeholders, path separators, empty
+patterns, and the reserved names `.` and `..` are rejected.
+
+The pattern also supports process-wide static property templates:
+
+```json
+{
+  "filename_pattern": "vehicle_{{ prop(\"vin\") }}_{write_start_ms}_{seq}.{{ prop(\"format\") }}"
+}
+```
+
+Static property expressions are rendered once when the pipeline is applied. The remaining runtime
+filename pattern is validated and compiled after static rendering. `props.path` remains literal and
+is not template-enabled.
 
 Rendered property values remain redacted in internal configuration,
 diagnostics, and planner IR. The resulting filename is necessarily plaintext
@@ -173,13 +179,13 @@ copy-and-delete because that can expose partial final files.
 
 Retention runs after a file is successfully finalized.
 
-Pruning is scoped to generated final files in the same directory with the same literal
-`filename_prefix` and `filename_suffix`. It ignores `.veloflux_tmp/` and unrelated names.
+Pruning is scoped to generated final files in the same directory that match the compiled
+`filename_pattern`. It ignores `.veloflux_tmp/` and unrelated names.
 
-Pipelines that share a directory, prefix, and suffix share retention pruning. Empty
-`filename_prefix` is broad: it matches all generated names shaped like `{ts_ms}_{seq}{suffix}` in the
-directory. Use separate output directories or non-empty prefixes when independent retention is
-required.
+Pipelines that share a directory and filename pattern share retention pruning. Use separate output
+directories or distinct literal text in each pattern when independent retention is required. Count
+retention sorts matching files by `{write_start_ms}` when present, otherwise `{write_end_ms}`, then
+by `{seq}`. Age retention continues to use filesystem modification time.
 
 Retention is best-effort under concurrent writers and tolerates files disappearing between directory
 scan and delete.

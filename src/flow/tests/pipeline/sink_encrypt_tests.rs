@@ -240,10 +240,10 @@ async fn run_file_pipeline(
     let mut sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "enc_")
-                .with_filename_suffix(suffix),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            format!("enc_{{write_start_ms}}_{{seq}}{suffix}"),
+        )),
     )
     .with_encryption(encryption);
     if let Some(compression) = compression {

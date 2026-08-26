@@ -86,13 +86,10 @@ async fn memory_source_feeds_file_sink_pipeline() {
     let sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(
-                output_dir.path().to_string_lossy(),
-                ConnectorString::sensitive("VIN-123_"),
-            )
-            .with_filename_suffix(ConnectorString::sensitive(".json")),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            ConnectorString::sensitive("VIN-123_{write_start_ms}_{seq}.json"),
+        )),
     );
     let pipeline = PipelineDefinition::new(
         pipeline_id,
@@ -180,10 +177,10 @@ async fn csv_encoder_writes_parseable_file_delivery() {
     let sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "values_")
-                .with_filename_suffix(".csv"),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            "values_{write_start_ms}_{seq}.csv",
+        )),
     )
     .with_encoder(SinkEncoderConfig::new("csv", encoder_props));
     let pipeline = PipelineDefinition::new(
@@ -282,10 +279,10 @@ async fn file_sink_rolls_files_by_common_batch_count() {
     let sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "speed_")
-                .with_filename_suffix(".json"),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            "speed_{write_start_ms}_{seq}.json",
+        )),
     )
     .with_common_props(CommonSinkProps {
         batch_count: Some(2),

@@ -81,10 +81,10 @@ async fn memory_source_gzip_compress_file_sink_roundtrips() {
     let sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "gzip_")
-                .with_filename_suffix(".json.gz"),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            "gzip_{write_start_ms}_{seq}.json.gz",
+        )),
     )
     .with_compression(CompressionCodec::gzip());
 
@@ -182,10 +182,10 @@ async fn memory_source_zstd_compress_file_sink_roundtrips() {
     let sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "zstd_")
-                .with_filename_suffix(".json.zst"),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            "zstd_{write_start_ms}_{seq}.json.zst",
+        )),
     )
     .with_compression(CompressionCodec::zstd());
 
@@ -278,10 +278,10 @@ async fn gzip_compress_batch_count_matches_uncompressed_delivery_count() {
     let sink = SinkDefinition::new(
         "file_sink",
         SinkType::File,
-        SinkProps::File(
-            FileSinkProps::new(output_dir.path().to_string_lossy(), "batch_")
-                .with_filename_suffix(".json.gz"),
-        ),
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            "batch_{write_start_ms}_{seq}.json.gz",
+        )),
     )
     .with_compression(CompressionCodec::gzip())
     .with_common_props(CommonSinkProps {

@@ -204,8 +204,7 @@ fn create_pipeline(
             "type": "file",
             "props": {
                 "path": path,
-                "filename_prefix": "packed_",
-                "filename_suffix": ".json"
+                "filename_pattern": "packed_{write_start_ms}_{seq}.json"
             },
             "encoder": { "type": "json", "props": {} }
         }),

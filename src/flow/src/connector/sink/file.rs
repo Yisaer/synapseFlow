@@ -12,14 +12,14 @@ use uuid::Uuid;
 
 const TMP_DIR_NAME: &str = ".veloflux_tmp";
 const MAX_SEQUENCE: u32 = 999_999;
+pub const DEFAULT_FILENAME_PATTERN: &str = "{write_start_ms}_{seq}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSinkConfig {
     pub sink_name: String,
     pub pipeline_id: String,
     pub path: String,
-    pub filename_prefix: crate::ConnectorString,
-    pub filename_suffix: crate::ConnectorString,
+    pub filename_pattern: crate::ConnectorString,
     pub retention: FileRetentionConfig,
 }
 
@@ -40,7 +40,32 @@ struct FileDeliveryState {
     tmp_path: PathBuf,
     file: File,
     bytes_written: u64,
-    ts_ms: u128,
+    write_start_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilenamePlaceholder {
+    WriteStartMs,
+    WriteEndMs,
+    Sequence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FilenamePatternSegment {
+    Literal(String),
+    Placeholder(FilenamePlaceholder),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompiledFilenamePattern {
+    segments: Vec<FilenamePatternSegment>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FilenameCaptures {
+    write_start_ms: Option<u128>,
+    write_end_ms: Option<u128>,
+    seq: Option<u32>,
 }
 
 impl FileSinkConnector {
@@ -67,11 +92,8 @@ impl FileSinkConnector {
 
     fn validate_config(&self) -> Result<(), SinkConnectorError> {
         validate_file_sink_path(&self.config.path)?;
-        validate_file_name_affixes(
-            self.config.filename_prefix.expose(),
-            self.config.filename_suffix.expose(),
-        )
-        .map_err(SinkConnectorError::Other)?;
+        validate_filename_pattern(self.config.filename_pattern.expose())
+            .map_err(SinkConnectorError::Other)?;
         Ok(())
     }
 
@@ -189,10 +211,13 @@ impl FileSinkConnector {
     fn finalize_tmp_file(
         &self,
         tmp_path: &Path,
-        ts_ms: u128,
+        write_start_ms: u128,
+        write_end_ms: u128,
     ) -> Result<PathBuf, SinkConnectorError> {
+        let pattern = compile_filename_pattern(self.config.filename_pattern.expose())
+            .map_err(SinkConnectorError::Other)?;
         for seq in 1..=MAX_SEQUENCE {
-            let final_path = self.final_path(ts_ms, seq);
+            let final_path = self.final_path(&pattern, write_start_ms, write_end_ms, seq);
             // Link-after-write gives atomic final-name visibility and fails if the target exists.
             match fs::hard_link(tmp_path, &final_path) {
                 Ok(()) => {
@@ -220,24 +245,24 @@ impl FileSinkConnector {
         }
 
         Err(SinkConnectorError::Other(format!(
-            "file sink `{}` exhausted filename sequence for timestamp {ts_ms}",
-            self.id
+            "file sink `{}` exhausted filename sequence for write range {write_start_ms}..{write_end_ms}",
+            self.id,
         )))
     }
 
-    fn final_path(&self, ts_ms: u128, seq: u32) -> PathBuf {
-        self.output_dir().join(format!(
-            "{}{}_{:06}{}",
-            self.config.filename_prefix.expose(),
-            ts_ms,
-            seq,
-            self.config.filename_suffix.expose()
-        ))
+    fn final_path(
+        &self,
+        pattern: &CompiledFilenamePattern,
+        write_start_ms: u128,
+        write_end_ms: u128,
+        seq: u32,
+    ) -> PathBuf {
+        self.output_dir()
+            .join(pattern.render(write_start_ms, write_end_ms, seq))
     }
 
     fn final_path_for_diagnostics<'a>(&self, path: &'a Path) -> Cow<'a, str> {
-        if self.config.filename_prefix.is_sensitive() || self.config.filename_suffix.is_sensitive()
-        {
+        if self.config.filename_pattern.is_sensitive() {
             Cow::Borrowed("<redacted>")
         } else {
             Cow::Owned(path.display().to_string())
@@ -251,6 +276,8 @@ impl FileSinkConnector {
         }
 
         let output_dir = self.output_dir();
+        let pattern = compile_filename_pattern(self.config.filename_pattern.expose())
+            .map_err(SinkConnectorError::Other)?;
         let mut files = Vec::new();
         for entry in fs::read_dir(&output_dir).map_err(|err| {
             SinkConnectorError::Other(format!(
@@ -273,7 +300,7 @@ impl FileSinkConnector {
             let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            let Some((ts_ms, seq)) = self.generated_filename_parts(file_name) else {
+            let Some(captures) = pattern.captures(file_name) else {
                 continue;
             };
             let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
@@ -291,12 +318,17 @@ impl FileSinkConnector {
             files.push(RetentionFile {
                 path,
                 modified,
-                ts_ms,
-                seq,
+                sort_ms: captures
+                    .write_start_ms
+                    .or(captures.write_end_ms)
+                    .expect("validated filename pattern contains a write timestamp"),
+                seq: captures
+                    .seq
+                    .expect("validated filename pattern contains seq"),
             });
         }
 
-        files.sort_by_key(|file| (file.ts_ms, file.seq));
+        files.sort_by_key(|file| (file.sort_ms, file.seq));
 
         if retention.max_file_age_days > 0 {
             let cutoff = SystemTime::now()
@@ -327,20 +359,6 @@ impl FileSinkConnector {
         }
 
         Ok(())
-    }
-
-    fn generated_filename_parts(&self, file_name: &str) -> Option<(u128, u32)> {
-        let rest = file_name.strip_prefix(self.config.filename_prefix.expose())?;
-        let middle = rest.strip_suffix(self.config.filename_suffix.expose())?;
-        let (ts, seq) = middle.rsplit_once('_')?;
-        if ts.is_empty()
-            || !ts.bytes().all(|byte| byte.is_ascii_digit())
-            || seq.len() != 6
-            || !seq.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return None;
-        }
-        Some((ts.parse().ok()?, seq.parse().ok()?))
     }
 
     fn abort_tmp_file(&self, tmp_path: &Path) {
@@ -385,13 +403,13 @@ impl FileSinkConnector {
         }
         self.validate_config()?;
         self.ensure_dirs_exist()?;
-        let ts_ms = current_epoch_millis()?;
+        let write_start_ms = current_epoch_millis()?;
         let (tmp_path, file) = self.begin_tmp_file()?;
         self.current = Some(FileDeliveryState {
             tmp_path,
             file,
             bytes_written: 0,
-            ts_ms,
+            write_start_ms,
         });
         Ok(())
     }
@@ -427,8 +445,10 @@ impl FileSinkConnector {
                     self.id
                 ))
             })?;
+            let write_end_ms = current_epoch_millis()?;
             drop(state.file);
-            let _final_path = self.finalize_tmp_file(&state.tmp_path, state.ts_ms)?;
+            let _final_path =
+                self.finalize_tmp_file(&state.tmp_path, state.write_start_ms, write_end_ms)?;
             self.apply_retention()?;
             Ok(DeliveryResult {
                 bytes_written: state.bytes_written,
@@ -590,7 +610,7 @@ impl SinkConnector for FileSinkConnector {
 struct RetentionFile {
     path: PathBuf,
     modified: Option<SystemTime>,
-    ts_ms: u128,
+    sort_ms: u128,
     seq: u32,
 }
 
@@ -603,23 +623,183 @@ fn validate_file_sink_path(path: &str) -> Result<(), SinkConnectorError> {
     Ok(())
 }
 
-pub(crate) fn validate_file_name_affixes(
-    filename_prefix: &str,
-    filename_suffix: &str,
-) -> Result<(), String> {
-    validate_file_name_part("filename_prefix", filename_prefix)?;
-    validate_file_name_part("filename_suffix", filename_suffix)?;
-    if matches!(filename_suffix, "." | "..") {
-        return Err("filename_suffix must not be `.` or `..`".to_string());
-    }
-    Ok(())
+pub fn validate_filename_pattern(pattern: &str) -> Result<(), String> {
+    compile_filename_pattern(pattern).map(|_| ())
 }
 
-fn validate_file_name_part(field: &str, value: &str) -> Result<(), String> {
-    if value.contains('/') || value.contains('\\') {
-        return Err(format!("{field} must not contain path separators"));
+fn compile_filename_pattern(pattern: &str) -> Result<CompiledFilenamePattern, String> {
+    if pattern.is_empty() {
+        return Err("filename_pattern must not be empty".to_string());
     }
-    Ok(())
+    if pattern.contains('/') || pattern.contains('\\') {
+        return Err("filename_pattern must not contain path separators".to_string());
+    }
+    if matches!(pattern, "." | "..") {
+        return Err("filename_pattern must not be `.` or `..`".to_string());
+    }
+
+    let mut segments = Vec::new();
+    let mut literal_start = 0;
+    let mut cursor = 0;
+    let mut seen_start = false;
+    let mut seen_end = false;
+    let mut seen_seq = false;
+    while cursor < pattern.len() {
+        let Some(relative) = pattern[cursor..].find(['{', '}']) else {
+            break;
+        };
+        let brace = cursor + relative;
+        if pattern.as_bytes()[brace] == b'}' {
+            return Err("filename_pattern contains an unmatched `}`".to_string());
+        }
+        if brace > literal_start {
+            segments.push(FilenamePatternSegment::Literal(
+                pattern[literal_start..brace].to_string(),
+            ));
+        } else if matches!(
+            segments.last(),
+            Some(FilenamePatternSegment::Placeholder(_))
+        ) {
+            return Err("filename_pattern placeholders must be separated by a literal".to_string());
+        }
+        let Some(close_relative) = pattern[brace + 1..].find('}') else {
+            return Err("filename_pattern contains an unclosed placeholder".to_string());
+        };
+        let close = brace + 1 + close_relative;
+        let name = &pattern[brace + 1..close];
+        let placeholder = match name {
+            "write_start_ms" if !seen_start => {
+                seen_start = true;
+                FilenamePlaceholder::WriteStartMs
+            }
+            "write_end_ms" if !seen_end => {
+                seen_end = true;
+                FilenamePlaceholder::WriteEndMs
+            }
+            "seq" if !seen_seq => {
+                seen_seq = true;
+                FilenamePlaceholder::Sequence
+            }
+            "write_start_ms" | "write_end_ms" | "seq" => {
+                return Err(format!(
+                    "filename_pattern placeholder `{{{name}}}` must not be repeated"
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "filename_pattern contains unsupported placeholder `{{{name}}}`"
+                ));
+            }
+        };
+        segments.push(FilenamePatternSegment::Placeholder(placeholder));
+        cursor = close + 1;
+        literal_start = cursor;
+    }
+    if literal_start < pattern.len() {
+        segments.push(FilenamePatternSegment::Literal(
+            pattern[literal_start..].to_string(),
+        ));
+    }
+    if !seen_seq {
+        return Err("filename_pattern must contain `{seq}`".to_string());
+    }
+    if !seen_start && !seen_end {
+        return Err(
+            "filename_pattern must contain `{write_start_ms}` or `{write_end_ms}`".to_string(),
+        );
+    }
+    Ok(CompiledFilenamePattern { segments })
+}
+
+impl CompiledFilenamePattern {
+    fn render(&self, write_start_ms: u128, write_end_ms: u128, seq: u32) -> String {
+        let mut output = String::new();
+        for segment in &self.segments {
+            match segment {
+                FilenamePatternSegment::Literal(literal) => output.push_str(literal),
+                FilenamePatternSegment::Placeholder(FilenamePlaceholder::WriteStartMs) => {
+                    output.push_str(&write_start_ms.to_string());
+                }
+                FilenamePatternSegment::Placeholder(FilenamePlaceholder::WriteEndMs) => {
+                    output.push_str(&write_end_ms.to_string());
+                }
+                FilenamePatternSegment::Placeholder(FilenamePlaceholder::Sequence) => {
+                    output.push_str(&format!("{seq:06}"));
+                }
+            }
+        }
+        output
+    }
+
+    fn captures(&self, file_name: &str) -> Option<FilenameCaptures> {
+        let mut captures = FilenameCaptures::default();
+        match_filename_segments(&self.segments, file_name, &mut captures).then_some(captures)
+    }
+}
+
+fn match_filename_segments(
+    segments: &[FilenamePatternSegment],
+    input: &str,
+    captures: &mut FilenameCaptures,
+) -> bool {
+    let Some((segment, remaining_segments)) = segments.split_first() else {
+        return input.is_empty();
+    };
+    match segment {
+        FilenamePatternSegment::Literal(literal) => {
+            input.strip_prefix(literal).is_some_and(|remaining| {
+                match_filename_segments(remaining_segments, remaining, captures)
+            })
+        }
+        FilenamePatternSegment::Placeholder(placeholder) => {
+            let candidate_ends: Vec<usize> = match remaining_segments.first() {
+                Some(FilenamePatternSegment::Literal(literal)) => input
+                    .match_indices(literal)
+                    .map(|(index, _)| index)
+                    .collect(),
+                Some(FilenamePatternSegment::Placeholder(_)) => return false,
+                None => vec![input.len()],
+            };
+            for end in candidate_ends {
+                let value = &input[..end];
+                let mut candidate = *captures;
+                if capture_filename_placeholder(*placeholder, value, &mut candidate)
+                    && match_filename_segments(remaining_segments, &input[end..], &mut candidate)
+                {
+                    *captures = candidate;
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+fn capture_filename_placeholder(
+    placeholder: FilenamePlaceholder,
+    value: &str,
+    captures: &mut FilenameCaptures,
+) -> bool {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    match placeholder {
+        FilenamePlaceholder::WriteStartMs => {
+            captures.write_start_ms = value.parse().ok();
+            captures.write_start_ms.is_some()
+        }
+        FilenamePlaceholder::WriteEndMs => {
+            captures.write_end_ms = value.parse().ok();
+            captures.write_end_ms.is_some()
+        }
+        FilenamePlaceholder::Sequence => {
+            captures.seq = (value.len() == 6)
+                .then(|| value.parse().ok())
+                .flatten()
+                .filter(|seq| (1..=MAX_SEQUENCE).contains(seq));
+            captures.seq.is_some()
+        }
+    }
 }
 
 fn current_epoch_millis() -> Result<u128, SinkConnectorError> {
@@ -676,8 +856,7 @@ mod tests {
             sink_name: "file_sink".to_string(),
             pipeline_id: "pipe_1".to_string(),
             path: path.to_string_lossy().into_owned(),
-            filename_prefix: "speed_".into(),
-            filename_suffix: ".json".into(),
+            filename_pattern: "speed_{write_start_ms}_{seq}.json".into(),
             retention: FileRetentionConfig::default(),
         }
     }
@@ -717,22 +896,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_sink_renders_write_start_and_end_in_final_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config(dir.path());
+        cfg.filename_pattern = "speed_{write_start_ms}_{write_end_ms}_{seq}.json".into();
+        let mut connector = FileSinkConnector::new("sink_1", cfg);
+
+        connector.ready().await.expect("ready");
+        deliver(&mut connector, b"bytes").await;
+
+        let files = final_files(dir.path());
+        let file_name = files[0].file_name().unwrap().to_str().unwrap();
+        let pattern = compile_filename_pattern(connector.config.filename_pattern.expose())
+            .expect("compile pattern");
+        let captures = pattern.captures(file_name).expect("match final name");
+        assert!(captures.write_start_ms.is_some());
+        assert!(captures.write_end_ms.is_some());
+        assert!(captures.write_end_ms >= captures.write_start_ms);
+        assert_eq!(captures.seq, Some(1));
+    }
+
+    #[test]
+    fn filename_pattern_renders_and_matches_write_range() {
+        let pattern = compile_filename_pattern("speed_{write_start_ms}_{write_end_ms}_{seq}.json")
+            .expect("compile pattern");
+
+        let name = pattern.render(1_000, 1_025, 7);
+
+        assert_eq!(name, "speed_1000_1025_000007.json");
+        assert_eq!(
+            pattern.captures(&name),
+            Some(FilenameCaptures {
+                write_start_ms: Some(1_000),
+                write_end_ms: Some(1_025),
+                seq: Some(7),
+            })
+        );
+        assert!(pattern.captures("speed_1000_bad_000007.json").is_none());
+    }
+
+    #[test]
+    fn filename_pattern_validation_rejects_unsafe_or_ambiguous_patterns() {
+        let cases = [
+            ("", "must not be empty"),
+            ("nested/{write_start_ms}_{seq}", "path separators"),
+            ("{write_start_ms}{seq}", "must be separated"),
+            ("{write_start_ms}.json", "must contain `{seq}`"),
+            (
+                "{seq}.json",
+                "must contain `{write_start_ms}` or `{write_end_ms}`",
+            ),
+            (
+                "{write_start_ms}_{unknown}_{seq}",
+                "unsupported placeholder",
+            ),
+            ("{write_start_ms}_{seq}_{seq}", "must not be repeated"),
+        ];
+
+        for (pattern, expected) in cases {
+            let error = compile_filename_pattern(pattern).expect_err("pattern must fail");
+            assert!(
+                error.contains(expected),
+                "unexpected error for {pattern:?}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn file_sink_exclusive_create_retry_handles_existing_final_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let connector = FileSinkConnector::new("sink_1", config(dir.path()));
         connector.ensure_dirs_exist().expect("ready dirs");
-        let ts_ms = current_epoch_millis().expect("clock");
-        fs::write(connector.final_path(ts_ms, 1), b"existing").expect("write existing");
+        let write_start_ms = current_epoch_millis().expect("clock");
+        let write_end_ms = write_start_ms + 1;
+        let pattern =
+            compile_filename_pattern(connector.config.filename_pattern.expose()).expect("pattern");
+        fs::write(
+            connector.final_path(&pattern, write_start_ms, write_end_ms, 1),
+            b"existing",
+        )
+        .expect("write existing");
         let (tmp_path, mut tmp) = connector.begin_tmp_file().expect("tmp");
         tmp.write_all(b"new").expect("write tmp");
         tmp.sync_all().expect("sync tmp");
         drop(tmp);
 
         let final_path = connector
-            .finalize_tmp_file(&tmp_path, ts_ms)
+            .finalize_tmp_file(&tmp_path, write_start_ms, write_end_ms)
             .expect("finalize");
 
-        assert!(final_path.ends_with(format!("speed_{ts_ms}_000002.json")));
+        assert!(final_path.ends_with(format!("speed_{write_start_ms}_000002.json")));
         assert_eq!(fs::read(final_path).expect("read final"), b"new");
     }
 
@@ -757,11 +1010,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_sink_empty_prefix_and_suffix_are_supported() {
+    async fn file_sink_default_pattern_is_supported() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = config(dir.path());
-        cfg.filename_prefix = "".into();
-        cfg.filename_suffix = "".into();
+        cfg.filename_pattern = DEFAULT_FILENAME_PATTERN.into();
         let mut connector = FileSinkConnector::new("sink_1", cfg);
 
         connector.ready().await.expect("ready");
@@ -775,11 +1027,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_sink_exposes_sensitive_affixes_only_for_file_operations() {
+    async fn file_sink_exposes_sensitive_pattern_only_for_file_operations() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = config(dir.path());
-        cfg.filename_prefix = crate::ConnectorString::sensitive("VIN-123_");
-        cfg.filename_suffix = crate::ConnectorString::sensitive(".json");
+        cfg.filename_pattern =
+            crate::ConnectorString::sensitive("VIN-123_{write_start_ms}_{seq}.json");
         let mut connector = FileSinkConnector::new("sink_1", cfg);
 
         connector.ready().await.expect("ready");

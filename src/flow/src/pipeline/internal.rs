@@ -1024,8 +1024,7 @@ fn build_sinks_from_definition(
                         sink_name: sink.sink_id.clone(),
                         pipeline_id: definition.id().to_string(),
                         path: props.path.clone(),
-                        filename_prefix: props.filename_prefix.clone(),
-                        filename_suffix: props.filename_suffix.clone(),
+                        filename_pattern: props.filename_pattern.clone(),
                         retention: FileSinkRetentionConfig {
                             max_file_count: props.retention.max_file_count,
                             max_file_age_days: props.retention.max_file_age_days,
@@ -1315,8 +1314,7 @@ mod file_sink_tests {
     use serde_json::Map as JsonMap;
 
     fn file_sink_definition(encoder: SinkEncoderConfig) -> PipelineDefinition {
-        let props = FileSinkProps::new("/tmp/vf-file", "speed_")
-            .with_filename_suffix(".json")
+        let props = FileSinkProps::new("/tmp/vf-file", "speed_{write_start_ms}_{seq}.json")
             .with_retention(FileRetentionConfig {
                 max_file_count: 10,
                 max_file_age_days: 7,
@@ -1349,8 +1347,10 @@ mod file_sink_tests {
         assert_eq!(config.sink_name, "sink_1");
         assert_eq!(config.pipeline_id, "pipe_1");
         assert_eq!(config.path, "/tmp/vf-file");
-        assert_eq!(config.filename_prefix.expose(), "speed_");
-        assert_eq!(config.filename_suffix.expose(), ".json");
+        assert_eq!(
+            config.filename_pattern.expose(),
+            "speed_{write_start_ms}_{seq}.json"
+        );
         assert_eq!(config.retention.max_file_count, 10);
         assert_eq!(config.retention.max_file_age_days, 7);
     }

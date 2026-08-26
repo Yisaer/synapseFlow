@@ -158,8 +158,7 @@ pub struct MemorySinkProps {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSinkProps {
     pub path: String,
-    pub filename_prefix: ConnectorString,
-    pub filename_suffix: ConnectorString,
+    pub filename_pattern: ConnectorString,
     pub retention: FileRetentionConfig,
 }
 
@@ -310,18 +309,12 @@ impl MemorySinkProps {
 }
 
 impl FileSinkProps {
-    pub fn new(path: impl Into<String>, filename_prefix: impl Into<ConnectorString>) -> Self {
+    pub fn new(path: impl Into<String>, filename_pattern: impl Into<ConnectorString>) -> Self {
         Self {
             path: path.into(),
-            filename_prefix: filename_prefix.into(),
-            filename_suffix: ConnectorString::plain(""),
+            filename_pattern: filename_pattern.into(),
             retention: FileRetentionConfig::default(),
         }
-    }
-
-    pub fn with_filename_suffix(mut self, filename_suffix: impl Into<ConnectorString>) -> Self {
-        self.filename_suffix = filename_suffix.into();
-        self
     }
 
     pub fn with_retention(mut self, retention: FileRetentionConfig) -> Self {
