@@ -74,17 +74,14 @@ impl StreamingAggregationProcessor {
                     channel_capacities,
                 ),
             )),
-            StreamingWindowSpec::Tumbling { .. } => {
-                // Currently only seconds are supported at the logical level.
-                Ok(StreamingAggregationProcessor::Tumbling(
-                    StreamingTumblingAggregationProcessor::new_with_channel_capacities(
-                        id,
-                        Arc::clone(&physical),
-                        aggregate_registry,
-                        channel_capacities,
-                    )?,
-                ))
-            }
+            StreamingWindowSpec::Tumbling { .. } => Ok(StreamingAggregationProcessor::Tumbling(
+                StreamingTumblingAggregationProcessor::new_with_channel_capacities(
+                    id,
+                    Arc::clone(&physical),
+                    aggregate_registry,
+                    channel_capacities,
+                )?,
+            )),
             StreamingWindowSpec::Sliding { .. } => Ok(StreamingAggregationProcessor::Sliding(
                 StreamingSlidingAggregationProcessor::new_with_channel_capacities(
                     id,

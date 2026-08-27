@@ -2557,6 +2557,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             ..
         } => {
             let unit = match time_unit {
+                parser_window::TimeUnit::Milliseconds => TimeUnit::Milliseconds,
                 parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
             };
             Ok(LogicalWindowSpec::Tumbling {
@@ -2582,6 +2583,7 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
             ..
         } => {
             let unit = match time_unit {
+                parser_window::TimeUnit::Milliseconds => TimeUnit::Milliseconds,
                 parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
             };
             Ok(LogicalWindowSpec::Sliding {

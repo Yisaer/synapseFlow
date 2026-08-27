@@ -20,12 +20,11 @@ pub enum WatermarkConfig {
 impl WatermarkConfig {
     pub fn interval_duration(&self) -> Duration {
         match self {
-            WatermarkConfig::Tumbling { time_unit, length } => match time_unit {
-                TimeUnit::Seconds => Duration::from_secs((*length).max(1)),
-            },
-            WatermarkConfig::Sliding { time_unit, .. } => match time_unit {
-                TimeUnit::Seconds => Duration::from_secs(1),
-            },
+            WatermarkConfig::Tumbling { time_unit, length } => time_unit.duration((*length).max(1)),
+            // Sliding-window deadline watermarks are emitted per tuple via a heap of sleeps; the
+            // periodic ticker only advances wall-clock time to drive downstream GC. Keep it fixed
+            // at one second regardless of the window unit.
+            WatermarkConfig::Sliding { .. } => Duration::from_secs(1),
         }
     }
 }

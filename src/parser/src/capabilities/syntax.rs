@@ -650,7 +650,7 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                     None,
                     &["window_only_in_group_by", "at_most_one_window"],
                     &[],
-                    &["tumblingwindow('ss'|'mm'|'hh', <length>)"],
+                    &["tumblingwindow('ms'|'ss', <length>)"],
                     &["... GROUP BY tumblingwindow('ss', 10)"],
                     &[],
                     vec![feature(
@@ -683,7 +683,7 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                     None,
                     &["window_only_in_group_by", "at_most_one_window"],
                     &[],
-                    &["slidingwindow('ss'|'mm'|'hh', <lookback> [, <lookahead>])"],
+                    &["slidingwindow('ms'|'ss', <lookback> [, <lookahead>])"],
                     &["... GROUP BY slidingwindow('ss', 10, 15)"],
                     &[],
                     vec![feature(

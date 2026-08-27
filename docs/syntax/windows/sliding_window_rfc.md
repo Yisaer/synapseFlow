@@ -13,12 +13,13 @@ in StreamDialect.
 
 ## Semantics model
 
-Each incoming tuple is a trigger point with timestamp `t`:
+Each incoming tuple is a trigger point with timestamp `t`. `lookback` and `lookahead` are measured
+in `time_unit` (`ms` for milliseconds, `ss` for seconds):
 
-- `slidingwindow('ss', lookback)`:
+- `slidingwindow(time_unit, lookback)`:
   - range: `[t - lookback, t]`
   - emission: immediate
-- `slidingwindow('ss', lookback, lookahead)`:
+- `slidingwindow(time_unit, lookback, lookahead)`:
   - range: `[t - lookback, t + lookahead]`
   - emission: when a watermark advances to `>= t + lookahead`
 
@@ -28,6 +29,7 @@ Each incoming tuple is a trigger point with timestamp `t`:
 
 - Supported in `GROUP BY` only.
 - At most one window function is allowed per statement.
+- `time_unit` accepts `'ms'` (milliseconds) and `'ss'` (seconds).
 - Parsed into `SelectStmt.window = Window::Sliding { time_unit, lookback, lookahead }`.
 - Non-window `GROUP BY` expressions remain in `SelectStmt.group_by_exprs`.
 
@@ -53,7 +55,8 @@ Each incoming tuple is a trigger point with timestamp `t`:
 
 ### Runtime
 
-- `SlidingWindowProcessor` is watermark-driven:
+- `SlidingWindowProcessor` is watermark-driven and uses `SystemTime`/`Duration` internally, so
+  window boundaries are unit-agnostic:
   - `lookahead = None` emits windows immediately on data.
   - `lookahead = Some(L)` emits windows when it observes watermarks `>= t + L`.
 - `StreamingSlidingAggregationProcessor` exists, and the optimizer can fuse

@@ -1180,10 +1180,16 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::ProcessTimeWatermark(watermark) => {
             push_watermark_config_info(&watermark.config, &mut info);
             info.push("mode=processing_time".to_string());
-            info.push(format!(
-                "interval={}",
-                watermark.config.interval_duration().as_secs()
-            ));
+            let interval = watermark.config.interval_duration();
+            match &watermark.config {
+                WatermarkConfig::Tumbling {
+                    time_unit: crate::planner::logical::TimeUnit::Milliseconds,
+                    ..
+                } => info.push(format!("interval_ms={}", interval.as_millis())),
+                WatermarkConfig::Tumbling { .. } | WatermarkConfig::Sliding { .. } => {
+                    info.push(format!("interval={}", interval.as_secs()));
+                }
+            }
         }
         PhysicalPlan::EventtimeWatermark(watermark) => {
             if let Some(config) = &watermark.window_config {

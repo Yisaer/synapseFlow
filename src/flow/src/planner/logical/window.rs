@@ -1,11 +1,22 @@
 use crate::planner::logical::BaseLogicalPlan;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Supported time units for window definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeUnit {
+    Milliseconds,
     Seconds,
+}
+
+impl TimeUnit {
+    pub fn duration(self, value: u64) -> Duration {
+        match self {
+            TimeUnit::Milliseconds => Duration::from_millis(value),
+            TimeUnit::Seconds => Duration::from_secs(value),
+        }
+    }
 }
 
 /// Logical window specification.

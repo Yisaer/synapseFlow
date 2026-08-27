@@ -457,8 +457,12 @@ impl SlidingWatermarkProcessor {
             channel_capacities.control,
         );
         let id = id.into();
-        let lookahead = match &physical.config {
-            WatermarkConfig::Sliding { lookahead, .. } => *lookahead,
+        let (time_unit, lookahead) = match &physical.config {
+            WatermarkConfig::Sliding {
+                time_unit,
+                lookahead,
+                ..
+            } => (*time_unit, *lookahead),
             _ => {
                 return Err(ProcessorError::InvalidConfiguration(format!(
                     "SlidingWatermarkProcessor requires WatermarkConfig::Sliding for processor '{}'",
@@ -466,7 +470,7 @@ impl SlidingWatermarkProcessor {
                 )));
             }
         };
-        let lookahead = lookahead.map(Duration::from_secs);
+        let lookahead = lookahead.map(|lookahead| time_unit.duration(lookahead));
         let mut ticker = interval(physical.config.interval_duration());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Ok(Self {
@@ -1149,6 +1153,65 @@ mod tests {
             crate::model::Tuple::empty_messages(),
             UNIX_EPOCH + Duration::from_secs(sec),
         )
+    }
+
+    fn tuple_at_millis(millis: u64) -> crate::model::Tuple {
+        crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_millis(millis),
+        )
+    }
+
+    #[tokio::test]
+    async fn sliding_watermark_emits_millisecond_deadline_per_tuple() {
+        let spawner = test_spawner();
+        let physical = PhysicalProcessTimeWatermark::new(
+            WatermarkConfig::Sliding {
+                time_unit: TimeUnit::Milliseconds,
+                lookback: 100,
+                lookahead: Some(100),
+            },
+            Vec::new(),
+            0,
+        );
+        let mut processor =
+            SlidingWatermarkProcessor::new("wm", Arc::new(physical)).expect("valid sliding config");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let base = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("now")
+            .as_millis() as u64;
+        let batch = crate::model::RecordBatch::new(vec![tuple_at_millis(base)]).expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        let mut saw_collection = false;
+        let mut saw_deadline_or_later = false;
+        let expected_deadline = UNIX_EPOCH + Duration::from_millis(base + 100);
+        for _ in 0..8 {
+            let msg = timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv");
+            match msg {
+                StreamData::Collection(_) => saw_collection = true,
+                StreamData::Watermark(ts) => {
+                    if ts >= expected_deadline {
+                        saw_deadline_or_later = true;
+                    }
+                }
+                _ => {}
+            }
+            if saw_collection && saw_deadline_or_later {
+                break;
+            }
+        }
+
+        assert!(saw_collection);
+        assert!(saw_deadline_or_later);
     }
 
     #[tokio::test]

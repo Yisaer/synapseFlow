@@ -89,6 +89,7 @@ pub struct AggregateExprIR {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TimeUnitIR {
+    Milliseconds,
     Seconds,
 }
 
@@ -827,6 +828,7 @@ fn window_ir_to_spec(
 
 fn time_unit_ir_to_time_unit(unit: TimeUnitIR) -> crate::planner::logical::TimeUnit {
     match unit {
+        TimeUnitIR::Milliseconds => crate::planner::logical::TimeUnit::Milliseconds,
         TimeUnitIR::Seconds => crate::planner::logical::TimeUnit::Seconds,
     }
 }
@@ -1168,6 +1170,7 @@ fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> Windo
             partition_by,
         } => WindowIR::Tumbling {
             time_unit: match time_unit {
+                crate::planner::logical::TimeUnit::Milliseconds => TimeUnitIR::Milliseconds,
                 crate::planner::logical::TimeUnit::Seconds => TimeUnitIR::Seconds,
             },
             length: *length,
@@ -1188,6 +1191,7 @@ fn window_spec_to_ir(spec: &crate::planner::logical::LogicalWindowSpec) -> Windo
             trigger_condition,
         } => WindowIR::Sliding {
             time_unit: match time_unit {
+                crate::planner::logical::TimeUnit::Milliseconds => TimeUnitIR::Milliseconds,
                 crate::planner::logical::TimeUnit::Seconds => TimeUnitIR::Seconds,
             },
             lookback: *lookback,
@@ -1231,6 +1235,32 @@ mod tests {
 
         let raw = logical.encode().unwrap();
         assert_eq!(LogicalPlanIR::decode(&raw).unwrap(), logical);
+    }
+
+    #[test]
+    fn millisecond_tumbling_window_ir_roundtrip() {
+        let window = WindowIR::Tumbling {
+            time_unit: TimeUnitIR::Milliseconds,
+            length: 100,
+            partition_by: Vec::new(),
+        };
+
+        let spec = window_ir_to_spec(&window).expect("decode millisecond tumbling window");
+        assert_eq!(window_spec_to_ir(&spec), window);
+    }
+
+    #[test]
+    fn millisecond_sliding_window_ir_roundtrip() {
+        let window = WindowIR::Sliding {
+            time_unit: TimeUnitIR::Milliseconds,
+            lookback: 100,
+            lookahead: Some(150),
+            partition_by: Vec::new(),
+            trigger_condition: None,
+        };
+
+        let spec = window_ir_to_spec(&window).expect("decode millisecond sliding window");
+        assert_eq!(window_spec_to_ir(&spec), window);
     }
 
     #[test]

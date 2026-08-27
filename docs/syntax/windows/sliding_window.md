@@ -7,9 +7,9 @@ See also: `docs/syntax/windows/syntax.md`, `docs/syntax/windows/window_metadata.
 
 ## Parameters
 
-- `time_unit`: string literal (currently only `'ss'` is supported).
-- `lookback`: unsigned integer literal (duration).
-- `lookahead`: optional unsigned integer literal (duration).
+- `time_unit`: string literal. Supported units are `'ms'` for milliseconds and `'ss'` for seconds.
+- `lookback`: unsigned integer literal (duration in `time_unit`).
+- `lookahead`: optional unsigned integer literal (duration in `time_unit`).
 
 ## Syntax
 
@@ -28,18 +28,25 @@ GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN flag > 0 PARTITION BY vehicle_id)
 
 ## Semantics
 
-Each incoming tuple is a trigger point with timestamp `t`:
+Each incoming tuple is a trigger point with timestamp `t`. `lookback` and `lookahead` are measured
+in `time_unit` (`ms` for milliseconds, `ss` for seconds):
 
-- `slidingwindow('ss', lookback)`:
+- `slidingwindow(time_unit, lookback)`:
   - range: `[t - lookback, t]`
   - emission: immediate (on receiving the trigger tuple)
   - `window_start()`: `t - lookback`
   - `window_end()`: `t`
-- `slidingwindow('ss', lookback, lookahead)`:
+- `slidingwindow(time_unit, lookback, lookahead)`:
   - range: `[t - lookback, t + lookahead]`
   - emission: delayed until the operator observes a watermark `>= t + lookahead`
   - `window_start()`: `t - lookback`
   - `window_end()`: `t + lookahead`
+
+A millisecond window uses the same boundaries and watermark rules:
+
+```sql
+GROUP BY slidingwindow('ms', 100, 50) OVER (WHEN flag > 0)
+```
 
 In event-time mode, `t` is the trigger tuple event timestamp.
 

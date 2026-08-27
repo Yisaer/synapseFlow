@@ -425,7 +425,10 @@ async fn sliding_window_group_and_partition_pipeline_table_driven() {
                     {"k2": 10, "s": 1},
                     {"k2": 20, "s": 10},
                 ]),
-                serde_json::json!([{"k2": 20, "s": 10}]),
+                serde_json::json!([
+                    {"k2": 10, "s": 1},
+                    {"k2": 20, "s": 10},
+                ]),
             ],
             assert_no_extra_output: true,
         },
@@ -457,7 +460,10 @@ async fn sliding_window_group_and_partition_pipeline_table_driven() {
                     {"k2": 10, "s": 1},
                     {"k2": 20, "s": 2},
                 ]),
-                serde_json::json!([{"k2": 20, "s": 2}]),
+                serde_json::json!([
+                    {"k2": 10, "s": 1},
+                    {"k2": 20, "s": 2},
+                ]),
                 serde_json::json!([{"k2": 10, "s": 100}]),
             ],
             assert_no_extra_output: true,

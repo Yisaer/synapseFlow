@@ -4,7 +4,6 @@
 //! Window flushing for lookahead windows is driven by incoming watermarks.
 
 use crate::expr::ScalarExpr;
-use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow, PipelineStateUsage};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
@@ -75,12 +74,10 @@ impl SlidingWindowProcessor {
             channel_capacities.control_link_kind,
             channel_capacities.control,
         );
-        let lookback = match physical.time_unit {
-            TimeUnit::Seconds => Duration::from_secs(physical.lookback),
-        };
-        let lookahead = match physical.time_unit {
-            TimeUnit::Seconds => physical.lookahead.map(Duration::from_secs),
-        };
+        let lookback = physical.time_unit.duration(physical.lookback);
+        let lookahead = physical
+            .lookahead
+            .map(|lookahead| physical.time_unit.duration(lookahead));
         let partition_by_scalars = physical.partition_by_scalars.clone();
         let trigger_condition_scalar = physical.trigger_condition_scalar.clone();
         let trigger_processor_state = physical.trigger_processor_state.clone();
@@ -523,9 +520,7 @@ impl ProcessingWithoutLookaheadState {
         let Some(end) = trigger_end else {
             return Ok(());
         };
-        let start = t
-            .checked_sub(self.lookback)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let start = window_metadata::saturating_sub_to_epoch(t, self.lookback);
         self.emit_window(start, end).await
     }
 
@@ -540,9 +535,7 @@ impl ProcessingWithoutLookaheadState {
     }
 
     fn trim(&mut self, watermark: SystemTime) {
-        let min_start = watermark
-            .checked_sub(self.lookback)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let min_start = window_metadata::saturating_sub_to_epoch(watermark, self.lookback);
         while let Some(front) = self.rows.front() {
             if front.timestamp >= min_start {
                 break;
@@ -619,9 +612,7 @@ impl ProcessingWithLookaheadState {
         let Some(end) = trigger_end else {
             return Ok(());
         };
-        let start = t
-            .checked_sub(self.lookback)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let start = window_metadata::saturating_sub_to_epoch(t, self.lookback);
         self.pending.push_back(WindowRequest { start, end });
         Ok(())
     }
@@ -661,9 +652,7 @@ impl ProcessingWithLookaheadState {
         let min_start = if let Some(front) = self.pending.front() {
             front.start
         } else {
-            watermark
-                .checked_sub(self.lookback)
-                .unwrap_or(SystemTime::UNIX_EPOCH)
+            window_metadata::saturating_sub_to_epoch(watermark, self.lookback)
         };
         while let Some(front) = self.rows.front() {
             if front.timestamp >= min_start {
@@ -711,6 +700,7 @@ mod tests {
     use crate::expr::func::BinaryFunc;
     use crate::expr::scalar::ColumnRef;
     use crate::expr::ProcStateField;
+    use crate::planner::logical::TimeUnit;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
     use crate::processor::processor_state::ProcessorState;
     use crate::runtime::TaskSpawner;
@@ -734,6 +724,13 @@ mod tests {
         crate::model::Tuple::with_timestamp(
             crate::model::Tuple::empty_messages(),
             UNIX_EPOCH + Duration::from_secs(sec),
+        )
+    }
+
+    fn tuple_at_millis(millis: u64) -> crate::model::Tuple {
+        crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_millis(millis),
         )
     }
 
@@ -1022,5 +1019,48 @@ mod tests {
             assert_eq!(snapshot.error_count, expected_errors);
             assert_eq!(snapshot.last_error.is_some(), expected_errors > 0);
         }
+    }
+
+    #[tokio::test]
+    async fn millisecond_sliding_window_uses_exact_boundaries_and_metadata() {
+        let spawner = test_spawner();
+        let physical = PhysicalSlidingWindow::new(TimeUnit::Milliseconds, 100, None, Vec::new(), 0);
+        let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        // lookback=100ms, no lookahead => each tuple emits a [t-100ms, t] window immediately.
+        let batch = crate::model::RecordBatch::new(vec![
+            tuple_at_millis(150),
+            tuple_at_millis(199),
+            tuple_at_millis(250),
+        ])
+        .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        let mut starts = Vec::new();
+        let mut ends = Vec::new();
+        let mut counts = Vec::new();
+        for _ in 0..3 {
+            match output_rx.recv().await.unwrap() {
+                StreamData::Collection(collection) => {
+                    let metadata = collection
+                        .metadata()
+                        .window
+                        .as_deref()
+                        .expect("window metadata");
+                    starts.push(metadata.start.epoch_micros());
+                    ends.push(metadata.end.epoch_micros());
+                    counts.push(collection.rows().len());
+                }
+                _ => panic!("unexpected output"),
+            }
+        }
+
+        assert_eq!(starts, vec![50_000, 99_000, 150_000]);
+        assert_eq!(ends, vec![150_000, 199_000, 250_000]);
+        assert_eq!(counts, vec![1, 2, 3]);
     }
 }

@@ -14,7 +14,7 @@ use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -33,7 +33,7 @@ pub struct StreamingTumblingAggregationProcessor {
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     partition_by_scalars: Vec<crate::expr::ScalarExpr>,
-    len_secs: u64,
+    window_length: Duration,
     stats: Arc<ProcessorStats>,
 }
 
@@ -66,7 +66,7 @@ impl StreamingTumblingAggregationProcessor {
             } => partition_by_scalars.clone(),
             _ => Vec::new(),
         };
-        let len_secs = Self::extract_window_length(physical.as_ref())?;
+        let window_length = Self::extract_window_length(physical.as_ref())?;
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -83,20 +83,18 @@ impl StreamingTumblingAggregationProcessor {
             channel_capacities,
             group_by_meta,
             partition_by_scalars,
-            len_secs,
+            window_length,
             stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
 
     fn extract_window_length(
         physical: &PhysicalStreamingAggregation,
-    ) -> Result<u64, ProcessorError> {
+    ) -> Result<Duration, ProcessorError> {
         match &physical.window {
             StreamingWindowSpec::Tumbling {
-                time_unit: _,
-                length,
-                ..
-            } => Ok(*length),
+                time_unit, length, ..
+            } => Ok(time_unit.duration(*length)),
             other => Err(ProcessorError::InvalidConfiguration(format!(
                 "streaming tumbling aggregation requires tumbling window spec, got {other:?}",
             ))),
@@ -132,11 +130,11 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let group_by_meta = self.group_by_meta.clone();
         let partition_by_scalars = self.partition_by_scalars.clone();
         let stats = Arc::clone(&self.stats);
-        let len_secs = self.len_secs;
+        let window_length = self.window_length;
 
         ProcessorStart::ready(spawner.spawn(async move {
             let mut window_state = PartitionedProcessingWindowState::new(
-                len_secs,
+                window_length,
                 Arc::clone(&physical),
                 Arc::clone(&aggregate_registry),
                 group_by_meta.clone(),
@@ -290,22 +288,22 @@ impl Processor for StreamingTumblingAggregationProcessor {
 
 /// Per-window aggregation state.
 struct WindowAggState {
-    start_secs: u64,
-    end_secs: u64,
+    start: SystemTime,
+    end: SystemTime,
     worker: AggregationWorker,
 }
 
 impl WindowAggState {
     fn new(
-        start_secs: u64,
-        len_secs: u64,
+        start: SystemTime,
+        end: SystemTime,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         group_by_meta: Vec<GroupByMeta>,
     ) -> Self {
         Self {
-            start_secs,
-            end_secs: start_secs.saturating_add(len_secs),
+            start,
+            end,
             worker: AggregationWorker::new(
                 Arc::clone(&physical),
                 Arc::clone(&aggregate_registry),
@@ -318,7 +316,7 @@ impl WindowAggState {
 /// Processing-time windows assuming monotonically increasing timestamps.
 struct ProcessingWindowState {
     windows: VecDeque<WindowAggState>,
-    len_secs: u64,
+    window_length: Duration,
     physical: Arc<PhysicalStreamingAggregation>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     group_by_meta: Vec<GroupByMeta>,
@@ -326,29 +324,32 @@ struct ProcessingWindowState {
 
 impl ProcessingWindowState {
     fn new(
-        len_secs: u64,
+        window_length: Duration,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         group_by_meta: Vec<GroupByMeta>,
     ) -> Self {
         Self {
             windows: VecDeque::new(),
-            len_secs,
+            window_length,
             physical,
             aggregate_registry,
             group_by_meta,
         }
     }
 
-    fn add_row_at(&mut self, start_secs: u64, row: &crate::model::Tuple) -> Result<(), String> {
+    fn add_row_at(&mut self, start: SystemTime, row: &crate::model::Tuple) -> Result<(), String> {
+        let end = start
+            .checked_add(self.window_length)
+            .ok_or_else(|| "tumblingwindow end timestamp overflow".to_string())?;
         if let Some(back) = self.windows.back_mut() {
-            if back.start_secs == start_secs {
+            if back.start == start {
                 return back.worker.update_groups(row);
             }
         }
         let mut new_state = WindowAggState::new(
-            start_secs,
-            self.len_secs,
+            start,
+            end,
             Arc::clone(&self.physical),
             Arc::clone(&self.aggregate_registry),
             self.group_by_meta.clone(),
@@ -365,9 +366,8 @@ impl ProcessingWindowState {
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
-        let watermark_secs = to_secs(watermark, "watermark")?;
         while let Some(mut state) = self.windows.pop_front() {
-            if state.end_secs > watermark_secs {
+            if state.end > watermark {
                 self.windows.push_front(state);
                 break;
             }
@@ -376,11 +376,8 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
-                let batch = window_metadata::attach_from_epoch_secs(
-                    batch,
-                    state.start_secs,
-                    state.end_secs,
-                )?;
+                let batch =
+                    window_metadata::attach_from_system_time(batch, state.start, state.end)?;
                 stats.record_collection_out(batch.num_rows() as u64);
                 send_with_backpressure(
                     output,
@@ -406,11 +403,8 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
-                let batch = window_metadata::attach_from_epoch_secs(
-                    batch,
-                    state.start_secs,
-                    state.end_secs,
-                )?;
+                let batch =
+                    window_metadata::attach_from_system_time(batch, state.start, state.end)?;
                 stats.record_collection_out(batch.num_rows() as u64);
                 send_with_backpressure(
                     output,
@@ -428,7 +422,7 @@ impl ProcessingWindowState {
 struct PartitionedProcessingWindowState {
     state_ids: HashMap<PartitionKey, usize>,
     states: Vec<ProcessingWindowState>,
-    len_secs: u64,
+    window_length: Duration,
     physical: Arc<PhysicalStreamingAggregation>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     group_by_meta: Vec<GroupByMeta>,
@@ -442,7 +436,7 @@ enum AddRowError {
 
 impl PartitionedProcessingWindowState {
     fn new(
-        len_secs: u64,
+        window_length: Duration,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         group_by_meta: Vec<GroupByMeta>,
@@ -451,7 +445,7 @@ impl PartitionedProcessingWindowState {
         Self {
             state_ids: HashMap::new(),
             states: Vec::new(),
-            len_secs,
+            window_length,
             physical,
             aggregate_registry,
             group_by_meta,
@@ -462,12 +456,18 @@ impl PartitionedProcessingWindowState {
     fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), AddRowError> {
         let partition_key = eval_partition_key(&self.partition_by_scalars, row, "tumblingwindow")
             .map_err(AddRowError::BeforeMutation)?;
-        let start_secs = window_start_secs_str(row.timestamp, self.len_secs)
-            .map_err(AddRowError::BeforeMutation)?;
-        window_metadata::validate_epoch_secs(start_secs.saturating_add(self.len_secs))
+        let window_start =
+            window_metadata::floor_to_window_start(row.timestamp, self.window_length, "timestamp")
+                .map_err(|err| AddRowError::BeforeMutation(err.to_string()))?;
+        let window_end = window_start
+            .checked_add(self.window_length)
+            .ok_or_else(|| {
+                AddRowError::BeforeMutation("tumblingwindow end timestamp overflow".to_string())
+            })?;
+        window_metadata::validate_system_time(window_end)
             .map_err(|err| AddRowError::BeforeMutation(err.to_string()))?;
         self.get_or_insert(partition_key)
-            .add_row_at(start_secs, row)
+            .add_row_at(window_start, row)
             .map_err(AddRowError::AfterMutation)
     }
 
@@ -508,28 +508,13 @@ impl PartitionedProcessingWindowState {
         let id = self.states.len();
         self.state_ids.insert(key, id);
         self.states.push(ProcessingWindowState::new(
-            self.len_secs,
+            self.window_length,
             Arc::clone(&self.physical),
             Arc::clone(&self.aggregate_registry),
             self.group_by_meta.clone(),
         ));
         &mut self.states[id]
     }
-}
-
-fn window_start_secs_str(ts: SystemTime, len_secs: u64) -> Result<u64, String> {
-    let secs = ts
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("invalid timestamp: {e}"))?
-        .as_secs();
-    let len = len_secs.max(1);
-    Ok(secs / len * len)
-}
-
-fn to_secs(ts: SystemTime, label: &str) -> Result<u64, ProcessorError> {
-    ts.duration_since(UNIX_EPOCH)
-        .map_err(|e| ProcessorError::ProcessingError(format!("invalid {label}: {e}")))
-        .map(|d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -545,6 +530,7 @@ mod tests {
     use datatypes::Value;
     use sqlparser::ast::{Expr, Ident};
     use std::collections::HashMap;
+    use std::time::UNIX_EPOCH;
     use tokio::time::{timeout, Duration};
 
     fn test_spawner() -> TaskSpawner {
@@ -573,7 +559,25 @@ mod tests {
         tuple
     }
 
+    fn tuple_at_millis(millis: u64, cols: &[(&str, Value)]) -> crate::model::Tuple {
+        let mut tuple = crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_millis(millis),
+        );
+        for (key, value) in cols {
+            tuple.add_affiliate_column(Arc::new((*key).to_string()), value.clone());
+        }
+        tuple
+    }
+
     fn make_physical() -> Arc<PhysicalStreamingAggregation> {
+        make_physical_with_window(TimeUnit::Seconds, 10)
+    }
+
+    fn make_physical_with_window(
+        time_unit: TimeUnit,
+        length: u64,
+    ) -> Arc<PhysicalStreamingAggregation> {
         let call = AggregateCall {
             output_column: "sum_a".to_string(),
             func_name: "sum".to_string(),
@@ -600,8 +604,8 @@ mod tests {
 
         Arc::new(PhysicalStreamingAggregation::new(
             StreamingWindowSpec::Tumbling {
-                time_unit: TimeUnit::Seconds,
-                length: 10,
+                time_unit,
+                length,
                 partition_by_exprs: Vec::new(),
                 partition_by_scalars: Vec::new(),
             },
@@ -749,5 +753,69 @@ mod tests {
                 crate::processor::BarrierControlSignal::StreamGracefulEnd { .. }
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn millisecond_tumbling_aggregation_uses_exact_boundaries_and_metadata() {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let physical = make_physical_with_window(TimeUnit::Milliseconds, 100);
+        let mut processor =
+            StreamingTumblingAggregationProcessor::new("tumbling", physical, aggregate_registry)
+                .expect("tumbling processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch = crate::model::RecordBatch::new(vec![
+            tuple_at_millis(1_050, &[("a", Value::Int64(2)), ("b", Value::Int64(1))]),
+            tuple_at_millis(1_099, &[("a", Value::Int64(3)), ("b", Value::Int64(1))]),
+            tuple_at_millis(1_100, &[("a", Value::Int64(7)), ("b", Value::Int64(1))]),
+        ])
+        .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::watermark(
+                UNIX_EPOCH + Duration::from_millis(1_099),
+            ))
+            .is_ok());
+        assert!(
+            timeout(Duration::from_millis(100), output_rx.recv())
+                .await
+                .is_err(),
+            "window must not flush before its end boundary"
+        );
+
+        assert!(input
+            .send(StreamData::watermark(
+                UNIX_EPOCH + Duration::from_millis(1_100),
+            ))
+            .is_ok());
+        let first = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(first) = first else {
+            panic!("expected first millisecond tumbling aggregation");
+        };
+        assert_eq!(extract_grouped_rows(first.as_ref()), vec![(1, 5)]);
+        let metadata = first.metadata().window.as_deref().expect("window metadata");
+        assert_eq!(metadata.start.epoch_micros(), 1_000_000);
+        assert_eq!(metadata.end.epoch_micros(), 1_100_000);
+
+        assert!(input
+            .send(StreamData::watermark(
+                UNIX_EPOCH + Duration::from_millis(1_200),
+            ))
+            .is_ok());
+        let second = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(second) = second else {
+            panic!("expected second millisecond tumbling aggregation");
+        };
+        assert_eq!(extract_grouped_rows(second.as_ref()), vec![(1, 7)]);
     }
 }

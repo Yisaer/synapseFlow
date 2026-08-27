@@ -76,6 +76,8 @@
 - `parser` 模块：负责将 SQL 解析为 AST；解析结果存放在 `SelectStmt` 中，作为后续模块交互的契约。
 - 修改 `parser` 模块相关代码时，可优先阅读 `docs/` 下与语法（syntax）相关的文档。
 - `flow` 模块（planner/optimizer）：对于 logical optimize 与 physical optimize 的每一条 rule，优先在 `docs/planner_optimize/logical/` 与 `docs/planner_optimize/physical/` 查找对应设计文档，理解约束与适用边界；再结合 `src/flow/tests/planner/` 的 `EXPLAIN` JSON 断言验证规则效果（如需新增 case，先与维护者确认），确认无误后将结论/注意事项补充回 `AGENTS.md`。
+- Window 时间精度结论：`tumblingwindow` 与 `slidingwindow` 的 `ss`/`ms` 在 standalone window processor 和 fused streaming aggregation 两条路径中都统一使用 `SystemTime`/`Duration` 作为时间坐标（边界计算收口在 `window_metadata::floor_to_window_start` / `saturating_sub_to_epoch`），processor 层不感知具体时间单位；新增时间单位只需扩展 `TimeUnit::duration()`。watermark 到达窗口 end 边界时触发 flush，`window_start()` / `window_end()` 保留微秒精度。
+- Sliding window 融合路径语义结论：无 `OVER (WHEN ...)` 时仍是每行触发，fused streaming aggregation 必须与 standalone processor 一样使用 `[t - lookback, t + lookahead]` 的逻辑边界并包含 lookback 内的历史行；调度 deadline 不得通过把逻辑 `window.start` 改成触发时间来复用。
 - 固定输出布局审计结论：sink 最终列统一由 planner 的 `OutputLayout` 描述；direct column/alias 继承 message 固定槽位，计算列使用有序 affiliate 槽位。encoder、row-diff、template 与 memory materialize 不得重新按 source/name 猜测布局，也不得恢复 `ByIndexProjection`、`late_projection` 或 `passthrough_messages` 兼容路径；fan-in 布局不兼容时应在规划阶段失败。
 - `processor` 模块：processor 指实际处理流数据的算子；每个 processor 处理完数据后会将数据转交给下一个算子。
 - 通道约束：每个 processor 有两类订阅通道 `control channel` 与 `data channel`；从哪个 channel 收到的数据，就只能转发到同类型的 channel（不得混用/串线）。

@@ -60,6 +60,7 @@ pub enum Window {
 /// Supported time units for window definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeUnit {
+    Milliseconds,
     Seconds,
 }
 
@@ -491,9 +492,10 @@ pub(crate) fn is_supported_window_function(name: &str) -> bool {
 impl TimeUnit {
     fn try_from_str(raw: &str) -> Result<Self, ParserError> {
         match raw.to_ascii_lowercase().as_str() {
+            "ms" => Ok(TimeUnit::Milliseconds),
             "ss" => Ok(TimeUnit::Seconds),
             other => Err(ParserError::ParserError(format!(
-                "unsupported time unit `{}` (only `ss` allowed)",
+                "unsupported time unit `{}` (only `ms` and `ss` allowed)",
                 other
             ))),
         }
@@ -501,6 +503,7 @@ impl TimeUnit {
 
     fn as_str(&self) -> &'static str {
         match self {
+            TimeUnit::Milliseconds => "ms",
             TimeUnit::Seconds => "ss",
         }
     }
@@ -673,6 +676,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_millisecond_tumbling_window_expr() {
+        let mut expr = tumbling_expr();
+        let Expr::Function(function) = &mut expr else {
+            panic!("expected tumbling window function");
+        };
+        function.args[0] = make_string_arg("MS");
+
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(Window::tumbling(TimeUnit::Milliseconds, 10)));
+    }
+
+    #[test]
     fn parse_tumbling_window_expr_partitioned_by() {
         let mut expr = tumbling_expr();
         if let Expr::Function(function) = &mut expr {
@@ -718,6 +733,21 @@ mod tests {
     fn parse_sliding_window_expr_without_lookahead() {
         let parsed = parse_window_expr(&sliding_expr(None)).unwrap();
         assert_eq!(parsed, Some(Window::sliding(TimeUnit::Seconds, 10, None)));
+    }
+
+    #[test]
+    fn parse_millisecond_sliding_window_expr() {
+        let mut expr = sliding_expr(None);
+        let Expr::Function(function) = &mut expr else {
+            panic!("expected sliding window function");
+        };
+        function.args[0] = make_string_arg("ms");
+
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(
+            parsed,
+            Some(Window::sliding(TimeUnit::Milliseconds, 10, None))
+        );
     }
 
     #[test]
@@ -815,6 +845,24 @@ mod tests {
     fn window_round_trip_back_to_expr() {
         let window = Window::tumbling(TimeUnit::Seconds, 25);
         let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn millisecond_sliding_window_round_trip_back_to_expr() {
+        let window = Window::sliding(TimeUnit::Milliseconds, 100, Some(150));
+        let expr = window_to_expr(&window);
+        assert_eq!(expr.to_string(), "slidingwindow('ms', 100, 150)");
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn millisecond_tumbling_window_round_trip_back_to_expr() {
+        let window = Window::tumbling(TimeUnit::Milliseconds, 100);
+        let expr = window_to_expr(&window);
+        assert_eq!(expr.to_string(), "tumblingwindow('ms', 100)");
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));
     }

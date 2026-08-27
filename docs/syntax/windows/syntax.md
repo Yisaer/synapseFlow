@@ -39,11 +39,21 @@ SQL-visible window metadata functions are documented in
 
 ## Parameter Rules
 
-For `tumblingwindow`, `slidingwindow`, and `countwindow`:
+For `tumblingwindow`:
+
 - Arguments must be literals.
 - `time_unit`: string literal (both single- and double-quoted strings are accepted).
-- `length`, `lookback`, `lookahead`, `count`: unsigned integer literals.
-- Currently only `time_unit = 'ss'` is supported.
+- Supported time units are `'ms'` for milliseconds and `'ss'` for seconds.
+- `length`: unsigned integer literal expressed in `time_unit`.
+
+For `slidingwindow`:
+
+- Arguments must be literals.
+- `time_unit`: string literal (both single- and double-quoted strings are accepted).
+- Supported time units are `'ms'` for milliseconds and `'ss'` for seconds.
+- `lookback` and `lookahead`: unsigned integer literals expressed in `time_unit`.
+
+For `countwindow`, `count` must be an unsigned integer literal.
 
 For `statewindow`:
 - `open_expr` and `emit_expr` are general SQL expressions (typically boolean conditions).
@@ -77,6 +87,9 @@ Window functions may use SQL function `FILTER (WHERE ...)` syntax. The filter st
 ```sql
 -- Time-based tumbling window of 10 seconds
 SELECT * FROM stream GROUP BY tumblingwindow('ss', 10);
+
+-- Time-based tumbling window of 100 milliseconds
+SELECT * FROM stream GROUP BY tumblingwindow('ms', 100);
 
 -- Count-based window over every 500 rows
 SELECT avg(price) FROM stream GROUP BY countwindow(500);

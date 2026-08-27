@@ -289,6 +289,22 @@ async fn eventtime_window_metadata_table_driven() {
             }]),
         },
         WindowMetadataCase {
+            name: "eventtime_millisecond_tumbling_window_projects_window_metadata",
+            sql: "SELECT window_start() AS ws, window_end() AS we, sum(a) AS s FROM stream_eventtime GROUP BY tumblingwindow('ms', 100)",
+            input_rows: vec![
+                serde_json::json!({"a": 2, "event_ts": 1050}),
+                serde_json::json!({"a": 3, "event_ts": 1099}),
+                serde_json::json!({"a": 7, "event_ts": 1100}),
+                serde_json::json!({"a": 17, "event_ts": 8100}),
+            ],
+            stop_before_expect: false,
+            expected: serde_json::json!([{
+                "ws": "1970-01-01T00:00:01.000000Z",
+                "we": "1970-01-01T00:00:01.100000Z",
+                "s": 5,
+            }]),
+        },
+        WindowMetadataCase {
             name: "eventtime_count_window_projects_lifecycle_metadata",
             sql: "SELECT window_start() AS ws, window_end() AS we, sum(a) AS s FROM stream_eventtime GROUP BY countwindow(3)",
             input_rows: vec![

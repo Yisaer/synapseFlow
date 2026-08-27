@@ -2,7 +2,6 @@
 //!
 
 use crate::expr::ScalarExpr;
-use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalTumblingWindow};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
@@ -18,7 +17,7 @@ use crate::processor::{
 use crate::runtime::TaskSpawner;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -51,9 +50,7 @@ impl TumblingWindowProcessor {
             channel_capacities.control_link_kind,
             channel_capacities.control,
         );
-        let length = match physical.time_unit {
-            TimeUnit::Seconds => Duration::from_secs(physical.length),
-        };
+        let length = physical.time_unit.duration(physical.length);
         let partition_by_scalars = physical.partition_by_scalars.clone();
         Self {
             id: id.into(),
@@ -99,9 +96,9 @@ impl Processor for TumblingWindowProcessor {
         let partition_by_scalars = self.partition_by_scalars.clone();
 
         // Local state captured by the task.
-        let len_secs = self.window_length.as_secs().max(1);
+        let window_length = self.window_length;
         let mut state = PartitionedProcessingState::new(
-            len_secs,
+            window_length,
             partition_by_scalars,
             output.clone(),
             channel_capacities.data,
@@ -234,7 +231,7 @@ impl Processor for TumblingWindowProcessor {
 struct PartitionedProcessingState {
     state_ids: HashMap<PartitionKey, usize>,
     states: Vec<ProcessingState>,
-    len_secs: u64,
+    window_length: Duration,
     partition_by_scalars: Vec<ScalarExpr>,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
@@ -244,7 +241,7 @@ struct PartitionedProcessingState {
 
 impl PartitionedProcessingState {
     fn new(
-        len_secs: u64,
+        window_length: Duration,
         partition_by_scalars: Vec<ScalarExpr>,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
@@ -259,7 +256,7 @@ impl PartitionedProcessingState {
         Self {
             state_ids: HashMap::new(),
             states: Vec::new(),
-            len_secs,
+            window_length,
             partition_by_scalars,
             output,
             data_channel_capacity,
@@ -283,7 +280,11 @@ impl PartitionedProcessingState {
             }
         };
         for tuple in rows {
-            let window_start = match window_start_secs(tuple.timestamp, self.len_secs) {
+            let window_start = match window_metadata::floor_to_window_start(
+                tuple.timestamp,
+                self.window_length,
+                "timestamp",
+            ) {
                 Ok(start) => start,
                 Err(err) => {
                     self.stats
@@ -291,13 +292,20 @@ impl PartitionedProcessingState {
                     continue;
                 }
             };
-            match window_metadata::validate_epoch_secs(window_start.saturating_add(self.len_secs)) {
-                Ok(()) => {}
-                Err(err) => {
-                    self.stats
-                        .record_error_logged("tumbling window processor error", err.to_string());
+            let window_end = match window_start.checked_add(self.window_length) {
+                Some(end) => end,
+                None => {
+                    self.stats.record_error_logged(
+                        "tumbling window processor error",
+                        "tumblingwindow end timestamp overflow".to_string(),
+                    );
                     continue;
                 }
+            };
+            if let Err(err) = window_metadata::validate_system_time(window_end) {
+                self.stats
+                    .record_error_logged("tumbling window processor error", err.to_string());
+                continue;
             }
             let partition_key =
                 match eval_partition_key(&self.partition_by_scalars, &tuple, "tumblingwindow") {
@@ -354,7 +362,7 @@ impl PartitionedProcessingState {
         let id = self.states.len();
         self.state_ids.insert(key, id);
         self.states.push(ProcessingState::new(
-            self.len_secs,
+            self.window_length,
             self.output.clone(),
             self.data_channel_capacity,
             Arc::clone(&self.stats),
@@ -366,7 +374,7 @@ impl PartitionedProcessingState {
 /// Processing-time window state: assumes timestamps are non-decreasing, buffers rows in order.
 struct ProcessingState {
     rows: VecDeque<crate::model::Tuple>,
-    len_secs: u64,
+    window_length: Duration,
     output: LinkOutput<StreamData>,
     data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
@@ -374,14 +382,14 @@ struct ProcessingState {
 
 impl ProcessingState {
     fn new(
-        len_secs: u64,
+        window_length: Duration,
         output: LinkOutput<StreamData>,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
     ) -> Self {
         Self {
             rows: VecDeque::new(),
-            len_secs,
+            window_length,
             output,
             data_channel_capacity,
             stats,
@@ -395,7 +403,11 @@ impl ProcessingState {
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
         // Flush whole windows whose end <= watermark.
         while let Some(front) = self.rows.front() {
-            let window_start = match window_start_secs(front.timestamp, self.len_secs) {
+            let window_start = match window_metadata::floor_to_window_start(
+                front.timestamp,
+                self.window_length,
+                "timestamp",
+            ) {
                 Ok(start) => start,
                 Err(err) => {
                     self.stats
@@ -404,15 +416,28 @@ impl ProcessingState {
                     continue;
                 }
             };
-            let window_end = SystemTime::UNIX_EPOCH
-                + Duration::from_secs(window_start.saturating_add(self.len_secs));
+            let window_end = match window_start.checked_add(self.window_length) {
+                Some(end) => end,
+                None => {
+                    self.stats.record_error_logged(
+                        "tumbling window processor error",
+                        "tumblingwindow end timestamp overflow".to_string(),
+                    );
+                    self.rows.pop_front();
+                    continue;
+                }
+            };
             if window_end > watermark {
                 break;
             }
 
             let mut current_rows = Vec::new();
             while let Some(row) = self.rows.front() {
-                let row_start = match window_start_secs(row.timestamp, self.len_secs) {
+                let row_start = match window_metadata::floor_to_window_start(
+                    row.timestamp,
+                    self.window_length,
+                    "timestamp",
+                ) {
                     Ok(start) => start,
                     Err(err) => {
                         self.stats.record_error_logged(
@@ -438,10 +463,10 @@ impl ProcessingState {
                 continue;
             }
             let row_count = current_rows.len() as u64;
-            let batch = match window_metadata::record_batch_from_epoch_secs(
+            let batch = match window_metadata::record_batch_from_system_time(
                 current_rows,
                 window_start,
-                window_start.saturating_add(self.len_secs),
+                window_end,
             ) {
                 Ok(batch) => batch,
                 Err(err) => {
@@ -464,7 +489,11 @@ impl ProcessingState {
 
     async fn flush_all(&mut self) -> Result<(), ProcessorError> {
         while let Some(front) = self.rows.front() {
-            let window_start = match window_start_secs(front.timestamp, self.len_secs) {
+            let window_start = match window_metadata::floor_to_window_start(
+                front.timestamp,
+                self.window_length,
+                "timestamp",
+            ) {
                 Ok(start) => start,
                 Err(err) => {
                     self.stats
@@ -475,7 +504,11 @@ impl ProcessingState {
             };
             let mut current_rows = Vec::new();
             while let Some(row) = self.rows.front() {
-                let row_start = match window_start_secs(row.timestamp, self.len_secs) {
+                let row_start = match window_metadata::floor_to_window_start(
+                    row.timestamp,
+                    self.window_length,
+                    "timestamp",
+                ) {
                     Ok(start) => start,
                     Err(err) => {
                         self.stats.record_error_logged(
@@ -500,10 +533,20 @@ impl ProcessingState {
                 continue;
             }
             let row_count = current_rows.len() as u64;
-            let batch = match window_metadata::record_batch_from_epoch_secs(
+            let window_end = match window_start.checked_add(self.window_length) {
+                Some(end) => end,
+                None => {
+                    self.stats.record_error_logged(
+                        "tumbling window processor error",
+                        "tumblingwindow end timestamp overflow".to_string(),
+                    );
+                    continue;
+                }
+            };
+            let batch = match window_metadata::record_batch_from_system_time(
                 current_rows,
                 window_start,
-                window_start.saturating_add(self.len_secs),
+                window_end,
             ) {
                 Ok(batch) => batch,
                 Err(err) => {
@@ -525,15 +568,6 @@ impl ProcessingState {
     }
 }
 
-fn window_start_secs(ts: SystemTime, len_secs: u64) -> Result<u64, ProcessorError> {
-    let epoch = ts
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| ProcessorError::ProcessingError(format!("invalid timestamp: {e}")))?;
-    let secs = epoch.as_secs();
-    let len = len_secs.max(1);
-    Ok(secs / len * len)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +575,7 @@ mod tests {
     use crate::planner::physical::PhysicalTumblingWindow;
     use crate::processor::base::{Processor, DEFAULT_DATA_CHANNEL_CAPACITY};
     use crate::processor::{BarrierControlSignal, ProcessorStats};
+    use std::time::UNIX_EPOCH;
     use tokio::time::timeout;
 
     fn test_spawner() -> TaskSpawner {
@@ -556,6 +591,13 @@ mod tests {
         crate::model::Tuple::with_timestamp(
             crate::model::Tuple::empty_messages(),
             UNIX_EPOCH + Duration::from_secs(sec),
+        )
+    }
+
+    fn tuple_at_millis(millis: u64) -> crate::model::Tuple {
+        crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_millis(millis),
         )
     }
 
@@ -642,5 +684,66 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|message| message.contains("invalid timestamp")));
+    }
+
+    #[tokio::test]
+    async fn millisecond_tumbling_window_uses_exact_boundaries_and_metadata() {
+        let spawner = test_spawner();
+        let physical = PhysicalTumblingWindow::new(TimeUnit::Milliseconds, 100, Vec::new(), 0);
+        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch = crate::model::RecordBatch::new(vec![
+            tuple_at_millis(1_050),
+            tuple_at_millis(1_099),
+            tuple_at_millis(1_100),
+        ])
+        .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::watermark(
+                UNIX_EPOCH + Duration::from_millis(1_099),
+            ))
+            .is_ok());
+        assert!(
+            timeout(Duration::from_millis(100), output_rx.recv())
+                .await
+                .is_err(),
+            "window must not flush before its end boundary"
+        );
+
+        assert!(input
+            .send(StreamData::watermark(
+                UNIX_EPOCH + Duration::from_millis(1_100),
+            ))
+            .is_ok());
+        let first = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(first) = first else {
+            panic!("expected first millisecond tumbling window");
+        };
+        assert_eq!(first.num_rows(), 2);
+        let metadata = first.metadata().window.as_deref().expect("window metadata");
+        assert_eq!(metadata.start.epoch_micros(), 1_000_000);
+        assert_eq!(metadata.end.epoch_micros(), 1_100_000);
+
+        assert!(input
+            .send(StreamData::watermark(
+                UNIX_EPOCH + Duration::from_millis(1_200),
+            ))
+            .is_ok());
+        let second = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(second) = second else {
+            panic!("expected second millisecond tumbling window");
+        };
+        assert_eq!(second.num_rows(), 1);
     }
 }
