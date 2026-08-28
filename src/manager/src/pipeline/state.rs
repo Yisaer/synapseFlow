@@ -168,11 +168,9 @@ impl AppState {
     }
 
     fn spawn_scheduler(&self, interval_secs: u64) {
-        let storage = Arc::clone(&self.storage);
-        let instances = self.instances.clone();
+        let state = self.clone();
         tokio::spawn(async move {
-            super::scheduler::run_patrol(storage, instances, Duration::from_secs(interval_secs))
-                .await;
+            super::scheduler::run_patrol(state, Duration::from_secs(interval_secs)).await;
         });
     }
 

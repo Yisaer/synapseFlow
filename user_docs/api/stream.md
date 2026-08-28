@@ -112,6 +112,118 @@ Example:
 curl -s http://127.0.0.1:8080/streams/describe/source_stream | jq .
 ```
 
+### Update Stream
+
+`PUT /streams/:name`
+
+Updates an existing stream definition. The stream `name` and `type` are immutable and are carried
+forward from the stored definition. A private stream may be converted to a shared stream, but a
+shared stream cannot be converted back to a private stream.
+
+The request body contains the mutable fields from `CreateStreamRequest`:
+
+```json
+{
+  "revision": 1721797200001,
+  "schema": {
+    "type": "json",
+    "props": {
+      "columns": [
+        {"name": "user_id", "data_type": "int64"},
+        {"name": "score", "data_type": "float64"}
+      ]
+    }
+  },
+  "props": {
+    "broker_url": "tcp://127.0.0.1:1883",
+    "topic": "/yisa/data",
+    "qos": 0
+  },
+  "shared": false,
+  "decoder": {
+    "type": "json",
+    "props": {}
+  }
+}
+```
+
+The optional `restart_pipelines` query parameter controls whether pipelines that reference the
+stream are rebuilt:
+
+- `restart_pipelines=false` is the default and preserves the existing behavior. Updating a private
+  stream does not affect already running pipelines, which continue to use their existing runtime.
+  Updating a shared stream returns `409 Conflict` while a referencing pipeline is running.
+- `restart_pipelines=true` applies the same lifecycle to private and shared streams. The manager
+  stops referencing pipelines that are running, replaces the stream, rebuilds every referencing
+  pipeline against the updated stream catalog, and restores each pipeline according to its stored
+  desired state.
+
+Example:
+
+```bash
+curl -s -XPUT \
+  "http://127.0.0.1:8080/streams/source_stream?restart_pipelines=true" \
+  -H "Content-Type: application/json" \
+  -d @stream-update.json | jq .
+```
+
+Pipeline rebuilds caused by a stream update do not modify the pipeline specification or pipeline
+revision. Runtime behavior depends on the pipeline lifecycle state:
+
+- A non-scheduled pipeline whose desired state is `Running` is rebuilt and started immediately.
+- A non-scheduled stopped pipeline is rebuilt and remains stopped.
+- A scheduled pipeline is rebuilt with desired state `ScheduledStopped`. The patrol scheduler
+  evaluates its schedule during a later patrol and starts it when the schedule is active.
+
+Once the stream has been replaced successfully, pipeline recovery is non-transactional. A pipeline
+rebuild or start failure does not roll back the stream and does not stop recovery of other
+pipelines. The manager records the runtime failure and reports the outcome for every affected
+pipeline.
+
+Successful response with pipeline restart results:
+
+```json
+{
+  "name": "source_stream",
+  "revision": 1721797200001,
+  "pipeline_restart": {
+    "requested": true,
+    "results": [
+      {
+        "id": "realtime_scores",
+        "status": "restarted"
+      },
+      {
+        "id": "scheduled_report",
+        "status": "scheduled_stopped"
+      },
+      {
+        "id": "legacy_projection",
+        "status": "rebuild_failed",
+        "error": "column `legacy_score` not found"
+      }
+    ]
+  }
+}
+```
+
+Pipeline result statuses are:
+
+- `restarted`: the pipeline was rebuilt and started successfully.
+- `rebuilt_stopped`: the pipeline was rebuilt and retained its stopped state.
+- `scheduled_stopped`: the scheduled pipeline was rebuilt and left for patrol reconciliation.
+- `rebuild_failed`: the pipeline could not be rebuilt against the updated stream.
+- `start_failed`: the pipeline was rebuilt but could not be started.
+
+The endpoint returns `200 OK` after the stream itself is updated, including when one or more
+pipeline results report failure. Validation, resource-lock, pipeline-stop, storage, or stream
+replacement failures that occur before the stream update completes return the corresponding error
+response instead.
+
+When `restart_pipelines` is omitted or `false`, the successful response contains only `name` and
+`revision`. If an equal revision contains the same normalized definition, the request is
+idempotent and does not restart pipelines even when `restart_pipelines=true`.
+
 ### Delete Stream
 
 `DELETE /streams/:name`

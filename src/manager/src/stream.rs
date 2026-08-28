@@ -1,8 +1,12 @@
 use crate::MQTT_QOS;
 use crate::audit::ResourceMutationLog;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
-use crate::pipeline::AppState;
-use crate::resource_id::{ResourceIdKind, validate_resource_id};
+use crate::pipeline::{
+    AppState, CreatePipelineRequest, build_pipeline_definition,
+    persist_generic_runtime_failure_marker, persist_start_failure_marker,
+    referenced_streams_from_pipeline_sql,
+};
+use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
 use crate::storage_bridge;
 use crate::storage_bridge::{stored_stream_from_request, stream_definition_from_stored};
 use axum::{
@@ -17,6 +21,7 @@ use flow::catalog::{
     MockStreamProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
     VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };
+use flow::pipeline::{PipelineError, PipelineStatus, PipelineStopMode};
 use flow::processor::ProcessorStatsEntry;
 use flow::processor::{SamplerConfig, SamplingStrategy};
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
@@ -26,7 +31,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use tokio::sync::TryAcquireError;
@@ -36,7 +41,10 @@ use flow::{
     Int16Type, Int32Type, Int64Type, ListType, ProtoDescriptorBundle, StringType, StructField,
     StructType, TimestampType, Uint8Type, Uint16Type, Uint32Type, Uint64Type,
 };
-use storage::{StorageError, StorageManager, StoredMemoryTopicKind};
+use storage::{
+    StorageError, StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState,
+    StoredPipelineRunState,
+};
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreateStreamRequest {
@@ -112,6 +120,259 @@ pub struct UpsertStreamRequest {
     pub eventtime: Option<EventtimeConfigRequest>,
     #[serde(default)]
     pub sampler: Option<SamplerConfig>,
+}
+
+/// Execution options for `PUT /streams/:name`.
+#[derive(Default, Deserialize)]
+pub struct UpsertStreamQuery {
+    /// Rebuild pipelines that reference the updated stream.
+    #[serde(default)]
+    pub restart_pipelines: bool,
+}
+
+#[derive(Serialize)]
+struct UpsertStreamResponse {
+    name: String,
+    revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pipeline_restart: Option<PipelineRestartResponse>,
+}
+
+#[derive(Serialize)]
+struct PipelineRestartResponse {
+    requested: bool,
+    results: Vec<PipelineRestartResult>,
+}
+
+#[derive(Serialize)]
+struct PipelineRestartResult {
+    id: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+struct AffectedPipeline {
+    id: String,
+    revision: u64,
+    flow_instance_id: String,
+    request: CreatePipelineRequest,
+    desired_state: StoredPipelineDesiredState,
+    runtime_status: Option<PipelineStatus>,
+}
+
+fn collect_pipelines_referencing_stream(
+    state: &AppState,
+    stream_name: &str,
+) -> Result<Vec<AffectedPipeline>, String> {
+    let mut affected = Vec::new();
+    let stored_pipelines = state
+        .storage
+        .list_pipelines()
+        .map_err(|err| format!("failed to list pipelines: {err}"))?;
+
+    for stored in stored_pipelines {
+        let request = storage_bridge::pipeline_request_from_stored(&stored)?;
+        let flow_instance_id = defaulted_flow_instance_id(request.flow_instance_id.as_deref())?;
+        let instance = state.local_instance(&flow_instance_id).ok_or_else(|| {
+            format!("flow instance {flow_instance_id} is not available in runtime")
+        })?;
+        let referenced_streams = referenced_streams_from_pipeline_sql(&request, &instance)?;
+        if !referenced_streams.contains(stream_name) {
+            continue;
+        }
+
+        let desired_state = state
+            .storage
+            .get_pipeline_run_state(&stored.id)
+            .map_err(|err| format!("failed to read pipeline {} desired state: {err}", stored.id))?
+            .map(|state| state.desired_state)
+            .unwrap_or(StoredPipelineDesiredState::Stopped);
+        let runtime_status = instance
+            .list_pipelines()
+            .into_iter()
+            .find(|snapshot| snapshot.definition.id() == stored.id)
+            .map(|snapshot| snapshot.status);
+
+        affected.push(AffectedPipeline {
+            id: stored.id,
+            revision: stored.revision,
+            flow_instance_id,
+            request,
+            desired_state,
+            runtime_status,
+        });
+    }
+
+    affected.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(affected)
+}
+
+async fn stop_affected_pipelines(
+    state: &AppState,
+    pipelines: &[AffectedPipeline],
+) -> Result<(), String> {
+    for pipeline in pipelines {
+        let instance = state
+            .local_instance(&pipeline.flow_instance_id)
+            .ok_or_else(|| {
+                format!(
+                    "flow instance {} is not available in runtime",
+                    pipeline.flow_instance_id
+                )
+            })?;
+
+        if pipeline.request.options.schedule.is_some() {
+            state
+                .storage
+                .put_pipeline_run_state(StoredPipelineRunState {
+                    pipeline_id: pipeline.id.clone(),
+                    desired_state: StoredPipelineDesiredState::ScheduledStopped,
+                })
+                .map_err(|err| {
+                    format!(
+                        "failed to mark scheduled pipeline {} stopped: {err}",
+                        pipeline.id
+                    )
+                })?;
+        }
+
+        if matches!(pipeline.runtime_status, Some(PipelineStatus::Running)) {
+            instance
+                .stop_pipeline(
+                    &pipeline.id,
+                    PipelineStopMode::Quick,
+                    Duration::from_secs(5),
+                )
+                .await
+                .map_err(|err| format!("failed to stop pipeline {}: {err}", pipeline.id))?;
+        }
+    }
+    Ok(())
+}
+
+async fn rebuild_affected_pipeline(
+    state: &AppState,
+    pipeline: &AffectedPipeline,
+) -> Result<(), String> {
+    let instance = state
+        .local_instance(&pipeline.flow_instance_id)
+        .ok_or_else(|| {
+            format!(
+                "flow instance {} is not available in runtime",
+                pipeline.flow_instance_id
+            )
+        })?;
+    match instance.delete_pipeline(&pipeline.id).await {
+        Ok(()) | Err(PipelineError::NotFound(_)) => {}
+        Err(err) => {
+            return Err(format!(
+                "failed to remove pipeline {} runtime before rebuild: {err}",
+                pipeline.id
+            ));
+        }
+    }
+
+    let definition = build_pipeline_definition(
+        &pipeline.request,
+        instance.encoder_registry().as_ref(),
+        instance.as_ref(),
+    )?;
+    instance
+        .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
+        .map_err(|err| format!("failed to validate pipeline {}: {err}", pipeline.id))?;
+    instance
+        .create_pipeline(flow::CreatePipelineRequest::new(definition))
+        .map_err(|err| format!("failed to rebuild pipeline {}: {err}", pipeline.id))?;
+    Ok(())
+}
+
+async fn rebuild_and_restore_affected_pipelines(
+    state: &AppState,
+    pipelines: &[AffectedPipeline],
+) -> Vec<PipelineRestartResult> {
+    let mut results = Vec::with_capacity(pipelines.len());
+    for pipeline in pipelines {
+        if let Err(err) = rebuild_affected_pipeline(state, pipeline).await {
+            persist_generic_runtime_failure_marker(
+                state.storage.as_ref(),
+                &pipeline.id,
+                pipeline.revision,
+                "stream_update_rebuild",
+                err.clone(),
+            );
+            results.push(PipelineRestartResult {
+                id: pipeline.id.clone(),
+                status: "rebuild_failed",
+                error: Some(err),
+            });
+            continue;
+        }
+
+        let _ = state.storage.delete_pipeline_runtime_failure(&pipeline.id);
+        if pipeline.request.options.schedule.is_some() {
+            results.push(PipelineRestartResult {
+                id: pipeline.id.clone(),
+                status: "scheduled_stopped",
+                error: None,
+            });
+            continue;
+        }
+        if !matches!(pipeline.desired_state, StoredPipelineDesiredState::Running) {
+            results.push(PipelineRestartResult {
+                id: pipeline.id.clone(),
+                status: "rebuilt_stopped",
+                error: None,
+            });
+            continue;
+        }
+
+        let instance = match state.local_instance(&pipeline.flow_instance_id) {
+            Some(instance) => instance,
+            None => {
+                let err = format!(
+                    "flow instance {} is not available in runtime",
+                    pipeline.flow_instance_id
+                );
+                persist_generic_runtime_failure_marker(
+                    state.storage.as_ref(),
+                    &pipeline.id,
+                    pipeline.revision,
+                    "stream_update_restart",
+                    err.clone(),
+                );
+                results.push(PipelineRestartResult {
+                    id: pipeline.id.clone(),
+                    status: "start_failed",
+                    error: Some(err),
+                });
+                continue;
+            }
+        };
+        match instance.start_pipeline(&pipeline.id).await {
+            Ok(()) => {
+                results.push(PipelineRestartResult {
+                    id: pipeline.id.clone(),
+                    status: "restarted",
+                    error: None,
+                });
+            }
+            Err(err) => {
+                persist_start_failure_marker(
+                    state.storage.as_ref(),
+                    &pipeline.id,
+                    pipeline.revision,
+                    &err,
+                );
+                results.push(PipelineRestartResult {
+                    id: pipeline.id.clone(),
+                    status: "start_failed",
+                    error: Some(err.to_string()),
+                });
+            }
+        }
+    }
+    results
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -882,6 +1143,7 @@ pub async fn shared_stream_stats_handler(
 pub async fn upsert_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    Query(query): Query<UpsertStreamQuery>,
     Json(req): Json<UpsertStreamRequest>,
 ) -> impl IntoResponse {
     if let Err(err) = validate_resource_id(ResourceIdKind::StreamName, &name) {
@@ -934,7 +1196,7 @@ pub async fn upsert_stream_handler(
 
     // For shared streams (existing or newly converted): reject if any running
     // pipeline references this stream.
-    if new_shared {
+    if new_shared && !query.restart_pipelines {
         let mut running_pipelines = Vec::new();
         for (_, instance) in state.instances.instances_snapshot() {
             for snapshot in instance.list_pipelines() {
@@ -1057,6 +1319,65 @@ pub async fn upsert_stream_handler(
         }
     }
 
+    // Build the new definition before stopping any dependent pipeline.
+    let mut definition = StreamDefinition::new(
+        new_req.name.clone(),
+        Arc::clone(&resolved_schema.logical_schema),
+        stream_props,
+        decoder,
+    );
+    if let Some(schema_version) = resolved_schema.schema_version {
+        definition = definition.with_schema_version(schema_version);
+    }
+    if let Some(cfg) = &new_req.eventtime {
+        definition = definition.with_eventtime(EventtimeDefinition::new(
+            cfg.column.clone(),
+            cfg.eventtime_type.clone(),
+        ));
+    }
+    if let Some(sampler) = new_req.sampler.clone() {
+        definition = definition.with_sampler(sampler);
+    }
+
+    let affected_pipelines = if query.restart_pipelines {
+        match collect_pipelines_referencing_stream(&state, &name) {
+            Ok(pipelines) => pipelines,
+            Err(err) => {
+                audit.log_failure(&err);
+                return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let mut pipeline_permits = Vec::with_capacity(affected_pipelines.len());
+    for pipeline in &affected_pipelines {
+        match state.try_acquire_pipeline_op(&pipeline.id).await {
+            Ok(permit) => pipeline_permits.push(permit),
+            Err(TryAcquireError::NoPermits) => {
+                return (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "pipeline {} is busy processing another command",
+                        pipeline.id
+                    ),
+                )
+                    .into_response();
+            }
+            Err(TryAcquireError::Closed) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "pipeline operation guard closed".to_string(),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Err(err) = stop_affected_pipelines(&state, &affected_pipelines).await {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
     // Persist updated spec.
     let new_stored = match stored_stream_from_request(&new_req) {
         Ok(stored) => stored,
@@ -1081,26 +1402,6 @@ pub async fn upsert_stream_handler(
             format!("failed to persist updated stream {name}: {err}"),
         )
             .into_response();
-    }
-
-    // Build new definition.
-    let mut definition = StreamDefinition::new(
-        new_req.name.clone(),
-        Arc::clone(&resolved_schema.logical_schema),
-        stream_props,
-        decoder,
-    );
-    if let Some(schema_version) = resolved_schema.schema_version {
-        definition = definition.with_schema_version(schema_version);
-    }
-    if let Some(cfg) = &new_req.eventtime {
-        definition = definition.with_eventtime(EventtimeDefinition::new(
-            cfg.column.clone(),
-            cfg.eventtime_type.clone(),
-        ));
-    }
-    if let Some(sampler) = new_req.sampler.clone() {
-        definition = definition.with_sampler(sampler);
     }
 
     // Replace on every instance.
@@ -1134,13 +1435,23 @@ pub async fn upsert_stream_handler(
         }
     }
 
+    let pipeline_restart = if query.restart_pipelines {
+        Some(PipelineRestartResponse {
+            requested: true,
+            results: rebuild_and_restore_affected_pipelines(&state, &affected_pipelines).await,
+        })
+    } else {
+        None
+    };
+
     audit.log_success();
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "name": name,
-            "revision": new_req.revision
-        })),
+        Json(UpsertStreamResponse {
+            name,
+            revision: new_req.revision,
+            pipeline_restart,
+        }),
     )
         .into_response()
 }

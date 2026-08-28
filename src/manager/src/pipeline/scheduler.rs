@@ -3,7 +3,6 @@ use croner::{
     Cron,
     parser::{CronParser, Seconds, Year},
 };
-use std::sync::Arc;
 use std::time::Duration;
 use storage::{StoredPipelineDesiredState, StoredPipelineRunState};
 
@@ -175,17 +174,13 @@ fn compute_schedule_status_at(
 
 /// The patrol loop that periodically checks all pipelines with schedules
 /// and reconciles their actual state with the expected schedule windows.
-pub(crate) async fn run_patrol(
-    storage: Arc<storage::StorageManager>,
-    instances: crate::instances::FlowInstances,
-    interval: Duration,
-) {
+pub(crate) async fn run_patrol(state: super::state::AppState, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     tick.tick().await;
 
     loop {
         tick.tick().await;
-        let pipelines = match storage.list_pipelines() {
+        let pipelines = match state.storage.list_pipelines() {
             Ok(p) => p,
             Err(err) => {
                 tracing::error!(%err, "patrol: failed to list pipelines");
@@ -194,7 +189,7 @@ pub(crate) async fn run_patrol(
         };
 
         for stored in &pipelines {
-            patrol_pipeline(stored, storage.as_ref(), &instances).await;
+            patrol_pipeline(stored, &state).await;
         }
     }
 }
@@ -500,7 +495,7 @@ mod tests {
             .create_pipeline(stored.clone())
             .expect("persist scheduled pipeline");
 
-        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+        patrol_pipeline(&stored, &state).await;
 
         let run_state = state
             .storage
@@ -540,7 +535,7 @@ mod tests {
         );
 
         let first_failed_at_ms = marker.failed_at_ms;
-        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+        patrol_pipeline(&stored, &state).await;
         let marker = state
             .storage
             .get_pipeline_runtime_failure("scheduled_fail_pipe")
@@ -574,7 +569,7 @@ mod tests {
             StoredPipelineDesiredState::ScheduledStopped
         );
 
-        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+        patrol_pipeline(&stored, &state).await;
         let marker = state
             .storage
             .get_pipeline_runtime_failure("scheduled_fail_pipe")
@@ -624,7 +619,7 @@ mod tests {
             .create_pipeline(stored.clone())
             .expect("persist range-only pipeline");
 
-        patrol_pipeline(&stored, state.storage.as_ref(), &state.instances).await;
+        patrol_pipeline(&stored, &state).await;
 
         let run_state = state
             .storage
@@ -645,12 +640,21 @@ mod tests {
     }
 }
 
-async fn patrol_pipeline(
-    stored: &storage::StoredPipeline,
-    storage: &storage::StorageManager,
-    instances: &crate::instances::FlowInstances,
-) {
+async fn patrol_pipeline(stored: &storage::StoredPipeline, state: &super::state::AppState) {
     let pipeline_id = &stored.id;
+    let _permit = match state.try_acquire_pipeline_op(pipeline_id).await {
+        Ok(permit) => permit,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            tracing::debug!(pipeline_id, "patrol: pipeline operation is busy");
+            return;
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            tracing::error!(pipeline_id, "patrol: pipeline operation guard closed");
+            return;
+        }
+    };
+    let storage = state.storage.as_ref();
+    let instances = &state.instances;
 
     let req = match storage_bridge::pipeline_request_from_stored(stored) {
         Ok(r) => r,
