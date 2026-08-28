@@ -1,9 +1,10 @@
 use crate::aggregation::{
     avg_function_def, count_function_def, deduplicate_function_def, last_row_function_def,
-    max_function_def, median_function_def, min_function_def, ndv_function_def, stddev_function_def,
-    stddevs_function_def, sum_function_def, var_function_def, vars_function_def, AvgFunction,
-    CountFunction, DeduplicateFunction, LastRowFunction, MaxFunction, MedianFunction, MinFunction,
-    NdvFunction, StddevFunction, StddevsFunction, SumFunction, VarFunction, VarsFunction,
+    max_function_def, median_function_def, merge_agg_function_def, min_function_def,
+    ndv_function_def, stddev_function_def, stddevs_function_def, sum_function_def,
+    var_function_def, vars_function_def, AvgFunction, CountFunction, DeduplicateFunction,
+    LastRowFunction, MaxFunction, MedianFunction, MergeAggFunction, MinFunction, NdvFunction,
+    StddevFunction, StddevsFunction, SumFunction, VarFunction, VarsFunction,
 };
 use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
@@ -15,6 +16,7 @@ use std::sync::Arc;
 
 pub trait AggregateUpdate: Send + Sync {
     fn as_any(&self) -> &dyn Any;
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
 pub trait AggregateAccumulator: Send + Sync {
@@ -88,6 +90,7 @@ impl AggregateFunctionRegistry {
         self.register_function(Arc::new(MinFunction::new()));
         self.register_function(Arc::new(MedianFunction::new()));
         self.register_function(Arc::new(LastRowFunction::new()));
+        self.register_function(Arc::new(MergeAggFunction::new()));
         self.register_function(Arc::new(NdvFunction::new()));
         self.register_function(Arc::new(StddevFunction::new()));
         self.register_function(Arc::new(StddevsFunction::new()));
@@ -119,6 +122,7 @@ pub fn builtin_aggregation_defs() -> Vec<FunctionDef> {
         median_function_def(),
         min_function_def(),
         last_row_function_def(),
+        merge_agg_function_def(),
         ndv_function_def(),
         stddev_function_def(),
         stddevs_function_def(),
@@ -148,6 +152,10 @@ mod tests {
             struct Update;
             impl AggregateUpdate for Update {
                 fn as_any(&self) -> &dyn Any {
+                    self
+                }
+
+                fn into_any(self: Box<Self>) -> Box<dyn Any> {
                     self
                 }
             }

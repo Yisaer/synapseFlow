@@ -34,6 +34,7 @@ pub fn default_aggregate_registry() -> Arc<dyn AggregateRegistry> {
         "last_row",
         "max",
         "median",
+        "merge_agg",
         "min",
         "ndv",
         "stddev",

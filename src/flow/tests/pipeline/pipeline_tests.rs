@@ -2,7 +2,7 @@
 
 use datatypes::{
     BytesType, ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType,
-    StructField, StructType, TimestampValue, Value,
+    StructField, StructType, StructValue, TimestampValue, Value,
 };
 use flow::catalog::{
     FileStreamProps, MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
@@ -1715,6 +1715,86 @@ async fn pipeline_table_driven_queries() {
                         Value::Uint64(2),
                     ],
                 }],
+        },
+    ];
+
+    for test_case in test_cases {
+        run_test_case(test_case).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_merge_agg_table_driven() {
+    let properties_type = StructType::new(Arc::new(vec![
+        StructField::new("x".to_string(), ConcreteDatatype::Int64(Int64Type), true),
+        StructField::new(
+            "label".to_string(),
+            ConcreteDatatype::String(StringType),
+            true,
+        ),
+    ]));
+    let test_cases = vec![
+        TestCase {
+            name: "merge_agg_wildcard_countwindow",
+            sql: "SELECT merge_agg(*) AS merged FROM stream GROUP BY countwindow(3)",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+            ],
+            expected_rows: 1,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "merged".to_string(),
+                expected_values: vec![Value::Struct(StructValue::new(
+                    vec![Value::Int64(3), Value::Int64(30)],
+                    StructType::new(Arc::new(vec![
+                        StructField::new("a".to_string(), ConcreteDatatype::Int64(Int64Type), true),
+                        StructField::new("b".to_string(), ConcreteDatatype::Int64(Int64Type), true),
+                    ])),
+                ))],
+            }],
+        },
+        TestCase {
+            name: "merge_agg_struct_column_countwindow",
+            sql: "SELECT merge_agg(properties) AS merged FROM stream GROUP BY countwindow(3)",
+            input_data: vec![
+                (
+                    "properties".to_string(),
+                    vec![
+                        Value::Struct(StructValue::new(
+                            vec![Value::Int64(1), Value::String("one".to_string())],
+                            properties_type.clone(),
+                        )),
+                        Value::Struct(StructValue::new(
+                            vec![Value::Int64(2), Value::String("two".to_string())],
+                            properties_type.clone(),
+                        )),
+                        Value::Struct(StructValue::new(
+                            vec![Value::Null, Value::String("three".to_string())],
+                            properties_type.clone(),
+                        )),
+                    ],
+                ),
+                (
+                    "ignored".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+            ],
+            expected_rows: 1,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "merged".to_string(),
+                expected_values: vec![Value::Struct(StructValue::new(
+                    vec![Value::Null, Value::String("three".to_string())],
+                    properties_type.clone(),
+                ))],
+            }],
         },
     ];
 

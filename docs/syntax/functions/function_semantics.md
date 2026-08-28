@@ -199,7 +199,7 @@ test expectations for streaming execution.
 
 Current examples:
 
-- `sum`, `count`, `avg`, `min`, and `max` report incremental capability
+- `sum`, `count`, `avg`, `min`, `max`, and `merge_agg` report incremental capability
 - `median`, `deduplicate`, and `ndv` do not
 
 This flag must remain aligned with the actual aggregate implementation's

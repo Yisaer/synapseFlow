@@ -89,6 +89,10 @@ impl AggregateUpdate for LastRowUpdate {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 impl AggregateFunction for LastRowFunction {

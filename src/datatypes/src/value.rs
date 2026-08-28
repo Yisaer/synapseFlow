@@ -91,6 +91,10 @@ impl StructValue {
         &self.fields
     }
 
+    pub fn into_parts(self) -> (Vec<Value>, StructType) {
+        (self.items, self.fields)
+    }
+
     /// Get field value by field name
     pub fn get_field(&self, field_name: &str) -> Option<&Value> {
         self.fields

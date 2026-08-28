@@ -165,6 +165,10 @@ impl AggregateUpdate for MedianUpdate {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 #[cfg(test)]
