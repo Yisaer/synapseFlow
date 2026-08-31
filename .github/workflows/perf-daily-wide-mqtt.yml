@@ -1,7 +1,33 @@
 name: Perf Daily Wide MQTT
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Branch or commit to benchmark (default: main)'
+        required: true
+        default: 'main'
+        type: string
+      columns:
+        description: 'Column count (default: 15000)'
+        required: true
+        default: '15000'
+        type: string
+      duration_secs:
+        description: 'Duration per scenario in seconds (default: 120)'
+        required: true
+        default: '120'
+        type: string
+      interval_ms:
+        description: 'Message interval in milliseconds (default: 20)'
+        required: true
+        default: '20'
+        type: string
+      pipelines:
+        description: 'Number of pipelines sharing the MQTT stream (default: 1)'
+        required: true
+        default: '1'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}
@@ -24,6 +50,8 @@ jobs:
           EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
@@ -56,9 +84,17 @@ jobs:
       - name: Run perf scenario (jemalloc, explicit columns)
         env:
           PERF_OUT_DIR: tmp/perf_daily_ci/jemalloc/out_explicit
-          PERF_DURATION_SECS: "120"
+          PERF_COLUMNS: ${{ inputs.columns || '15000' }}
+          PERF_DURATION_SECS: ${{ inputs.duration_secs || '120' }}
+          PERF_INTERVAL_MS: ${{ inputs.interval_ms || '20' }}
+          PERF_PIPELINES: ${{ inputs.pipelines || '1' }}
         run: |
           set -euo pipefail
+          if [ "$PERF_INTERVAL_MS" -le 0 ] || [ "$((1000 % PERF_INTERVAL_MS))" -ne 0 ]; then
+            echo "interval_ms must be positive and divide 1000 exactly." >&2
+            exit 1
+          fi
+          PERF_RATE=$((1000 / PERF_INTERVAL_MS))
           PYTHONPYCACHEPREFIX=tmp/pycache \
           python3 tests/perf_daily/perf_daily.py \
             --force \
@@ -67,13 +103,14 @@ jobs:
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
             --qos 1 \
-            --columns 15000 \
+            --columns "${PERF_COLUMNS}" \
             --sql-mode explicit \
             --pipeline-id perf_daily_pipeline_explicit \
+            --pipelines "${PERF_PIPELINES}" \
             --cases 20 \
             --str-len 10 \
             --duration-secs "${PERF_DURATION_SECS}" \
-            --rate 50 \
+            --rate "${PERF_RATE}" \
             --scrape-interval-ms 15000 \
             --out-dir "${PERF_OUT_DIR}" \
             run
@@ -88,7 +125,7 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT (jemalloc) - explicit (2m) (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT (jemalloc) - explicit (${{ inputs.columns || '15000' }} cols, ${{ inputs.interval_ms || '20' }}ms, ${{ inputs.pipelines || '1' }} pipelines, ${{ inputs.duration_secs || '120' }}s) (${{ github.sha }})"
 
       - name: Stop veloflux (jemalloc, after explicit)
         if: always()
@@ -110,9 +147,17 @@ jobs:
       - name: Run perf scenario (jemalloc, select *)
         env:
           PERF_OUT_DIR: tmp/perf_daily_ci/jemalloc/out_star
-          PERF_DURATION_SECS: "120"
+          PERF_COLUMNS: ${{ inputs.columns || '15000' }}
+          PERF_DURATION_SECS: ${{ inputs.duration_secs || '120' }}
+          PERF_INTERVAL_MS: ${{ inputs.interval_ms || '20' }}
+          PERF_PIPELINES: ${{ inputs.pipelines || '1' }}
         run: |
           set -euo pipefail
+          if [ "$PERF_INTERVAL_MS" -le 0 ] || [ "$((1000 % PERF_INTERVAL_MS))" -ne 0 ]; then
+            echo "interval_ms must be positive and divide 1000 exactly." >&2
+            exit 1
+          fi
+          PERF_RATE=$((1000 / PERF_INTERVAL_MS))
           PYTHONPYCACHEPREFIX=tmp/pycache \
           python3 tests/perf_daily/perf_daily.py \
             --force \
@@ -121,13 +166,14 @@ jobs:
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
             --qos 1 \
-            --columns 15000 \
+            --columns "${PERF_COLUMNS}" \
             --sql-mode star \
             --pipeline-id perf_daily_pipeline_star \
+            --pipelines "${PERF_PIPELINES}" \
             --cases 20 \
             --str-len 10 \
             --duration-secs "${PERF_DURATION_SECS}" \
-            --rate 50 \
+            --rate "${PERF_RATE}" \
             --scrape-interval-ms 15000 \
             --out-dir "${PERF_OUT_DIR}" \
             run
@@ -142,7 +188,7 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT (jemalloc) - select * (2m) (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT (jemalloc) - select * (${{ inputs.columns || '15000' }} cols, ${{ inputs.interval_ms || '20' }}ms, ${{ inputs.pipelines || '1' }} pipelines, ${{ inputs.duration_secs || '120' }}s) (${{ github.sha }})"
 
       - name: Stop veloflux (jemalloc)
         if: always()
@@ -162,9 +208,17 @@ jobs:
       - name: Run perf scenario (system, explicit columns)
         env:
           PERF_OUT_DIR: tmp/perf_daily_ci/system/out_explicit
-          PERF_DURATION_SECS: "120"
+          PERF_COLUMNS: ${{ inputs.columns || '15000' }}
+          PERF_DURATION_SECS: ${{ inputs.duration_secs || '120' }}
+          PERF_INTERVAL_MS: ${{ inputs.interval_ms || '20' }}
+          PERF_PIPELINES: ${{ inputs.pipelines || '1' }}
         run: |
           set -euo pipefail
+          if [ "$PERF_INTERVAL_MS" -le 0 ] || [ "$((1000 % PERF_INTERVAL_MS))" -ne 0 ]; then
+            echo "interval_ms must be positive and divide 1000 exactly." >&2
+            exit 1
+          fi
+          PERF_RATE=$((1000 / PERF_INTERVAL_MS))
           PYTHONPYCACHEPREFIX=tmp/pycache \
           python3 tests/perf_daily/perf_daily.py \
             --force \
@@ -173,13 +227,14 @@ jobs:
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
             --qos 1 \
-            --columns 15000 \
+            --columns "${PERF_COLUMNS}" \
             --sql-mode explicit \
             --pipeline-id perf_daily_pipeline_explicit \
+            --pipelines "${PERF_PIPELINES}" \
             --cases 20 \
             --str-len 10 \
             --duration-secs "${PERF_DURATION_SECS}" \
-            --rate 50 \
+            --rate "${PERF_RATE}" \
             --scrape-interval-ms 15000 \
             --out-dir "${PERF_OUT_DIR}" \
             run
@@ -194,7 +249,7 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT (system) - explicit (2m) (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT (system) - explicit (${{ inputs.columns || '15000' }} cols, ${{ inputs.interval_ms || '20' }}ms, ${{ inputs.pipelines || '1' }} pipelines, ${{ inputs.duration_secs || '120' }}s) (${{ github.sha }})"
 
       - name: Stop veloflux (system, after explicit)
         if: always()
@@ -214,9 +269,17 @@ jobs:
       - name: Run perf scenario (system, select *)
         env:
           PERF_OUT_DIR: tmp/perf_daily_ci/system/out_star
-          PERF_DURATION_SECS: "120"
+          PERF_COLUMNS: ${{ inputs.columns || '15000' }}
+          PERF_DURATION_SECS: ${{ inputs.duration_secs || '120' }}
+          PERF_INTERVAL_MS: ${{ inputs.interval_ms || '20' }}
+          PERF_PIPELINES: ${{ inputs.pipelines || '1' }}
         run: |
           set -euo pipefail
+          if [ "$PERF_INTERVAL_MS" -le 0 ] || [ "$((1000 % PERF_INTERVAL_MS))" -ne 0 ]; then
+            echo "interval_ms must be positive and divide 1000 exactly." >&2
+            exit 1
+          fi
+          PERF_RATE=$((1000 / PERF_INTERVAL_MS))
           PYTHONPYCACHEPREFIX=tmp/pycache \
           python3 tests/perf_daily/perf_daily.py \
             --force \
@@ -225,13 +288,14 @@ jobs:
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
             --qos 1 \
-            --columns 15000 \
+            --columns "${PERF_COLUMNS}" \
             --sql-mode star \
             --pipeline-id perf_daily_pipeline_star \
+            --pipelines "${PERF_PIPELINES}" \
             --cases 20 \
             --str-len 10 \
             --duration-secs "${PERF_DURATION_SECS}" \
-            --rate 50 \
+            --rate "${PERF_RATE}" \
             --scrape-interval-ms 15000 \
             --out-dir "${PERF_OUT_DIR}" \
             run
@@ -246,7 +310,7 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT (system) - select * (2m) (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT (system) - select * (${{ inputs.columns || '15000' }} cols, ${{ inputs.interval_ms || '20' }}ms, ${{ inputs.pipelines || '1' }} pipelines, ${{ inputs.duration_secs || '120' }}s) (${{ github.sha }})"
 
       - name: Upload artifacts
         if: always()

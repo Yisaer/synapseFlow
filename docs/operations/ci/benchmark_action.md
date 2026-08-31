@@ -1,6 +1,6 @@
 # Benchmark GitHub Actions (pipeline E2E)
 
-This document describes the **Criterion-based pipeline E2E benchmark** and the **GitHub Actions workflows** added in this PR.
+This document describes the **Criterion-based pipeline E2E benchmark** and the **GitHub Actions workflows** used to run it.
 
 ## Goals
 
@@ -67,29 +67,16 @@ A renderer script parses `target/criterion/**/new/estimates.json` and prints a m
 
 ## GitHub Actions workflows
 
-### 1) Automatic: run on push to `main`
+### Wide MQTT perf workflow
 
-- Workflow: `.github/workflows/bench_main.yml`
-- Trigger: `push` to `main`
-
-### 2) Manual: run on selected ref
-
-- Workflow: `.github/workflows/bench_manual.yml`
+- Workflow: `.github/workflows/perf-daily-wide-mqtt.yml`
 - Trigger: `workflow_dispatch`
-- Input: `ref` (branch/tag/SHA)
+- Inputs: `target_ref`, `columns`, `duration_secs`, `interval_ms`, and `pipelines`
+- The message rate is derived as `1000 / interval_ms`; `interval_ms` must divide 1000 exactly.
+- The workflow runs explicit-column and `select *` scenarios with both jemalloc and the system allocator.
+- Each scenario collects Veloflux metrics from `/metrics`, renders an HTML report, and uploads the result JSON, OpenMetrics dump, report, and runtime log as artifacts.
 
-### Reusable workflow
-
-Both workflows call the reusable workflow:
-
-- `.github/workflows/_bench_run.yml`
-
-The reusable workflow:
-
-1. Checks out the requested `ref`
-2. Runs `cargo bench --bench pipeline_e2e`
-3. Runs the renderer script
-4. Appends the markdown output to `$GITHUB_STEP_SUMMARY`
+The workflow checks out the requested ref, builds the release binaries, runs only the perf scenarios, renders the reports, and appends the results to `$GITHUB_STEP_SUMMARY`.
 
 ## How to run locally
 
@@ -110,4 +97,3 @@ cargo bench --bench pipeline_e2e
 
 - Add new cases in `benches/pipeline_e2e.rs`.
 - Consider adding larger datasets and additional SQL patterns (agg/window/join) once the workflow is stable.
-
