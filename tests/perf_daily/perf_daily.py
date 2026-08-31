@@ -240,6 +240,7 @@ def provision(
     timeout_secs: float,
     stream_name: str,
     pipeline_id: str,
+    pipeline_count: int,
     columns: int,
     broker_url: str,
     topic: str,
@@ -252,12 +253,17 @@ def provision(
     client = Client(base_url, timeout_secs)
     sql = build_select_sql_by_mode(stream_name, columns, sql_mode=sql_mode)
     stream_req = create_stream_body(stream_name, columns, broker_url, topic, qos)
-    pipeline_req = create_pipeline_body(pipeline_id, sql)
+    pipeline_ids = [
+        pipeline_id if pipeline_count == 1 else f"{pipeline_id}_{index}"
+        for index in range(1, pipeline_count + 1)
+    ]
 
     if dry_run:
         print(f"sql bytes: {len(sql.encode('utf-8'))}", file=sys.stderr)
         print(f"stream body bytes: {len(_encode_json(stream_req))}", file=sys.stderr)
-        print(f"pipeline body bytes: {len(_encode_json(pipeline_req))}", file=sys.stderr)
+        sample_pipeline = create_pipeline_body(pipeline_ids[0], sql)
+        print(f"pipeline body bytes: {len(_encode_json(sample_pipeline))}", file=sys.stderr)
+        print(f"pipelines: {pipeline_count}", file=sys.stderr)
         return
 
     if force:
@@ -273,16 +279,23 @@ def provision(
         if e.status_code != 409:
             raise
 
-    # Recreate pipeline.
-    _ignore_not_found(lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id)}"))
-    try:
-        client.request_json("POST", "/pipelines", pipeline_req)
-    except ApiError as e:
-        if e.status_code != 409:
-            raise
+    # Recreate pipelines.
+    for current_id in pipeline_ids:
+        pipeline_req = create_pipeline_body(current_id, sql)
+        _ignore_not_found(
+            lambda current_id=current_id: client.request_text(
+                "DELETE", f"/pipelines/{urllib.parse.quote(current_id)}"
+            )
+        )
+        try:
+            client.request_json("POST", "/pipelines", pipeline_req)
+        except ApiError as e:
+            if e.status_code != 409:
+                raise
 
     if not no_start:
-        client.request_text("POST", f"/pipelines/{urllib.parse.quote(pipeline_id)}/start")
+        for current_id in pipeline_ids:
+            client.request_text("POST", f"/pipelines/{urllib.parse.quote(current_id)}/start")
 
 
 def _alnum_rand_str(rng: random.Random, length: int) -> str:
@@ -480,12 +493,13 @@ def trim_openmetrics_to_window(in_path: str, start_ms: int, end_ms: int) -> None
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Daily perf scenario: 15k-column MQTT stream + nop pipeline.")
+    p = argparse.ArgumentParser(description="Daily perf scenario: wide MQTT stream + nop pipelines.")
     p.add_argument("--base-url", default="http://127.0.0.1:8080")
     p.add_argument("--timeout-secs", type=float, default=60.0)
 
     p.add_argument("--stream-name", default=DEFAULT_STREAM_NAME)
     p.add_argument("--pipeline-id", default=DEFAULT_PIPELINE_ID)
+    p.add_argument("--pipelines", type=int, default=1)
     p.add_argument("--columns", type=int, default=15000)
     p.add_argument("--sql-mode", choices=("explicit", "star"), default="explicit")
 
@@ -521,6 +535,8 @@ def main(argv: List[str]) -> int:
         raise PerfDailyError("--columns must be > 0")
     if args.cases < 0:
         raise PerfDailyError("--cases must be >= 0")
+    if args.pipelines <= 0:
+        raise PerfDailyError("--pipelines must be > 0")
     if args.str_len <= 0:
         raise PerfDailyError("--str-len must be > 0")
     if args.duration_secs < 0:
@@ -540,6 +556,7 @@ def main(argv: List[str]) -> int:
             timeout_secs=args.timeout_secs,
             stream_name=args.stream_name,
             pipeline_id=args.pipeline_id,
+            pipeline_count=args.pipelines,
             columns=args.columns,
             broker_url=args.broker_url,
             topic=args.topic,
@@ -614,6 +631,13 @@ def main(argv: List[str]) -> int:
                     "base_url": args.base_url,
                     "stream_name": args.stream_name,
                     "pipeline_id": args.pipeline_id,
+                    "pipeline_ids": [
+                        args.pipeline_id
+                        if args.pipelines == 1
+                        else f"{args.pipeline_id}_{index}"
+                        for index in range(1, args.pipelines + 1)
+                    ],
+                    "pipelines": args.pipelines,
                     "columns": args.columns,
                     "sql_mode": args.sql_mode,
                     "broker_url": args.broker_url,

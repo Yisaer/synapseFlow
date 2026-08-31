@@ -16,14 +16,12 @@ pub use value::Value;
 ///
 /// The type map is keyed by **lowercased** short-name (matching the
 /// convention used by [`crate::parser::datatypes::DataTypesParser`]).
-#[derive(Debug)]
-pub struct Decoder<'a> {
-    types: &'a HashMap<String, DataType>,
-}
+#[derive(Debug, Default)]
+pub struct Decoder;
 
-impl<'a> Decoder<'a> {
-    pub fn new(types: &'a HashMap<String, DataType>) -> Self {
-        Self { types }
+impl Decoder {
+    pub fn new() -> Self {
+        Self
     }
 
     /// Decode `data` according to `dt`, returning the number of bytes
@@ -31,13 +29,18 @@ impl<'a> Decoder<'a> {
     ///
     /// For composite types (STRUCTURE, ARRAY, VECTOR) this method
     /// recurses into the referenced sub-types via the type map.
-    pub fn decode(&self, data: &[u8], dt: &DataType) -> Result<(usize, Value), String> {
+    pub fn decode(
+        &self,
+        types: &HashMap<String, DataType>,
+        data: &[u8],
+        dt: &DataType,
+    ) -> Result<(usize, Value), String> {
         match &dt.kind {
             DataTypeKind::TypeReference(tr) => self.decode_type_reference(data, tr),
 
             DataTypeKind::Array(arr) => {
                 let element_dt = self
-                    .resolve_ref(&arr.element_ref)
+                    .resolve_ref(types, &arr.element_ref)
                     .ok_or_else(|| format!("unknown array element type: {}", arr.element_ref))?;
 
                 if arr.size == 0 {
@@ -46,7 +49,7 @@ impl<'a> Decoder<'a> {
                     let mut offset = 0;
                     let mut elems = Vec::new();
                     while offset < data.len() {
-                        match self.decode(&data[offset..], &element_dt) {
+                        match self.decode(types, &data[offset..], &element_dt) {
                             Ok((n, v)) => {
                                 if n == 0 {
                                     break;
@@ -63,7 +66,7 @@ impl<'a> Decoder<'a> {
                 let mut offset = 0;
                 let mut elems = Vec::with_capacity(arr.size as usize);
                 for _ in 0..arr.size {
-                    let (n, v) = self.decode(&data[offset..], &element_dt)?;
+                    let (n, v) = self.decode(types, &data[offset..], &element_dt)?;
                     offset += n;
                     elems.push(v);
                 }
@@ -72,14 +75,14 @@ impl<'a> Decoder<'a> {
 
             DataTypeKind::Vector(vec) => {
                 let element_dt = self
-                    .resolve_ref(&vec.element_ref)
+                    .resolve_ref(types, &vec.element_ref)
                     .ok_or_else(|| format!("unknown vector element type: {}", vec.element_ref))?;
 
                 // Variable-length: consume all remaining bytes.
                 let mut offset = 0;
                 let mut elems = Vec::new();
                 while offset < data.len() {
-                    let (n, v) = self.decode(&data[offset..], &element_dt)?;
+                    let (n, v) = self.decode(types, &data[offset..], &element_dt)?;
                     if n == 0 {
                         break; // prevent infinite loop on zero-width types
                     }
@@ -93,10 +96,10 @@ impl<'a> Decoder<'a> {
                 let mut offset = 0;
                 let mut fields = Vec::with_capacity(st.fields.len());
                 for sf in &st.fields {
-                    let field_dt = self.resolve_ref(&sf.type_ref).ok_or_else(|| {
+                    let field_dt = self.resolve_ref(types, &sf.type_ref).ok_or_else(|| {
                         format!("unknown type '{}' for field '{}'", sf.type_ref, sf.name)
                     })?;
-                    let (n, v) = self.decode(&data[offset..], &field_dt)?;
+                    let (n, v) = self.decode(types, &data[offset..], &field_dt)?;
                     offset += n;
                     fields.push((sf.name.clone(), v));
                 }
@@ -154,13 +157,17 @@ impl<'a> Decoder<'a> {
     ///
     /// The returned value is either a clone of an entry in the type
     /// map or a synthesised `DataType` for basic / built-in types.
-    pub fn resolve_ref(&self, ref_path: &str) -> Option<DataType> {
+    pub fn resolve_ref(
+        &self,
+        types: &HashMap<String, DataType>,
+        ref_path: &str,
+    ) -> Option<DataType> {
         use crate::ast::resolver::resolve_basic_type;
 
         let key = convert::extract_last(ref_path).to_lowercase();
 
         // 1) Type-map lookup (application data types).
-        if let Some(dt) = self.types.get(&key) {
+        if let Some(dt) = types.get(&key) {
             return Some(dt.clone());
         }
 
@@ -278,10 +285,26 @@ mod tests {
         [("point".to_string(), point_dt)].into_iter().collect()
     }
 
-    fn decoder() -> Decoder<'static> {
-        // Leak to get 'static — acceptable for tests.
-        let map: &'static HashMap<String, DataType> = Box::leak(Box::new(types_map()));
-        Decoder::new(map)
+    struct TestDecoder {
+        decoder: Decoder,
+        types: HashMap<String, DataType>,
+    }
+
+    impl TestDecoder {
+        fn decode(&self, data: &[u8], dt: &DataType) -> Result<(usize, Value), String> {
+            self.decoder.decode(&self.types, data, dt)
+        }
+
+        fn resolve_ref(&self, ref_path: &str) -> Option<DataType> {
+            self.decoder.resolve_ref(&self.types, ref_path)
+        }
+    }
+
+    fn decoder() -> TestDecoder {
+        TestDecoder {
+            decoder: Decoder::new(),
+            types: types_map(),
+        }
     }
 
     #[test]

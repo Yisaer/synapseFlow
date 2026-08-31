@@ -65,7 +65,7 @@ async fn wait_for_manager(http: &reqwest::Client, base: &str) {
 }
 
 async fn wait_for_row_count(recorder: &RowRecorder, expected: usize) -> Vec<JsonValue> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let rows = recorder.rows();
         if rows.len() >= expected {

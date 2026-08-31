@@ -1,0 +1,537 @@
+name: Perf Daily QNX
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Branch or commit to benchmark (default: main_qnx)'
+        required: true
+        default: 'main_qnx'
+        type: string
+      columns:
+        description: 'Column count (default: 30)'
+        required: true
+        default: '30'
+        type: string
+      duration_secs:
+        description: 'Duration per scenario in seconds (default: 120)'
+        required: true
+        default: '120'
+        type: string
+      interval_ms:
+        description: 'Message interval in milliseconds (default: 10)'
+        required: true
+        default: '10'
+        type: string
+      pipelines:
+        description: 'Number of pipelines sharing the MQTT stream (default: 10)'
+        required: true
+        default: '10'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_HOME: /root/.cargo
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  QNX_INSTALL_DIR: /opt/qnx800
+  QNX_RUST_TOOLCHAIN: qnx
+  QNX_SDP_IMAGE: ghcr.io/emqx/veloflux-qnx-sdp:8.0-try
+  QNX_QEMU_VM_IMAGE: ghcr.io/emqx/veloflux-qnx-qemu-vm:8.0-try
+  QNX_VM_WORK_DIR: /opt/qnx-qemu/vm
+  QNX_VM_SSH_KEY: /opt/qnx-qemu/qnx_vm_ed25519
+  RUST_TARGET: aarch64-unknown-nto-qnx800
+
+jobs:
+  perf-daily-qnx:
+    name: QNX Perf Daily
+    runs-on: infra-emqx-io-4c
+    timeout-minutes: 120
+    services:
+      mosquitto:
+        image: eclipse-mosquitto:2
+        ports:
+          - 1883:1883
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull QNX SDP image
+        run: docker pull "$QNX_SDP_IMAGE"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo-cache/registry
+            .cargo-cache/git
+          key: qnx-perf-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            qnx-perf-cargo-${{ runner.os }}-
+
+      - name: Build veloFlux release binary for QNX
+        env:
+          CARGO_BUILD_TARGET: aarch64-unknown-nto-qnx800
+          QNX_SERIAL_NUMBER: ${{ secrets.QNX_SERIAL_NUMBER }}
+          QNX_LICENSE_KEY: ${{ secrets.QNX_LICENSE_KEY }}
+          QNX_MYQNX_USER: ${{ secrets.QNX_MYQNX_USER }}
+          QNX_MYQNX_PASSWORD: ${{ secrets.QNX_MYQNX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$PWD/.cargo-cache/registry" "$PWD/.cargo-cache/git"
+
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TERM_COLOR \
+            -e CARGO_BUILD_JOBS \
+            -e CARGO_INCREMENTAL \
+            -e CARGO_NET_GIT_FETCH_WITH_CLI \
+            -e CARGO_HOME=/workspace/.cargo-cache \
+            -e QNX_INSTALL_DIR \
+            -e QNX_RUST_TOOLCHAIN \
+            -e RUST_TARGET \
+            -e CARGO_BUILD_TARGET \
+            -e QNX_SERIAL_NUMBER \
+            -e QNX_LICENSE_KEY \
+            -e QNX_MYQNX_USER \
+            -e QNX_MYQNX_PASSWORD \
+            "$QNX_SDP_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential \
+                curl \
+                git \
+                libprotobuf-dev \
+                m4 \
+                pkg-config \
+                protobuf-compiler
+              test -f /usr/include/google/protobuf/empty.proto
+              test -f /usr/include/google/protobuf/struct.proto
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+              source "$CARGO_HOME/env"
+
+              QNX_RUST_TC_URL="https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.2.0/qnx8_rust_toolchain.tar.gz"
+              QNX_RUST_TC_DIR="/opt/qnx-rust-toolchain"
+
+              echo "Downloading QNX Rust toolchain from qorix-group/rust-lang-qnx8..."
+              curl -fsSL "$QNX_RUST_TC_URL" -o /tmp/qnx8_rust_toolchain.tar.gz
+              mkdir -p "$QNX_RUST_TC_DIR"
+              tar -xzf /tmp/qnx8_rust_toolchain.tar.gz -C "$QNX_RUST_TC_DIR" --strip-components=1
+              rm -f /tmp/qnx8_rust_toolchain.tar.gz
+
+              if [ ! -x "$QNX_RUST_TC_DIR/bin/rustc" ]; then
+                inner="$(find "$QNX_RUST_TC_DIR" -maxdepth 3 -type f -name rustc -perm -111 | head -1)"
+                if [ -n "$inner" ]; then
+                  QNX_RUST_TC_DIR="$(dirname "$(dirname "$inner")")"
+                  echo "Adjusted toolchain root to: $QNX_RUST_TC_DIR"
+                else
+                  echo "QNX Rust toolchain: rustc not found after extraction" >&2
+                  find "$QNX_RUST_TC_DIR" -maxdepth 4 -type f | sort >&2
+                  exit 1
+                fi
+              fi
+
+              rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$QNX_RUST_TC_DIR"
+              cargo +"$QNX_RUST_TOOLCHAIN" -V
+              rustc +"$QNX_RUST_TOOLCHAIN" -Vv
+
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              if [ -z "${QNX_LICENSE_KEY:-}" ]; then
+                echo "QNX_LICENSE_KEY secret is required to activate the QNX runtime license." >&2
+                exit 1
+              fi
+
+              qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"
+              if [ ! -x "$qsc_bin" ]; then
+                qsc_bin="$(find "$QNX_QSC_DIR" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"
+              fi
+              if [ -z "$qsc_bin" ] || [ ! -x "$qsc_bin" ]; then
+                echo "qnxsoftwarecenter_clt was not found under $QNX_QSC_DIR" >&2
+                find "$QNX_QSC_DIR" -maxdepth 4 -type f | sort >&2
+                exit 1
+              fi
+
+              "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
+              qcc -Vgcc_ntoaarch64le_cxx -E -xc /dev/null >/dev/null
+
+              echo "Target cfg:"
+              rustc +"$QNX_RUST_TOOLCHAIN" --print cfg --target "$RUST_TARGET" | sort
+
+              cargo +"$QNX_RUST_TOOLCHAIN" build \
+                --release \
+                --no-default-features \
+                --features allocator-system,metrics
+
+              release_bin="target/$RUST_TARGET/release/veloflux"
+
+              strip_bin="$(command -v ntoaarch64-strip || true)"
+              if [ -z "$strip_bin" ]; then
+                strip_bin="$(find "$QNX_HOST" -type f -name "*strip" | sort | head -n 1 || true)"
+              fi
+              if [ -n "$strip_bin" ] && [ -x "$strip_bin" ]; then
+                echo "Stripping release binary with $strip_bin..."
+                "$strip_bin" "$release_bin"
+              fi
+              ls -lh "$release_bin"
+            '
+
+          docker run --rm \
+            -v "$PWD/.cargo-cache:/cargo-cache" \
+            "$QNX_SDP_IMAGE" \
+            bash -lc 'chmod -R a+rX /cargo-cache' || true
+
+      - name: Inspect QNX release binary
+        run: |
+          set -euo pipefail
+          bin="target/${RUST_TARGET}/release/veloflux"
+          test -x "$bin"
+          file "$bin"
+          echo "Binary size: $(du -h "$bin" | cut -f1)"
+
+      - name: Pull QNX runtime VM image
+        run: docker pull "$QNX_QEMU_VM_IMAGE"
+
+      - name: Run QNX perf benchmark
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_qnx
+          PERF_DURATION_SECS: ${{ inputs.duration_secs || '120' }}
+          PERF_COLUMNS: ${{ inputs.columns || '30' }}
+          PERF_INTERVAL_MS: ${{ inputs.interval_ms || '10' }}
+          PERF_PIPELINES: ${{ inputs.pipelines || '10' }}
+          PERF_CASES: '100'
+        run: |
+          set -euo pipefail
+
+          rm -rf tmp/qnx-qemu tmp/perf_daily_qnx
+          mkdir -p tmp/qnx-qemu tmp/perf_daily_qnx
+
+          bin="target/${RUST_TARGET}/release/veloflux"
+          config="etc/config.example.yaml"
+          test -x "$bin"
+          test -f "$config"
+          file "$bin"
+
+          docker_args=(
+            --rm
+            -i
+            --privileged
+            --network host
+            -v "$PWD:/workspace"
+            -w /workspace
+            -e QNX_VM_WORK_DIR
+            -e QNX_VM_SSH_KEY
+            -e RUST_TARGET
+            -e PERF_OUT_DIR
+            -e PERF_DURATION_SECS
+            -e PERF_COLUMNS
+            -e PERF_INTERVAL_MS
+            -e PERF_PIPELINES
+            -e PERF_CASES
+          )
+
+          if [ -e /dev/kvm ]; then
+            docker_args+=(--device /dev/kvm)
+          fi
+
+          docker run "${docker_args[@]}" "$QNX_QEMU_VM_IMAGE" bash -s <<'QNX_PERF_RUN'
+          set -euo pipefail
+
+          echo "Installing host-side dependencies..."
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends mosquitto-clients python3
+
+          echo "Starting prepared QNX runtime VM..."
+          bash scripts/qnx/start_qnx_vm.sh \
+            --skip-build \
+            --log-dir tmp/qnx-qemu \
+            --work-dir "$QNX_VM_WORK_DIR" \
+            --ssh-key "$QNX_VM_SSH_KEY" \
+            --host-manager-port 18080 \
+            --timeout-secs 300 \
+            --hold-secs 3600 &
+          vm_pid=$!
+
+          stop_vm() {
+            set +e
+            if [ -f tmp/qnx-qemu/qemu.pid ]; then
+              qemu_pid="$(cat tmp/qnx-qemu/qemu.pid)"
+              if [ -n "$qemu_pid" ] && kill -0 "$qemu_pid" >/dev/null 2>&1; then
+                echo "Stopping QNX QEMU process..."
+                kill "$qemu_pid" >/dev/null 2>&1
+              fi
+            fi
+            if kill -0 "$vm_pid" >/dev/null 2>&1; then
+              echo "Stopping QNX VM launcher..."
+              kill "$vm_pid" >/dev/null 2>&1
+              for _ in $(seq 1 20); do
+                if ! kill -0 "$vm_pid" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 1
+              done
+              if kill -0 "$vm_pid" >/dev/null 2>&1; then
+                kill -9 "$vm_pid" >/dev/null 2>&1
+              fi
+              wait "$vm_pid" >/dev/null 2>&1 || true
+            fi
+          }
+          cleanup() {
+            status=$?
+            stop_vm
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          echo "Waiting for QNX VM readiness file..."
+          for attempt in $(seq 1 80); do
+            if [ -f tmp/qnx-qemu/qnx-vm.env ]; then
+              echo "QNX VM readiness file detected on attempt ${attempt}."
+              break
+            fi
+            if ! kill -0 "$vm_pid" >/dev/null 2>&1; then
+              wait "$vm_pid"
+            fi
+            echo "QNX VM is not ready yet; sleeping before next attempt..."
+            sleep 5
+          done
+
+          if [ ! -f tmp/qnx-qemu/qnx-vm.env ]; then
+            echo "QNX VM did not become ready." >&2
+            exit 1
+          fi
+
+          source tmp/qnx-qemu/qnx-vm.env
+          echo "QNX VM SSH endpoint: ${QNX_VM_HOST}:${QNX_VM_SSH_PORT}"
+          echo "QNX VM forwarded manager endpoint: 127.0.0.1:${QNX_VM_MANAGER_PORT}"
+
+          ssh_args=(
+            -n
+            -i "$QNX_VM_SSH_KEY"
+            -p "$QNX_VM_SSH_PORT"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=5
+            -o ConnectionAttempts=3
+          )
+          scp_args=(
+            -i "$QNX_VM_SSH_KEY"
+            -P "$QNX_VM_SSH_PORT"
+            -o StrictHostKeyChecking=no
+            -o UserKnownHostsFile=/dev/null
+            -o ConnectTimeout=5
+            -o ConnectionAttempts=3
+          )
+
+          # ---- Prepare veloflux inside QNX VM ----
+          remote_dir="/tmp/veloflux-qnx-perf"
+          echo "Preparing remote directory ${remote_dir}..."
+          ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "rm -rf $remote_dir && mkdir -p $remote_dir && ls -ld $remote_dir"
+
+          echo "Copying QNX release binary and config into the QNX VM..."
+          scp "${scp_args[@]}" "target/${RUST_TARGET}/release/veloflux" "root@${QNX_VM_HOST}:${remote_dir}/veloflux"
+          scp "${scp_args[@]}" "etc/config.example.yaml" "root@${QNX_VM_HOST}:${remote_dir}/config.yaml"
+          echo "Copied veloFlux binary and config into the QNX VM."
+
+          echo "Inspecting copied veloFlux binary inside QNX VM..."
+          ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "chmod +x ${remote_dir}/veloflux && file ${remote_dir}/veloflux || true"
+
+          echo "Starting veloFlux inside QNX VM..."
+          ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
+            set -eu
+            cd ${remote_dir}
+            rm -rf data logs veloflux.log veloflux.pid
+            mkdir -p data logs
+            ./veloflux --config config.yaml --data-dir data > veloflux.log 2>&1 &
+            echo \$! > veloflux.pid
+          "
+
+          fetch_status() {
+            local response_file="$1"
+            : >"$response_file"
+            timeout 5 bash -c '
+              set -euo pipefail
+              port="$1"
+              response_file="$2"
+              exec 3<>"/dev/tcp/127.0.0.1/${port}"
+              printf "GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3
+              cat <&3 >"${response_file}"
+              exec 3>&-
+              exec 3<&-
+            ' _ "$QNX_VM_MANAGER_PORT" "$response_file"
+          }
+
+          echo "Waiting for veloFlux /status through QEMU port forwarding..."
+          status_response=""
+          status_response_file="tmp/qnx-qemu/veloflux-status-response.http"
+          for attempt in $(seq 1 30); do
+            echo "Attempt ${attempt}: checking veloFlux process and /status..."
+            if ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
+                set -eu
+                cd ${remote_dir}
+                pid=\$(cat veloflux.pid)
+                kill -0 \$pid >/dev/null 2>&1
+              "; then
+              if fetch_status "$status_response_file"; then
+                status_response="$(cat "$status_response_file")"
+                echo "Attempt ${attempt} /status response:"
+                printf "%s\n" "$status_response"
+                if grep -F "200 OK" <<< "$status_response" >/dev/null; then
+                  break
+                fi
+              else
+                echo "Attempt ${attempt} did not receive a complete /status response within 5s."
+                if [ -s "$status_response_file" ]; then
+                  echo "Partial /status response from attempt ${attempt}:"
+                  cat "$status_response_file"
+                fi
+              fi
+            else
+              echo "veloFlux exited before /status became reachable." >&2
+              ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "cat ${remote_dir}/veloflux.log >&2 || true"
+              exit 1
+            fi
+            sleep 2
+          done
+
+          echo "Final veloFlux /status HTTP response:"
+          printf "%s\n" "$status_response"
+          if ! grep -F "200 OK" <<< "$status_response" >/dev/null; then
+            echo "veloFlux /status did not return HTTP 200." >&2
+            ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "cat ${remote_dir}/veloflux.log >&2 || true"
+            exit 1
+          fi
+          grep -F "active_pipeline_count" <<< "$status_response"
+          grep -F "uptime_seconds" <<< "$status_response"
+
+          echo "veloFlux is healthy; starting perf benchmark..."
+
+          PERF_RATE=$((1000 / PERF_INTERVAL_MS))
+          if [ "$((1000 % PERF_INTERVAL_MS))" -ne 0 ]; then
+            echo "PERF_INTERVAL_MS must divide 1000 exactly." >&2
+            exit 1
+          fi
+
+          # ---- Run perf scenario (explicit columns) ----
+          echo "=== Perf scenario: explicit columns ==="
+          mkdir -p "${PERF_OUT_DIR}/explicit"
+
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily.py \
+            --force \
+            --base-url "http://127.0.0.1:${QNX_VM_MANAGER_PORT}" \
+            --metrics-url "http://127.0.0.1:${QNX_VM_MANAGER_PORT}/metrics" \
+            --broker-url tcp://127.0.0.1:1883 \
+            --stream-broker-url tcp://10.0.2.2:1883 \
+            --topic /perf/daily/qnx \
+            --qos 1 \
+            --columns "${PERF_COLUMNS}" \
+            --sql-mode explicit \
+            --pipeline-id perf_daily_qnx_explicit \
+            --pipelines "${PERF_PIPELINES}" \
+            --cases "${PERF_CASES}" \
+            --str-len 10 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --rate "${PERF_RATE}" \
+            --scrape-interval-ms 15000 \
+            --out-dir "${PERF_OUT_DIR}/explicit" \
+            run
+
+          echo "=== Benchmark run complete ==="
+
+          echo "Stopping veloFlux inside QNX VM..."
+          ssh "${ssh_args[@]}" "root@${QNX_VM_HOST}" "
+            set -eu
+            cd ${remote_dir}
+            pid=\$(cat veloflux.pid)
+            if kill -0 \$pid >/dev/null 2>&1; then
+              kill \$pid >/dev/null 2>&1 || true
+              wait \$pid >/dev/null 2>&1 || true
+            fi
+            echo \"veloFlux log from QNX VM:\"
+            cat veloflux.log
+          "
+
+          stop_vm
+          QNX_PERF_RUN
+
+      - name: Render report
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # The docker container runs as root; make files world-writable so the runner can write the report.
+          docker run --rm \
+            -v "$PWD/tmp/perf_daily_qnx:/perf-out" \
+            "$QNX_QEMU_VM_IMAGE" \
+            bash -lc 'chmod -R a+rwX /perf-out'
+
+          result_json="tmp/perf_daily_qnx/explicit/result.json"
+          if [ ! -f "$result_json" ]; then
+            echo "No result.json found; skipping report rendering."
+            exit 0
+          fi
+
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "$result_json" \
+            --out-html "tmp/perf_daily_qnx/explicit/report.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf Daily QNX - explicit (${{ inputs.columns || '30' }} cols, ${{ inputs.interval_ms || '10' }}ms, ${{ inputs.pipelines || '10' }} pipelines, ${{ inputs.duration_secs || '120' }}s) (${{ github.sha }})"
+
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-daily-qnx-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            tmp/perf_daily_qnx/explicit/result.json
+            tmp/perf_daily_qnx/explicit/metrics.openmetrics
+            tmp/perf_daily_qnx/explicit/report.html
+
+      - name: Prepare QNX VM logs for upload
+        if: always()
+        run: |
+          set -euo pipefail
+
+          if [ -d tmp/qnx-qemu ]; then
+            if ! chmod -R a+rX tmp/qnx-qemu 2>/dev/null; then
+              docker run --rm \
+                -v "$PWD/tmp/qnx-qemu:/qnx-qemu-logs" \
+                "$QNX_QEMU_VM_IMAGE" \
+                bash -lc 'chmod -R a+rX /qnx-qemu-logs' || true
+              chmod -R a+rX tmp/qnx-qemu 2>/dev/null || true
+            fi
+          fi
+
+      - name: Upload QNX VM logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-daily-qnx-vm-logs-${{ github.run_id }}
+          path: tmp/qnx-qemu
+          if-no-files-found: warn

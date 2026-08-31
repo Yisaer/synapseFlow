@@ -44,11 +44,12 @@ pub struct ArxmlCodec {
 enum CodecVariant {
     Cp {
         parser: Box<CpParser>,
-        decoder: Decoder<'static>,
+        types: HashMap<String, DataType>,
+        decoder: Decoder,
     },
     Ap {
         parser: Box<ApParser>,
-        decoder: Decoder<'static>,
+        decoder: Decoder,
     },
 }
 
@@ -76,12 +77,12 @@ impl ArxmlCodec {
         } else if is_cp_arxml(ar_packages) {
             let mut parser = CpParser::new();
             parser.parse(&doc)?;
-            let merged = parser.merged_data_types();
-            let decoder = unsafe_decoder_owned(merged);
+            let types = parser.merged_data_types();
             Ok(Self {
                 variant: CodecVariant::Cp {
                     parser: Box::new(parser),
-                    decoder,
+                    types,
+                    decoder: Decoder::new(),
                 },
             })
         } else {
@@ -101,11 +102,10 @@ impl ArxmlCodec {
     fn load_as_ap(doc: &Document) -> Result<Self, String> {
         let mut parser = ApParser::new();
         parser.parse(doc)?;
-        let decoder = unsafe_decoder(parser.data_types());
         Ok(Self {
             variant: CodecVariant::Ap {
                 parser: Box::new(parser),
-                decoder,
+                decoder: Decoder::new(),
             },
         })
     }
@@ -133,9 +133,13 @@ impl ArxmlCodec {
     /// CP decode: resolve `(service_id, header_id)` then decode `data`.
     pub fn decode_cp(&self, service_id: u16, header_id: u32, data: &[u8]) -> Result<Value, String> {
         match &self.variant {
-            CodecVariant::Cp { parser, decoder } => {
+            CodecVariant::Cp {
+                parser,
+                types,
+                decoder,
+            } => {
                 let dt = parser.resolve_type(service_id, header_id)?;
-                let (_consumed, value) = decoder.decode(data, dt)?;
+                let (_consumed, value) = decoder.decode(types, data, dt)?;
                 Ok(value)
             }
             CodecVariant::Ap { .. } => panic!("decode_cp called on AP codec"),
@@ -147,7 +151,7 @@ impl ArxmlCodec {
         match &self.variant {
             CodecVariant::Ap { parser, decoder } => {
                 let dt = parser.resolve_type(service_id, event_id)?;
-                let (_consumed, value) = decoder.decode(data, dt)?;
+                let (_consumed, value) = decoder.decode(parser.data_types(), data, dt)?;
                 Ok(value)
             }
             CodecVariant::Cp { .. } => panic!("decode_ap called on CP codec"),
@@ -164,13 +168,17 @@ impl ArxmlCodec {
         match &self.variant {
             CodecVariant::Ap { parser, decoder } => {
                 let dt = parser.resolve_type(service_id, event_id)?;
-                let (_consumed, value) = decoder.decode(data, dt)?;
+                let (_consumed, value) = decoder.decode(parser.data_types(), data, dt)?;
                 Ok(value)
             }
-            CodecVariant::Cp { parser, decoder } => {
+            CodecVariant::Cp {
+                parser,
+                types,
+                decoder,
+            } => {
                 let header_id = crate::util::convert::merge_u16_to_u32(service_id, event_id);
                 let dt = parser.resolve_type(service_id, header_id)?;
-                let (_consumed, value) = decoder.decode(data, dt)?;
+                let (_consumed, value) = decoder.decode(types, data, dt)?;
                 Ok(value)
             }
         }
@@ -191,11 +199,12 @@ impl ArxmlCodec {
     /// Resolve a type reference path (e.g. an ARRAY's `element_ref`) to its
     /// [`DataType`], searching the same type map used by the binary decoder.
     pub fn resolve_ref(&self, ref_path: &str) -> Option<DataType> {
-        let decoder = match &self.variant {
-            CodecVariant::Ap { decoder, .. } => decoder,
-            CodecVariant::Cp { decoder, .. } => decoder,
-        };
-        decoder.resolve_ref(ref_path)
+        match &self.variant {
+            CodecVariant::Ap { parser, decoder } => {
+                decoder.resolve_ref(parser.data_types(), ref_path)
+            }
+            CodecVariant::Cp { types, decoder, .. } => decoder.resolve_ref(types, ref_path),
+        }
     }
 
     /// Resolve human-readable names for the service and entry (method/event)
@@ -376,27 +385,6 @@ fn is_cp_arxml(ar_packages: roxmltree::Node) -> bool {
         && has_ar_package(ar_packages, "System")
         && has_ar_package(ar_packages, "Topology")
         && has_ar_package(ar_packages, "DataTypeMappingSets")
-}
-
-// ---------------------------------------------------------------------------
-// Unsafe helper — see SAFETY comment
-// ---------------------------------------------------------------------------
-
-fn unsafe_decoder_owned(types: HashMap<String, DataType>) -> Decoder<'static> {
-    let leaked: &'static HashMap<String, DataType> = Box::leak(Box::new(types));
-    Decoder::new(leaked)
-}
-
-fn unsafe_decoder(types: &HashMap<String, DataType>) -> Decoder<'static> {
-    // SAFETY: the ArxmlCodec owns the parser which owns the HashMap.
-    // The Decoder's reference is pinned to 'static which is safe as
-    // long as ArxmlCodec (and therefore the HashMap) outlives all
-    // Decoder uses.  Since Decoder is stored inside the same
-    // ArxmlCodec, this holds.
-    let types: &'static _ = unsafe {
-        std::mem::transmute::<&HashMap<String, DataType>, &'static HashMap<String, DataType>>(types)
-    };
-    Decoder::new(types)
 }
 
 // ---------------------------------------------------------------------------
