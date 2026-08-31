@@ -1,4 +1,7 @@
-use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, Select, SelectItem,
+    SetExpr, Statement, UnaryOperator, Visit, VisitMut, VisitorMut,
+};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Token, TokenWithLocation, Tokenizer};
 
@@ -86,6 +89,7 @@ impl StreamSqlParser {
         let mut select_stmt = self.extract_select_fields(statement)?;
         select_stmt.window = window;
         select_stmt.group_by_exprs = group_by_exprs;
+        lower_null_predicates(&mut select_stmt);
 
         let mut allocator = ColPlaceholderAllocator::new();
 
@@ -187,6 +191,96 @@ impl StreamSqlParser {
     }
 
     // Window validation (e.g. only allowed in GROUP BY) is intentionally not enforced here.
+}
+
+struct NullPredicateLowerer;
+
+impl VisitorMut for NullPredicateLowerer {
+    type Break = ();
+
+    fn post_visit_expr(&mut self, expr: &mut Expr) -> std::ops::ControlFlow<Self::Break> {
+        let lowered = match expr {
+            Expr::IsNull(inner) => Some(isnull_call((**inner).clone())),
+            Expr::IsNotNull(inner) => Some(Expr::UnaryOp {
+                op: UnaryOperator::Not,
+                expr: Box::new(isnull_call((**inner).clone())),
+            }),
+            _ => None,
+        };
+        if let Some(lowered) = lowered {
+            *expr = lowered;
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
+fn isnull_call(expr: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![Ident::new("isnull")]),
+        args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))],
+        over: None,
+        distinct: false,
+        special: false,
+        order_by: vec![],
+        filter: None,
+        null_treatment: None,
+    })
+}
+
+fn lower_null_predicates(select_stmt: &mut SelectStmt) {
+    let mut lowerer = NullPredicateLowerer;
+    for field in &mut select_stmt.select_fields {
+        let _ = VisitMut::visit(&mut field.expr, &mut lowerer);
+    }
+    let _ = VisitMut::visit(&mut select_stmt.where_condition, &mut lowerer);
+    let _ = VisitMut::visit(&mut select_stmt.having, &mut lowerer);
+    for item in &mut select_stmt.order_by {
+        let _ = VisitMut::visit(&mut item.expr, &mut lowerer);
+    }
+    let _ = VisitMut::visit(&mut select_stmt.group_by_exprs, &mut lowerer);
+
+    let Some(window) = select_stmt.window.as_mut() else {
+        return;
+    };
+    match window {
+        Window::Tumbling {
+            partition_by,
+            filter,
+            ..
+        }
+        | Window::Count {
+            partition_by,
+            filter,
+            ..
+        } => {
+            let _ = VisitMut::visit(partition_by, &mut lowerer);
+            let _ = VisitMut::visit(filter, &mut lowerer);
+        }
+        Window::Sliding {
+            partition_by,
+            trigger_condition,
+            filter,
+            ..
+        } => {
+            let _ = VisitMut::visit(partition_by, &mut lowerer);
+            let _ = VisitMut::visit(trigger_condition, &mut lowerer);
+            let _ = VisitMut::visit(filter, &mut lowerer);
+        }
+        Window::State {
+            open,
+            emit,
+            partition_by,
+            filter,
+        } => {
+            let _ = VisitMut::visit(open, &mut lowerer);
+            let _ = VisitMut::visit(emit, &mut lowerer);
+            let _ = VisitMut::visit(partition_by, &mut lowerer);
+            let _ = VisitMut::visit(filter, &mut lowerer);
+        }
+        Window::Eos { filter } => {
+            let _ = VisitMut::visit(filter, &mut lowerer);
+        }
+    }
 }
 
 impl Default for StreamSqlParser {
@@ -583,6 +677,27 @@ mod tests {
 
         let select_stmt = result.unwrap();
         assert_eq!(select_stmt.select_fields.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_lowers_standard_null_predicates() {
+        let select_stmt =
+            parse_sql("SELECT coalesce(a, b) IS NOT NULL AS has_value FROM s WHERE a IS NULL")
+                .expect("standard NULL predicates should parse");
+
+        assert_eq!(
+            select_stmt.select_fields[0].expr.to_string(),
+            "NOT isnull(coalesce(a, b))"
+        );
+        assert_eq!(select_stmt.select_fields[0].field_name, "has_value");
+        assert_eq!(
+            select_stmt
+                .where_condition
+                .as_ref()
+                .expect("WHERE predicate")
+                .to_string(),
+            "isnull(a)"
+        );
     }
 
     #[test]

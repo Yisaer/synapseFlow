@@ -1275,6 +1275,66 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
+            name: "standard_null_predicates_with_coalesce",
+            sql: "SELECT a IS NULL AS a_is_null, coalesce(a, b) IS NOT NULL AS has_value FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Null, Value::Null, Value::Int64(1)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Null, Value::Int64(2), Value::Null],
+                ),
+            ],
+            expected_rows: 3,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "a_is_null".to_string(),
+                    expected_values: vec![
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ],
+                },
+                ColumnCheck {
+                    expected_name: "has_value".to_string(),
+                    expected_values: vec![
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                    ],
+                },
+            ],
+        },
+        TestCase {
+            name: "standard_is_not_null_filter_with_coalesce",
+            sql: "SELECT a, b FROM stream WHERE coalesce(a, b) IS NOT NULL",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Null, Value::Null, Value::Int64(1)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Null, Value::Int64(2), Value::Null],
+                ),
+            ],
+            expected_rows: 2,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "a".to_string(),
+                    expected_values: vec![Value::Null, Value::Int64(1)],
+                },
+                ColumnCheck {
+                    expected_name: "b".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Null],
+                },
+            ],
+        },
+        TestCase {
             name: "filter_with_projection",
             sql: "SELECT a + 5, b * 2 FROM stream WHERE a > 15",
             input_data: vec![

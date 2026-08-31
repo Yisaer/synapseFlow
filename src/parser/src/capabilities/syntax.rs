@@ -400,6 +400,25 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                 vec![],
             ),
             feature(
+                "expr.null_predicate",
+                "NULL predicate",
+                SyntaxFeatureStatus::Supported,
+                Some("Test whether an expression evaluates to NULL or a non-NULL value."),
+                Some(
+                    "NULL predicates always return a boolean. They are lowered to the built-in NULL check during parsing.",
+                ),
+                None,
+                &[],
+                &[],
+                &["<expr> IS NULL", "<expr> IS NOT NULL"],
+                &[
+                    "SELECT * FROM s WHERE a IS NULL",
+                    "SELECT coalesce(a, b) IS NOT NULL FROM s",
+                ],
+                &[],
+                vec![],
+            ),
+            feature(
                 "expr.binary.arithmetic",
                 "Binary arithmetic operators",
                 SyntaxFeatureStatus::Supported,

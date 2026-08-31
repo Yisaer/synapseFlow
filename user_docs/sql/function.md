@@ -772,6 +772,7 @@ Convert an object into a list of `struct(key, value)` pairs.
 - Kind: scalar
 - Allowed clauses: `SELECT`, `WHERE`, `GROUP BY`
 - Return `boolean`: `true` if `x` is `NULL`, `false` otherwise.
+- Prefer the standard `x IS NULL` predicate in new SQL. The function form remains supported.
 
 ```sql
 SELECT * FROM s WHERE isnull(error_code)
@@ -781,10 +782,12 @@ SELECT * FROM s WHERE isnull(error_code)
 
 - Kind: scalar
 - Allowed clauses: `SELECT`, `WHERE`, `GROUP BY`
-- Return the first non-`NULL` argument. Variadic.
+- Accept one or more arguments and return the first non-`NULL` argument. Return `NULL` when every
+  argument is `NULL`.
 
 ```sql
 SELECT coalesce(nickname, username, 'anonymous') AS display_name FROM s
+SELECT * FROM s WHERE coalesce(primary_id, fallback_id) IS NOT NULL
 ```
 
 ### `cast(expr, target_type)`

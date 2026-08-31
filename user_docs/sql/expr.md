@@ -21,7 +21,15 @@ Expressions can appear in:
 - Arithmetic: `+`, `-`, `*`, `/`
 - Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
 - Boolean: `AND`, `OR`, `NOT`
+- Null predicates: `IS NULL`, `IS NOT NULL`
 - Membership/ranges: `IN (...)`, `BETWEEN ... AND ...`
+
+Use null predicates instead of comparing a value with `NULL`:
+
+```sql
+SELECT * FROM s WHERE error_code IS NULL
+SELECT * FROM s WHERE coalesce(primary_id, fallback_id) IS NOT NULL
+```
 
 Planner/runtime may apply additional typing constraints; validate with `EXPLAIN` when in doubt.
 
@@ -50,4 +58,3 @@ structured values depending on planner support; validate with `EXPLAIN`.
 
 Function calls are expressions. See `user_docs/sql/function.md` for the function catalog and usage
 guidance.
-

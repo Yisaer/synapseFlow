@@ -1167,6 +1167,12 @@ fn plan_explain_table_driven() {
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[CASE WHEN col_1 > 0 THEN 'pos' ELSE 'neg' END as label]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[CASE WHEN col_1 > 0 THEN 'pos' ELSE 'neg' END as label]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
+            name: "standard_null_predicates_with_coalesce",
+            sql: "SELECT coalesce(a, b) IS NOT NULL AS has_value FROM stream_ab WHERE a IS NULL",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=isnull(a)"],"operator":"Filter"}],"id":"Project_2","info":["fields=[NOT isnull(coalesce(a, b)) as has_value]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFilter_2","info":["predicate=isnull(a)"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_3","info":["fields=[NOT isnull(coalesce(a, b)) as has_value]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
             name: "order_by_single_key",
             sql: "SELECT a FROM stream ORDER BY a",
             options: PipelineOptions::default(),
