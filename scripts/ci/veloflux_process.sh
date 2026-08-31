@@ -25,7 +25,7 @@ veloflux_pid_matches() {
   cmd="$(ps -p "$pid" -o args= 2>/dev/null)" || return 1
   [ -n "$cmd" ] || return 1
   case "$cmd" in
-    *target/release/veloflux* | *"/veloflux --config "*)
+    *target/release/veloflux* | *target-*/release/veloflux* | *"/veloflux --config "*)
       return 0
       ;;
     *)

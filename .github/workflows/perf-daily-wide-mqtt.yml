@@ -79,7 +79,20 @@ jobs:
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci/jemalloc
           target-jemalloc/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/jemalloc/data > tmp/perf_daily_ci/jemalloc/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/jemalloc/veloflux.pid
+          pid="$!"
+          echo "$pid" > tmp/perf_daily_ci/jemalloc/veloflux.pid
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "veloflux exited during startup" >&2
+              tail -n 100 tmp/perf_daily_ci/jemalloc/veloflux.log >&2 || true
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:8080/status >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8080/status >/dev/null
 
       - name: Run perf scenario (jemalloc, explicit columns)
         env:
@@ -130,10 +143,11 @@ jobs:
       - name: Stop veloflux (jemalloc, after explicit)
         if: always()
         run: |
-          set +e
-          if [ -f tmp/perf_daily_ci/jemalloc/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/jemalloc/veloflux.pid)" 2>/dev/null || true
-          fi
+          set -euo pipefail
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/jemalloc/veloflux.pid
+          wait_for_port_release 8080
+          wait_for_port_release 6060
 
       - name: Start veloflux (jemalloc, for select *)
         env:
@@ -142,7 +156,20 @@ jobs:
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci/jemalloc
           target-jemalloc/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/jemalloc/data > tmp/perf_daily_ci/jemalloc/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/jemalloc/veloflux.pid
+          pid="$!"
+          echo "$pid" > tmp/perf_daily_ci/jemalloc/veloflux.pid
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "veloflux exited during startup" >&2
+              tail -n 100 tmp/perf_daily_ci/jemalloc/veloflux.log >&2 || true
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:8080/status >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8080/status >/dev/null
 
       - name: Run perf scenario (jemalloc, select *)
         env:
@@ -193,17 +220,31 @@ jobs:
       - name: Stop veloflux (jemalloc)
         if: always()
         run: |
-          set +e
-          if [ -f tmp/perf_daily_ci/jemalloc/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/jemalloc/veloflux.pid)" 2>/dev/null || true
-          fi
+          set -euo pipefail
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/jemalloc/veloflux.pid
+          wait_for_port_release 8080
+          wait_for_port_release 6060
 
       - name: Start veloflux (system allocator)
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci/system
           target-system/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/system/data > tmp/perf_daily_ci/system/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/system/veloflux.pid
+          pid="$!"
+          echo "$pid" > tmp/perf_daily_ci/system/veloflux.pid
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "veloflux exited during startup" >&2
+              tail -n 100 tmp/perf_daily_ci/system/veloflux.log >&2 || true
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:8080/status >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8080/status >/dev/null
 
       - name: Run perf scenario (system, explicit columns)
         env:
@@ -254,17 +295,31 @@ jobs:
       - name: Stop veloflux (system, after explicit)
         if: always()
         run: |
-          set +e
-          if [ -f tmp/perf_daily_ci/system/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/system/veloflux.pid)" 2>/dev/null || true
-          fi
+          set -euo pipefail
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/system/veloflux.pid
+          wait_for_port_release 8080
+          wait_for_port_release 6060
 
       - name: Start veloflux (system, for select *)
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci/system
           target-system/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/system/data > tmp/perf_daily_ci/system/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/system/veloflux.pid
+          pid="$!"
+          echo "$pid" > tmp/perf_daily_ci/system/veloflux.pid
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "veloflux exited during startup" >&2
+              tail -n 100 tmp/perf_daily_ci/system/veloflux.log >&2 || true
+              exit 1
+            fi
+            if curl --fail --silent http://127.0.0.1:8080/status >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8080/status >/dev/null
 
       - name: Run perf scenario (system, select *)
         env:
@@ -337,10 +392,9 @@ jobs:
       - name: Stop veloflux
         if: always()
         run: |
-          set +e
-          if [ -f tmp/perf_daily_ci/jemalloc/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/jemalloc/veloflux.pid)" 2>/dev/null || true
-          fi
-          if [ -f tmp/perf_daily_ci/system/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/system/veloflux.pid)" 2>/dev/null || true
-          fi
+          set -euo pipefail
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/jemalloc/veloflux.pid
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/system/veloflux.pid
+          wait_for_port_release 8080
+          wait_for_port_release 6060
