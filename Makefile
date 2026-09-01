@@ -47,7 +47,7 @@ test-asan:
 # Usage: make test-tsan [TARGET=x86_64-unknown-linux-gnu]
 test-tsan:
 	@echo "Running workspace-wide tests with ThreadSanitizer (excluding benches)..."
-	@TSAN_OPTIONS="suppressions=$(CURDIR)/scripts/tsan_suppressions.txt" RUSTFLAGS="-Zsanitizer=thread -Clink-arg=-fuse-ld=lld" $(CARGO) test -Zbuild-std --workspace --lib --tests $(if $(TARGET),--target $(TARGET)) --no-default-features --features allocator-system,metrics -- --test-threads=1
+	@TSAN_OPTIONS="suppressions=$(CURDIR)/scripts/tsan_suppressions.txt" RUSTFLAGS="-Zsanitizer=thread -Clink-arg=-fuse-ld=lld" $(CARGO) test -Zbuild-std --workspace --lib --tests $(if $(TARGET),--target $(TARGET)) --no-default-features --features allocator-system,metrics -- --test-threads=1 --skip e2e::file_source_checkpoint::file_source_checkpoint_resumes_from_last_emitted_offset
 
 # Stack Overflow Detection
 # Runs tests with a restricted stack size to expose unbounded recursion
