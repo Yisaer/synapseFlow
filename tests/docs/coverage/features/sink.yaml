@@ -56,6 +56,13 @@ features:
       - docs/runtime/sinks/encoders/csv.md
     status: active
 
+  - id: sink.encoder.ndjson_output
+    title: NDJSON sink encoder output
+    summary: Encode each JSON sink output row as one compact LF-terminated JSON text.
+    doc_refs:
+      - docs/runtime/sinks/encoders/json_encoder_options.md
+    status: active
+
   - id: sink.output.row_diff
     title: Row diff output
     summary: Produce row-diff output according to the documented sink-output contract.

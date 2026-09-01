@@ -1786,10 +1786,8 @@ fn add_regular_encoder_with_builder(
             sink_input = builder.get_or_create_output_layout_materialize(sink_input, output_layout);
         }
 
-        let connector_config = resolve_connector_content_type(
-            connector.connector.clone(),
-            connector.encoder.kind_str(),
-        );
+        let connector_config =
+            resolve_connector_content_type(connector.connector.clone(), &connector.encoder);
         Ok((
             sink_input,
             PhysicalSinkConnector::new(
@@ -1859,10 +1857,8 @@ fn add_regular_encoder_with_builder(
             delivery_node = Arc::new(PhysicalPlan::SinkEncrypt(encrypt));
         }
 
-        let connector_config = resolve_connector_content_type(
-            connector.connector.clone(),
-            connector.encoder.kind_str(),
-        );
+        let connector_config =
+            resolve_connector_content_type(connector.connector.clone(), &connector.encoder);
         Ok((
             delivery_node,
             PhysicalSinkConnector::new(
@@ -1880,12 +1876,16 @@ fn add_regular_encoder_with_builder(
 /// the encoder kind when not explicitly configured.
 fn resolve_connector_content_type(
     config: crate::planner::sink::SinkConnectorConfig,
-    encoder_kind: &str,
+    encoder: &crate::planner::sink::SinkEncoderConfig,
 ) -> crate::planner::sink::SinkConnectorConfig {
     match config {
         crate::planner::sink::SinkConnectorConfig::Http(http_cfg) => {
+            let is_ndjson = matches!(
+                encoder.json_output_format(),
+                Ok(crate::planner::sink::JsonOutputFormat::Ndjson)
+            );
             crate::planner::sink::SinkConnectorConfig::Http(
-                http_cfg.with_inferred_content_type(Some(encoder_kind)),
+                http_cfg.with_inferred_content_type(Some(encoder.kind_str()), is_ndjson),
             )
         }
         other => other,
@@ -2052,6 +2052,7 @@ fn find_binding_entry<'a>(
 mod tests {
     use super::*;
     use crate::processor::SamplerConfig;
+    use serde_json::{Map as JsonMap, Value as JsonValue};
 
     #[test]
     fn test_physical_plan_builder_creation() {
@@ -2140,6 +2141,26 @@ mod tests {
             .and_then(|value| value.downcast::<u32>().ok())
             .expect("sampler schema artifact");
         assert_eq!(*restored, 42);
+    }
+
+    #[test]
+    fn resolves_ndjson_http_content_type_from_encoder_format() {
+        let connector = crate::planner::sink::SinkConnectorConfig::Http(
+            crate::connector::HttpSinkConfig::new("https://example.com/api"),
+        );
+        let mut props = JsonMap::new();
+        props.insert(
+            "format".to_string(),
+            JsonValue::String("ndjson".to_string()),
+        );
+        let encoder = crate::planner::sink::SinkEncoderConfig::new("json", props);
+
+        let resolved = resolve_connector_content_type(connector, &encoder);
+
+        let crate::planner::sink::SinkConnectorConfig::Http(config) = resolved else {
+            panic!("expected HTTP connector");
+        };
+        assert_eq!(config.content_type.as_deref(), Some("application/x-ndjson"));
     }
 }
 

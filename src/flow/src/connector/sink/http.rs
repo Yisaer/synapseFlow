@@ -86,11 +86,15 @@ impl HttpSinkConfig {
         self
     }
 
-    /// Infer and set `content_type` from the pipeline encoder kind when it is
-    /// not already explicitly configured. Called during physical plan building.
-    pub fn with_inferred_content_type(mut self, encoder_kind: Option<&str>) -> Self {
+    /// Infer and set `content_type` from the pipeline encoder configuration.
+    /// Called during physical plan building.
+    pub(crate) fn with_inferred_content_type(
+        mut self,
+        encoder_kind: Option<&str>,
+        is_ndjson: bool,
+    ) -> Self {
         if matches!(self.body, HttpBodyConfig::Raw) && self.content_type.is_none() {
-            self.content_type = infer_content_type_for_encoder(encoder_kind);
+            self.content_type = infer_content_type_for_encoder(encoder_kind, is_ndjson);
         }
         self
     }
@@ -145,11 +149,12 @@ fn validate_multipart_name(value: &str, field: &str) -> Result<(), String> {
 }
 
 /// Infer a Content-Type header value from the encoder kind string.
-fn infer_content_type_for_encoder(encoder_kind: Option<&str>) -> Option<String> {
-    match encoder_kind {
-        Some("csv") => Some("text/csv; charset=utf-8".to_string()),
-        Some("json") => Some("application/json".to_string()),
-        Some("protobuf") => Some("application/octet-stream".to_string()),
+fn infer_content_type_for_encoder(encoder_kind: Option<&str>, is_ndjson: bool) -> Option<String> {
+    match (encoder_kind, is_ndjson) {
+        (Some("json"), true) => Some("application/x-ndjson".to_string()),
+        (Some("csv"), _) => Some("text/csv; charset=utf-8".to_string()),
+        (Some("json"), _) => Some("application/json".to_string()),
+        (Some("protobuf"), _) => Some("application/octet-stream".to_string()),
         _ => None,
     }
 }
@@ -471,15 +476,30 @@ mod tests {
 
     #[test]
     fn infer_content_type_json() {
-        let cfg =
-            HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(Some("json"));
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_inferred_content_type(Some("json"), false);
+        assert_eq!(cfg.content_type.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn infer_content_type_ndjson() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_inferred_content_type(Some("json"), true);
+        assert_eq!(cfg.content_type.as_deref(), Some("application/x-ndjson"));
+    }
+
+    #[test]
+    fn explicit_content_type_is_not_overwritten_by_ndjson_inference() {
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_content_type("application/json")
+            .with_inferred_content_type(Some("json"), true);
         assert_eq!(cfg.content_type.as_deref(), Some("application/json"));
     }
 
     #[test]
     fn infer_content_type_protobuf() {
         let cfg = HttpSinkConfig::new("https://example.com/api")
-            .with_inferred_content_type(Some("protobuf"));
+            .with_inferred_content_type(Some("protobuf"), false);
         assert_eq!(
             cfg.content_type.as_deref(),
             Some("application/octet-stream")
@@ -488,21 +508,22 @@ mod tests {
 
     #[test]
     fn infer_content_type_csv() {
-        let cfg =
-            HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(Some("csv"));
+        let cfg = HttpSinkConfig::new("https://example.com/api")
+            .with_inferred_content_type(Some("csv"), false);
         assert_eq!(cfg.content_type.as_deref(), Some("text/csv; charset=utf-8"));
     }
 
     #[test]
     fn infer_content_type_unknown_is_none() {
         let cfg = HttpSinkConfig::new("https://example.com/api")
-            .with_inferred_content_type(Some("custom_encoder"));
+            .with_inferred_content_type(Some("custom_encoder"), false);
         assert_eq!(cfg.content_type, None);
     }
 
     #[test]
     fn infer_content_type_none_is_none() {
-        let cfg = HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(None);
+        let cfg =
+            HttpSinkConfig::new("https://example.com/api").with_inferred_content_type(None, false);
         assert_eq!(cfg.content_type, None);
     }
 
@@ -510,7 +531,7 @@ mod tests {
     fn explicit_content_type_is_not_overwritten_by_inference() {
         let cfg = HttpSinkConfig::new("https://example.com/api")
             .with_content_type("text/plain")
-            .with_inferred_content_type(Some("json"));
+            .with_inferred_content_type(Some("json"), false);
         assert_eq!(cfg.content_type.as_deref(), Some("text/plain"));
     }
 
@@ -522,7 +543,7 @@ mod tests {
                 file_name: "payload.bin".to_string(),
                 fields: BTreeMap::new(),
             }))
-            .with_inferred_content_type(Some("json"));
+            .with_inferred_content_type(Some("json"), false);
         assert_eq!(cfg.content_type, None);
     }
 

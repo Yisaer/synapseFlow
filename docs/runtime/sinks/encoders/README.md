@@ -25,3 +25,6 @@ Current encoder-local documents:
 - [Encoder Transform](encoder_transform.md)
 - [JSON Encoder Options](json_encoder_options.md)
 - [JSON Null Field Omission](json_null_column_omit.md)
+
+The built-in JSON encoder supports `encoder.props.format=array|ndjson`. Framing is scoped to one
+encoded delivery and does not change connector delivery boundaries.

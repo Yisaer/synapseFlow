@@ -24,6 +24,15 @@ interactions:
       - sink.connector.file_output
     status: active
 
+  - id: sink.ndjson_batched_file_delivery
+    title: NDJSON encoder batched file delivery
+    summary: Validate compact LF-delimited JSON rows delivered through common batching to one file.
+    features:
+      - sink.encoder.ndjson_output
+      - sink.output.batching
+      - sink.connector.file_output
+    status: active
+
   - id: sink.encoder_gzip_file_delivery
     title: Encoder + gzip compress + file connector delivery
     summary: Validate that encoder output passes through gzip compression and is correctly written by the file connector.

@@ -255,6 +255,8 @@ combined with OR semantics.
   - Optional `batch_duration: number` (milliseconds)
 - `encoder: { type: string, props: object }` (optional; default is `{ "type": "json", "props": {} }`)
   - Built-in byte encoders include `json` and `csv`.
+  - JSON accepts `props.format`: `array` (default) emits one JSON array per delivery, while
+    `ndjson` emits one compact LF-terminated JSON text per output row.
   - CSV accepts `props.delimiter` (one ASCII byte, default `,`) and `props.header` (boolean,
     default `true`), and does not support `output.mode=delta` or encoder transforms.
   - For `type == "kuksa"` or `type == "kura"`, encoder is ignored and forced to `none`.
@@ -298,8 +300,10 @@ and random jitter for transient failures (network errors, 5xx, 429).
 - Optional `secret_headers: object` — custom auth headers whose values are secrets: header name →
   `store:NAME` reference (e.g. `{ "X-Api-Key": "store:my-api-key" }`).
 - Optional `content_type: string` — explicit `Content-Type` header. When omitted, inferred from the
-  encoder kind (`application/json` for JSON, `text/csv; charset=utf-8` for CSV,
-  `application/octet-stream` for protobuf)
+  encoder kind and JSON format (`application/json` for JSON arrays, `application/x-ndjson` for
+  NDJSON, `text/csv; charset=utf-8` for CSV, `application/octet-stream` for protobuf). An explicit
+  value takes precedence. Multipart mode uses its generated `multipart/form-data` Content-Type
+  instead of encoder inference.
 - Optional `max_body_size: number` (default: `67108864`, i.e. 64 MiB) — maximum single-delivery body
   size in bytes. Exceeding this limit aborts the delivery.
 - Optional `retry_max_attempts: number` (default: none, i.e. no retry) — maximum delivery attempts

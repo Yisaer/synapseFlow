@@ -377,6 +377,13 @@ pub enum SinkEncoderKind {
     Custom(String),
 }
 
+/// Output framing supported by the built-in JSON encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JsonOutputFormat {
+    Array,
+    Ndjson,
+}
+
 /// Supported encoder transform kinds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SinkEncoderTransformConfig {
@@ -477,6 +484,18 @@ impl SinkEncoderConfig {
         }
     }
 
+    pub(crate) fn json_output_format(&self) -> Result<JsonOutputFormat, String> {
+        match self.props.get("format") {
+            None => Ok(JsonOutputFormat::Array),
+            Some(JsonValue::String(value)) if value == "array" => Ok(JsonOutputFormat::Array),
+            Some(JsonValue::String(value)) if value == "ndjson" => Ok(JsonOutputFormat::Ndjson),
+            Some(JsonValue::String(value)) => Err(format!(
+                "encoder.props.format has unknown value `{value}`; expected `array` or `ndjson`"
+            )),
+            Some(_) => Err("encoder.props.format must be a string".to_string()),
+        }
+    }
+
     pub fn csv_delimiter(&self) -> Result<u8, String> {
         let delimiter = match self.props.get("delimiter") {
             None => return Ok(b','),
@@ -569,6 +588,7 @@ impl SinkEncoderConfig {
 
         if matches!(self.kind, SinkEncoderKind::Json) {
             self.json_omit_null_columns()?;
+            self.json_output_format()?;
         }
 
         if matches!(self.kind, SinkEncoderKind::Protobuf) && self.proto_bundle.is_none() {
@@ -657,6 +677,40 @@ mod tests {
             err.contains("omit_null_columns must be a boolean"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn json_encoder_validates_output_format() {
+        assert_eq!(
+            SinkEncoderConfig::json().json_output_format().unwrap(),
+            JsonOutputFormat::Array
+        );
+
+        let mut props = JsonMap::new();
+        props.insert(
+            "format".to_string(),
+            JsonValue::String("ndjson".to_string()),
+        );
+        let config = SinkEncoderConfig::new("json", props);
+        assert_eq!(
+            config.json_output_format().unwrap(),
+            JsonOutputFormat::Ndjson
+        );
+        assert!(config.validate().is_ok());
+
+        let mut props = JsonMap::new();
+        props.insert("format".to_string(), JsonValue::String("jsonl".to_string()));
+        let err = SinkEncoderConfig::new("json", props)
+            .validate()
+            .expect_err("unknown JSON output format should fail");
+        assert!(err.contains("expected `array` or `ndjson`"), "{err}");
+
+        let mut props = JsonMap::new();
+        props.insert("format".to_string(), JsonValue::Bool(true));
+        let err = SinkEncoderConfig::new("json", props)
+            .validate()
+            .expect_err("non-string JSON output format should fail");
+        assert!(err.contains("format must be a string"), "{err}");
     }
 
     #[test]

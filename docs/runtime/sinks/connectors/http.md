@@ -32,8 +32,9 @@ HTTP sink definitions accept:
 - Optional `method` (default: `"POST"`) — `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`
 - Optional `timeout_secs` (default: `30`) — per-request timeout
 - Optional `headers` (default: `{}`) — extra HTTP headers
-- Optional `content_type` — explicit `Content-Type`. When omitted, inferred from encoder kind
-  (`application/json` for JSON, `text/csv; charset=utf-8` for CSV,
+- Optional `content_type` — explicit `Content-Type`. When omitted, inferred from encoder kind and
+  JSON format (`application/json` for JSON arrays, `application/x-ndjson` for NDJSON,
+  `text/csv; charset=utf-8` for CSV,
   `application/octet-stream` for protobuf)
 - Optional `max_body_size` (default: 64 MiB) — single-delivery body limit
 - Optional `body` (default: `{ "type": "raw" }`) — raw or multipart request body mode
@@ -190,7 +191,8 @@ When `content_type` is not explicitly configured:
 
 | Encoder type | Inferred `Content-Type` |
 |---|---|
-| `json` | `application/json` |
+| `json` with `props.format=array` or no format | `application/json` |
+| `json` with `props.format=ndjson` | `application/x-ndjson` |
 | `csv` | `text/csv; charset=utf-8` |
 | `protobuf` | `application/octet-stream` |
 | Other / custom | (no Content-Type header set) |
@@ -198,6 +200,10 @@ When `content_type` is not explicitly configured:
 The inference happens during physical plan building, before the connector is instantiated.
 Explicit `content_type` always takes precedence in raw mode. Multipart mode disables inference and
 does not allow an explicit request `Content-Type`.
+
+`application/x-ndjson` is the media type recommended by the NDJSON specification and is a common
+convention, but it is not an IANA-registered media type. Services that require another value can
+set `content_type` explicitly.
 
 Compression of the file payload does not automatically add a request-level `Content-Encoding`,
 because that header would describe the entire multipart representation. Endpoint-specific headers

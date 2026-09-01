@@ -357,3 +357,103 @@ async fn file_sink_rolls_files_by_common_batch_count() {
         .await
         .expect("delete pipeline");
 }
+
+// coverage-covers: sink.encoder.ndjson_output, sink.connector.file_output, sink.output.batching
+#[tokio::test]
+async fn ndjson_encoder_writes_batched_file_delivery() {
+    let instance = test_instance();
+    let source_name = format!("memory_stream_{}", uuid::Uuid::new_v4().as_simple());
+    let input_topic = format!("tests.file.ndjson.input.{}", uuid::Uuid::new_v4());
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input topic");
+    let stream = StreamDefinition::new(
+        source_name.clone(),
+        json_schema(&source_name),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_stream(stream, false)
+        .await
+        .expect("create memory stream");
+
+    let output_dir = tempfile::tempdir().expect("output tempdir");
+    let pipeline_id = format!("memory_to_ndjson_file_{}", uuid::Uuid::new_v4().as_simple());
+    let mut encoder_props = JsonMap::new();
+    encoder_props.insert(
+        "format".to_string(),
+        JsonValue::String("ndjson".to_string()),
+    );
+    let sink = SinkDefinition::new(
+        "file_sink",
+        SinkType::File,
+        SinkProps::File(FileSinkProps::new(
+            output_dir.path().to_string_lossy(),
+            "events_{write_start_ms}_{seq}.ndjson",
+        )),
+    )
+    .with_encoder(SinkEncoderConfig::new("json", encoder_props))
+    .with_common_props(CommonSinkProps {
+        batch_count: Some(2),
+        batch_duration: None,
+    });
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        format!("SELECT v FROM {source_name}"),
+        vec![sink],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start pipeline");
+
+    instance
+        .wait_for_memory_subscribers(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            1,
+            FILE_SINK_TEST_TIMEOUT,
+        )
+        .await
+        .expect("wait for memory source");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open memory publisher");
+    for value in [1, 2] {
+        publisher
+            .publish_bytes(bytes::Bytes::from(format!(r#"{{"v":{value}}}"#)))
+            .expect("publish memory input");
+    }
+
+    let files = wait_for_generated_files(output_dir.path(), 1).await;
+    assert_eq!(files.len(), 1);
+    assert!(files[0]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".ndjson")));
+    assert_eq!(
+        fs::read(&files[0]).expect("read NDJSON file"),
+        b"{\"v\":1}\n{\"v\":2}\n"
+    );
+
+    instance
+        .stop_pipeline(
+            &pipeline_id,
+            PipelineStopMode::Quick,
+            FILE_SINK_TEST_TIMEOUT,
+        )
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}

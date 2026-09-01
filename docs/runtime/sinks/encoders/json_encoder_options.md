@@ -25,6 +25,7 @@ It does **not** define option models for:
 
 The JSON encoder has to combine several behaviors:
 
+- array or NDJSON delivery framing
 - plain full-row JSON object encoding
 - item-level template transform
 - row-diff mask-aware output
@@ -37,11 +38,57 @@ explicit and testable.
 
 ## User-Facing Options
 
+### `encoder.props.format`
+
+Meaning:
+
+- select the framing for each encoded JSON delivery
+
+Supported values:
+
+- `array` (default)
+- `ndjson`
+
+Example:
+
+```json
+{
+  "encoder": {
+    "type": "json",
+    "props": {
+      "format": "ndjson"
+    }
+  }
+}
+```
+
+Array format emits one compact JSON array per delivery:
+
+```text
+[{"a":1},{"a":2}]
+```
+
+NDJSON format emits one compact JSON text per row. Every row, including the last row, ends with LF:
+
+```text
+{"a":1}\n
+{"a":2}\n
+```
+
+NDJSON uses UTF-8, does not emit a BOM, and does not emit outer brackets or row-separator commas.
+LF and CR inside string values are JSON-escaped and therefore do not create record boundaries.
+
+For a delivery whose lifecycle is started and finished with zero rows, array format emits `[]` and
+NDJSON emits zero bytes. If no delivery is started, neither format creates an output by itself.
+
+The format is a delivery-level encoder option. It does not change sink batching or make the file
+sink append to a long-lived file.
+
 ### `encoder.transform`
 
 Meaning:
 
-- enable item-level row transform before the final JSON array payload is emitted
+- enable item-level row transform before final JSON delivery framing is emitted
 
 Supported value today:
 
@@ -68,7 +115,8 @@ Effect:
 
 - each input SQL row is exposed to the template as `.row`
 - the template renders one JSON item
-- the JSON encoder still owns the outer array framing
+- the JSON encoder still owns the configured array or NDJSON framing
+- NDJSON compacts the rendered JSON item before appending the record LF
 
 Example input rows:
 
@@ -362,6 +410,7 @@ Important limit:
 
 | User or runtime option | Meaning | Enables / affects |
 |---|---|---|
+| `encoder.props.format` | select `array` or `ndjson` delivery framing | JSON delivery boundaries and row separators |
 | `encoder.transform=template` | render one JSON item per row through a template | encoder transform |
 | `encoder.props.omit_null_columns` | omit `null` object fields on native JSON object encoding | null-field omission |
 | `output_layout` | align final columns with fixed runtime value references | native, row-diff-aware, and template rendering |
@@ -371,6 +420,28 @@ Important limit:
 | `null_policy=OmitNullObjectFields` | omit `null` object fields | default full-output null omission |
 
 ## Practical End-to-End Examples
+
+### Example 0: NDJSON Delivery
+
+Configuration:
+
+```json
+{
+  "encoder": {
+    "type": "json",
+    "props": {
+      "format": "ndjson"
+    }
+  }
+}
+```
+
+Two output rows produce:
+
+```text
+{"a":1}\n
+{"a":2}\n
+```
 
 ### Example 1: Plain Full Output
 

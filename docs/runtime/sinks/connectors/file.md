@@ -48,6 +48,26 @@ PhysicalSinkEncoder -> EncodedDelivery -> FileSinkConnector delivery -> one file
 The file sink does not add delimiters, newlines, headers, or framing. If the output should be
 newline-delimited JSON or another framed format, that behavior belongs to the encoder.
 
+For NDJSON output, configure the JSON encoder and an explicit `.ndjson` filename suffix:
+
+```json
+{
+  "props": {
+    "path": "/var/lib/veloflux/output",
+    "filename_pattern": "events_{write_start_ms}_{seq}.ndjson"
+  },
+  "encoder": {
+    "type": "json",
+    "props": {
+      "format": "ndjson"
+    }
+  }
+}
+```
+
+Each delivery still creates one atomically published file. NDJSON changes the bytes inside that
+file; it does not keep one file open for append or provide a long-lived `tail -f` target.
+
 For CSV output, select the built-in CSV encoder and include a `.csv` extension explicitly:
 
 ```json

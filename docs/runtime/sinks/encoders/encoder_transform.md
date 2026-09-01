@@ -16,8 +16,8 @@ SELECT a, b FROM stream
 ```
 
 - Sink batching is still configured at the collection level.
-- The final MQTT payload should still be a JSON array.
-- Each row item inside that array needs to be reshaped before encoding.
+- The final MQTT payload uses the JSON encoder's configured delivery format.
+- Each row item needs to be reshaped before delivery framing is applied.
 
 Example:
 
@@ -49,7 +49,7 @@ The transform is **item-level**, not payload-level:
 
 - The transform consumes the current SQL output row.
 - The transform produces one transformed JSON item.
-- The outer JSON array, separators, batching, and final payload bytes remain the responsibility of
+- Array/NDJSON framing, separators, batching, and final payload bytes remain the responsibility of
   the JSON encoder.
 
 This keeps the common sink-batch scenario simple and memory-efficient.
@@ -107,7 +107,7 @@ The intended configuration model is:
 
 The exact config field names may evolve, but the semantics should stay:
 
-- `type = json` means the outer payload is still encoded by the JSON encoder.
+- `type = json` means the final payload is still encoded and framed by the JSON encoder.
 - `transform` currently means a template-based transform.
 - The template input context is the current encoder input row under `.row`.
 - On row-diff sink branches, `.row` remains the dense row-diff output shape; unchanged tracked
@@ -142,7 +142,9 @@ The row template produces:
 {"c":1,"d":2}
 ```
 
-The JSON encoder then appends that item into the outer collection payload.
+The JSON encoder then appends that item using the configured delivery format. Array format keeps
+the rendered item bytes inside the outer array. NDJSON compacts the rendered JSON value and appends
+LF so template whitespace cannot create extra record boundaries.
 
 The runtime template engine is `upon`. The encoder profile exposes:
 
@@ -170,7 +172,7 @@ If sink batching is disabled:
 - It iterates all rows in that collection.
 - For each row:
   - Render one transformed JSON item from the row template.
-  - Append that item into the output JSON array.
+  - Append that item using the configured JSON delivery framing.
 - The encoder emits one JSON payload.
 
 Conceptually:
@@ -178,7 +180,7 @@ Conceptually:
 ```text
 collection
   -> for each row: template(row) => json item
-  -> encode all items as one json array
+  -> frame all items as one array or NDJSON delivery
   -> bytes
 ```
 
@@ -217,7 +219,7 @@ Runtime behavior:
 2. `Batch` groups rows if batching is configured.
 3. `Encoder` walks the input collection.
 4. For each row, the encoder renders one transformed JSON item from the template.
-5. The encoder writes all transformed items into one JSON array payload.
+5. The encoder writes all transformed items using the configured array or NDJSON framing.
 6. `Sink` publishes the final bytes.
 
 Properties:
@@ -237,7 +239,7 @@ Reason:
 - The encoder still emits exactly one payload per flush unit.
 - Therefore `append(row)` has a clear meaning:
   - Render the current row through the row template.
-  - Encode the transformed item into the current JSON array buffer.
+  - Encode the transformed item into the current JSON delivery.
 
 Physical shape:
 
@@ -251,9 +253,9 @@ Runtime behavior:
 2. For each appended row:
    - Build the row render context from the current SQL output row.
    - Render one transformed JSON item.
-   - Append that item into the current JSON array buffer.
+   - Append that item using the configured framing.
 3. When batch count or duration is reached:
-   - Close the JSON array.
+   - Finish the current JSON delivery. Array format writes `]`; NDJSON has no closing bytes.
    - Emit one payload bytes buffer.
    - Reset streaming state.
 
@@ -262,7 +264,7 @@ This is effectively:
 ```text
 append(row)
   -> template(row) => transformed json item
-  -> append item into current json payload buffer
+  -> append item into current JSON delivery
 ```
 
 Key point:
@@ -292,7 +294,7 @@ Per-row execution becomes:
 
 Flush execution becomes:
 
-1. Close the JSON array.
+1. Finish the configured JSON delivery framing.
 2. Emit one payload.
 3. Reset encoder state.
 
@@ -318,7 +320,7 @@ The current encoder transform design is:
 - Keep `encoder.type = json`
 - Add `encoder.transform` as an optional template renderer
 - Interpret the template as `row -> transformed JSON item`
-- Keep outer JSON array encoding inside the JSON encoder
+- Keep array/NDJSON delivery framing inside the JSON encoder
 - Keep sink batching at the collection level
 
 Under this design:

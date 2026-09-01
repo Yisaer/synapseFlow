@@ -2,17 +2,18 @@ use super::template_transform::JsonTemplateTransform;
 use super::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use crate::model::{Collection, Tuple};
 use crate::planner::physical::output_layout::{OutputLayout, OutputValueRef};
-use crate::planner::sink::{SinkEncoderConfig, SinkEncoderTransformConfig};
+use crate::planner::sink::{JsonOutputFormat, SinkEncoderConfig, SinkEncoderTransformConfig};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use datatypes::Value;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::sync::Arc;
 
-/// Encoder that emits the entire collection as a JSON array of row objects.
+/// Encoder that emits row objects using the configured JSON delivery format.
 pub struct JsonEncoder {
     id: String,
     props: JsonMap<String, JsonValue>,
+    output_format: JsonOutputFormat,
     omit_null_columns: bool,
     transform: Option<Arc<JsonTemplateTransform>>,
     output_layout: Option<Arc<OutputLayout>>,
@@ -25,8 +26,10 @@ impl JsonEncoder {
         let omit_null_columns = config
             .json_omit_null_columns()
             .map_err(EncodeError::Other)?;
+        let output_format = config.json_output_format().map_err(EncodeError::Other)?;
         Ok(Self {
             id,
+            output_format,
             omit_null_columns,
             transform: json_template_transform_from_config(config)?,
             props: config.props().clone(),
@@ -47,6 +50,7 @@ impl SinkEncoderFactory for JsonEncoder {
 
     fn start_encoder(&self) -> Result<Box<dyn SinkEncoder>, EncodeError> {
         Ok(Box::new(JsonEncoderRuntime::new(
+            self.output_format,
             self.omit_null_columns,
             self.transform.clone(),
             self.output_layout.clone(),
@@ -60,6 +64,7 @@ impl SinkEncoderFactory for JsonEncoder {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             props: self.props.clone(),
+            output_format: self.output_format,
             omit_null_columns: self.omit_null_columns,
             transform: self.transform.clone(),
             output_layout: Some(output_layout),
@@ -68,6 +73,7 @@ impl SinkEncoderFactory for JsonEncoder {
 }
 
 struct JsonEncoderRuntime {
+    output_format: JsonOutputFormat,
     is_first_row: bool,
     omit_null_columns: bool,
     transform: Option<Arc<JsonTemplateTransform>>,
@@ -76,11 +82,13 @@ struct JsonEncoderRuntime {
 
 impl JsonEncoderRuntime {
     fn new(
+        output_format: JsonOutputFormat,
         omit_null_columns: bool,
         transform: Option<Arc<JsonTemplateTransform>>,
         output_layout: Option<Arc<OutputLayout>>,
     ) -> Self {
         Self {
+            output_format,
             is_first_row: true,
             omit_null_columns,
             transform,
@@ -129,7 +137,10 @@ enum NullColumnPolicy {
 impl SinkEncoder for JsonEncoderRuntime {
     fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
         self.is_first_row = true;
-        Ok(Some(bytes::Bytes::from_static(b"[")))
+        match self.output_format {
+            JsonOutputFormat::Array => Ok(Some(bytes::Bytes::from_static(b"["))),
+            JsonOutputFormat::Ndjson => Ok(None),
+        }
     }
 
     fn append(&mut self, record: &dyn Collection) -> Result<Option<bytes::Bytes>, EncodeError> {
@@ -139,23 +150,32 @@ impl SinkEncoder for JsonEncoderRuntime {
 
         let mut chunk = Vec::new();
         for tuple in record.rows() {
-            if !self.is_first_row {
-                chunk.push(b',');
+            if matches!(self.output_format, JsonOutputFormat::Array) {
+                if !self.is_first_row {
+                    chunk.push(b',');
+                }
+                self.is_first_row = false;
             }
-            self.is_first_row = false;
             append_tuple_json(
                 &mut chunk,
                 self.omit_null_columns,
                 tuple,
                 self.transform.as_deref(),
                 self.output_layout.as_deref(),
+                matches!(self.output_format, JsonOutputFormat::Ndjson),
             )?;
+            if matches!(self.output_format, JsonOutputFormat::Ndjson) {
+                chunk.push(b'\n');
+            }
         }
         Ok(Some(chunk.into()))
     }
 
     fn finish_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
-        Ok(Some(bytes::Bytes::from_static(b"]")))
+        match self.output_format {
+            JsonOutputFormat::Array => Ok(Some(bytes::Bytes::from_static(b"]"))),
+            JsonOutputFormat::Ndjson => Ok(None),
+        }
     }
 
     fn abort_delivery(&mut self) {
@@ -287,6 +307,7 @@ fn append_tuple_json(
     tuple: &Tuple,
     transform: Option<&JsonTemplateTransform>,
     output_layout: Option<&OutputLayout>,
+    compact_transform: bool,
 ) -> Result<(), EncodeError> {
     let options = if transform.is_some() {
         JsonRowEncodeOptions::transform(output_layout)
@@ -302,7 +323,11 @@ fn append_tuple_json(
     };
     let row = tuple_to_json_with_options(tuple, options)?;
     if let Some(transform) = transform {
-        payload.extend(transform.render_item(row)?);
+        if compact_transform {
+            payload.extend(transform.render_compact_item(row)?);
+        } else {
+            payload.extend(transform.render_item(row)?);
+        }
     } else {
         serde_json::to_writer(payload, &row).map_err(EncodeError::Serialization)?;
     }
@@ -383,10 +408,17 @@ mod tests {
 
     fn test_runtime(encoder: &JsonEncoder, collection: &dyn Collection) -> JsonEncoderRuntime {
         JsonEncoderRuntime::new(
+            encoder.output_format,
             encoder.omit_null_columns,
             encoder.transform.clone(),
             Some(test_output_layout(collection)),
         )
+    }
+
+    fn json_config_with_format(format: &str) -> SinkEncoderConfig {
+        let mut props = JsonMap::new();
+        props.insert("format".to_string(), JsonValue::String(format.to_string()));
+        SinkEncoderConfig::new("json", props)
     }
 
     fn encode_collection(encoder: &JsonEncoder, collection: &dyn Collection) -> Vec<u8> {
@@ -437,6 +469,108 @@ mod tests {
                 {"amount":20, "status":"fail"}
             ])
         );
+    }
+
+    #[test]
+    fn json_encoder_explicit_array_matches_default_bytes() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10), Value::Int64(20)],
+        )])
+        .expect("valid batch");
+        let default_encoder =
+            JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("default encoder");
+        let array_encoder =
+            JsonEncoder::new("json", &json_config_with_format("array")).expect("array encoder");
+
+        let default_payload = encode_collection(&default_encoder, &batch);
+        let array_payload = encode_collection(&array_encoder, &batch);
+
+        assert_eq!(default_payload, br#"[{"amount":10},{"amount":20}]"#);
+        assert_eq!(array_payload, default_payload);
+    }
+
+    #[test]
+    fn json_encoder_ndjson_emits_one_compact_line_per_row() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10), Value::Int64(20)],
+        )])
+        .expect("valid batch");
+        let encoder =
+            JsonEncoder::new("json", &json_config_with_format("ndjson")).expect("NDJSON encoder");
+
+        let payload = encode_collection(&encoder, &batch);
+
+        assert_eq!(payload, b"{\"amount\":10}\n{\"amount\":20}\n");
+    }
+
+    #[test]
+    fn json_encoder_ndjson_streams_across_appends_without_shared_row_state() {
+        let batch1 = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(1)],
+        )])
+        .expect("batch1");
+        let batch2 = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(2)],
+        )])
+        .expect("batch2");
+        let encoder =
+            JsonEncoder::new("json", &json_config_with_format("ndjson")).expect("NDJSON encoder");
+        let mut runtime = test_runtime(&encoder, &batch1);
+        let mut payload = Vec::new();
+
+        extend_optional(
+            &mut payload,
+            runtime.begin_delivery().expect("begin delivery"),
+        );
+        extend_optional(
+            &mut payload,
+            runtime.append(&batch1).expect("append batch1"),
+        );
+        extend_optional(
+            &mut payload,
+            runtime.append(&batch2).expect("append batch2"),
+        );
+        extend_optional(
+            &mut payload,
+            runtime.finish_delivery().expect("finish delivery"),
+        );
+
+        assert_eq!(payload, b"{\"amount\":1}\n{\"amount\":2}\n");
+    }
+
+    #[test]
+    fn json_encoder_ndjson_empty_delivery_is_empty() {
+        let encoder =
+            JsonEncoder::new("json", &json_config_with_format("ndjson")).expect("NDJSON encoder");
+        let empty = crate::model::RecordBatch::new(Vec::new()).expect("empty batch");
+
+        assert!(encode_collection(&encoder, &empty).is_empty());
+    }
+
+    #[test]
+    fn json_encoder_ndjson_escapes_record_delimiters_inside_strings() {
+        let batch = batch_from_columns_simple(vec![(
+            "events".to_string(),
+            "text".to_string(),
+            vec![Value::String("雪\n\r".to_string())],
+        )])
+        .expect("valid batch");
+        let encoder =
+            JsonEncoder::new("json", &json_config_with_format("ndjson")).expect("NDJSON encoder");
+
+        let payload = encode_collection(&encoder, &batch);
+
+        assert_eq!(payload, "{\"text\":\"雪\\n\\r\"}\n".as_bytes());
+        assert!(!payload[..payload.len() - 1].contains(&b'\n'));
+        assert!(!payload.contains(&b'\r'));
     }
 
     #[test]
@@ -699,6 +833,23 @@ mod tests {
                 {"value":20, "label":"fail"}
             ])
         );
+    }
+
+    #[test]
+    fn json_encoder_ndjson_compacts_template_output() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10)],
+        )])
+        .expect("valid batch");
+        let mut config = json_config_with_format("ndjson");
+        config = config.with_transform_template("{\n  \"value\": {{ json(.row.amount) }}\n}");
+        let encoder = JsonEncoder::new("json", &config).expect("NDJSON template encoder");
+
+        let payload = encode_collection(&encoder, &batch);
+
+        assert_eq!(payload, b"{\"value\":10}\n");
     }
 
     #[test]

@@ -73,7 +73,7 @@ The runtime currently registers the following built-in encoder kinds:
 
 | Encoder | Runtime built-in | Output type | Streaming support | Notes |
 |--------|-------------------|-------------|-------------------|-------|
-| `json` | yes | bytes | yes | Encodes a `Collection` as a JSON array payload and supports encoder-local JSON formatting options. |
+| `json` | yes | bytes | yes | Encodes a `Collection` with `array` (default) or `ndjson` delivery framing and supports encoder-local JSON formatting options. |
 | `csv` | yes | bytes | yes | Encodes the fixed output layout as UTF-8 CSV and supports configurable delimiter and per-delivery headers. |
 | `none` | planner pseudo-mode | collection passthrough | n/a | No encoder node is built; the connector receives decoded collections directly. |
 
@@ -87,11 +87,14 @@ Current transform support:
 - When `encoder.type=none`, any configured transform is ignored by design.
 - `encoder.props.omit_null_columns` is a JSON-encoder-local option that controls omission of
   `null` object fields during native JSON object encoding.
+- `encoder.props.format` selects JSON delivery framing: `array` by default or LF-terminated
+  compact `ndjson` records.
 
 See also:
 
 - [CSV Sink Encoder](encoders/csv.md)
 - [Encoder Transform](encoders/encoder_transform.md)
+- [JSON Encoder Options](encoders/json_encoder_options.md)
 - [Delivery Compression](delivery/compress.md)
 - [Delivery Encryption](delivery/encrypt.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)

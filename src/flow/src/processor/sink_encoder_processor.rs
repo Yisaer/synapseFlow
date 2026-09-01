@@ -806,6 +806,10 @@ mod tests {
     }
 
     fn test_json_runtime() -> Box<dyn SinkEncoder> {
+        test_json_runtime_with_config(SinkEncoderConfig::json())
+    }
+
+    fn test_json_runtime_with_config(config: SinkEncoderConfig) -> Box<dyn SinkEncoder> {
         let layout = Arc::new(OutputLayout::new(vec![OutputColumnLayout {
             name: Arc::from("amount"),
             data_type: ConcreteDatatype::Int64(Int64Type),
@@ -814,11 +818,9 @@ mod tests {
                 value_index: 0,
             },
         }]));
-        let factory = Arc::new(
-            JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder factory"),
-        )
-        .with_output_layout(layout)
-        .expect("bind output layout");
+        let factory = Arc::new(JsonEncoder::new("json", &config).expect("encoder factory"))
+            .with_output_layout(layout)
+            .expect("bind output layout");
         factory.start_encoder().expect("encoder runtime")
     }
 
@@ -958,6 +960,40 @@ mod tests {
         assert!(flags.contains(EncodedDeliveryFlags::START));
         assert!(flags.contains(EncodedDeliveryFlags::END));
         assert_eq!(bytes.as_ref(), b"[]");
+
+        let terminal = recv_output(&mut output).await.expect("terminal");
+        assert!(terminal.is_terminal());
+        handle.await.expect("join").expect("processor result");
+    }
+
+    #[tokio::test]
+    async fn immediate_empty_collection_emits_empty_ndjson_delivery() {
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "format".to_string(),
+            serde_json::Value::String("ndjson".to_string()),
+        );
+        let runtime = test_json_runtime_with_config(SinkEncoderConfig::new("json", props));
+        let mut processor = SinkEncoderProcessor::new("sink_encoder", runtime, None, None);
+        let (input, input_rx) = broadcast::channel(8);
+        processor.add_input(input_rx);
+        let mut output = processor.subscribe_output().expect("output");
+        let handle = processor.start(&test_spawner());
+
+        assert!(input
+            .send(StreamData::collection(Box::new(
+                RecordBatch::new(Vec::new()).expect("empty batch"),
+            )))
+            .is_ok());
+        assert!(input.send(StreamData::stream_end()).is_ok());
+
+        let data = recv_output(&mut output).await.expect("empty delivery");
+        let StreamData::EncodedDelivery { flags, bytes } = data else {
+            panic!("expected encoded delivery");
+        };
+        assert!(flags.contains(EncodedDeliveryFlags::START));
+        assert!(flags.contains(EncodedDeliveryFlags::END));
+        assert!(bytes.is_empty());
 
         let terminal = recv_output(&mut output).await.expect("terminal");
         assert!(terminal.is_terminal());

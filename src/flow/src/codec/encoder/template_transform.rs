@@ -22,6 +22,16 @@ impl JsonTemplateTransform {
     }
 
     pub fn render_item(&self, row: JsonValue) -> Result<Vec<u8>, EncodeError> {
+        let (rendered, _) = self.render_and_parse_item(row)?;
+        Ok(rendered.into_bytes())
+    }
+
+    pub fn render_compact_item(&self, row: JsonValue) -> Result<Vec<u8>, EncodeError> {
+        let (_, item) = self.render_and_parse_item(row)?;
+        serde_json::to_vec(&item).map_err(EncodeError::Serialization)
+    }
+
+    fn render_and_parse_item(&self, row: JsonValue) -> Result<(String, JsonValue), EncodeError> {
         let rendered = self
             .engine
             .template(TEMPLATE_NAME)
@@ -31,10 +41,10 @@ impl JsonTemplateTransform {
             .to_string()
             .map_err(|err| EncodeError::Other(format!("template render error: {err}")))?;
 
-        serde_json::from_str::<JsonValue>(&rendered).map_err(|err| {
+        let item = serde_json::from_str::<JsonValue>(&rendered).map_err(|err| {
             EncodeError::Other(format!("template rendered invalid json item: {err}"))
         })?;
-        Ok(rendered.into_bytes())
+        Ok((rendered, item))
     }
 }
 
