@@ -28,11 +28,13 @@ Key requirements:
 veloFlux executes sinks over `Collection`s. For the Kura sink:
 
 - A `Collection` is treated as a batch of rows.
+- Each row uses the planner-materialized final output names, including SQL aliases and computed
+  column aliases.
 - Each row is scanned for non-null columns that have an entry in the mapping file.
 - Each mapped column is converted to a `DataPointCurrent` value with the corresponding VSS path.
 - All data points from the collection are batched into a single `SetCurrentRequest`.
 - Value type conversion follows a direct mapping from `datatypes::Value` to the protobuf
-  `ValueType` oneof.
+  `ValueType` oneof, unless a mapping entry supplies an explicit `data_type` override.
 
 ## Configuration
 
@@ -48,21 +50,58 @@ Manager defaults:
 
 ## Mapping File
 
-`mapping_path` points to a flat JSON object where:
+`mapping_path` points to a JSON object where:
 
-- Keys are input column names from the pipeline.
-- Values are VSS paths on the kura server.
+- Keys are final pipeline output column names, including SQL aliases and computed column aliases.
+- A string value is a VSS path and preserves the native veloFlux value type.
+- An object value contains a VSS `path` and a `data_type` override. The override selects the
+  protobuf `ValueType` oneof that Kura expects for that VSS node.
+
+Supported `data_type` values use VSS catalog names. Aliases are accepted for the names introduced
+by the original float mapping:
+
+| `data_type` | Alias | Protobuf variant |
+|-------------|-------|------------------|
+| `string` | | `string` |
+| `boolean` | `bool` | `bool` |
+| `int8`, `int16`, `int32`, `int64` | | `int8` … `int64` |
+| `uint8`, `uint16`, `uint32`, `uint64` | | `uint8` … `uint64` |
+| `float` | `float32` | `float` |
+| `double` | `float64` | `double` |
+
+Numeric overrides accept integer and floating source values. Integer targets require a whole number
+in range. `boolean` also accepts integer or whole-float `0` and `1`, which is the usual DBC encoding
+for switch signals. `string` only accepts string values. Out-of-range or incompatible values return
+an error.
 
 Example:
 
 ```json
 {
-  "speed": "Vehicle.Speed",
+  "speed": {
+    "path": "Vehicle.Speed",
+    "data_type": "float"
+  },
+  "door_count": {
+    "path": "Vehicle.Cabin.DoorCount",
+    "data_type": "uint8"
+  },
+  "is_open": {
+    "path": "Vehicle.Cabin.Door.Row1.DriverSide.IsOpen",
+    "data_type": "boolean"
+  },
   "name": "Vehicle.VehicleIdentification.VIN"
 }
 ```
 
-At runtime, incoming column names are matched **exactly** against the keys.
+At runtime, final pipeline output names are matched **exactly** against the keys. A mapping that
+does not match any output column returns an error instead of reporting a successful no-op. A mapped
+column whose current value is `null` is still skipped normally.
+
+DBC integer scale/offset signals are `Int64` or `Uint64`. Fractional scale/offset signals are
+`Float64`. VSS nodes are typically narrower (`uint8`, `int32`, `float`, `boolean`), so mapping
+entries for those nodes should set `data_type` to the VSS type. Native conversion without
+`data_type` still sends the veloFlux column type unchanged.
 
 ## Execution Model (gRPC SetCurrent)
 
@@ -81,13 +120,15 @@ unary RPC.
 For Kura sinks, the physical plan contains no encoder node:
 
 - Logical plan shows `encoder=none` for the sink.
-- Physical plan directly connects the decoder/project chain to the sink processor.
+- A `PhysicalMemoryCollectionMaterialize` node resolves the final `OutputLayout` before the sink so
+  SQL aliases, computed columns, and fixed output slots become one dense collection.
+- The materialized collection is connected directly to the sink processor.
 
 When batching is enabled (`batch_count` or `batch_duration`), a `PhysicalBatch`
 node is inserted before the `PhysicalDataSink`:
 
 ```
-PhysicalBatch(batch_count=10) → PhysicalDataSink(connector=kura)
+PhysicalBatch(batch_count=10) → PhysicalMemoryCollectionMaterialize → PhysicalDataSink(connector=kura)
 ```
 
 The `PhysicalBatch` node creates a `BatchProcessor` that accumulates rows into
@@ -100,21 +141,22 @@ This avoids any passthrough/encoding step and ensures the sink receives
 
 - Authentication tokens are not part of the current sink configuration.
 - Struct, list, bytes, and timestamp value types are not supported and will return an error.
-- The sink does not query kura for target metadata — value types are inferred from the veloFlux
-  column type alone.
-- Unmapped columns and `null` values are skipped.
+- The sink does not query kura for target metadata. Value types come from the veloFlux column type
+  or an explicit mapping `data_type` override. Array and struct VSS types are not supported.
+- Individually unmapped columns and `null` values are skipped. A mapping with no final output-column
+  match is rejected when rows arrive.
 - No retry or reconnection logic beyond what tonic provides.
 
 ## Example (REST)
 
-Create a pipeline that publishes `SELECT speed, name` into kura:
+Create a pipeline that publishes an aliased speed into kura:
 
 ```json
 POST /pipelines
 {
   "id": "pipeline_kura",
   "revision": 1,
-  "sql": "SELECT speed, name FROM vehicle_stream",
+  "sql": "SELECT can_speed AS speed FROM vehicle_stream",
   "sinks": [
     {
       "type": "kura",

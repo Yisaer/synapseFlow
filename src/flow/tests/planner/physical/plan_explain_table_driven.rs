@@ -10,7 +10,9 @@ use flow::connector::sink::video::{
     VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig, VideoRollingConfig,
     VideoSinkConfig, VideoSinkTargetConfig,
 };
-use flow::connector::{HttpSinkConfig, KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
+use flow::connector::{
+    HttpSinkConfig, KuksaSinkConfig, KuraSinkConfig, MemorySinkConfig, MemoryTopicKind,
+};
 use flow::expr::func::EvalError;
 use flow::planner::logical::{
     create_logical_plan, create_logical_plan_with_source_inputs,
@@ -1029,6 +1031,23 @@ fn plan_explain_with_sinks_table_driven() {
                 ),
             )],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*; a as x]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*; a as x]"],"operator":"PhysicalProject"}],"id":"PhysicalMemoryCollectionMaterialize_4","info":[],"operator":"PhysicalMemoryCollectionMaterialize"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=memory","topic=demo_collection","kind=collection"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+        Case {
+            name: "kura_sink_materializes_sql_aliases",
+            sql: "SELECT a AS speed FROM stream",
+            sinks: vec![PipelineSink::new(
+                "test_sink",
+                PipelineSinkConnector::new(
+                    "test_connector",
+                    SinkConnectorConfig::Kura(KuraSinkConfig {
+                        sink_name: "test_sink".to_string(),
+                        addr: "http://127.0.0.1:50053".to_string(),
+                        mapping_path: "/etc/veloflux/kura_mapping.json".to_string(),
+                    }),
+                    SinkEncoderConfig::new("none", serde_json::Map::new()),
+                ),
+            )],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as speed]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kura","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as speed]"],"operator":"PhysicalProject"}],"id":"PhysicalMemoryCollectionMaterialize_4","info":[],"operator":"PhysicalMemoryCollectionMaterialize"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=kura"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
             name: "memory_bytes_sink_does_not_insert_materialize",

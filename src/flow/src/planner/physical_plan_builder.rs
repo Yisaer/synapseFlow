@@ -1773,6 +1773,13 @@ fn add_regular_encoder_with_builder(
                     layout_materialized = true;
                 }
             },
+            crate::planner::sink::SinkConnectorConfig::Kura(_) => {
+                let output_layout = sink_input.output_layout()?;
+                validate_unique_output_columns(sink.sink_id.as_str(), &output_layout)?;
+                sink_input =
+                    builder.get_or_create_output_layout_materialize(sink_input, output_layout);
+                layout_materialized = true;
+            }
             crate::planner::sink::SinkConnectorConfig::Video(_) => {
                 let output_layout = sink_input.output_layout()?;
                 validate_video_sink_input_schema(sink.sink_id.as_str(), &output_layout)?;
