@@ -17,6 +17,8 @@ pub struct PreparedSchemaSource {
     stored_props: JsonMap<String, JsonValue>,
     staging_dir: Option<PathBuf>,
     installed_dir: Option<PathBuf>,
+    backup_dir: Option<PathBuf>,
+    backup_active: bool,
     committed: bool,
 }
 
@@ -199,6 +201,25 @@ impl PreparedSchemaSource {
         schema_type: &str,
         props: &JsonMap<String, JsonValue>,
     ) -> Result<Self, String> {
+        Self::prepare_with_existing(storage, schema_name, schema_type, props, false)
+    }
+
+    pub fn prepare_for_update(
+        storage: &StorageManager,
+        schema_name: &str,
+        schema_type: &str,
+        props: &JsonMap<String, JsonValue>,
+    ) -> Result<Self, String> {
+        Self::prepare_with_existing(storage, schema_name, schema_type, props, true)
+    }
+
+    fn prepare_with_existing(
+        storage: &StorageManager,
+        schema_name: &str,
+        schema_type: &str,
+        props: &JsonMap<String, JsonValue>,
+        allow_existing: bool,
+    ) -> Result<Self, String> {
         if props.contains_key(SCHEMA_PATH_KEY) && props.contains_key(PROTO_PATH_KEY) {
             return Err(
                 "schema props must not contain both `schema_path` and `proto_path`".to_string(),
@@ -210,6 +231,8 @@ impl PreparedSchemaSource {
                 stored_props: props.clone(),
                 staging_dir: None,
                 installed_dir: None,
+                backup_dir: None,
+                backup_active: false,
                 committed: false,
             });
         };
@@ -243,7 +266,7 @@ impl PreparedSchemaSource {
         let parent = storage.schemas_dir().join(&schema_type);
         let installed_dir = parent.join(schema_name);
         let staging_dir = parent.join(format!(".{schema_name}.tmp"));
-        if installed_dir.exists() || staging_dir.exists() {
+        if (!allow_existing && installed_dir.exists()) || staging_dir.exists() {
             return Err(format!(
                 "installed schema source `{schema_name}` already exists"
             ));
@@ -278,6 +301,8 @@ impl PreparedSchemaSource {
             stored_props,
             staging_dir: Some(staging_dir),
             installed_dir: Some(installed_dir),
+            backup_dir: None,
+            backup_active: false,
             committed: false,
         })
     }
@@ -295,9 +320,51 @@ impl PreparedSchemaSource {
             self.committed = true;
             return Ok(());
         };
-        fs::rename(staging, installed).map_err(|err| format!("install schema source: {err}"))?;
+        if installed.exists() {
+            let backup = installed.with_file_name(format!(
+                ".{}.backup",
+                installed
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("schema")
+            ));
+            if backup.exists() {
+                return Err(format!(
+                    "schema source backup `{}` already exists",
+                    backup.display()
+                ));
+            }
+            fs::rename(installed, &backup)
+                .map_err(|err| format!("backup installed schema source: {err}"))?;
+            self.backup_dir = Some(backup);
+            self.backup_active = true;
+        }
+        if let Err(err) = fs::rename(staging, installed) {
+            if let Some(backup) = self.backup_dir.take()
+                && let Err(restore_err) = fs::rename(&backup, installed)
+            {
+                return Err(format!(
+                    "install schema source: {err}; restore previous schema source: {restore_err}"
+                ));
+            }
+            self.backup_active = false;
+            return Err(format!("install schema source: {err}"));
+        }
         self.committed = true;
         Ok(())
+    }
+
+    pub fn finish(&mut self) {
+        if let Some(backup) = self.backup_dir.take()
+            && let Err(err) = fs::remove_dir_all(&backup)
+        {
+            tracing::warn!(
+                path = %backup.display(),
+                error = %err,
+                "failed to remove previous schema source backup"
+            );
+        }
+        self.backup_active = false;
     }
 
     pub fn rollback(&mut self) -> Result<(), String> {
@@ -315,6 +382,17 @@ impl PreparedSchemaSource {
                 }
             }
         }
+        if self.backup_active
+            && let (Some(backup), Some(installed)) = (&self.backup_dir, &self.installed_dir)
+            && let Err(err) = fs::rename(backup, installed)
+        {
+            return Err(format!(
+                "restore previous schema source `{}`: {err}",
+                installed.display()
+            ));
+        }
+        self.backup_dir = None;
+        self.backup_active = false;
         self.committed = false;
         Ok(())
     }
@@ -362,6 +440,9 @@ impl Drop for PreparedSchemaSource {
                 error = %err,
                 "failed to remove schema staging directory"
             );
+        }
+        if self.committed && self.backup_active {
+            self.finish();
         }
     }
 }
@@ -889,6 +970,36 @@ mod tests {
 
         source.rollback().expect("rollback source");
         assert!(!installed.exists());
+    }
+
+    #[test]
+    fn prepared_source_update_replaces_existing_installation() {
+        let temp = TempDir::new().expect("temp dir");
+        let storage = StorageManager::new(temp.path()).expect("storage");
+        let archive = temp.path().join("schema.zip");
+        let installed = storage.schemas_dir().join("gbf/vehicle/vehicle.json");
+        fs::create_dir_all(installed.parent().expect("installed parent"))
+            .expect("create installed parent");
+        fs::write(&installed, b"old").expect("write old schema");
+        write_archive(&archive, &[("vehicle.json", Some(b"new"))]);
+
+        let mut source = PreparedSchemaSource::prepare_for_update(
+            &storage,
+            "vehicle",
+            "gbf",
+            &schema_props(&archive),
+        )
+        .expect("prepare schema update");
+        source.commit().expect("commit schema update");
+        assert_eq!(fs::read(&installed).expect("read updated schema"), b"new");
+        let backup = installed
+            .parent()
+            .expect("installed schema directory")
+            .with_file_name(".vehicle.backup");
+        assert!(backup.exists());
+
+        source.finish();
+        assert!(!backup.exists());
     }
 
     #[test]

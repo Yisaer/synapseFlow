@@ -127,7 +127,9 @@ fn build_app(state: AppState) -> Router {
         )
         .route(
             "/schemas/:name",
-            get(schema::handler::get_schema_handler).delete(schema::handler::delete_schema_handler),
+            get(schema::handler::get_schema_handler)
+                .put(schema::handler::update_schema_handler)
+                .delete(schema::handler::delete_schema_handler),
         )
         .route(
             "/schemas/:type/:name/upload",

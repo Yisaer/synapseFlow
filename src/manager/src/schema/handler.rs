@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Multipart, Path, State, multipart::MultipartRejection},
+    extract::{Multipart, Path, Query, State, multipart::MultipartRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -10,10 +10,14 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
-use crate::stream::{named_schema_store, schema_registry};
+use crate::stream::{
+    PipelineRestartResult, named_schema_store, refresh_stream_and_restart_pipelines,
+    schema_registry,
+};
 use crate::streaming_upload::{
     TemporaryUpload, is_zip_filename, read_text_field, required_multipart,
 };
+use crate::table::refresh_table_runtime;
 use storage::{StorageError, StoredSchema};
 
 use super::source::{PreparedSchemaSource, delete_installed_source};
@@ -29,6 +33,12 @@ pub struct CreateSchemaRequest {
     pub props: JsonMap<String, JsonValue>,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateSchemaQuery {
+    #[serde(default)]
+    pub restart_pipelines: bool,
+}
+
 #[derive(Serialize)]
 pub struct SchemaInfo {
     pub name: String,
@@ -37,6 +47,14 @@ pub struct SchemaInfo {
     pub schema_type: String,
     pub props: JsonMap<String, JsonValue>,
     pub columns: Vec<SchemaColumnInfo>,
+}
+
+#[derive(Serialize)]
+struct ResourceRefreshResult {
+    id: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -67,6 +85,203 @@ pub async fn create_schema_handler(
         }
     };
     create_schema_locked(&state, req, false).await
+}
+
+pub async fn update_schema_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<UpdateSchemaQuery>,
+    Json(req): Json<CreateSchemaRequest>,
+) -> Response {
+    let _storage_permit = match state.try_acquire_storage_operation() {
+        Ok(permit) => permit,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            return (
+                StatusCode::CONFLICT,
+                "another storage operation is in progress",
+            )
+                .into_response();
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage operation guard closed",
+            )
+                .into_response();
+        }
+    };
+    if name != req.name {
+        return (
+            StatusCode::BAD_REQUEST,
+            "schema name in path and body differ",
+        )
+            .into_response();
+    }
+    let current = match state.storage.get_schema(&name) {
+        Ok(Some(schema)) => schema,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("schema {name} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read schema {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
+    if req.revision < current.revision {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "schema {name} older_revision: incoming revision {}, current revision {}",
+                req.revision, current.revision
+            ),
+        )
+            .into_response();
+    }
+    let current_props: JsonValue = serde_json::from_str(&current.props_json).unwrap_or_default();
+    let incoming_props = JsonValue::Object(req.props.clone());
+    if req.revision == current.revision {
+        if current.schema_type == req.schema_type && current_props == incoming_props {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": name,
+                    "revision": current.revision
+                })),
+            )
+                .into_response();
+        }
+        return (StatusCode::CONFLICT, format!(
+            "schema {name} same_revision_different_spec: incoming revision {}, current revision {}",
+            req.revision, current.revision
+        )).into_response();
+    }
+
+    let (streams, tables) = match find_resources_referencing_schema(&state, &name) {
+        Ok(references) => references,
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+    };
+    let mut resource_permits = Vec::with_capacity(streams.len() + tables.len());
+    for resource in streams.iter().chain(tables.iter()) {
+        match state.try_acquire_stream_op(resource).await {
+            Ok(permit) => resource_permits.push(permit),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                return (
+                    StatusCode::CONFLICT,
+                    format!("resource {resource} is busy processing another command"),
+                )
+                    .into_response();
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "resource operation guard closed",
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let mut source = match PreparedSchemaSource::prepare_for_update(
+        &state.storage,
+        &name,
+        &req.schema_type,
+        &req.props,
+    ) {
+        Ok(source) => source,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let (schema, proto_bundle, artifact) =
+        match schema_registry().parse(&req.schema_type, &name, source.parse_props()) {
+            Ok(parsed) => parsed,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+    let props_json = match serde_json::to_string(source.stored_props()) {
+        Ok(props) => props,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialize schema props: {err}"),
+            )
+                .into_response();
+        }
+    };
+    if let Err(err) = source.commit() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
+    if let Err(err) = state.storage.replace_schema(StoredSchema {
+        name: name.clone(),
+        revision: req.revision,
+        schema_type: req.schema_type,
+        props_json,
+    }) {
+        let _ = source.rollback();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to persist schema {name}: {err}"),
+        )
+            .into_response();
+    }
+    named_schema_store().insert_resolved(
+        name.clone(),
+        req.revision,
+        schema,
+        proto_bundle,
+        artifact,
+    );
+    source.finish();
+
+    let mut pipeline_results = Vec::<PipelineRestartResult>::new();
+    let mut stream_results = Vec::<ResourceRefreshResult>::new();
+    for stream in &streams {
+        match refresh_stream_and_restart_pipelines(&state, stream, query.restart_pipelines).await {
+            Ok(results) => {
+                pipeline_results.extend(results);
+                stream_results.push(ResourceRefreshResult {
+                    id: stream.clone(),
+                    status: "refreshed",
+                    error: None,
+                });
+            }
+            Err(err) => stream_results.push(ResourceRefreshResult {
+                id: stream.clone(),
+                status: "failed",
+                error: Some(err),
+            }),
+        }
+    }
+    let mut table_results = Vec::<ResourceRefreshResult>::new();
+    for table in &tables {
+        if let Err(err) = refresh_table_runtime(&state, table).await {
+            table_results.push(ResourceRefreshResult {
+                id: table.clone(),
+                status: "failed",
+                error: Some(err),
+            });
+        } else {
+            table_results.push(ResourceRefreshResult {
+                id: table.clone(),
+                status: "refreshed",
+                error: None,
+            });
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": name,
+            "revision": req.revision,
+            "pipeline_restart": {
+                "requested": query.restart_pipelines,
+                "results": pipeline_results
+            },
+            "stream_refresh": stream_results,
+            "table_refresh": table_results
+        })),
+    )
+        .into_response()
 }
 
 async fn create_schema_locked(
@@ -635,6 +850,10 @@ mod tests {
     }
 
     fn proto_zip() -> Vec<u8> {
+        proto_zip_with_field("value")
+    }
+
+    fn proto_zip_with_field(field_name: &str) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         writer
             .start_file(
@@ -644,14 +863,24 @@ mod tests {
             )
             .expect("start proto entry");
         writer
-            .write_all(b"syntax = \"proto3\"; message Sensor { int64 value = 1; }")
+            .write_all(
+                format!("syntax = \"proto3\"; message Sensor {{ int64 {field_name} = 1; }}")
+                    .as_bytes(),
+            )
             .expect("write proto entry");
         writer.finish().expect("finish ZIP").into_inner()
     }
 
     fn schema_upload_request(name: &str) -> axum::http::Request<axum::body::Body> {
+        schema_upload_request_with_zip(name, 1, proto_zip())
+    }
+
+    fn schema_upload_request_with_zip(
+        name: &str,
+        revision: u64,
+        zip: Vec<u8>,
+    ) -> axum::http::Request<axum::body::Body> {
         let boundary = "schema_upload_test_boundary";
-        let zip = proto_zip();
         let mut body = Vec::new();
         write!(
             &mut body,
@@ -660,7 +889,7 @@ mod tests {
         .expect("write props field");
         write!(
             &mut body,
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"revision\"\r\n\r\n1\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"revision\"\r\n\r\n{revision}\r\n"
         )
         .expect("write revision field");
         write!(
@@ -759,6 +988,296 @@ mod tests {
                 .is_none(),
             "invalid name must not persist",
         );
+    }
+
+    #[tokio::test]
+    async fn update_schema_refreshes_stream_and_restarts_dependent_pipeline() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+        let schema_name = "CascadeSchema";
+        let stream_name = "cascade_schema_stream";
+        let pipeline_id = "cascade_schema_pipeline";
+
+        create_schema_handler(
+            State(state.clone()),
+            Json(CreateSchemaRequest {
+                name: schema_name.to_string(),
+                revision: 1,
+                schema_type: "json".to_string(),
+                props: serde_json::json!({
+                    "columns": [{ "name": "old_value", "data_type": "int64" }]
+                })
+                .as_object()
+                .expect("schema props object")
+                .clone(),
+            }),
+        )
+        .await;
+
+        let stream_request = crate::stream::CreateStreamRequest {
+            name: stream_name.to_string(),
+            revision: 1,
+            stream_type: "mock".to_string(),
+            schema: crate::stream::SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: JsonMap::new(),
+                r#ref: Some(schema_name.to_string()),
+            },
+            props: crate::stream::StreamPropsRequest::default(),
+            shared: false,
+            decoder: crate::stream::DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        };
+        let stream_response =
+            crate::stream::create_stream_handler(State(state.clone()), Json(stream_request))
+                .await
+                .into_response();
+        assert_eq!(stream_response.status(), StatusCode::CREATED);
+
+        let pipeline_request: crate::pipeline::CreatePipelineRequest =
+            serde_json::from_value(serde_json::json!({
+                "id": pipeline_id,
+                "revision": 1,
+                "flow_instance_id": "default",
+                "sql": format!("SELECT * FROM {stream_name}"),
+                "sinks": [{
+                    "id": "sink",
+                    "type": "nop",
+                    "props": { "log": false },
+                    "encoder": { "type": "json", "props": {} }
+                }]
+            }))
+            .expect("decode pipeline request");
+        let instance = state.local_instance("default").expect("default instance");
+        let definition = crate::pipeline::build_pipeline_definition(
+            &pipeline_request,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("build pipeline definition");
+        state
+            .storage
+            .create_pipeline(
+                crate::storage_bridge::stored_pipeline_from_request(&pipeline_request)
+                    .expect("serialize pipeline"),
+            )
+            .expect("store pipeline");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("create pipeline runtime");
+        instance
+            .start_pipeline(pipeline_id)
+            .await
+            .expect("start pipeline runtime");
+        state
+            .storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: pipeline_id.to_string(),
+                desired_state: storage::StoredPipelineDesiredState::Running,
+            })
+            .expect("persist running desired state");
+
+        let response = update_schema_handler(
+            State(state.clone()),
+            Path(schema_name.to_string()),
+            Query(UpdateSchemaQuery {
+                restart_pipelines: true,
+            }),
+            Json(CreateSchemaRequest {
+                name: schema_name.to_string(),
+                revision: 2,
+                schema_type: "json".to_string(),
+                props: serde_json::json!({
+                    "columns": [{ "name": "new_value", "data_type": "float64" }]
+                })
+                .as_object()
+                .expect("schema props object")
+                .clone(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read update response body");
+        let body: JsonValue = serde_json::from_slice(&body).expect("decode update response");
+        assert_eq!(body["revision"], 2);
+        assert_eq!(body["pipeline_restart"]["requested"], true);
+        assert_eq!(body["pipeline_restart"]["results"][0]["id"], pipeline_id);
+        assert_eq!(
+            body["pipeline_restart"]["results"][0]["status"],
+            "restarted"
+        );
+
+        let schema = state
+            .storage
+            .get_schema(schema_name)
+            .expect("read schema")
+            .expect("schema exists");
+        assert_eq!(schema.revision, 2);
+        let stream = instance
+            .get_stream(stream_name)
+            .await
+            .expect("read refreshed stream");
+        assert_eq!(
+            stream.definition.schema().column_schemas()[0].name,
+            "new_value"
+        );
+        assert!(matches!(
+            stream.definition.schema().column_schemas()[0].data_type,
+            flow::ConcreteDatatype::Float64(_)
+        ));
+        assert_eq!(
+            instance
+                .list_pipelines()
+                .into_iter()
+                .find(|snapshot| snapshot.definition.id() == pipeline_id)
+                .map(|snapshot| snapshot.status),
+            Some(flow::pipeline::PipelineStatus::Running)
+        );
+
+        named_schema_store().remove(schema_name);
+    }
+
+    #[tokio::test]
+    async fn update_file_backed_proto_schema_refreshes_stream_and_restarts_pipeline() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+        let schema_name = "CascadeProtoSchema";
+        let stream_name = "cascade_proto_stream";
+        let pipeline_id = "cascade_proto_pipeline";
+
+        let create_response = crate::build_app(state.clone())
+            .oneshot(schema_upload_request_with_zip(
+                schema_name,
+                1,
+                proto_zip_with_field("old_value"),
+            ))
+            .await
+            .expect("send proto schema upload request");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let stream_request = crate::stream::CreateStreamRequest {
+            name: stream_name.to_string(),
+            revision: 1,
+            stream_type: "mock".to_string(),
+            schema: crate::stream::SchemaConfigRequest {
+                schema_type: "proto".to_string(),
+                props: JsonMap::new(),
+                r#ref: Some(schema_name.to_string()),
+            },
+            props: crate::stream::StreamPropsRequest::default(),
+            shared: false,
+            decoder: crate::stream::DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        };
+        let stream_response =
+            crate::stream::create_stream_handler(State(state.clone()), Json(stream_request))
+                .await
+                .into_response();
+        assert_eq!(stream_response.status(), StatusCode::CREATED);
+
+        let pipeline_request: crate::pipeline::CreatePipelineRequest =
+            serde_json::from_value(serde_json::json!({
+                "id": pipeline_id,
+                "revision": 1,
+                "flow_instance_id": "default",
+                "sql": format!("SELECT * FROM {stream_name}"),
+                "sinks": [{
+                    "id": "sink",
+                    "type": "nop",
+                    "props": { "log": false },
+                    "encoder": { "type": "json", "props": {} }
+                }]
+            }))
+            .expect("decode pipeline request");
+        let instance = state.local_instance("default").expect("default instance");
+        let definition = crate::pipeline::build_pipeline_definition(
+            &pipeline_request,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("build pipeline definition");
+        state
+            .storage
+            .create_pipeline(
+                crate::storage_bridge::stored_pipeline_from_request(&pipeline_request)
+                    .expect("serialize pipeline"),
+            )
+            .expect("store pipeline");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("create pipeline runtime");
+        instance
+            .start_pipeline(pipeline_id)
+            .await
+            .expect("start pipeline runtime");
+        state
+            .storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: pipeline_id.to_string(),
+                desired_state: storage::StoredPipelineDesiredState::Running,
+            })
+            .expect("persist running desired state");
+
+        let updated_archive = temp_dir.path().join("updated.proto.zip");
+        std::fs::write(&updated_archive, {
+            let zip = proto_zip_with_field("new_value");
+            zip
+        })
+        .expect("write updated proto archive");
+        let response = update_schema_handler(
+            State(state.clone()),
+            Path(schema_name.to_string()),
+            Query(UpdateSchemaQuery {
+                restart_pipelines: true,
+            }),
+            Json(CreateSchemaRequest {
+                name: schema_name.to_string(),
+                revision: 2,
+                schema_type: "proto".to_string(),
+                props: serde_json::json!({
+                    "proto_path": updated_archive,
+                    "message_type": "Sensor"
+                })
+                .as_object()
+                .expect("schema props object")
+                .clone(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read update response body");
+        let body: JsonValue = serde_json::from_slice(&body).expect("decode update response");
+        assert_eq!(body["revision"], 2);
+        assert_eq!(body["pipeline_restart"]["results"][0]["id"], pipeline_id);
+        assert_eq!(
+            body["pipeline_restart"]["results"][0]["status"],
+            "restarted"
+        );
+
+        let stream = instance
+            .get_stream(stream_name)
+            .await
+            .expect("read refreshed proto stream");
+        assert_eq!(
+            stream.definition.schema().column_schemas()[0].name,
+            "new_value"
+        );
+        assert_eq!(
+            instance
+                .list_pipelines()
+                .into_iter()
+                .find(|snapshot| snapshot.definition.id() == pipeline_id)
+                .map(|snapshot| snapshot.status),
+            Some(flow::pipeline::PipelineStatus::Running)
+        );
+
+        named_schema_store().remove(schema_name);
     }
 
     #[tokio::test]

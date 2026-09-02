@@ -139,6 +139,39 @@ pub(crate) fn build_table_decoder(
     Ok(config)
 }
 
+pub(crate) async fn refresh_table_runtime(
+    state: &AppState,
+    table_name: &str,
+) -> Result<(), String> {
+    let stored = state
+        .storage
+        .get_table(table_name)
+        .map_err(|err| format!("failed to read table {table_name}: {err}"))?
+        .ok_or_else(|| format!("table {table_name} not found"))?;
+    let definition = crate::storage_bridge::table_definition_from_stored(
+        &stored,
+        state
+            .instances
+            .default_instance()
+            .decoder_registry()
+            .as_ref(),
+    )?;
+    for (_, instance) in state.instances.instances_snapshot() {
+        match instance.delete_table(table_name).await {
+            Ok(())
+            | Err(flow::FlowInstanceError::Catalog(flow::catalog::CatalogError::TableNotFound(
+                _,
+            ))) => {}
+            Err(err) => return Err(format!("failed to remove table {table_name}: {err}")),
+        }
+        instance
+            .create_table(definition.clone())
+            .await
+            .map_err(|err| format!("failed to refresh table {table_name}: {err}"))?;
+    }
+    Ok(())
+}
+
 pub async fn create_table_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateTableRequest>,

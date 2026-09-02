@@ -288,6 +288,10 @@ impl MetadataStorage {
         self.insert_if_absent(SCHEMAS_TABLE, &schema.name, &schema)
     }
 
+    pub fn replace_schema(&self, schema: StoredSchema) -> Result<(), StorageError> {
+        self.put_entry(SCHEMAS_TABLE, &schema.name, &schema)
+    }
+
     pub fn get_schema(&self, name: &str) -> Result<Option<StoredSchema>, StorageError> {
         self.get_entry(SCHEMAS_TABLE, name)
     }
@@ -1030,6 +1034,10 @@ impl StorageManager {
 
     pub fn create_schema(&self, schema: StoredSchema) -> Result<(), StorageError> {
         self.metadata.create_schema(schema)
+    }
+
+    pub fn replace_schema(&self, schema: StoredSchema) -> Result<(), StorageError> {
+        self.metadata.replace_schema(schema)
     }
 
     pub fn get_schema(&self, name: &str) -> Result<Option<StoredSchema>, StorageError> {

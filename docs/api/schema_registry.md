@@ -6,8 +6,18 @@ defining, storing, and reusing named schemas in veloflux.
 Every schema create specification requires a positive JSON safe integer
 `revision` (`1..=9007199254740991`). The multipart upload endpoint requires the
 same value in a `revision` text field. Schema get/list and resource export return
-the persisted revision. There is no online schema update API; revision
-arbitration is used by startup init.
+the persisted revision. Revision arbitration is used by both online updates and
+startup init.
+
+`PUT /schemas/:name` updates an existing named schema. An older revision is
+rejected, an equal revision is idempotent only when the definition is unchanged,
+and a newer revision replaces the stored and in-memory schema. Streams referencing
+the schema are then refreshed. Pass `restart_pipelines=true` to cascade the
+existing stream pipeline rebuild and restore flow to pipelines that reference
+those streams. Once the schema update succeeds, refresh failures do not change
+the HTTP status: the response remains `200` and reports stream, table, and
+pipeline results in `stream_refresh`, `table_refresh`, and
+`pipeline_restart.results`.
 
 For the REST API contract, see `user_docs/api/schema.md`.
 

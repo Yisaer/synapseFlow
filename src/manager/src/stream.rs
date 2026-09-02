@@ -145,7 +145,7 @@ struct PipelineRestartResponse {
 }
 
 #[derive(Serialize)]
-struct PipelineRestartResult {
+pub(crate) struct PipelineRestartResult {
     id: String,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -377,6 +377,55 @@ async fn rebuild_and_restore_affected_pipelines(
         }
     }
     results
+}
+
+pub(crate) async fn refresh_stream_and_restart_pipelines(
+    state: &AppState,
+    stream_name: &str,
+    restart_pipelines: bool,
+) -> Result<Vec<PipelineRestartResult>, String> {
+    let stored = state
+        .storage
+        .get_stream(stream_name)
+        .map_err(|err| format!("failed to read stream {stream_name}: {err}"))?
+        .ok_or_else(|| format!("stream {stream_name} not found"))?;
+    let definition = stream_definition_from_stored(
+        &stored,
+        state
+            .instances
+            .default_instance()
+            .decoder_registry()
+            .as_ref(),
+    )?;
+    let stream_request = storage_bridge::stream_request_from_stored(&stored)?;
+    let affected = if restart_pipelines {
+        collect_pipelines_referencing_stream(state, stream_name)?
+    } else {
+        Vec::new()
+    };
+    let mut permits = Vec::with_capacity(affected.len());
+    for pipeline in &affected {
+        permits.push(state.try_acquire_pipeline_op(&pipeline.id).await.map_err(
+            |err| match err {
+                TryAcquireError::NoPermits => {
+                    format!(
+                        "pipeline {} is busy processing another command",
+                        pipeline.id
+                    )
+                }
+                TryAcquireError::Closed => "pipeline operation guard closed".to_string(),
+            },
+        )?);
+    }
+    stop_affected_pipelines(state, &affected).await?;
+
+    for (_, instance) in state.instances.instances_snapshot() {
+        instance
+            .replace_stream(definition.clone(), stream_request.shared)
+            .await
+            .map_err(|err| format!("failed to refresh stream {stream_name}: {err}"))?;
+    }
+    Ok(rebuild_and_restore_affected_pipelines(state, &affected).await)
 }
 
 #[derive(Deserialize, Serialize, Clone)]
