@@ -32,7 +32,7 @@ the connector does not inspect rows, schema, output mode, or encoder format.
 |----------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Must be `file`. |
 | `props.path` | string | Yes | - | Local output directory. |
-| `props.filename_pattern` | string | No | `"{write_start_ms}_{seq}"` | Complete final filename pattern. It may use static property templates and the runtime placeholders described below. |
+| `props.filename_pattern` | string | No | `"{write_start_ms}_{seq}"` | Complete final filename pattern. It may use static property templates and the runtime placeholders described below. Runtime placeholders are optional. |
 | `props.retention.max_file_count` | integer | No | `0` | Maximum generated files to keep for this filename pattern scope. `0` disables count pruning. |
 | `props.retention.max_file_age_days` | integer | No | `0` | Maximum generated file age in days. `0` disables age pruning. |
 | `encoder.type` | string | No | `json` | Encoder kind. `none` is rejected for file sinks. |
@@ -141,18 +141,29 @@ speed_1779945123456_1779945123472_000001.json
 speed_1779945123456_1779945123472_000002.json
 ```
 
-Supported runtime placeholders are:
+Supported runtime placeholders are optional:
 
 - `{write_start_ms}`: wall-clock Unix epoch milliseconds captured when the delivery write starts.
 - `{write_end_ms}`: wall-clock Unix epoch milliseconds captured after the temporary file has been
   fully written and flushed, before the final name is published.
-- `{seq}`: a six-digit collision retry sequence. This placeholder is required so existing files are
-  never overwritten.
+- `{seq}`: a six-digit collision retry sequence used to avoid overwriting an existing final file.
 
-The pattern must contain `{seq}` and at least one of `{write_start_ms}` or `{write_end_ms}`. Each
-placeholder may appear at most once. Placeholders must be separated by literal text so generated
-names can be matched unambiguously for retention. Unknown placeholders, path separators, empty
-patterns, and the reserved names `.` and `..` are rejected.
+A pattern that omits `{seq}` does not guarantee a unique name. If the rendered final path already
+exists, the delivery fails and the existing file is left unchanged. A fully static basename is
+valid and uses the same behavior. When `{seq}` is present, the sink keeps retrying `000001`
+through `999999` and never overwrites an existing file.
+
+Each placeholder may appear at most once. Placeholders must be separated by literal text so
+generated names can be matched unambiguously for retention. Unknown placeholders, path separators,
+NUL bytes, empty patterns, and the reserved names `.` and `..` are rejected.
+
+Example of a customer-defined pattern without `{seq}`:
+
+```json
+{
+  "filename_pattern": "{{ prop(\"vin\") }}-928_V7-{write_start_ms}.zst"
+}
+```
 
 The pattern also supports process-wide static property templates:
 
@@ -205,7 +216,9 @@ Pruning is scoped to generated final files in the same directory that match the 
 Pipelines that share a directory and filename pattern share retention pruning. Use separate output
 directories or distinct literal text in each pattern when independent retention is required. Count
 retention sorts matching files by `{write_start_ms}` when present, otherwise `{write_end_ms}`, then
-by `{seq}`. Age retention continues to use filesystem modification time.
+by `{seq}`. If the compiled pattern has neither timestamp placeholder, count retention sorts by
+filesystem modification time and then by basename. Age retention continues to use filesystem
+modification time.
 
 Retention is best-effort under concurrent writers and tolerates files disappearing between directory
 scan and delete.

@@ -1383,6 +1383,19 @@ mod tests {
     }
 
     #[test]
+    fn file_sink_ir_accepts_seq_less_pattern() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "pipeline_id": "pipe_1",
+            "path": "/tmp/vf-file",
+            "filename_pattern": "latest.json"
+        });
+
+        let decoded = file_sink_from_ir_settings(&settings).expect("static name is valid");
+        assert_eq!(decoded.filename_pattern.expose(), "latest.json");
+    }
+
+    #[test]
     fn file_sink_ir_rejects_non_string_filename_pattern() {
         for value in [serde_json::json!(123), serde_json::json!([".json"])] {
             let mut settings = serde_json::json!({
@@ -1503,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn file_sink_ir_rejects_filename_pattern_without_seq() {
+    fn file_sink_ir_accepts_filename_pattern_without_seq() {
         let settings = serde_json::json!({
             "sink_name": "sink_1",
             "pipeline_id": "pipe_1",
@@ -1511,11 +1524,10 @@ mod tests {
             "filename_pattern": "speed_{write_start_ms}.json"
         });
 
-        let err = file_sink_from_ir_settings(&settings).expect_err("missing seq");
-
-        assert!(
-            err.contains("must contain `{seq}`"),
-            "unexpected error: {err}"
+        let decoded = file_sink_from_ir_settings(&settings).expect("seq-less pattern");
+        assert_eq!(
+            decoded.filename_pattern.expose(),
+            "speed_{write_start_ms}.json"
         );
     }
 }

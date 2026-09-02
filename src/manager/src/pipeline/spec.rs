@@ -1678,6 +1678,83 @@ mod tests {
         assert_eq!(file.retention.max_file_age_days, 7);
     }
 
+    #[tokio::test]
+    async fn build_pipeline_definition_accepts_seq_less_file_name_after_property_render() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_static_name",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "file",
+                "props": {
+                    "path": "/tmp/veloflux-file-sink-test",
+                    "filename_pattern": "{{ prop(\"vin\") }}-928_V7-{write_start_ms}.zst"
+                },
+                "encoder": { "type": "json" }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([(
+            "vin".to_string(),
+            SecretString::new("VIN-123".to_string()),
+        )])));
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let SinkProps::File(file) = &definition.sinks()[0].props else {
+            panic!("expected file sink props");
+        };
+        assert_eq!(
+            file.filename_pattern.expose(),
+            "VIN-123-928_V7-{write_start_ms}.zst"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_accepts_static_file_name() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_file_static_name",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "sink_1",
+                "type": "file",
+                "props": {
+                    "path": "/tmp/veloflux-file-sink-test",
+                    "filename_pattern": "latest.json"
+                },
+                "encoder": { "type": "json" }
+            }],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("static name is valid");
+        let SinkProps::File(file) = &definition.sinks()[0].props else {
+            panic!("expected file sink props");
+        };
+        assert_eq!(file.filename_pattern.expose(), "latest.json");
+    }
+
     #[test]
     fn file_sink_request_rejects_removed_filename_affixes() {
         let result = serde_json::from_value::<FileSinkPropsRequest>(json!({
@@ -1691,6 +1768,21 @@ mod tests {
         };
 
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn file_sink_request_rejects_filename_collision_policy_field() {
+        let result = serde_json::from_value::<FileSinkPropsRequest>(json!({
+            "path": "/tmp/veloflux-file-sink-test",
+            "filename_pattern": "latest.json",
+            "filename_collision_policy": "error"
+        }));
+        let error = match result {
+            Ok(_) => panic!("filename_collision_policy must be rejected as unknown"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[tokio::test]

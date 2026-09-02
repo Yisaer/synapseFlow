@@ -216,38 +216,58 @@ impl FileSinkConnector {
     ) -> Result<PathBuf, SinkConnectorError> {
         let pattern = compile_filename_pattern(self.config.filename_pattern.expose())
             .map_err(SinkConnectorError::Other)?;
-        for seq in 1..=MAX_SEQUENCE {
-            let final_path = self.final_path(&pattern, write_start_ms, write_end_ms, seq);
-            // Link-after-write gives atomic final-name visibility and fails if the target exists.
-            match fs::hard_link(tmp_path, &final_path) {
-                Ok(()) => {
-                    let _ = fs::remove_file(tmp_path);
-                    return Ok(final_path);
-                }
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(err) if is_cross_device_error(&err) => {
-                    return Err(SinkConnectorError::Other(format!(
-                        "file sink `{}` cannot finalize tmp file `{}` to `{}` across devices: {err}",
-                        self.id,
-                        tmp_path.display(),
-                        self.final_path_for_diagnostics(&final_path)
-                    )));
-                }
-                Err(err) => {
-                    return Err(SinkConnectorError::Other(format!(
-                        "file sink `{}` failed to finalize tmp file `{}` to `{}`: {err}",
-                        self.id,
-                        tmp_path.display(),
-                        self.final_path_for_diagnostics(&final_path)
-                    )));
+        if pattern.has_seq() {
+            for seq in 1..=MAX_SEQUENCE {
+                let final_path = self.final_path(&pattern, write_start_ms, write_end_ms, seq);
+                match self.publish_tmp_file(tmp_path, &final_path)? {
+                    PublishResult::Published => return Ok(final_path),
+                    PublishResult::AlreadyExists => continue,
                 }
             }
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` exhausted filename sequence for write range {write_start_ms}..{write_end_ms}",
+                self.id,
+            )));
         }
 
-        Err(SinkConnectorError::Other(format!(
-            "file sink `{}` exhausted filename sequence for write range {write_start_ms}..{write_end_ms}",
-            self.id,
-        )))
+        let final_path = self.final_path(&pattern, write_start_ms, write_end_ms, 1);
+        match self.publish_tmp_file(tmp_path, &final_path)? {
+            PublishResult::Published => Ok(final_path),
+            PublishResult::AlreadyExists => Err(SinkConnectorError::Other(format!(
+                "file sink `{}` cannot publish `{}` because it already exists",
+                self.id,
+                self.final_path_for_diagnostics(&final_path)
+            ))),
+        }
+    }
+
+    fn publish_tmp_file(
+        &self,
+        tmp_path: &Path,
+        final_path: &Path,
+    ) -> Result<PublishResult, SinkConnectorError> {
+        // Link-after-write gives atomic final-name visibility and fails if the target exists.
+        match fs::hard_link(tmp_path, final_path) {
+            Ok(()) => {
+                let _ = fs::remove_file(tmp_path);
+                Ok(PublishResult::Published)
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                Ok(PublishResult::AlreadyExists)
+            }
+            Err(err) if is_cross_device_error(&err) => Err(SinkConnectorError::Other(format!(
+                "file sink `{}` cannot finalize tmp file `{}` to `{}` across devices: {err}",
+                self.id,
+                tmp_path.display(),
+                self.final_path_for_diagnostics(final_path)
+            ))),
+            Err(err) => Err(SinkConnectorError::Other(format!(
+                "file sink `{}` failed to finalize tmp file `{}` to `{}`: {err}",
+                self.id,
+                tmp_path.display(),
+                self.final_path_for_diagnostics(final_path)
+            ))),
+        }
     }
 
     fn final_path(
@@ -297,10 +317,14 @@ impl FileSinkConnector {
             if !path.is_file() {
                 continue;
             }
-            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            let Some(file_name) = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            else {
                 continue;
             };
-            let Some(captures) = pattern.captures(file_name) else {
+            let Some(captures) = pattern.captures(&file_name) else {
                 continue;
             };
             let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
@@ -318,17 +342,22 @@ impl FileSinkConnector {
             files.push(RetentionFile {
                 path,
                 modified,
-                sort_ms: captures
-                    .write_start_ms
-                    .or(captures.write_end_ms)
-                    .expect("validated filename pattern contains a write timestamp"),
-                seq: captures
-                    .seq
-                    .expect("validated filename pattern contains seq"),
+                sort_ms: captures.write_start_ms.or(captures.write_end_ms),
+                seq: captures.seq,
+                name: file_name,
             });
         }
 
-        files.sort_by_key(|file| (file.sort_ms, file.seq));
+        files.sort_by(|left, right| match (left.sort_ms, right.sort_ms) {
+            (Some(left_ms), Some(right_ms)) => left_ms
+                .cmp(&right_ms)
+                .then(left.seq.cmp(&right.seq))
+                .then(left.name.cmp(&right.name)),
+            _ => left
+                .modified
+                .cmp(&right.modified)
+                .then(left.name.cmp(&right.name)),
+        });
 
         if retention.max_file_age_days > 0 {
             let cutoff = SystemTime::now()
@@ -610,8 +639,14 @@ impl SinkConnector for FileSinkConnector {
 struct RetentionFile {
     path: PathBuf,
     modified: Option<SystemTime>,
-    sort_ms: u128,
-    seq: u32,
+    sort_ms: Option<u128>,
+    seq: Option<u32>,
+    name: String,
+}
+
+enum PublishResult {
+    Published,
+    AlreadyExists,
 }
 
 fn validate_file_sink_path(path: &str) -> Result<(), SinkConnectorError> {
@@ -630,6 +665,9 @@ pub fn validate_filename_pattern(pattern: &str) -> Result<(), String> {
 fn compile_filename_pattern(pattern: &str) -> Result<CompiledFilenamePattern, String> {
     if pattern.is_empty() {
         return Err("filename_pattern must not be empty".to_string());
+    }
+    if pattern.contains('\0') {
+        return Err("filename_pattern must not contain NUL".to_string());
     }
     if pattern.contains('/') || pattern.contains('\\') {
         return Err("filename_pattern must not contain path separators".to_string());
@@ -700,18 +738,19 @@ fn compile_filename_pattern(pattern: &str) -> Result<CompiledFilenamePattern, St
             pattern[literal_start..].to_string(),
         ));
     }
-    if !seen_seq {
-        return Err("filename_pattern must contain `{seq}`".to_string());
-    }
-    if !seen_start && !seen_end {
-        return Err(
-            "filename_pattern must contain `{write_start_ms}` or `{write_end_ms}`".to_string(),
-        );
-    }
     Ok(CompiledFilenamePattern { segments })
 }
 
 impl CompiledFilenamePattern {
+    fn has_seq(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            matches!(
+                segment,
+                FilenamePatternSegment::Placeholder(FilenamePlaceholder::Sequence)
+            )
+        })
+    }
+
     fn render(&self, write_start_ms: u128, write_end_ms: u128, seq: u32) -> String {
         let mut output = String::new();
         for segment in &self.segments {
@@ -936,16 +975,34 @@ mod tests {
     }
 
     #[test]
+    fn filename_pattern_renders_static_and_timestamp_only_names() {
+        let static_name = compile_filename_pattern("VIN-123-928_V7.zst").expect("compile");
+        assert_eq!(static_name.render(1, 2, 3), "VIN-123-928_V7.zst");
+        assert_eq!(
+            static_name.captures("VIN-123-928_V7.zst"),
+            Some(FilenameCaptures::default())
+        );
+        assert!(static_name.captures("VIN-123-928_V7.json").is_none());
+
+        let start_only = compile_filename_pattern("{write_start_ms}.zst").expect("compile");
+        assert_eq!(start_only.render(1_700, 1_800, 9), "1700.zst");
+        assert_eq!(
+            start_only.captures("1700.zst"),
+            Some(FilenameCaptures {
+                write_start_ms: Some(1_700),
+                write_end_ms: None,
+                seq: None,
+            })
+        );
+    }
+
+    #[test]
     fn filename_pattern_validation_rejects_unsafe_or_ambiguous_patterns() {
         let cases = [
             ("", "must not be empty"),
             ("nested/{write_start_ms}_{seq}", "path separators"),
             ("{write_start_ms}{seq}", "must be separated"),
-            ("{write_start_ms}.json", "must contain `{seq}`"),
-            (
-                "{seq}.json",
-                "must contain `{write_start_ms}` or `{write_end_ms}`",
-            ),
+            ("speed_\0_{seq}.json", "NUL"),
             (
                 "{write_start_ms}_{unknown}_{seq}",
                 "unsupported placeholder",
@@ -960,6 +1017,26 @@ mod tests {
                 "unexpected error for {pattern:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn filename_pattern_allows_optional_runtime_placeholders() {
+        for pattern in [
+            DEFAULT_FILENAME_PATTERN,
+            "{write_start_ms}_{write_end_ms}_{seq}.zst",
+            "{write_start_ms}.zst",
+            "{seq}.json",
+            "VIN-123-928_V7.zst",
+        ] {
+            compile_filename_pattern(pattern).expect(pattern);
+        }
+    }
+
+    #[test]
+    fn filename_pattern_accepts_seq_less_names() {
+        validate_filename_pattern("{write_start_ms}.zst").expect("timestamp-only pattern");
+        validate_filename_pattern("latest.json").expect("static name");
+        validate_filename_pattern(DEFAULT_FILENAME_PATTERN).expect("default pattern");
     }
 
     #[tokio::test]
@@ -990,6 +1067,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_sink_static_name_does_not_overwrite() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config(dir.path());
+        cfg.filename_pattern = "latest.json".into();
+        let connector = FileSinkConnector::new("sink_1", cfg);
+        connector.ensure_dirs_exist().expect("ready dirs");
+        let existing = dir.path().join("latest.json");
+        fs::write(&existing, b"existing").expect("write existing");
+        let (tmp_path, mut tmp) = connector.begin_tmp_file().expect("tmp");
+        tmp.write_all(b"new").expect("write tmp");
+        tmp.sync_all().expect("sync tmp");
+        drop(tmp);
+
+        let err = connector
+            .finalize_tmp_file(&tmp_path, 1, 2)
+            .expect_err("existing static name must fail");
+
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(fs::read(&existing).expect("read existing"), b"existing");
+        assert!(
+            tmp_path.exists(),
+            "failed publish must leave tmp for abort cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_sink_static_name_publishes_without_seq() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config(dir.path());
+        cfg.filename_pattern = "VIN-123-928_V7.zst".into();
+        let mut connector = FileSinkConnector::new("sink_1", cfg);
+
+        connector.ready().await.expect("ready");
+        deliver(&mut connector, b"payload").await;
+
+        let files = final_files(dir.path());
+        assert_eq!(files, vec![dir.path().join("VIN-123-928_V7.zst")]);
+        assert_eq!(fs::read(&files[0]).expect("read file"), b"payload");
+    }
+
+    #[tokio::test]
+    async fn file_sink_seq_less_pattern_fails_second_delivery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config(dir.path());
+        cfg.filename_pattern = "events_{write_start_ms}.json".into();
+        let connector = FileSinkConnector::new("sink_1", cfg);
+        connector.ensure_dirs_exist().expect("ready dirs");
+        let write_start_ms = 1_700_000_000_000;
+        let existing = connector.final_path(
+            &compile_filename_pattern(connector.config.filename_pattern.expose()).expect("pattern"),
+            write_start_ms,
+            write_start_ms + 1,
+            1,
+        );
+        fs::write(&existing, b"existing").expect("write existing");
+        let (tmp_path, mut tmp) = connector.begin_tmp_file().expect("tmp");
+        tmp.write_all(b"new").expect("write tmp");
+        tmp.sync_all().expect("sync tmp");
+        drop(tmp);
+
+        let err = connector
+            .finalize_tmp_file(&tmp_path, write_start_ms, write_start_ms + 1)
+            .expect_err("collision without seq must fail");
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(fs::read(&existing).expect("read existing"), b"existing");
+    }
+
+    #[tokio::test]
     async fn file_sink_retention_by_count_prunes_oldest_generated_files_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = config(dir.path());
@@ -1007,6 +1152,46 @@ mod tests {
         assert!(dir.path().join("speed_1001_000001.json").exists());
         assert!(dir.path().join("speed_1002_000001.json").exists());
         assert!(dir.path().join("other_1000_000001.json").exists());
+    }
+
+    #[tokio::test]
+    async fn file_sink_retention_without_timestamp_uses_mtime_then_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = config(dir.path());
+        cfg.filename_pattern = "keep_{seq}.json".into();
+        cfg.retention.max_file_count = 2;
+        let connector = FileSinkConnector::new("sink_1", cfg);
+        connector.ensure_dirs_exist().expect("ready dirs");
+
+        let older = dir.path().join("keep_000001.json");
+        let newer = dir.path().join("keep_000002.json");
+        let newest = dir.path().join("keep_000003.json");
+        fs::write(&older, b"old").expect("old");
+        fs::write(&newer, b"mid").expect("mid");
+        fs::write(&newest, b"new").expect("new");
+        fs::write(dir.path().join("other_000001.json"), b"other").expect("other");
+
+        let old_mtime = SystemTime::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("mtime");
+        let mid_mtime = SystemTime::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("mtime");
+        fs::File::open(&older)
+            .expect("open old")
+            .set_modified(old_mtime)
+            .expect("set old mtime");
+        fs::File::open(&newer)
+            .expect("open mid")
+            .set_modified(mid_mtime)
+            .expect("set mid mtime");
+
+        connector.apply_retention().expect("retention");
+
+        assert!(!older.exists());
+        assert!(newer.exists());
+        assert!(newest.exists());
+        assert!(dir.path().join("other_000001.json").exists());
     }
 
     #[tokio::test]
