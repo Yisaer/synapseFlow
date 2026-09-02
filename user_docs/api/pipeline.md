@@ -90,15 +90,17 @@ Response:
 
 `POST /pipelines/:id/start`
 
-Persists desired state as `running` and starts runtime execution.
+For an unscheduled pipeline, persists desired state as `running` and starts runtime execution.
+For a scheduled pipeline, re-enables schedule control by persisting `scheduled_stopped`; the
+patrol scheduler starts it during a later patrol when the schedule is active.
 Starting a failed pipeline is an explicit retry; a successful start clears the runtime failure
-marker.
+marker for unscheduled pipelines. For a scheduled pipeline, `start` only re-enables schedule
+control and does not clear an existing runtime failure marker. Use `stop` to clear the marker, then
+`start` to re-enable schedule control.
 
 Response:
 
 - `200 OK` on success.
-- `409 Conflict` if the pipeline has `options.schedule`; scheduled pipeline lifecycle is
-  managed by the scheduler.
 - `404 Not Found` if pipeline is not present.
 - `409 Conflict` if the pipeline is busy processing another command.
 
@@ -106,9 +108,8 @@ Response:
 
 `POST /pipelines/:id/stop?mode=quick|graceful&timeout_ms=5000`
 
-Persists desired state as `stopped` and stops runtime execution. For a scheduled failed pipeline,
-manual stop is allowed as a recovery action: it clears the runtime failure marker, writes
-`scheduled_stopped`, and lets the scheduler retry on a later patrol.
+Persists desired state as `stopped` and stops runtime execution. For a scheduled pipeline, this
+also disables schedule patrol until a later manual start. The runtime failure marker is cleared.
 
 Query parameters:
 
@@ -118,8 +119,6 @@ Query parameters:
 Response:
 
 - `200 OK` on success.
-- `409 Conflict` if the pipeline has `options.schedule` and does not have a matching runtime
-  failure marker; scheduled pipeline lifecycle is managed by the scheduler.
 - `404 Not Found` if pipeline is not present.
 - `409 Conflict` if the pipeline is busy processing another command.
 
@@ -189,9 +188,10 @@ Response:
 
 ### `PipelineScheduleRequest`
 
-`schedule` declares automatic pipeline start/stop windows. When present, the scheduler owns the
-pipeline lifecycle; manual start/stop endpoints return `409 Conflict`, except that manual stop is
-allowed to recover a scheduled failed pipeline with a matching runtime failure marker.
+`schedule` declares automatic pipeline start/stop windows. The scheduler owns the lifecycle while
+the schedule is enabled. Manual `stop` disables schedule patrol and enters `stopped`; manual
+`start` re-enables schedule control and enters `scheduled_stopped`, leaving the next runtime start
+to patrol.
 
 ```json
 {
@@ -230,8 +230,9 @@ If `cron` matches but `datetime_ranges` is non-empty and the current timestamp i
 range, the pipeline does not start. If a cron window crosses the end of a matched datetime range,
 the pipeline stops at the range end.
 
-On create, upsert, or process restart, a scheduled pipeline first enters `scheduled_stopped`. The
-patrol scheduler evaluates the current window before starting it.
+On create, a scheduled pipeline first enters `scheduled_stopped`. Upsert and process restart retain
+manual `stopped`; otherwise they enter `scheduled_stopped`. The patrol scheduler evaluates the
+current window before starting it.
 
 ### `PipelineDatetimeRangeRequest`
 

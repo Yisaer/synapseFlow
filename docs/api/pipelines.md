@@ -32,9 +32,9 @@ Properties require that effective shared version to be `v5`.
 ## Schedule Options
 
 Pipeline schedules are declared inside `options.schedule` when creating or upserting a pipeline.
-The scheduler owns the lifecycle of a scheduled pipeline. Manual `POST /pipelines/:id/start` and
-`POST /pipelines/:id/stop` calls return `409 Conflict` while a schedule is present, except that
-manual stop is allowed when the current revision has a matching runtime failure marker.
+The scheduler owns the lifecycle while the schedule is enabled. Manual `stop` disables schedule
+patrol and enters `Stopped`; manual `start` re-enables schedule control and enters
+`ScheduledStopped`, leaving the next runtime start to patrol.
 
 ```json
 {
@@ -83,14 +83,16 @@ If the cron window crosses the end of the matched datetime range, the pipeline i
 range end. `GET /pipelines/:id` returns `schedule_status.auto_stop_at` as the effective current
 window end, not just the raw cron duration end.
 
-On create, upsert, or process restart, a scheduled pipeline first enters `ScheduledStopped`. The
-patrol scheduler evaluates the current window before starting it; a persisted
-`ScheduledRunning` value is not used to bypass the current schedule.
+On create, a scheduled pipeline first enters `ScheduledStopped`. Upsert and process restart retain
+manual `Stopped`; otherwise they enter `ScheduledStopped`. The patrol scheduler evaluates the
+current window before starting it; a persisted `ScheduledRunning` value is not used to bypass the
+current schedule.
 
 Scheduled pipeline desired state is stored separately from manual lifecycle state:
 
 - `ScheduledRunning`: the effective schedule window currently expects the pipeline to run.
 - `ScheduledStopped`: the effective schedule window currently expects the pipeline to stop.
+- `Stopped`: schedule control is manually disabled; patrol skips the pipeline.
 
 REST responses expose these states as `scheduled_running` and `scheduled_stopped`.
 
@@ -130,10 +132,10 @@ Responses may include these additional fields:
 Startup hydration restores a failed pipeline definition but does not auto-start a revision with a
 matching runtime failure marker. Scheduled patrol also skips auto-start while the matching marker is
 present. A manual start is treated as an explicit retry for unscheduled pipelines and clears the
-marker only after a successful runtime start. Manual stop clears the marker and writes desired state
-`stopped`; for scheduled failed pipelines, manual stop writes `scheduled_stopped` and returns the
-pipeline to scheduler control so the next active patrol can retry. Delete removes the stored pipeline
-and the marker.
+marker only after a successful runtime start. For scheduled pipelines, manual start only re-enables
+schedule control; patrol performs the later runtime start. Manual stop clears the marker, writes
+desired state `stopped`, and disables schedule patrol. Delete removes the stored pipeline and the
+marker.
 
 `GET /pipelines/:id/stats` is only available for a running pipeline. For a failed pipeline, the
 endpoint returns `400 Bad Request` with the failed processor and reason instead of returning stale

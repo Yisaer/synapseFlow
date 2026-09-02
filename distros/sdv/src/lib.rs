@@ -12,6 +12,9 @@ pub mod decoder;
 pub mod encoder;
 pub mod schema;
 
+#[cfg(test)]
+mod gbf_packer_deterministic_tests;
+
 /// Register all SDV-specific codecs, decoders, mergers, and schema parsers
 /// on the given FlowInstance. Called from both normal startup and worker mode.
 pub fn register(instance: &flow::FlowInstance) {

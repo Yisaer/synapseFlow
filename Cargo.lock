@@ -6210,6 +6210,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "tokio",
  "tracing",
  "zip",
 ]

@@ -136,7 +136,8 @@ Current persistence behavior:
 - stop writes `stopped` before runtime converge
 - processor-fatal runtime failures persist a runtime failure marker without rewriting desired state
 - upsert preserves the previous desired state when possible
-- scheduled create, upsert, and startup hydration enter `scheduled_stopped`; patrol evaluates the
+- scheduled create enters `scheduled_stopped`; manual stop enters `stopped` and disables patrol,
+  while manual start re-enables schedule control with `scheduled_stopped`; patrol evaluates the
   current schedule before writing `scheduled_running` and starting the runtime
 - revision orders artifact definitions; operational start/stop state changes do
   not increment it
@@ -165,9 +166,8 @@ Manual lifecycle behavior:
 - a failed manual start preserves the running desired state and writes a new runtime failure marker
 - stop is allowed for failed pipelines; it writes desired state `stopped`, clears the runtime failure
   marker, and reports `stopped`
-- stop is also allowed for scheduled failed pipelines; it writes desired state `scheduled_stopped`,
-  clears the runtime failure marker, and returns the pipeline to scheduler control for later patrol
-  retries
+- stop is also allowed for scheduled pipelines; it writes desired state `stopped`, clears the
+  runtime failure marker, and disables scheduler patrol until a later manual start
 - delete is allowed for failed pipelines and removes the stored definition, desired state, and
   runtime failure marker
 

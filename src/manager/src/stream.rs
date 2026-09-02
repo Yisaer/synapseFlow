@@ -222,7 +222,9 @@ async fn stop_affected_pipelines(
                 )
             })?;
 
-        if pipeline.request.options.schedule.is_some() {
+        if pipeline.request.options.schedule.is_some()
+            && !matches!(pipeline.desired_state, StoredPipelineDesiredState::Stopped)
+        {
             state
                 .storage
                 .put_pipeline_run_state(StoredPipelineRunState {
@@ -310,7 +312,9 @@ async fn rebuild_and_restore_affected_pipelines(
         }
 
         let _ = state.storage.delete_pipeline_runtime_failure(&pipeline.id);
-        if pipeline.request.options.schedule.is_some() {
+        if pipeline.request.options.schedule.is_some()
+            && !matches!(pipeline.desired_state, StoredPipelineDesiredState::Stopped)
+        {
             results.push(PipelineRestartResult {
                 id: pipeline.id.clone(),
                 status: "scheduled_stopped",

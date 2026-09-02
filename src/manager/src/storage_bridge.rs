@@ -432,12 +432,19 @@ async fn restore_pipeline(
 
     let is_scheduled = req.options.schedule.is_some();
     if is_scheduled {
-        storage
-            .put_pipeline_run_state(storage::StoredPipelineRunState {
-                pipeline_id: pipeline.id.clone(),
-                desired_state: storage::StoredPipelineDesiredState::ScheduledStopped,
-            })
-            .map_err(|e| e.to_string())?;
+        let desired_state = storage
+            .get_pipeline_run_state(&pipeline.id)
+            .map_err(|e| e.to_string())?
+            .map(|state| state.desired_state)
+            .unwrap_or(storage::StoredPipelineDesiredState::ScheduledStopped);
+        if !matches!(desired_state, storage::StoredPipelineDesiredState::Stopped) {
+            storage
+                .put_pipeline_run_state(storage::StoredPipelineRunState {
+                    pipeline_id: pipeline.id.clone(),
+                    desired_state: storage::StoredPipelineDesiredState::ScheduledStopped,
+                })
+                .map_err(|e| e.to_string())?;
+        }
     }
 
     if let Some(failure) = storage

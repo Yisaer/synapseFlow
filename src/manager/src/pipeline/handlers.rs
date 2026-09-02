@@ -103,6 +103,7 @@ fn desired_state_after_upsert(
     old_desired_state: StoredPipelineDesiredState,
 ) -> StoredPipelineDesiredState {
     match (is_scheduled, old_desired_state) {
+        (true, StoredPipelineDesiredState::Stopped) => StoredPipelineDesiredState::Stopped,
         (true, _) => StoredPipelineDesiredState::ScheduledStopped,
         (
             false,
@@ -999,11 +1000,21 @@ pub async fn start_pipeline_handler(
     );
 
     if pipeline_req.options.schedule.is_some() {
-        let err = format!(
-            "pipeline {id} is scheduled; manual start conflicts with scheduler-managed lifecycle"
-        );
-        audit.log_failure(&err);
-        return (StatusCode::CONFLICT, err).into_response();
+        if let Err(err) = state
+            .storage
+            .put_pipeline_run_state(StoredPipelineRunState {
+                pipeline_id: id.clone(),
+                desired_state: StoredPipelineDesiredState::ScheduledStopped,
+            })
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist pipeline {id} desired state: {err}"),
+            )
+                .into_response();
+        }
+        audit.log_success();
+        return (StatusCode::OK, format!("pipeline {id} scheduling enabled")).into_response();
     }
 
     let _shared_mqtt_permits =
@@ -1081,23 +1092,7 @@ pub async fn stop_pipeline_handler(
     };
     let audit =
         ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(pipeline_req.revision));
-
-    let scheduled_failure = if pipeline_req.options.schedule.is_some() {
-        match matching_runtime_failure(&state, &id, pipeline_req.revision) {
-            Ok(failure) => failure,
-            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
-        }
-    } else {
-        None
-    };
-
-    if pipeline_req.options.schedule.is_some() && scheduled_failure.is_none() {
-        let err = format!(
-            "pipeline {id} is scheduled; manual stop conflicts with scheduler-managed lifecycle"
-        );
-        audit.log_failure(&err);
-        return (StatusCode::CONFLICT, err).into_response();
-    }
+    let is_scheduled = pipeline_req.options.schedule.is_some();
 
     let mode = match parse_stop_mode(&query.mode) {
         Ok(mode) => mode,
@@ -1112,11 +1107,7 @@ pub async fn stop_pipeline_handler(
         .storage
         .put_pipeline_run_state(StoredPipelineRunState {
             pipeline_id: id.clone(),
-            desired_state: if scheduled_failure.is_some() {
-                StoredPipelineDesiredState::ScheduledStopped
-            } else {
-                StoredPipelineDesiredState::Stopped
-            },
+            desired_state: StoredPipelineDesiredState::Stopped,
         })
     {
         return (
@@ -1137,7 +1128,7 @@ pub async fn stop_pipeline_handler(
             (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
         }
         Err(PipelineError::NotFound(_)) => {
-            if scheduled_failure.is_some() {
+            if is_scheduled {
                 let _ = state.storage.delete_pipeline_runtime_failure(&id);
                 audit.log_success();
                 (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
@@ -1369,6 +1360,10 @@ mod tests {
         assert_eq!(
             desired_state_after_upsert(true, StoredPipelineDesiredState::Running),
             StoredPipelineDesiredState::ScheduledStopped
+        );
+        assert_eq!(
+            desired_state_after_upsert(true, StoredPipelineDesiredState::Stopped),
+            StoredPipelineDesiredState::Stopped
         );
     }
 

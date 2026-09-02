@@ -91,9 +91,10 @@ JSON formatting and object field order do not affect equality.
 `PUT /streams/:name` also accepts the optional `restart_pipelines` query parameter. It defaults to
 `false`. When set to `true`, the manager stops running pipelines that reference the stream,
 replaces the stream, rebuilds all affected pipeline runtimes against the updated catalog, and
-restores non-scheduled pipelines according to their stored desired state. Scheduled pipelines are
-left in `ScheduledStopped` for patrol reconciliation. This runtime rebuild does not change pipeline
-specifications or revisions.
+restores non-scheduled pipelines according to their stored desired state. Scheduled pipelines with
+schedule control enabled are left in `ScheduledStopped` for patrol reconciliation; manually stopped
+scheduled pipelines remain `Stopped`. This runtime rebuild does not change pipeline specifications
+or revisions.
 
 Pipeline recovery after a successful stream replacement is non-transactional. Rebuild and start
 failures are recorded and returned as per-pipeline results without rolling back the stream. See

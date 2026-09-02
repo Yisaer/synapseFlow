@@ -564,19 +564,33 @@ mod tests {
             .get_pipeline_run_state("scheduled_fail_pipe")
             .expect("read run state")
             .expect("run state exists");
+        assert_eq!(run_state.desired_state, StoredPipelineDesiredState::Stopped);
+
+        patrol_pipeline(&stored, &state).await;
+        assert!(
+            state
+                .storage
+                .get_pipeline_runtime_failure("scheduled_fail_pipe")
+                .expect("read failure marker")
+                .is_none()
+        );
+
+        let response = super::super::handlers::start_pipeline_handler(
+            State(state.clone()),
+            Path("scheduled_fail_pipe".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let run_state = state
+            .storage
+            .get_pipeline_run_state("scheduled_fail_pipe")
+            .expect("read run state")
+            .expect("run state exists");
         assert_eq!(
             run_state.desired_state,
             StoredPipelineDesiredState::ScheduledStopped
         );
-
-        patrol_pipeline(&stored, &state).await;
-        let marker = state
-            .storage
-            .get_pipeline_runtime_failure("scheduled_fail_pipe")
-            .expect("read failure marker")
-            .expect("failure marker exists");
-        assert_eq!(marker.revision, 7);
-        assert_eq!(marker.processor_kind, "scheduler_auto_start");
     }
 
     #[tokio::test]
@@ -697,6 +711,14 @@ async fn patrol_pipeline(stored: &storage::StoredPipeline, state: &super::state:
             return;
         }
     };
+
+    if matches!(current_desired_state, StoredPipelineDesiredState::Stopped) {
+        tracing::debug!(
+            pipeline_id,
+            "patrol: scheduled pipeline is manually stopped"
+        );
+        return;
+    }
 
     let flow_instance_id = req
         .flow_instance_id
