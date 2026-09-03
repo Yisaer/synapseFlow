@@ -84,9 +84,12 @@ CAN ID fields:
 }
 ```
 
-This mode uses `(bus_id, can_id)` for DBC lookup and preserves a complete
-29-bit CAN ID in a `u32` field. Do not configure `format.props.can_id_mapping`
-when `bus_id_ref` is present.
+This mode uses `(bus_id, can_id)` for DBC lookup. Without `extend_ref`, `can_id`
+must already be the DBC `u32` key (bit 31 = IDE, bits 0–28 = CAN ID, bits 29–30
+= 0). GBF does not canonicalize FrameIDCAN/SocketCAN flag bits. When the
+envelope splits ID and extended-frame flag, add `extend_ref` so the parser
+composes that key. Do not configure `format.props.can_id_mapping` when
+`bus_id_ref` is present.
 
 ## Fused packer merger
 

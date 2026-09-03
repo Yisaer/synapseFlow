@@ -74,8 +74,8 @@ BusMirror DBC tokens are:
 | Token | Value |
 |---|---|
 | `{bus_name}` | Bus name from the entry |
-| `{msg_id}` | Normalized message ID in decimal |
-| `{msg_id_hex_lower}` / `{msg_id_hex_upper}` | Normalized message ID in hexadecimal |
+| `{msg_id}` | Message `u32` lookup key in decimal |
+| `{msg_id_hex_lower}` / `{msg_id_hex_upper}` | Message `u32` lookup key in hexadecimal |
 | `{msg_name}` | DBC message name |
 | `{sig_name}` | DBC signal name |
 
@@ -98,7 +98,8 @@ example `0x{msg_id_hex_upper}`. Unknown, empty, or unclosed tokens, empty output
 names, duplicate output names, and a generated `ts` name are rejected during
 installation. Legacy aliases such as `{id}` and `{sig}` are not accepted.
 
-CAN wire flags for extended frames and CAN FD are not part of the DBC identity.
-The decoder uses the normalized 29-bit numeric CAN ID emitted by VeloFlux's DBC
-parser. Network type and network ID remain part of the BusMirror frame identity,
-so equal CAN IDs on different buses do not collide.
+CAN FrameID is a 4-byte AUTOSAR `FrameIDCAN`. The decoder keeps IDE (bit 31) and
+clears FD (bit 30) and reserved (bit 29), then uses that packed `u32` as the DBC
+lookup key. Standard `0x123` and extended `0x123` therefore stay distinct.
+Network type and network ID remain part of the BusMirror frame identity, so
+equal CAN IDs on different buses do not collide.

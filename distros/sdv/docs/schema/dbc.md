@@ -120,8 +120,8 @@ Set `signal_name_pattern` in DBC schema props. The default is `{sig_name}`. Supp
 | `{bus_name}` | Bus name |
 | `{bus_id}` | Bus ID in decimal |
 | `{bus_id_hex_lower}` / `{bus_id_hex_upper}` | Bus ID in hexadecimal |
-| `{msg_id}` | Normalized message ID in decimal |
-| `{msg_id_hex_lower}` / `{msg_id_hex_upper}` | Normalized message ID in hexadecimal |
+| `{msg_id}` | Message `u32` lookup key in decimal |
+| `{msg_id_hex_lower}` / `{msg_id_hex_upper}` | Message `u32` lookup key in hexadecimal |
 | `{msg_name}` | Message name |
 | `{sig_name}` | Signal name |
 
@@ -225,15 +225,20 @@ Notes:
 > the upper bits — must set
 > `"can_id_mapping": { "mode": "bus_shift", "bits": 12 }` to keep matching frames.
 
-### Extended / 29-bit CAN IDs
+### Packed `u32` CAN IDs
 
-Both standard 11-bit and extended 29-bit CAN IDs (and any DBC message id that
-exceeds 16 bits) are supported with **no code change** — the CAN/GBF decode path
-is `u32` end-to-end. To use them:
+DBC lookup uses the message `id` as a `u32` key (optionally paired with a bus
+ID). That key follows the Vector/SocketCAN convention: bit 31 is the extended
+frame flag (IDE), and bits 0–28 are the CAN ID. Standard `0x123` and extended
+`0x123` are therefore `0x00000123` and `0x80000123`.
+
+`.dbc` files keep Vector's `BO_` encoding: an extended frame stores
+`0x80000000 | can_id`. JSON DBC files use the `id` field as written. Signal
+name tokens such as `{msg_id_hex_lower}` render this same `u32` key.
 
 1. **Declare a wide id field in the GBF schema.** The `id_ref` field may be
    `u8`, `u16be`, `u16le`, `u32be`, or `u32le`. An 11-bit id fits a `u16`; a
-   29-bit id needs a `u32` field:
+   packed extended id needs a `u32` field:
 
    ```json
    { "name": "can_id", "type": "u32be" },
@@ -241,13 +246,16 @@ is `u32` end-to-end. To use them:
      "format": { "type": "dbc", "id_ref": "can_id" } }
    ```
 
-2. **Use the default `raw` mapping.** An extended id is globally unique, so it is
-   matched directly against the DBC `msg.id` — no bus packing. Do **not** use
-   `bus_shift` for extended ids: `bits: 12` only leaves room for an 11-bit id and
-   would overflow (the decoder warns when this happens).
+   When `extend_ref` is omitted, the wire `id_ref` must already be this packed
+   `u32` (bits 29–30 clear). GBF does not strip FrameIDCAN FD/reserved bits.
+   When the wire carries a separate IDE flag, add `extend_ref` so GBF composes
+   the packed key at parse time.
 
-`.dbc` files: extended frames (the `BO_` id with bit 31 set) are parsed to their
-bare 29-bit message id automatically. In-range ids that have no DBC entry are
-traced and skipped, exactly like standard ids — never silently dropped for being
-"too wide".
+2. **Use the default `raw` mapping.** The wire `u32` is matched directly against
+   the DBC `msg.id`. Do **not** use `bus_shift` for extended ids: `bits: 12` only
+   leaves room for an 11-bit id and would overflow (the decoder warns when this
+   happens).
+
+In-range ids that have no DBC entry are traced and skipped, exactly like
+standard ids — never silently dropped for being "too wide".
 

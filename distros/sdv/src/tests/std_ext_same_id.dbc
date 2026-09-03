@@ -1,0 +1,13 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 291 StdSame: 8 Vector__XXX
+ SG_ StdSig : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+
+BO_ 2147483939 ExtSame: 8 Vector__XXX
+ SG_ ExtSig : 0|8@1+ (1,0) [0|255] "" Vector__XXX

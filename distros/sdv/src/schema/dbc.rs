@@ -11,6 +11,7 @@ use manager::{ParsedSchema, register_schema};
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+use crate::can_id::packed_can_id;
 use crate::decoder::can::classify_signal;
 use crate::schema::name_pattern::{
     CompiledNamePattern, DbcNameContext, DbcNamePatternMode, NetworkNameContext,
@@ -78,18 +79,6 @@ impl CompiledDbcSchema {
     ) -> Result<Self, String> {
         let compiled_name_pattern = CompiledNamePattern::compile(signal_name_pattern, naming_mode)?;
         validate_dbc_signal_ranges(&dbc)?;
-        if naming_mode == DbcNamePatternMode::BusMirror {
-            for bus in &dbc.buses {
-                for message in &bus.messages {
-                    if message.id > 0x1fff_ffff {
-                        return Err(format!(
-                            "BusMirror DBC message `{}` on bus {} has ID 0x{:X} outside the 29-bit CAN identity range",
-                            message.name, bus.id, message.id
-                        ));
-                    }
-                }
-            }
-        }
         let schema = Self {
             dbc: Arc::new(dbc),
             signal_name_pattern: Arc::from(signal_name_pattern),
@@ -448,8 +437,7 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                     // means the `BO_` id was not flagged as extended (bit 31), so
                     // `can-dbc` took the standard branch and may have truncated a
                     // wide id to 16 bits — it will then never match a wire frame
-                    // carrying the real id. Warn instead of failing silently
-                    // (issue #202). See docs/schema/dbc.md "Extended / 29-bit".
+                    // carrying the real id. Warn instead of failing silently.
                     if id > 0x7FF {
                         tracing::warn!(
                             message = %msg.name,
@@ -461,7 +449,9 @@ fn convert_dbc_to_bus(dbc: &can_dbc::Dbc, id: u32, name: String) -> BusJson {
                     }
                     id
                 }
-                can_dbc::MessageId::Extended(id) => id,
+                // `can-dbc` yields the bare 29-bit id; restore Vector's bit-31
+                // flag so the stored `u32` is the lookup key.
+                can_dbc::MessageId::Extended(id) => packed_can_id(true, id),
             };
 
             let signals = msg
@@ -721,9 +711,8 @@ mod tests {
 
     #[test]
     fn load_can_schema_extended_message_id() {
-        // Extended (29-bit) frames set bit 31 in the DBC `BO_` id; the parser
-        // must yield the bare 29-bit id, not the raw value with the flag bit
-        // (issue #202).
+        // Extended frames set bit 31 in the DBC `BO_` id. The stored lookup key
+        // keeps that flag so it matches a packed wire `u32`.
         const EXT_ID: u32 = 0x18FE_F100; // J1939-style 29-bit id
         let raw = 0x8000_0000u32 | EXT_ID; // DBC extended-frame encoding
         let dbc_content = format!(
@@ -738,10 +727,26 @@ mod tests {
 
         let msg = &dbc.buses[0].messages[0];
         assert_eq!(
-            msg.id, EXT_ID,
-            "extended BO_ id must parse to the bare 29-bit message id"
+            msg.id, raw,
+            "extended BO_ id must keep Vector bit 31 as the u32 lookup key"
         );
-        assert!(msg.id > 0x7FF, "id must exceed the 11-bit standard range");
+        assert!(
+            msg.id & 0x8000_0000 != 0,
+            "extended lookup key must have IDE set"
+        );
+    }
+
+    #[test]
+    fn load_can_schema_keeps_standard_and_extended_same_numeric_id() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/std_ext_same_id.dbc");
+        let dbc = load_can_schema(path.to_str().unwrap()).expect("load std/ext same-id DBC");
+        let ids: Vec<u32> = dbc.buses[0].messages.iter().map(|msg| msg.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&0x123), "BO_ 291 must load as 0x123: {ids:?}");
+        assert!(
+            ids.contains(&0x8000_0123),
+            "BO_ 2147483939 must load as 0x80000123: {ids:?}"
+        );
     }
 
     #[test]

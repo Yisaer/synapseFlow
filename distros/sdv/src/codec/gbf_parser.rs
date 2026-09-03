@@ -35,6 +35,8 @@ pub struct SchemaFieldMap {
     pub frame_id_field: String,
     /// Optional separate CAN bus ID field referenced by the payload format.
     pub bus_id_field: Option<String>,
+    /// Optional CAN IDE / extended-frame flag field referenced by the payload format.
+    pub extend_field: Option<String>,
     /// Payload field name in frame items (e.g., "payload")
     pub frame_payload_field: String,
 }
@@ -138,6 +140,10 @@ impl SchemaFieldMap {
             .format
             .as_ref()
             .and_then(|format| format.bus_id_ref.clone());
+        let extend_field = payload_field
+            .format
+            .as_ref()
+            .and_then(|format| format.extend_ref.clone());
 
         Ok(Self {
             timestamp_field,
@@ -145,6 +151,7 @@ impl SchemaFieldMap {
             sequence_item_type,
             frame_id_field,
             bus_id_field,
+            extend_field,
             frame_payload_field,
         })
     }
@@ -192,6 +199,7 @@ pub(crate) enum OptFieldType {
         length_ref_index: usize,
         format_id_ref_index: Option<usize>,
         bus_id_ref_index: Option<usize>,
+        extend_ref_index: Option<usize>,
     },
 }
 
@@ -398,10 +406,41 @@ impl GbfParser {
                     } else {
                         None
                     };
+                    let extend_ref_idx = if let Some(name) = field
+                        .format
+                        .as_ref()
+                        .and_then(|format| format.extend_ref.as_ref())
+                    {
+                        let idx = *name_to_index.get(name).ok_or_else(|| {
+                            CodecError::Other(format!(
+                                "bytes field '{}' has unknown extend_ref '{}'",
+                                field.name, name
+                            ))
+                        })?;
+                        const EXTEND_INTEGER_TYPES: &[&str] =
+                            &["u8", "u16be", "u16le", "u32be", "u32le"];
+                        let target_type = fields_def[idx].field_type.as_str();
+                        if !EXTEND_INTEGER_TYPES.contains(&target_type) {
+                            return Err(CodecError::Other(format!(
+                                "bytes field '{}' has extend_ref '{}' pointing to unsupported field type '{}'; extend_ref must refer to an integer field (u8/u16*/u32*)",
+                                field.name, name, target_type
+                            )));
+                        }
+                        if idx >= i {
+                            return Err(CodecError::Other(format!(
+                                "bytes field '{}' has extend_ref '{}' that must refer to an earlier field",
+                                field.name, name
+                            )));
+                        }
+                        Some(idx)
+                    } else {
+                        None
+                    };
                     OptFieldType::Bytes {
                         length_ref_index: ref_idx,
                         format_id_ref_index: id_ref_idx,
                         bus_id_ref_index: bus_id_ref_idx,
+                        extend_ref_index: extend_ref_idx,
                     }
                 }
                 _ => {
@@ -642,6 +681,10 @@ impl GbfParser {
         self.field_map.bus_id_field.is_some()
     }
 
+    pub fn has_extend_ref(&self) -> bool {
+        self.field_map.extend_field.is_some()
+    }
+
     /// Parse frames from a sequence buffer, invoking `sink(frame_id, payload)` for
     /// each frame without allocating a per-frame payload buffer. Each payload
     /// slice borrows from `buffer` and is only valid for that invocation.
@@ -804,6 +847,7 @@ impl GbfParser {
                         length_ref_index,
                         format_id_ref_index,
                         bus_id_ref_index,
+                        extend_ref_index,
                     } => {
                         let len = context[*length_ref_index] as usize;
                         let clamped_len = len.min(buffer.len() - frame_cursor);
@@ -814,7 +858,17 @@ impl GbfParser {
                         if let Some(id_idx) = format_id_ref_index {
                             payload_start = frame_cursor;
                             payload_len = clamped_len;
-                            can_id = Some(context[*id_idx] as u32);
+                            let raw_id = context[*id_idx] as u32;
+                            // Without extend_ref, id_ref is the DBC u32 key as-is
+                            // (bit 31 = IDE, bits 0–28 = CAN ID). Do not strip
+                            // bits 29–30 here: bus_shift may store the bus in
+                            // those bits, and FrameIDCAN is a BusMirror layout.
+                            can_id = Some(match extend_ref_index {
+                                Some(ext_idx) => {
+                                    crate::can_id::packed_can_id(context[*ext_idx] != 0, raw_id)
+                                }
+                                None => raw_id,
+                            });
                             bus_id = bus_id_ref_index.map(|idx| context[idx] as u32);
                         }
 
@@ -991,6 +1045,67 @@ mod tests {
         assert_eq!(frames[0].bus_id, Some(7));
         assert_eq!(frames[0].can_id, 0x1fff_ffff);
         assert_eq!(frames[0].payload, [0xaa, 0xbb]);
+    }
+
+    #[test]
+    fn composes_packed_can_id_from_extend_ref() {
+        let schema: GbfSchema = serde_json::from_value(serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "length_unit": "bytes",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "frame_extend", "type": "u8" },
+                                { "name": "frame_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "id_ref": "frame_id",
+                                        "extend_ref": "frame_extend"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("schema");
+        let parser = GbfParser::new(schema).expect("parser");
+        assert!(parser.has_extend_ref());
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_u64.to_be_bytes());
+        packet.extend_from_slice(&7_u16.to_be_bytes());
+        packet.push(1); // extended
+        packet.extend_from_slice(&0x123_u32.to_be_bytes());
+        packet.push(1);
+        packet.push(0xaa);
+
+        let (_, frames) = parser.parse_packet(&packet).expect("packet");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].can_id, 0x8000_0123);
+
+        let mut std_packet = Vec::new();
+        std_packet.extend_from_slice(&1_u64.to_be_bytes());
+        std_packet.extend_from_slice(&7_u16.to_be_bytes());
+        std_packet.push(0); // standard
+        std_packet.extend_from_slice(&0x123_u32.to_be_bytes());
+        std_packet.push(1);
+        std_packet.push(0xbb);
+        let (_, frames) = parser.parse_packet(&std_packet).expect("std packet");
+        assert_eq!(frames[0].can_id, 0x123);
     }
 
     #[test]

@@ -26,14 +26,10 @@ impl FrameIdentity {
         Self(((bus_id as u64) << 32) | format_id as u64)
     }
 
-    /// Build an AUTOSAR BusMirror identity.
+    /// Build an AUTOSAR BusMirror identity from a packed CAN `u32` key.
     #[inline]
     pub const fn busmirror(network_type: u8, network_id: u8, frame_id: u32) -> Self {
-        Self(
-            ((network_type as u64) << 40)
-                | ((network_id as u64) << 32)
-                | ((frame_id & 0x1fff_ffff) as u64),
-        )
+        Self(((network_type as u64) << 40) | ((network_id as u64) << 32) | frame_id as u64)
     }
 
     /// Build a BusMirror identity from the schema compiler's packed bus ID.

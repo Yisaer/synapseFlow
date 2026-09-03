@@ -74,7 +74,8 @@ fn gbf_schema_path(layout: CanIdentityLayout) -> String {
                                         "length_ref": "frame_length",
                                         "format": {
                                             "id_ref": "frame_id",
-                                            "bus_id_ref": "frame_channel"
+                                            "bus_id_ref": "frame_channel",
+                                            "extend_ref": "frame_extend"
                                         }
                                     }
                                 ]

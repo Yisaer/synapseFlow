@@ -346,7 +346,7 @@ impl Merger for GbfFusedMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::dbc::{CompiledDbcSchema, load_dbc_json, schema_from_dbc};
+    use crate::schema::dbc::{CompiledDbcSchema, load_can_schema, load_dbc_json, schema_from_dbc};
     use crate::schema::gbf::CompiledGbfSchema;
     use datatypes::Value;
     use flow::catalog::StreamDecoderConfig;
@@ -420,6 +420,48 @@ mod tests {
         }
         "#;
         serde_json::from_str(json).expect("parse u32 can id schema")
+    }
+
+    fn std_ext_same_id_dbc() -> crate::schema::dbc::DbcJson {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tests/std_ext_same_id.dbc");
+        load_can_schema(path.to_str().unwrap()).expect("load std/ext same-id DBC")
+    }
+
+    fn get_extend_ref_schema() -> GbfSchema {
+        serde_json::from_value(serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "length_unit": "bytes",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "frame_extend", "type": "u8" },
+                                { "name": "frame_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "id_ref": "frame_id",
+                                        "extend_ref": "frame_extend"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("parse extend_ref schema")
     }
 
     fn get_bus_id_ref_schema() -> GbfSchema {
@@ -911,7 +953,7 @@ mod tests {
     fn test_extended_29bit_can_id_decodes_both_paths() {
         use flow::Merger;
 
-        // bus 0 + raw mapping -> the lookup key is the bare 29-bit msg.id.
+        // bus 0 + raw mapping -> JSON DBC id is the u32 lookup key as written.
         const EXT_ID: u32 = 0x1FFF_FFFF;
         let dbc: crate::schema::dbc::DbcJson = serde_json::from_str(&format!(
             r#"
@@ -987,6 +1029,169 @@ mod tests {
             fused_batch.rows()[0].value_by_name("ext", "ExtSig"),
             Some(&Value::Int64(77)),
             "extended id must decode via the fused path"
+        );
+    }
+
+    #[test]
+    fn test_extend_ref_composes_u32_lookup_key() {
+        const PACKED_ID: u32 = 0x8000_0123;
+        let dbc: crate::schema::dbc::DbcJson = serde_json::from_str(&format!(
+            r#"
+            {{
+                "buses": [{{
+                    "name": "Bus0",
+                    "id": 0,
+                    "messages": [{{
+                        "name": "ExtMsg",
+                        "id": {PACKED_ID},
+                        "frameId": "0x80000123",
+                        "length": 8,
+                        "signals": [{{
+                            "name": "ExtSig",
+                            "start": 0,
+                            "length": 8,
+                            "scale": 1,
+                            "offset": 0,
+                            "isBigEndian": false,
+                            "isSigned": false
+                        }}]
+                    }}]
+                }}]
+            }}"#
+        ))
+        .expect("parse packed can dbc");
+        let schema = Arc::new(schema_from_dbc("ext", &dbc, None).expect("compile DBC schema"));
+        let gbf = serde_json::from_value(serde_json::json!({
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "length_unit": "bytes",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "frame_extend", "type": "u8" },
+                                { "name": "frame_id", "type": "u32be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": {
+                                        "id_ref": "frame_id",
+                                        "extend_ref": "frame_extend"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }))
+        .expect("parse extend_ref schema");
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&14u16.to_be_bytes());
+        packet.push(1); // extended
+        packet.extend_from_slice(&0x123_u32.to_be_bytes());
+        packet.push(8);
+        packet.extend_from_slice(&[77, 0, 0, 0, 0, 0, 0, 0]);
+
+        let decoder = GbfDecoder::new("ext", schema, gbf, dbc, None, true, CanIdMapping::Raw)
+            .expect("build decoder");
+        let batch = decoder.decode(&packet).expect("decode extend_ref");
+        assert_eq!(
+            batch.rows()[0].value_by_name("ext", "ExtSig"),
+            Some(&Value::Int64(77)),
+            "extend_ref must compose the packed u32 lookup key"
+        );
+    }
+
+    #[test]
+    fn packed_id_ref_keeps_standard_and_extended_same_numeric_id() {
+        let dbc = std_ext_same_id_dbc();
+        let schema = Arc::new(schema_from_dbc("same", &dbc, None).expect("compile DBC schema"));
+        let decoder = GbfDecoder::new(
+            "same",
+            schema,
+            get_u32_can_id_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build decoder");
+
+        let mut frames = Vec::new();
+        frames.push(0x55);
+        frames.extend_from_slice(&0x123_u32.to_be_bytes());
+        frames.push(8);
+        frames.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 0]);
+        frames.push(0x55);
+        frames.extend_from_slice(&0x8000_0123_u32.to_be_bytes());
+        frames.push(8);
+        frames.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&(frames.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&frames);
+
+        let batch = decoder.decode(&packet).expect("decode both identities");
+        assert_eq!(
+            batch.rows()[0].value_by_name("same", "StdSig"),
+            Some(&Value::Int64(10))
+        );
+        assert_eq!(
+            batch.rows()[0].value_by_name("same", "ExtSig"),
+            Some(&Value::Int64(20))
+        );
+    }
+
+    #[test]
+    fn extend_ref_keeps_standard_and_extended_same_numeric_id() {
+        let dbc = std_ext_same_id_dbc();
+        let schema = Arc::new(schema_from_dbc("same", &dbc, None).expect("compile DBC schema"));
+        let decoder = GbfDecoder::new(
+            "same",
+            schema,
+            get_extend_ref_schema(),
+            dbc,
+            None,
+            true,
+            CanIdMapping::Raw,
+        )
+        .expect("build decoder");
+
+        let mut frames = Vec::new();
+        frames.push(0); // standard
+        frames.extend_from_slice(&0x123_u32.to_be_bytes());
+        frames.push(8);
+        frames.extend_from_slice(&[10, 0, 0, 0, 0, 0, 0, 0]);
+        frames.push(1); // extended
+        frames.extend_from_slice(&0x123_u32.to_be_bytes());
+        frames.push(8);
+        frames.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&1_000u64.to_be_bytes());
+        packet.extend_from_slice(&(frames.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&frames);
+
+        let batch = decoder.decode(&packet).expect("decode both identities");
+        assert_eq!(
+            batch.rows()[0].value_by_name("same", "StdSig"),
+            Some(&Value::Int64(10))
+        );
+        assert_eq!(
+            batch.rows()[0].value_by_name("same", "ExtSig"),
+            Some(&Value::Int64(20))
         );
     }
 

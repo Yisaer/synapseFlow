@@ -66,8 +66,8 @@ The tool will:
 # Generate 10 packets with random data
 gbf_gen -s schema.json -c 10 -r file:output.hex
 
-# Use specific CAN IDs
-gbf_gen -s schema.json -c 5 --can-ids 0x586,0x24A -r file:data.hex
+# Use specific CAN IDs (packed extended IDs keep bit 31)
+gbf_gen -s schema.json -c 5 --can-ids 0x586,0x24A,0x80000103 -r file:data.hex
 
 # Reproducible output with seed
 gbf_gen -s schema.json -c 3 -r --seed 42 file:test.hex
@@ -144,7 +144,7 @@ Key schema features used:
           "type": "struct",
           "fields": [
             { "name": "magic", "type": "u8", "const": 85 },
-            { "name": "can_id", "type": "u16be" },
+            { "name": "can_id", "type": "u32be" },
             { "name": "data_len", "type": "u8" },
             {
               "name": "payload",

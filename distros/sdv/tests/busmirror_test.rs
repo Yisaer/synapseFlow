@@ -186,7 +186,7 @@ fn create_pipeline(
         "`can2__201__BrakePressure`",
     ];
     if include_extended {
-        columns.insert(3, "`can1__103__ExtendedRPM`");
+        columns.insert(3, "`can1__80000103__ExtendedRPM`");
     }
     let sink = match sink {
         PipelineSink::Mqtt(topic) => json!({
@@ -366,7 +366,7 @@ fn decodes_and_packs_busmirror_end_to_end() {
                 "can1__100__RPM": 5000,
                 "can2__201__BrakePressure": 30.0
             },
-            {"ts": 1_000_000, "can1__103__ExtendedRPM": 6100}
+            {"ts": 1_000_000, "can1__80000103__ExtendedRPM": 6100}
         ])
     );
 

@@ -185,6 +185,9 @@ fn parse_gbf_schema(
             if parser.has_bus_id_ref() {
                 return Err("GBF `bus_id_ref` is supported only for CAN format".to_string());
             }
+            if parser.has_extend_ref() {
+                return Err("GBF `extend_ref` is supported only for CAN format".to_string());
+            }
             let arxml_path =
                 required_member_path(&member_root, &document.format.props, "arxml_path")?;
             let pattern = document.signal_name_pattern.as_deref().unwrap_or("{field}");
@@ -267,6 +270,9 @@ pub struct FormatSpec {
     pub id_ref: Option<String>,
     /// Optional reference to a separate CAN bus ID field.
     pub bus_id_ref: Option<String>,
+    /// Optional reference to a CAN IDE / extended-frame flag.
+    /// When set, the lookup key is `(extend ? 0x80000000 : 0) | (id & 0x1FFFFFFF)`.
+    pub extend_ref: Option<String>,
 }
 
 impl GbfSchema {

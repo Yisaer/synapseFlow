@@ -63,7 +63,7 @@ struct Args {
     #[arg(long)]
     timestamp: Option<String>,
 
-    /// CAN IDs to use (comma-separated hex, e.g., "0x586,0x24A")
+    /// CAN IDs to use (comma-separated hex, e.g., "0x586,0x24A,0x80000103")
     #[arg(long)]
     can_ids: Option<String>,
 
@@ -98,14 +98,14 @@ impl OutputMode {
     }
 }
 
-fn parse_can_ids(ids_str: &Option<String>, can_encoder: Option<&CanEncoder>) -> Option<Vec<u16>> {
+fn parse_can_ids(ids_str: &Option<String>, can_encoder: Option<&CanEncoder>) -> Option<Vec<u32>> {
     if let Some(s) = ids_str {
         Some(
             s.split(',')
                 .filter_map(|s| {
                     let s = s.trim();
                     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                        u16::from_str_radix(hex, 16).ok()
+                        u32::from_str_radix(hex, 16).ok()
                     } else {
                         s.parse().ok()
                     }
@@ -113,11 +113,7 @@ fn parse_can_ids(ids_str: &Option<String>, can_encoder: Option<&CanEncoder>) -> 
                 .collect(),
         )
     } else if let Some(can_enc) = can_encoder {
-        let ids: Vec<u16> = can_enc
-            .message_ids()
-            .into_iter()
-            .filter_map(|id| u16::try_from(id).ok())
-            .collect();
+        let ids: Vec<u32> = can_enc.message_ids();
         if ids.is_empty() { None } else { Some(ids) }
     } else {
         None
@@ -231,7 +227,7 @@ fn generate_values<R: rand::Rng>(
     args: &Args,
     rng: &mut R,
     packet_index: usize,
-    can_ids: Option<&[u16]>,
+    can_ids: Option<&[u32]>,
 ) -> Result<FieldValues, Box<dyn std::error::Error>> {
     let mut values = if args.random {
         encoder.generate_random(rng, args.items)
@@ -273,18 +269,18 @@ fn generate_values<R: rand::Rng>(
             // Set CAN ID
             if let Some(ids) = can_ids {
                 let can_id = ids[i % ids.len()];
-                frame.insert("can_id".to_string(), FieldValue::Int(can_id as u64));
+                frame.insert("can_id".to_string(), FieldValue::Int(u64::from(can_id)));
 
                 // Generate proper payload using DBC if available
                 if let Some(can_enc) = can_encoder
-                    && can_enc.has_message(can_id as u32)
+                    && can_enc.has_message(can_id)
                 {
                     // Start with random values, then override with user-specified ones
-                    let mut signal_values = can_enc.generate_random(can_id as u32, rng)?;
+                    let mut signal_values = can_enc.generate_random(can_id, rng)?;
                     for (sig_name, sig_val) in &user_signals {
                         signal_values.insert(sig_name.clone(), *sig_val);
                     }
-                    let payload = can_enc.encode(can_id as u32, &signal_values)?;
+                    let payload = can_enc.encode(can_id, &signal_values)?;
                     frame.insert("payload".to_string(), FieldValue::Bytes(payload));
                 }
             }
@@ -456,6 +452,10 @@ mod tests {
         let ids = parse_can_ids(&Some("0x123, 456, 0X1A".to_string()), None);
         assert_eq!(ids, Some(vec![0x123, 456, 0x1A]));
 
+        // Packed extended DBC u32 key (bit 31 = IDE)
+        let ids = parse_can_ids(&Some("0x80000103".to_string()), None);
+        assert_eq!(ids, Some(vec![0x8000_0103]));
+
         // Invalid parts skipped
         let ids = parse_can_ids(&Some("0x123, invalid, 10".to_string()), None);
         assert_eq!(ids, Some(vec![0x123, 10]));
@@ -463,5 +463,19 @@ mod tests {
         // None input
         let ids = parse_can_ids(&None, None);
         assert_eq!(ids, None);
+    }
+
+    #[test]
+    fn parse_can_ids_from_dbc_keeps_packed_extended_id() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/tests/std_ext_same_id.dbc");
+        let dbc = load_can_schema(path.to_str().unwrap()).expect("load DBC");
+        let encoder = CanEncoder::new(&dbc);
+        let ids = parse_can_ids(&None, Some(&encoder)).expect("ids from DBC");
+        assert!(ids.contains(&0x123), "standard 0x123: {ids:?}");
+        assert!(
+            ids.contains(&0x8000_0123),
+            "packed extended 0x80000123: {ids:?}"
+        );
     }
 }

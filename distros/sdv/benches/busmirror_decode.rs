@@ -32,7 +32,7 @@ fn benchmark_busmirror_decode(criterion: &mut Criterion) {
     let schema = Arc::new(compiled.schema("mirror"));
     let decoder =
         CanDecoder::build_from_busmirror("mirror", schema, &compiled, true).expect("build decoder");
-    let packet = destination_frame(1_720_765_705_290, 0xc000_0100, &[42, 1, 2, 3, 4, 5, 6, 7]);
+    let packet = destination_frame(1_720_765_705_290, 0x4000_0100, &[42, 1, 2, 3, 4, 5, 6, 7]);
     let mut slots: Vec<BusMirrorFrameSlot> = Vec::with_capacity(8);
 
     criterion.bench_function("busmirror_parse_identity_and_dbc_decode", |bencher| {

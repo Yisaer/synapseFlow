@@ -279,7 +279,7 @@ mod tests {
         let (schema, compiled) = compiled_schema();
         let decoder =
             BusMirrorDecoder::from_compiled("mirror", schema, &compiled).expect("build decoder");
-        let first = destination_frame(1_001, &can_item(0xc000_0100, &[42, 0, 0, 0, 0, 0, 0, 0]));
+        let first = destination_frame(1_001, &can_item(0x4000_0100, &[42, 0, 0, 0, 0, 0, 0, 0]));
         let malformed = destination_frame(1_002, &[0, 0, 0x61, 1]);
         let second = destination_frame(1_003, &can_item(0x100, &[43, 0, 0, 0, 0, 0, 0, 0]));
         let payload = [first, malformed, second].concat();
@@ -402,6 +402,41 @@ mod tests {
         assert_eq!(
             batch.rows()[0].value_by_name("mirror", "2__100__StandardUnsigned"),
             Some(&Value::Int64(43))
+        );
+    }
+
+    #[test]
+    fn decoder_keeps_standard_and_extended_same_numeric_id() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/std_ext_same_id.dbc");
+        let mut dbc = load_can_schema(path.to_str().expect("fixture path")).expect("load DBC");
+        dbc.buses[0].id = 0x101;
+        dbc.buses[0].name = Some("Powertrain".to_string());
+        let dbc = Arc::new(
+            CompiledDbcSchema::new_busmirror(dbc, "{network_id}__{msg_id_hex_lower}__{sig_name}")
+                .expect("compile BusMirror DBC"),
+        );
+        let schema = Arc::new(dbc.schema("mirror"));
+        let compiled = CompiledBusMirrorSchema::from_dbc(dbc);
+        let decoder =
+            BusMirrorDecoder::from_compiled("mirror", schema, &compiled).expect("build decoder");
+        let body = [
+            can_item_for(1, 0x123, &[10, 0, 0, 0, 0, 0, 0, 0]),
+            can_item_for(1, 0xC000_0123, &[20, 0, 0, 0, 0, 0, 0, 0]),
+        ]
+        .concat();
+
+        let batch = decoder
+            .decode(&destination_frame(1_001, &body))
+            .expect("decode standard and extended 0x123");
+
+        assert_eq!(
+            batch.rows()[0].value_by_name("mirror", "1__123__StdSig"),
+            Some(&Value::Int64(10))
+        );
+        assert_eq!(
+            batch.rows()[0].value_by_name("mirror", "1__80000123__ExtSig"),
+            Some(&Value::Int64(20))
         );
     }
 

@@ -69,7 +69,7 @@ No archive entry may exist outside the root entry and companion directory. The p
 ### Separate bus and CAN IDs
 
 For multi-bus inputs, prefer carrying the bus ID and the complete CAN ID in
-separate fields. This preserves the full 29-bit CAN ID and avoids allocating a
+separate fields. This preserves the packed `u32` CAN ID and avoids allocating a
 fixed number of bits to a synthetic packed ID:
 
 ```json
@@ -118,6 +118,31 @@ fixed number of bits to a synthetic packed ID:
 `u32le` field in the same frame structure. When it is present, VeloFlux matches
 frames by the structured `(bus_id, can_id)` pair. `can_id_mapping` must be
 omitted; configuring both is rejected.
+
+DBC lookup uses a packed `u32` CAN ID: bit 31 is IDE, bits 0–28 are the CAN ID.
+
+When `extend_ref` is omitted, `id_ref` is the lookup key as-is. The envelope
+must already carry that DBC `u32` value: bits 29–30 must be 0. Do not pass an
+AUTOSAR BusMirror `FrameIDCAN` (bit 30 = FD) or a SocketCAN `canid_t` with
+RTR/ERR flags; GBF does not clear those bits. BusMirror destination frames use
+the `busmirror` decoder, which does drop FD/reserved before lookup.
+
+If the envelope splits the numeric ID and the extended-frame flag, add
+`extend_ref` to an earlier integer field; GBF then composes
+`(extend ? 0x80000000 : 0) | (id & 0x1FFFFFFF)` at parse time:
+
+```json
+{
+  "name": "frame_data",
+  "type": "bytes",
+  "length_ref": "frame_length",
+  "format": {
+    "id_ref": "frame_id",
+    "bus_id_ref": "frame_channel",
+    "extend_ref": "frame_extend"
+  }
+}
+```
 
 Zero-valued fields are consumed according to the declared frame structure; the
 decoder does not treat leading zero bytes as implicit padding. For example, a

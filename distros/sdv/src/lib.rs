@@ -7,6 +7,7 @@
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
+pub mod can_id;
 pub mod codec;
 pub mod decoder;
 pub mod encoder;

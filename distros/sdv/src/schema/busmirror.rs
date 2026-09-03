@@ -117,14 +117,13 @@ fn parse_busmirror_schema(
         })?;
 
         for message in &dbc_bus.messages {
-            let normalized_id = message.id & 0x1fff_ffff;
             let identity = (u64::from(network_type) << 40)
                 | (u64::from(bus.network_id) << 32)
-                | u64::from(normalized_id);
+                | u64::from(message.id);
             if !frame_identities.insert(identity) {
                 return Err(format!(
-                    "duplicate BusMirror frame identity for bus `{}`, message `{}` (0x{normalized_id:X})",
-                    bus.name, message.name
+                    "duplicate BusMirror frame identity for bus `{}`, message `{}` (0x{:X})",
+                    bus.name, message.name, message.id
                 ));
             }
         }

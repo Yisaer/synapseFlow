@@ -129,7 +129,11 @@ fn parse_packet_inner(
                 .iter()
                 .fold(0u32, |value, byte| (value << 8) | u32::from(*byte));
             cursor += width;
-            Some(value)
+            Some(if network_type == 1 {
+                crate::can_id::busmirror_can_id(value)
+            } else {
+                value
+            })
         } else {
             None
         };
@@ -230,13 +234,30 @@ mod tests {
 
         assert_eq!(timestamp, 12_345);
         assert_eq!(slots.len(), 2);
-        assert_eq!(slots[0].identity, FrameIdentity::busmirror(1, 7, 0x123));
+        assert_eq!(
+            slots[0].identity,
+            FrameIdentity::busmirror(1, 7, 0x8000_0123)
+        );
         assert_eq!(slots[1].identity, FrameIdentity::busmirror(2, 7, 0x23));
         assert_eq!(
             &packet[slots[0].payload_offset as usize
                 ..slots[0].payload_offset as usize + slots[0].payload_len as usize],
             &[0xaa, 0xbb]
         );
+    }
+
+    #[test]
+    fn clears_can_fd_flag_and_keeps_standard_id() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0, 0, 0x61, 1]);
+        body.extend_from_slice(&0x4000_0100u32.to_be_bytes());
+        body.extend_from_slice(&[1, 0xaa]);
+        let packet = packet(1, 0, &body);
+
+        let mut slots = Vec::new();
+        parse_packet(&packet, &mut slots).expect("parse packet");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].identity, FrameIdentity::busmirror(1, 1, 0x100));
     }
 
     #[test]
