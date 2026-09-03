@@ -74,6 +74,7 @@ pub enum SinkProps {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineStatus {
     Stopped,
+    Stopping,
     Running,
     Failed,
 }

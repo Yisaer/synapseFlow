@@ -309,6 +309,11 @@ impl PipelineManager {
             if matches!(entry.status, PipelineStatus::Running) {
                 return Ok(());
             }
+            if matches!(entry.status, PipelineStatus::Stopping) {
+                return Err(PipelineError::Runtime(format!(
+                    "pipeline {pipeline_id} is stopping"
+                )));
+            }
 
             if entry.pipeline.is_none() {
                 let definition = Arc::clone(&entry.definition);
@@ -401,17 +406,28 @@ impl PipelineManager {
             let entry = guard
                 .get_mut(pipeline_id)
                 .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+            if matches!(entry.status, PipelineStatus::Stopping) {
+                return Err(PipelineError::Runtime(format!(
+                    "pipeline {pipeline_id} is already stopping"
+                )));
+            }
             if !matches!(entry.status, PipelineStatus::Running) {
                 entry.status = PipelineStatus::Stopped;
                 return Ok(());
             }
-            entry.status = PipelineStatus::Stopped;
+            entry.status = PipelineStatus::Stopping;
             entry.pipeline.take()
         };
 
         let pipeline = maybe_pipeline
             .ok_or_else(|| PipelineError::Runtime("pipeline runtime missing".to_string()))?;
-        close_pipeline(pipeline, mode, timeout).await
+        let result = close_pipeline(pipeline, mode, timeout).await;
+        let mut guard = self.pipelines.write();
+        let entry = guard
+            .get_mut(pipeline_id)
+            .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+        entry.status = PipelineStatus::Stopped;
+        result
     }
 
     pub(crate) fn mark_pipeline_failed(&self, pipeline_id: &str) -> Result<(), PipelineError> {
@@ -450,6 +466,11 @@ impl PipelineManager {
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
         match entry.status {
             PipelineStatus::Running => {}
+            PipelineStatus::Stopping => {
+                return Err(PipelineError::Runtime(format!(
+                    "pipeline {pipeline_id} is stopping"
+                )));
+            }
             PipelineStatus::Failed => {
                 return Err(PipelineError::Runtime(format!(
                     "pipeline {pipeline_id} is failed"

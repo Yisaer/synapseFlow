@@ -81,7 +81,8 @@ next cron fire.
 
 If the cron window crosses the end of the matched datetime range, the pipeline is stopped at the
 range end. `GET /pipelines/:id` returns `schedule_status.auto_stop_at` as the effective current
-window end, not just the raw cron duration end.
+window end, not just the raw cron duration end. Patrol-triggered stops use graceful shutdown by
+default so already accepted data can be drained and finalized before the runtime exits.
 
 On create, a scheduled pipeline first enters `ScheduledStopped`. Upsert and process restart retain
 manual `Stopped`; otherwise they enter `ScheduledStopped`. The patrol scheduler evaluates the
@@ -96,12 +97,21 @@ Scheduled pipeline desired state is stored separately from manual lifecycle stat
 
 REST responses expose these states as `scheduled_running` and `scheduled_stopped`.
 
+During a graceful patrol stop, the runtime may temporarily report `stopping`. This is an
+in-memory transition state and is not persisted as a desired state. Patrol treats `stopping` as
+an operation in progress and does not start the runtime again until the stop has completed. A
+manual stop persists `Stopped` immediately to disable schedule control, while the runtime may
+remain `stopping` until graceful shutdown finishes. A manual start received during this transition
+is rejected as busy; retrying it after the stop completes only re-enables schedule control, and the
+next patrol decides whether the runtime should start.
+
 ## Runtime Failure Status
 
 Pipeline list and get responses expose the current runtime status when it differs from the stored
 desired state. A pipeline can report:
 
 - `running`
+- `stopping`
 - `stopped`
 - `scheduled_running`
 - `scheduled_stopped`

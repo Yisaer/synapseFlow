@@ -110,10 +110,12 @@ Response:
 
 Persists desired state as `stopped` and stops runtime execution. For a scheduled pipeline, this
 also disables schedule patrol until a later manual start. The runtime failure marker is cleared.
+If graceful shutdown is selected, the runtime may temporarily report `stopping` while already
+accepted data is drained; schedule patrol does not restart a runtime in this state.
 
 Query parameters:
 
-- `mode` (optional, default `quick`): `quick` or `graceful`
+- `mode` (optional, default `graceful`): `quick` or `graceful`
 - `timeout_ms` (optional, default `5000`)
 
 Response:
@@ -191,7 +193,9 @@ Response:
 `schedule` declares automatic pipeline start/stop windows. The scheduler owns the lifecycle while
 the schedule is enabled. Manual `stop` disables schedule patrol and enters `stopped`; manual
 `start` re-enables schedule control and enters `scheduled_stopped`, leaving the next runtime start
-to patrol.
+to patrol. When a schedule window ends, patrol uses graceful shutdown by default. The runtime
+transitions through `stopping` until shutdown completes; this transient runtime state is not
+persisted as a desired state.
 
 ```json
 {
@@ -378,13 +382,13 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
+- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
 
 ### `ListPipelineItem`
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
+- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
 - `desired_status: string` (optional; present when stored desired state differs from `status`)
 - `last_runtime_error: PipelineRuntimeFailure` (optional; present when a matching runtime failure
   marker exists)
@@ -393,7 +397,7 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
+- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
 - `desired_status: string` (optional; present when stored desired state differs from `status`)
 - `last_runtime_error: PipelineRuntimeFailure` (optional; present when a matching runtime failure
   marker exists)

@@ -286,7 +286,7 @@ pub(crate) struct StopPipelineQuery {
 impl Default for StopPipelineQuery {
     fn default() -> Self {
         Self {
-            mode: "quick".to_string(),
+            mode: "graceful".to_string(),
             timeout_ms: 5_000,
         }
     }

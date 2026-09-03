@@ -26,7 +26,7 @@ A pipeline resource consists of:
 - stored pipeline spec
 - required persisted `revision`
 - target `flow_instance_id`
-- stored desired state (`running` or `stopped`)
+- stored desired state (`running`, `stopped`, `scheduled_running`, or `scheduled_stopped`)
 - runtime installation inside the selected flow instance
 
 The stored spec is the source of truth.
@@ -93,14 +93,17 @@ Stop does not change pipeline revision.
 
 Supported stop modes at the manager surface are:
 
-- `quick` (default)
-- `graceful`
+- `graceful` (default)
+- `quick`
 
 Behavior:
 
 - stop is idempotent for already stopped pipelines
 - flow marks status `stopped` and drops the runtime pipeline object
 - a running pipeline is closed using the requested stop mode and timeout
+
+The scheduler uses `graceful` when a scheduled run window ends. This internal behavior is
+independent of the default mode for manual stop requests.
 
 ## Delete Semantics
 
@@ -139,6 +142,9 @@ Current persistence behavior:
 - scheduled create enters `scheduled_stopped`; manual stop enters `stopped` and disables patrol,
   while manual start re-enables schedule control with `scheduled_stopped`; patrol evaluates the
   current schedule before writing `scheduled_running` and starting the runtime
+- when a schedule window ends, patrol writes `scheduled_stopped` and gracefully stops the runtime
+  by default. The runtime reports `stopping` during this transition; `stopping` is transient and
+  is not persisted as desired state. Patrol does not start a pipeline while it is stopping
 - revision orders artifact definitions; operational start/stop state changes do
   not increment it
 

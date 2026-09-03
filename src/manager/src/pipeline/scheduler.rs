@@ -734,10 +734,11 @@ async fn patrol_pipeline(stored: &storage::StoredPipeline, state: &super::state:
         return;
     };
 
-    let is_running = instance.list_pipelines().iter().any(|s| {
-        s.definition.id() == pipeline_id
-            && matches!(s.status, flow::pipeline::PipelineStatus::Running)
-    });
+    let runtime_status = instance
+        .list_pipelines()
+        .into_iter()
+        .find(|snapshot| snapshot.definition.id() == pipeline_id)
+        .map(|snapshot| snapshot.status);
 
     if current_desired_state != expected_desired_state
         && storage
@@ -753,6 +754,19 @@ async fn patrol_pipeline(stored: &storage::StoredPipeline, state: &super::state:
         );
         return;
     }
+
+    if matches!(
+        runtime_status,
+        Some(flow::pipeline::PipelineStatus::Stopping)
+    ) {
+        tracing::debug!(pipeline_id, "patrol: pipeline stop is still in progress");
+        return;
+    }
+
+    let is_running = matches!(
+        runtime_status,
+        Some(flow::pipeline::PipelineStatus::Running)
+    );
 
     if in_window && !is_running {
         match storage.get_pipeline_runtime_failure(pipeline_id) {
@@ -804,7 +818,7 @@ async fn patrol_pipeline(stored: &storage::StoredPipeline, state: &super::state:
         if let Err(err) = instance
             .stop_pipeline(
                 pipeline_id,
-                flow::pipeline::PipelineStopMode::Quick,
+                flow::pipeline::PipelineStopMode::Graceful,
                 timeout,
             )
             .await
