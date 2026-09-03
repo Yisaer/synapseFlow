@@ -1868,7 +1868,7 @@ async fn pipeline_merge_agg_table_driven() {
 async fn pipeline_table_driven_file_source_stream() {
     let test_cases = vec![
         FileSourceJsonCase {
-            name: "file_source_reads_existing_line_and_appended_complete_line",
+            name: "file_source_reads_observed_append_batches",
             source_name: "file_logs",
             sql: "SELECT line, filename FROM file_logs",
             covers: &["source.file.stream", "decoder.file_line"],
@@ -1877,19 +1877,21 @@ async fn pipeline_table_driven_file_source_stream() {
                 contents: b"ready\n",
             },
             expected_initial_outputs: vec![serde_json::json!([
-                { "line": "ready", "filename": "app.log" }
+                { "line": "ready\n", "filename": "app.log" }
             ])],
             writes: vec![
                 FileSourceWriteStep {
                     filename: "app.log",
                     bytes: b"part",
-                    expected_output: None,
+                    expected_output: Some(serde_json::json!([
+                        { "line": "part", "filename": "app.log" }
+                    ])),
                 },
                 FileSourceWriteStep {
                     filename: "app.log",
                     bytes: b"ial\n",
                     expected_output: Some(serde_json::json!([
-                        { "line": "partial", "filename": "app.log" }
+                        { "line": "ial\n", "filename": "app.log" }
                     ])),
                 },
             ],
@@ -1904,7 +1906,7 @@ async fn pipeline_table_driven_file_source_stream() {
                 nested_files: vec![("nested", "nested.log", b"nested\n")],
             },
             expected_initial_outputs: vec![serde_json::json!([
-                { "line": "direct", "filename": "direct.log" }
+                { "line": "direct\n", "filename": "direct.log" }
             ])],
             writes: vec![],
         },

@@ -15,6 +15,19 @@ pub use function_catalog::{
 };
 pub use functions::{describe_function_def, list_function_defs};
 
+/// Message framing used by file-backed streams.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FileSourceFraming {
+    /// Emit all bytes observed during one file-change handling pass as one payload.
+    #[default]
+    AppendBatch,
+    /// Split payloads using a byte delimiter.
+    Delimiter {
+        delimiter: Vec<u8>,
+        include_delimiter: bool,
+    },
+}
+
 /// Errors that can occur when mutating the catalog.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CatalogError {
@@ -176,11 +189,20 @@ impl MqttStreamProps {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStreamProps {
     pub path: String,
+    pub framing: FileSourceFraming,
 }
 
 impl FileStreamProps {
     pub fn new(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            framing: FileSourceFraming::default(),
+        }
+    }
+
+    pub fn with_framing(mut self, framing: FileSourceFraming) -> Self {
+        self.framing = framing;
+        self
     }
 }
 

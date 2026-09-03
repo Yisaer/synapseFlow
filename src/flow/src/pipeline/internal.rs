@@ -1248,7 +1248,8 @@ pub(super) fn attach_sources_from_catalog(
                     ds.add_connector(Box::new(connector));
                 }
                 StreamProps::File(props) => {
-                    let config = FileSourceConfig::new(props.path.clone());
+                    let config = FileSourceConfig::new(props.path.clone())
+                        .with_framing(props.framing.clone());
                     let connector = FileSourceConnector::new(
                         format!("{processor_id}_file_source_connector"),
                         config,

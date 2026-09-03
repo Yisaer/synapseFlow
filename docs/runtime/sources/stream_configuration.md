@@ -66,6 +66,8 @@ The built-in required properties are:
 - `mock`: no connector props
 - `nng_pubsub`: `url`; `topic` defaults to subscribe-all when omitted; `topic_delimiter`
   defaults to `:`
+- `file`: `path`; optional `framing` configuration supports `append_batch` and delimiter-based
+  framing
 - `video`: `url`; optional RTSP/reconnect controls
 
 The stream type decides both the connector property schema and which downstream combinations are

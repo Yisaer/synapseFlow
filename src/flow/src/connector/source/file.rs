@@ -1,3 +1,4 @@
+use crate::catalog::FileSourceFraming;
 use crate::checkpoint::CheckpointState;
 use crate::connector::{
     ConnectorError, ConnectorEvent, ConnectorStream, SourceCheckpointRequest, SourceConnector,
@@ -28,11 +29,20 @@ const READ_BUFFER_SIZE: usize = 8;
 #[derive(Debug, Clone)]
 pub struct FileSourceConfig {
     pub path: PathBuf,
+    pub framing: FileSourceFraming,
 }
 
 impl FileSourceConfig {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            framing: FileSourceFraming::default(),
+        }
+    }
+
+    pub fn with_framing(mut self, framing: FileSourceFraming) -> Self {
+        self.framing = framing;
+        self
     }
 }
 
@@ -93,12 +103,14 @@ impl SourceConnector for FileSourceConnector {
         let (checkpoint_tx, checkpoint_rx) = std_mpsc::channel();
         self.checkpoint_tx = Some(checkpoint_tx);
         let connector_id = self.id.clone();
+        let framing = self.config.framing.clone();
         let restored_state = self.restored_state.take();
 
         let _task = self.spawner.spawn_blocking(move || {
             run_file_source(
                 connector_id,
                 source_path,
+                framing,
                 sender,
                 shutdown,
                 checkpoint_rx,
@@ -287,6 +299,12 @@ fn parse_restore_state(
                 path.display()
             )));
         }
+        if !path.is_absolute() {
+            return Err(invalid_checkpoint(format!(
+                "cursor path `{}` must be absolute",
+                path.display()
+            )));
+        }
 
         restored_cursors.insert(
             path.clone(),
@@ -364,6 +382,7 @@ fn invalid_checkpoint(message: impl Into<String>) -> ConnectorError {
 fn run_file_source(
     connector_id: String,
     source_path: PathBuf,
+    framing: FileSourceFraming,
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     shutdown: Arc<AtomicBool>,
     checkpoint_rx: std_mpsc::Receiver<FileSourceCommand>,
@@ -375,7 +394,7 @@ fn run_file_source(
         "starting file source"
     );
 
-    let mut state = match FileSourceState::new(source_path, restored_state) {
+    let mut state = match FileSourceState::new_with_framing(source_path, framing, restored_state) {
         Ok(state) => state,
         Err(err) => {
             let _ = sender.blocking_send(Err(err));
@@ -459,6 +478,7 @@ fn run_file_source(
 struct FileSourceState {
     source_path: PathBuf,
     watch_path: PathBuf,
+    framing: FileSourceFraming,
     mode: FileSourceMode,
     cursors: HashMap<PathBuf, FileCursor>,
 }
@@ -469,8 +489,24 @@ enum FileSourceMode {
 }
 
 impl FileSourceState {
+    #[cfg(test)]
     fn new(
         source_path: PathBuf,
+        restored_state: Option<FileSourceRestoreState>,
+    ) -> Result<Self, ConnectorError> {
+        Self::new_with_framing(
+            source_path,
+            FileSourceFraming::Delimiter {
+                delimiter: b"\n".to_vec(),
+                include_delimiter: false,
+            },
+            restored_state,
+        )
+    }
+
+    fn new_with_framing(
+        source_path: PathBuf,
+        framing: FileSourceFraming,
         restored_state: Option<FileSourceRestoreState>,
     ) -> Result<Self, ConnectorError> {
         let metadata = fs::symlink_metadata(&source_path).map_err(|err| {
@@ -489,6 +525,7 @@ impl FileSourceState {
             return Ok(Self {
                 source_path: source_path.clone(),
                 watch_path: watch_path.to_path_buf(),
+                framing,
                 mode: FileSourceMode::File {
                     target: source_path.clone(),
                 },
@@ -501,6 +538,7 @@ impl FileSourceState {
             return Ok(Self {
                 source_path: source_path.clone(),
                 watch_path: source_path,
+                framing,
                 mode: FileSourceMode::Directory,
                 cursors: restored_state
                     .map(|state| state.cursors)
@@ -606,7 +644,7 @@ impl FileSourceState {
             .cursors
             .entry(path.clone())
             .or_insert_with(|| FileCursor::new(path));
-        cursor.read_available_lines(sender)
+        cursor.read_available(&self.framing, sender)
     }
 
     fn snapshot(&mut self) -> Result<CheckpointState, ConnectorError> {
@@ -646,7 +684,7 @@ impl FileSourceState {
 
 struct FileCursor {
     path: PathBuf,
-    /// Byte position immediately after the last complete line sent to the pipeline.
+    /// Byte position immediately after the last payload sent to the pipeline.
     offset: u64,
     /// Next byte position to read during the current connector run.
     read_offset: u64,
@@ -717,8 +755,9 @@ impl FileCursor {
         )
     }
 
-    fn read_available_lines(
+    fn read_available(
         &mut self,
+        framing: &FileSourceFraming,
         sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     ) -> Result<(), ()> {
         let metadata = match regular_file_metadata_without_symlink(&self.path).map_err(|err| {
@@ -791,40 +830,80 @@ impl FileCursor {
             self.read_offset += bytes_read as u64;
             remaining -= bytes_read as u64;
             self.pending.extend_from_slice(&buffer[..bytes_read]);
-            self.emit_complete_lines(sender)?;
         }
 
+        self.emit_framed(framing, sender)?;
         Ok(())
     }
 
-    fn emit_complete_lines(
+    fn emit_framed(
         &mut self,
+        framing: &FileSourceFraming,
         sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     ) -> Result<(), ()> {
-        while let Some(newline_pos) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let consumed = newline_pos + 1;
-            let line_end = if newline_pos > 0 && self.pending[newline_pos - 1] == b'\r' {
-                newline_pos - 1
-            } else {
-                newline_pos
-            };
-            let payload =
-                encode_file_line_frame(&self.path, &self.pending[..line_end]).map_err(|err| {
-                    let _ = sender.blocking_send(Err(err));
-                })?;
-            if sender
-                .blocking_send(Ok(ConnectorEvent::Payload(payload)))
-                .is_err()
-            {
-                debug!(path = %self.path.display(), "file source receiver closed");
-                return Err(());
+        match framing {
+            FileSourceFraming::AppendBatch => {
+                if self.pending.is_empty() {
+                    return Ok(());
+                }
+                self.emit_payload(&self.pending, sender)?;
+                self.offset += self.pending.len() as u64;
+                self.pending.clear();
             }
-            self.pending.drain(..consumed);
-            self.offset += consumed as u64;
+            FileSourceFraming::Delimiter {
+                delimiter,
+                include_delimiter,
+            } => {
+                while let Some(delimiter_start) = find_subslice(&self.pending, delimiter) {
+                    let consumed = delimiter_start + delimiter.len();
+                    let mut payload_end = if *include_delimiter {
+                        consumed
+                    } else {
+                        delimiter_start
+                    };
+                    if !include_delimiter
+                        && delimiter == b"\n"
+                        && payload_end > 0
+                        && self.pending[payload_end - 1] == b'\r'
+                    {
+                        payload_end -= 1;
+                    }
+                    self.emit_payload(&self.pending[..payload_end], sender)?;
+                    self.pending.drain(..consumed);
+                    self.offset += consumed as u64;
+                }
+            }
         }
 
         Ok(())
     }
+
+    fn emit_payload(
+        &self,
+        payload: &[u8],
+        sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
+    ) -> Result<(), ()> {
+        let payload = encode_file_line_frame(&self.path, payload).map_err(|err| {
+            let _ = sender.blocking_send(Err(err));
+        })?;
+        if sender
+            .blocking_send(Ok(ConnectorEvent::Payload(payload)))
+            .is_err()
+        {
+            debug!(path = %self.path.display(), "file source receiver closed");
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn is_regular_file_without_symlink(path: &Path) -> std::io::Result<bool> {
@@ -981,6 +1060,66 @@ mod tests {
     }
 
     #[test]
+    fn file_source_append_batch_emits_each_observed_growth_as_one_payload() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        write_file(&path, b"a\nb\n");
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut state =
+            FileSourceState::new_with_framing(path.clone(), FileSourceFraming::AppendBatch, None)
+                .expect("file source state");
+
+        state
+            .read_initial_files(&sender)
+            .expect("read initial batch");
+        assert_eq!(
+            drain_payloads(&mut receiver),
+            vec![("app.log".to_string(), "a\nb\n".to_string())]
+        );
+
+        append_file(&path, b"c\n d\n");
+        state.read_path(path, &sender).expect("read appended batch");
+        assert_eq!(
+            drain_payloads(&mut receiver),
+            vec![("app.log".to_string(), "c\n d\n".to_string())]
+        );
+    }
+
+    #[test]
+    fn file_source_delimiter_framing_emits_multiple_records_and_keeps_partial_tail() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("app.log");
+        write_file(&path, b"first|second");
+        let framing = FileSourceFraming::Delimiter {
+            delimiter: b"|".to_vec(),
+            include_delimiter: false,
+        };
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut state = FileSourceState::new_with_framing(path.clone(), framing.clone(), None)
+            .expect("file source state");
+
+        state
+            .read_initial_files(&sender)
+            .expect("read initial delimiter records");
+        assert_eq!(
+            drain_payloads(&mut receiver),
+            vec![("app.log".to_string(), "first".to_string())]
+        );
+
+        append_file(&path, b"|third|");
+        state
+            .read_path(path, &sender)
+            .expect("read appended delimiter records");
+        assert_eq!(
+            drain_payloads(&mut receiver),
+            vec![
+                ("app.log".to_string(), "second".to_string()),
+                ("app.log".to_string(), "third".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn file_source_checkpoint_restores_from_last_emitted_offset() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("app.log");
@@ -1033,7 +1172,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn file_source_checkpoint_resets_emitted_offset_after_file_replacement() {
+    fn file_source_checkpoint_resets_offset_after_file_replacement() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("app.log");
         let replacement = dir.path().join("replacement.log");

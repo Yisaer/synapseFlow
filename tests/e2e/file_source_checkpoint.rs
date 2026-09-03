@@ -196,13 +196,13 @@ async fn file_source_checkpoint_resumes_from_last_emitted_offset() {
         .expect("start checkpoint pipeline request");
     assert_response_status(start_pipeline, StatusCode::OK, "start checkpoint pipeline").await;
 
-    let initial_rows = wait_for_row_count(recorder.as_ref(), 2).await;
+    let initial_rows = wait_for_row_count(recorder.as_ref(), 1).await;
     assert_eq!(
         initial_rows,
-        vec![
-            serde_json::json!({"line": "committed", "filename": "app.log"}),
-            serde_json::json!({"line": "part", "filename": "app.log"}),
-        ]
+        vec![serde_json::json!({
+            "line": "committed\npart\n",
+            "filename": "app.log"
+        })]
     );
 
     let stop_pipeline = http
@@ -253,7 +253,7 @@ async fn file_source_checkpoint_resumes_from_last_emitted_offset() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         resumed_rows,
-        vec![serde_json::json!({"line": "new", "filename": "app.log"})]
+        vec![serde_json::json!({"line": "new\n", "filename": "app.log"})]
     );
     assert_eq!(
         recorder.rows(),

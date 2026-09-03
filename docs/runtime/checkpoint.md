@@ -205,8 +205,9 @@ request is asynchronous: the connector establishes a production boundary, emits 
 `ConnectorEvent::CheckpointFence` after all payloads produced before the boundary, and returns an
 owned in-memory `CheckpointState`. The fence is an internal connector event and is not forwarded as
 a pipeline data-channel checkpoint signal. The current `FileSourceConnector` implements this
-protocol and records the source path, file mode, and each file's last emitted byte offset and file
-identity. Runtime read offsets and pending partial-line bytes are not persisted. After emitting the
+protocol and records the source path, file mode, and each file's canonical absolute path, last
+emitted byte offset, and physical file fingerprint. Runtime read offsets and pending partial-line
+bytes are not persisted. After emitting the
 fence, the file worker may resume producing post-fence payloads. Those payloads remain ordered after
 the fence in the connector event stream.
 
@@ -235,7 +236,7 @@ OperatorSnapshot {
         mode: "file" | "directory"
         cursors: [{
             path
-            offset: <byte position after the last emitted complete line>
+            offset: <byte position after the last emitted payload>
             file_identity
         }]
     }
@@ -298,11 +299,11 @@ on global plan indexes. Adding or removing a reference to the same source may in
 the affected keys and invalidate its previous snapshots.
 
 At file-source startup, existing files resume at the stored byte offset with an empty runtime
-pending buffer. Because the stored offset is the position after the last emitted complete line, any
-incomplete trailing bytes are read again. Files without a cursor start at offset zero. A file that
-is shorter than the stored offset or has a changed file identity resets its cursor to zero; ordinary
-append growth retains the stored offset. A restored cursor for a currently missing directory file is
-retained so a later file at the same path can be checked against the stored identity.
+pending buffer. Any incomplete trailing bytes are read again. Files without a cursor start at offset
+zero. A file that is shorter than the stored offset or has a changed physical file identity resets
+its cursor to zero; ordinary append growth retains the stored offset. File cursors are keyed by
+canonical absolute path. A restored cursor for a currently missing directory file is retained so a
+later file at the same path can be checked against its stored physical identity.
 
 Snapshots that are present are compatibility checked as one unit:
 
@@ -310,8 +311,8 @@ Snapshots that are present are compatibility checked as one unit:
 - a processor-kind mismatch is incompatible
 - an unsupported state version is incompatible
 - a file connector-kind or source-path mismatch is incompatible
-- an invalid file snapshot structure, duplicate cursor, out-of-scope cursor path, offset, or file
-  identity is incompatible
+- an invalid file snapshot structure, duplicate cursor, out-of-scope cursor path, relative cursor
+  path, offset, or file identity is incompatible
 
 Any such incompatibility clears all checkpoints for that pipeline and starts with empty state. The
 runtime never restores only a compatible subset of a manifest. A cleanup failure prevents startup.
@@ -436,9 +437,10 @@ The checkpoint protocol provides consistent state snapshots with at-least-once r
 Concurrent checkpoint requests are unsupported in the current phase. The manager only triggers one
 `Final` checkpoint during graceful shutdown.
 
-File replacement detection currently resets a cursor when file identity changes or current length
-is shorter than the stored offset. It cannot reliably detect an in-place `copytruncate` followed by
-growth beyond the stored offset before the next observation.
+File cursors are keyed by canonical absolute path and carry a physical file fingerprint. The source
+resets a cursor when the fingerprint changes or current length is shorter than the stored offset. It
+cannot reliably detect an in-place `copytruncate` followed by growth beyond the stored offset before
+the next observation.
 
 Exactly-once delivery is deferred to a future sink transaction or idempotency design. It is not an
 implicit property of the checkpoint coordinator.

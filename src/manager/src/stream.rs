@@ -17,8 +17,8 @@ use axum::{
 };
 use flow::DecoderRegistry;
 use flow::catalog::{
-    CatalogError, EventtimeDefinition, FileStreamProps, HistoryStreamProps, MemoryStreamProps,
-    MockStreamProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
+    CatalogError, EventtimeDefinition, FileSourceFraming, FileStreamProps, HistoryStreamProps,
+    MemoryStreamProps, MockStreamProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
     VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };
 use flow::pipeline::{PipelineError, PipelineStatus, PipelineStopMode};
@@ -733,6 +733,15 @@ pub struct MemoryStreamPropsRequest {
 #[serde(default)]
 pub struct FileStreamPropsRequest {
     pub path: Option<String>,
+    pub framing: Option<FileFramingRequest>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct FileFramingRequest {
+    pub mode: Option<String>,
+    pub delimiter: Option<String>,
+    pub include_delimiter: bool,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -1756,6 +1765,32 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
         StreamProps::File(file) => {
             let mut map = JsonMap::new();
             map.insert("path".to_string(), JsonValue::String(file.path.clone()));
+            let mut framing = JsonMap::new();
+            match &file.framing {
+                FileSourceFraming::AppendBatch => {
+                    framing.insert(
+                        "mode".to_string(),
+                        JsonValue::String("append_batch".to_string()),
+                    );
+                }
+                FileSourceFraming::Delimiter {
+                    delimiter,
+                    include_delimiter,
+                } => {
+                    framing.insert(
+                        "mode".to_string(),
+                        JsonValue::String("delimiter".to_string()),
+                    );
+                    framing.insert(
+                        "delimiter".to_string(),
+                        JsonValue::String(String::from_utf8_lossy(delimiter).into_owned()),
+                    );
+                    if *include_delimiter {
+                        framing.insert("include_delimiter".to_string(), JsonValue::Bool(true));
+                    }
+                }
+            }
+            map.insert("framing".to_string(), JsonValue::Object(framing));
             JsonValue::Object(map)
         }
         StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
@@ -1865,6 +1900,36 @@ fn file_line_schema(stream_name: &str) -> Schema {
             ConcreteDatatype::String(StringType),
         ),
     ])
+}
+
+fn parse_file_framing(request: Option<FileFramingRequest>) -> Result<FileSourceFraming, String> {
+    let Some(request) = request else {
+        return Ok(FileSourceFraming::default());
+    };
+    match request.mode.as_deref().unwrap_or("append_batch") {
+        "append_batch" => {
+            if request.delimiter.is_some() {
+                return Err("file append_batch framing must not set delimiter".to_string());
+            }
+            if request.include_delimiter {
+                return Err("file append_batch framing must not set include_delimiter".to_string());
+            }
+            Ok(FileSourceFraming::AppendBatch)
+        }
+        "delimiter" => {
+            let delimiter = request
+                .delimiter
+                .ok_or_else(|| "file delimiter framing requires delimiter".to_string())?;
+            if delimiter.is_empty() {
+                return Err("file delimiter framing requires a non-empty delimiter".to_string());
+            }
+            Ok(FileSourceFraming::Delimiter {
+                delimiter: delimiter.into_bytes(),
+                include_delimiter: request.include_delimiter,
+            })
+        }
+        mode => Err(format!("unsupported file framing mode `{mode}`")),
+    }
 }
 
 pub(crate) fn resolve_schema_from_request(
@@ -1985,7 +2050,10 @@ pub(crate) fn build_stream_props(
                     "file stream path `{path}` must be a regular file or directory"
                 ));
             }
-            Ok(StreamProps::File(FileStreamProps::new(path)))
+            let framing = parse_file_framing(file_props.framing)?;
+            Ok(StreamProps::File(
+                FileStreamProps::new(path).with_framing(framing),
+            ))
         }
         "nng_pubsub" => {
             let nng_props: NngPubSubStreamPropsRequest =
@@ -2739,6 +2807,48 @@ mod tests {
 
         let err = build_schema_from_request(&req).unwrap_err();
         assert_eq!(err, "schema type `avro` not registered");
+    }
+
+    #[test]
+    fn parse_file_framing_defaults_to_append_batch() {
+        assert_eq!(
+            parse_file_framing(None).expect("default file framing"),
+            FileSourceFraming::AppendBatch
+        );
+    }
+
+    #[test]
+    fn parse_file_framing_decodes_delimiter_options() {
+        let framing = parse_file_framing(Some(FileFramingRequest {
+            mode: Some("delimiter".to_string()),
+            delimiter: Some("\\n".to_string()),
+            include_delimiter: true,
+        }))
+        .expect("delimiter framing");
+        assert_eq!(
+            framing,
+            FileSourceFraming::Delimiter {
+                delimiter: b"\\n".to_vec(),
+                include_delimiter: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_file_framing_rejects_invalid_delimiter_options() {
+        let missing_delimiter = parse_file_framing(Some(FileFramingRequest {
+            mode: Some("delimiter".to_string()),
+            delimiter: None,
+            include_delimiter: false,
+        }));
+        assert!(missing_delimiter.is_err());
+
+        let empty_delimiter = parse_file_framing(Some(FileFramingRequest {
+            mode: Some("delimiter".to_string()),
+            delimiter: Some(String::new()),
+            include_delimiter: false,
+        }));
+        assert!(empty_delimiter.is_err());
     }
 
     #[test]

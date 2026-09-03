@@ -32,8 +32,8 @@ mod test_support;
 
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
-    Catalog, CatalogError, CatalogRelation, EventtimeDefinition, FileStreamProps,
-    HistoryTableProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
+    Catalog, CatalogError, CatalogRelation, EventtimeDefinition, FileSourceFraming,
+    FileStreamProps, HistoryTableProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
     StreamDefinition, StreamProps, StreamType, TableCapabilities, TableDefinition, TableProps,
     TableScanCapability, TableType, VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };

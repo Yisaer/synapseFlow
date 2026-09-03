@@ -288,7 +288,7 @@ curl -s \
 - `name: string` (required, non-empty)
 - `revision: number` (required, positive JSON-safe integer)
 - `type: string` (required)
-  - Supported: `mqtt`, `history`
+  - Supported: `mqtt`, `history`, `file`
 - `schema: { type: string, props: object }` (required)
   - Alternatively: `schema: { ref: string }` to reference a named schema.
   - When `ref` is set, `type` and `props` are ignored.
@@ -316,6 +316,20 @@ curl -s \
 - Optional `end: int64` (timestamp integer; compared against the history Parquet `ts` column as-is)
 - Optional `batch_size: number`
 - Optional `send_interval_ms: number`
+
+`type == "file"`:
+
+- `path: string` (required) — Existing regular file or directory to watch.
+- Optional `framing`:
+  - `{ "mode": "append_batch" }` — groups all newly observed bytes from one file-change
+    handling pass into one message.
+  - `{ "mode": "delimiter", "delimiter": string, "include_delimiter": boolean }` — groups
+    content using the configured UTF-8 delimiter. `include_delimiter` defaults to `false`.
+
+File streams require `decoder.type = "file_line"`. Their built-in schema is
+`line: string` and `filename: string`. In `append_batch` mode, `line` contains the
+whole observed batch and may contain multiple lines; the existing field name is retained for
+compatibility. When `framing` is omitted, `append_batch` is used.
 
 ### Sampler Configuration (`sampler`)
 
