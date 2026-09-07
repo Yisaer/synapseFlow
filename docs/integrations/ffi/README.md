@@ -305,18 +305,31 @@ NNG-specific implementation constraints are documented in
 build must use the same compatible `libnng` runtime as the host process when an
 `inproc://` endpoint is used.
 
+The FFI crate exposes NNG support through an explicit Cargo feature:
+
+```bash
+NNG_NO_VENDOR=1 NNG_STATIC=0 \
+  cargo build --release -p veloflux-ffi --features nng_pubsub
+```
+
+The build environment must provide a compatible shared `libnng` and its
+headers. The resulting shared library must resolve to the same `libnng` used by
+the host process.
+
 The embedded API should factor around those assumptions instead of duplicating
 startup logic.
 
 ## Initial Rollout Plan
 
-The first implementation step should be:
+The initial embedded implementation consists of:
 
 1. extract an embedded manager startup path inside `veloflux`;
 2. add a runtime handle with explicit shutdown;
 3. reject non-`in_process` flow instance configurations;
 4. add a dedicated `cdylib` FFI shim crate exposing `start` and `stop`;
-5. document build and linking instructions once the ABI is in place.
+5. enable NNG support with the `nng_pubsub` FFI feature;
+6. build against the host-compatible shared `libnng` for `inproc://` deployments;
+7. validate the host-process round trip with an embedded integration test.
 
 This keeps the first version narrow, testable, and aligned with the existing
 HTTP/REST-centric runtime model.

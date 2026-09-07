@@ -13,6 +13,7 @@ metrics = ["veloflux/metrics"]
 profiling = ["veloflux/profiling"]
 allocator-jemalloc = ["veloflux/allocator-jemalloc"]
 allocator-system = ["veloflux/allocator-system"]
+nng_pubsub = ["veloflux/nng_pubsub"]
 
 [dependencies]
 veloflux = { path = "../..", default-features = false }

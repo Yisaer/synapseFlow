@@ -1,4 +1,6 @@
-use crate::connector::nng_pubsub::{strip_topic_prefix, NngPubSubSourceConfig};
+use crate::connector::nng_pubsub::{
+    parse_nng_transport, strip_topic_prefix, NngPubSubSourceConfig, NngTransport,
+};
 use crate::connector::{
     mask_url_userinfo, ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector,
 };
@@ -101,6 +103,14 @@ async fn run_nng_source_loop(
     };
     let topic = config.topic.into_bytes();
     let delimiter = config.topic_delimiter.into_bytes();
+    let transport = match parse_nng_transport(&config.url) {
+        Ok(transport) => transport,
+        Err(err) => {
+            let _ = sender.send(Err(ConnectorError::Connection(err))).await;
+            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
+            return;
+        }
+    };
     let mut backoff = Duration::from_millis(100);
     let max_backoff = Duration::from_secs(5);
 
@@ -113,6 +123,7 @@ async fn run_nng_source_loop(
                     &mut shutdown_rx,
                     &mut backoff,
                     max_backoff,
+                    transport,
                     ConnectorError::Connection(format!("nng sub socket open failed: {err}")),
                 )
                 .await
@@ -129,6 +140,7 @@ async fn run_nng_source_loop(
                 &mut shutdown_rx,
                 &mut backoff,
                 max_backoff,
+                transport,
                 ConnectorError::Connection(format!(
                     "nng sub dial `{}` failed: {err}",
                     mask_url_userinfo(&config.url)
@@ -200,13 +212,21 @@ async fn report_and_wait(
     shutdown_rx: &mut oneshot::Receiver<()>,
     backoff: &mut Duration,
     max_backoff: Duration,
+    transport: NngTransport,
     err: ConnectorError,
 ) -> bool {
     let _ = sender.send(Err(err)).await;
+    let delay = if matches!(transport, NngTransport::Inproc) {
+        Duration::from_millis(100)
+    } else {
+        *backoff
+    };
     tokio::select! {
         _ = shutdown_rx => false,
-        _ = sleep(*backoff) => {
-            *backoff = std::cmp::min(*backoff * 2, max_backoff);
+        _ = sleep(delay) => {
+            if !matches!(transport, NngTransport::Inproc) {
+                *backoff = std::cmp::min(*backoff * 2, max_backoff);
+            }
             true
         }
     }

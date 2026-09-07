@@ -54,7 +54,7 @@ the Manager request.
 
 ## Internal connection model
 
-The flow layer parses the URL once into an internal endpoint model:
+The flow layer parses the URL through one shared helper:
 
 ```text
 NngEndpoint {
@@ -63,25 +63,26 @@ NngEndpoint {
 }
 ```
 
-Source and sink construction passes this endpoint and its protocol to one NNG
-connection factory:
+Source and sink continue to own their protocol-specific sockets. They use the
+parsed transport to select only transport-specific dialing behavior:
 
 ```text
-source -> connection factory(endpoint, sub)
-sink   -> connection factory(endpoint, pub)
+source -> sub0 socket + parsed transport
+sink   -> pub0 socket + parsed transport
 ```
 
 The Manager validates the request and builds the pipeline definition. It does
 not create NNG sockets or select a language binding. Transport-specific socket
-behavior belongs in the connection factory so that URL classification is not
-duplicated across Manager, source, sink, and FFI code.
+behavior belongs in the shared helper path so that URL classification is not
+duplicated across Manager, source, sink, and FFI code. A separate connection
+factory is not required for the first implementation.
 
 ## In-process dialing
 
 `inproc://` only connects NNG sockets in the same process and in the same NNG
 runtime. Matching URLs in two different processes do not communicate.
 
-For `inproc` connections, the connection layer should retry dialing until the
+For `inproc` connections, the connector should retry dialing until the
 host peer is available or the pipeline is stopped. This is different from a
 normal external endpoint where asynchronous NNG reconnect behavior is
 sufficient. The retry must be cancellation-aware and bounded by the connector
@@ -174,7 +175,7 @@ The first implementation should:
 
 - keep the existing `nng_pubsub` source and sink API;
 - derive transport from the URL scheme;
-- centralize endpoint parsing and connection creation;
+- centralize endpoint parsing while keeping socket ownership in source and sink;
 - support `tcp`, `ipc`, and `inproc` through the same connector kind;
 - add connector/pipeline readiness reporting;
 - keep `nng_pubsub` streams out of shared-stream promotion;

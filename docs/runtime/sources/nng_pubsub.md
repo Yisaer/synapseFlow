@@ -51,6 +51,6 @@ configured URL. The source may retry while the host peer is starting, but the
 host should wait for pipeline readiness before publishing data because NNG
 pub/sub does not acknowledge delivery and early messages may be lost.
 
-The complete embedded design, including the Manager boundary, connection
-factory, readiness contract, and shared `libnng` requirement, is documented in
+The complete embedded design, including the Manager boundary, transport
+parsing, connection retry behavior, and shared `libnng` requirement, is documented in
 [NNG In-Process Integration](../../integrations/ffi/nng_inproc.md).

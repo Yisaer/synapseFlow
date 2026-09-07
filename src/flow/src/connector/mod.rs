@@ -135,7 +135,9 @@ pub use memory_pubsub::{
 pub(crate) use mqtt_client::MqttClientManager;
 pub use mqtt_client::SharedMqttClientConfig;
 pub use mqtt_protocol::{validate_mqtt_user_properties, MqttProtocolVersion, MqttUserProperty};
-pub use nng_pubsub::{NngPubSubSinkConfig, NngPubSubSourceConfig};
+pub use nng_pubsub::{
+    parse_nng_transport, NngPubSubSinkConfig, NngPubSubSourceConfig, NngTransport,
+};
 pub use registry::ConnectorRegistry;
 pub use sink::file::FileSinkConfig;
 pub use sink::http::HttpSinkConfig;

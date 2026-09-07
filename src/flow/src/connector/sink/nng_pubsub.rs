@@ -1,11 +1,16 @@
 use super::{DeliveryResult, SinkConnector, SinkConnectorError};
-use crate::connector::nng_pubsub::NngPubSubSinkConfig;
+use crate::connector::nng_pubsub::{parse_nng_transport, NngPubSubSinkConfig, NngTransport};
 use anng::protocols::pubsub0;
 use anng::{Message, Socket};
 use async_trait::async_trait;
 use std::ffi::CString;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+
+const INPROC_DIAL_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const INPROC_DIAL_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct NngPubSubSinkConnector {
     id: String,
@@ -37,6 +42,9 @@ impl NngPubSubSinkConnector {
         self.config
             .validate()
             .map_err(|err| SinkConnectorError::Other(format!("invalid nng pubsub sink: {err}")))?;
+        let transport = parse_nng_transport(&self.config.url).map_err(|err| {
+            SinkConnectorError::Other(format!("invalid nng pubsub sink url: {err}"))
+        })?;
         let url = CString::new(self.config.url.as_str()).map_err(|err| {
             SinkConnectorError::Other(format!(
                 "invalid nng url `{}`: {err}",
@@ -46,12 +54,23 @@ impl NngPubSubSinkConnector {
         let socket = pubsub0::Pub0::socket().map_err(|err| {
             SinkConnectorError::Other(format!("nng pub socket open failed: {err}"))
         })?;
-        socket.dial(url.as_c_str()).await.map_err(|err| {
-            SinkConnectorError::Unavailable(format!(
-                "nng pubsub sink `{}` dial `{}` failed: {err}",
-                self.id, self.config.url
-            ))
-        })?;
+        let deadline = Instant::now() + INPROC_DIAL_RETRY_TIMEOUT;
+        loop {
+            match socket.dial(url.as_c_str()).await {
+                Ok(_) => break,
+                Err(_err)
+                    if matches!(transport, NngTransport::Inproc) && Instant::now() < deadline =>
+                {
+                    sleep(INPROC_DIAL_RETRY_INTERVAL).await;
+                }
+                Err(err) => {
+                    return Err(SinkConnectorError::Unavailable(format!(
+                        "nng pubsub sink `{}` dial `{}` failed: {err}",
+                        self.id, self.config.url
+                    )));
+                }
+            }
+        }
         tracing::info!(connector_id = %self.id, "nng pubsub sink connected");
         self.socket = Some(socket);
         Ok(())

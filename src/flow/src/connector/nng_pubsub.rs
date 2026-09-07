@@ -2,6 +2,13 @@ use url::Url;
 
 pub const DEFAULT_TOPIC_DELIMITER: &str = ":";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NngTransport {
+    Tcp,
+    Ipc,
+    Inproc,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NngPubSubSourceConfig {
     pub source_name: String,
@@ -72,12 +79,18 @@ impl NngPubSubSinkConfig {
 }
 
 pub fn validate_nng_url(raw_url: &str) -> Result<(), String> {
+    parse_nng_transport(raw_url).map(|_| ())
+}
+
+pub fn parse_nng_transport(raw_url: &str) -> Result<NngTransport, String> {
     if raw_url.trim().is_empty() {
         return Err("url is required".to_string());
     }
     let parsed = Url::parse(raw_url).map_err(|err| format!("invalid url `{raw_url}`: {err}"))?;
     match parsed.scheme() {
-        "tcp" | "ipc" | "inproc" => Ok(()),
+        "tcp" => Ok(NngTransport::Tcp),
+        "ipc" => Ok(NngTransport::Ipc),
+        "inproc" => Ok(NngTransport::Inproc),
         scheme => Err(format!(
             "unsupported nng url scheme `{scheme}`; supported schemes are tcp, ipc, and inproc"
         )),
