@@ -136,7 +136,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_frame, strip_topic_prefix, validate_nng_url};
+    use super::{
+        build_frame, parse_nng_transport, strip_topic_prefix, validate_nng_url, NngTransport,
+    };
 
     #[test]
     fn strip_topic_prefix_handles_exact_topic_without_delimiter() {
@@ -196,8 +198,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_nng_transport_classifies_supported_schemes() {
+        assert_eq!(
+            parse_nng_transport("tcp://127.0.0.1:5563"),
+            Ok(NngTransport::Tcp)
+        );
+        assert_eq!(
+            parse_nng_transport("ipc:///tmp/veloflux-nng.ipc"),
+            Ok(NngTransport::Ipc)
+        );
+        assert_eq!(
+            parse_nng_transport("inproc://veloflux-nng"),
+            Ok(NngTransport::Inproc)
+        );
+    }
+
+    #[test]
     fn validate_nng_url_rejects_unsupported_schemes() {
         let err = validate_nng_url("file:///tmp/data").expect_err("reject file scheme");
+        assert!(err.contains("unsupported nng url scheme"));
+    }
+
+    #[test]
+    fn parse_nng_transport_rejects_unsupported_schemes() {
+        let err = parse_nng_transport("file:///tmp/data").expect_err("reject file scheme");
         assert!(err.contains("unsupported nng url scheme"));
     }
 }
