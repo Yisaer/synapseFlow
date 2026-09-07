@@ -24,6 +24,7 @@ jobs:
             build-essential \
             curl \
             libnng-dev \
+            libprotobuf-dev \
             pkg-config \
             protobuf-compiler
 
