@@ -1,0 +1,130 @@
+name: FFI NNG inproc
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  ffi-nng-inproc:
+    name: Build FFI and verify NNG inproc
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            curl \
+            libnng-dev \
+            pkg-config \
+            protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build debug VeloFlux shared library
+        env:
+          NNG_NO_VENDOR: "1"
+          NNG_STATIC: "0"
+        run: cargo build -p veloflux-ffi --features nng_pubsub
+
+      - name: Build C host
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+            -Isrc/ffi/include \
+            tests/ffi_nng_inproc_host.c \
+            -Ltarget/debug -lveloflux_ffi -lnng \
+            -Wl,-rpath,"$PWD/target/debug" \
+            -o target/ffi-nng-inproc-host
+
+      - name: Verify dynamic linking
+        run: |
+          ldd target/debug/libveloflux_ffi.so
+          ldd target/ffi-nng-inproc-host
+
+      - name: Start C host and configure an inproc pipeline
+        run: |
+          mkdir -p target/ffi-nng-data
+          cat > target/ffi-nng-config.yaml <<'EOF'
+          properties: {}
+          server:
+            manager_addr: "127.0.0.1:18080"
+            flow_instances:
+              - id: default
+                backend: in_process
+          EOF
+
+          target/ffi-nng-inproc-host \
+            target/ffi-nng-config.yaml \
+            inproc://velo-flux-ci-input \
+            inproc://velo-flux-ci-output \
+            > target/ffi-nng-host.log 2>&1 &
+          host_pid=$!
+
+          trap 'kill "$host_pid" 2>/dev/null || true; wait "$host_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18080/streams >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$host_pid" 2>/dev/null; then
+              cat target/ffi-nng-host.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          curl --fail --silent -X POST http://127.0.0.1:18080/streams \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "name": "ffi_nng_input",
+              "revision": 1,
+              "type": "nng_pubsub",
+              "schema": {
+                "type": "json",
+                "props": {
+                  "columns": [
+                    {"name": "v", "data_type": "int64"}
+                  ]
+                }
+              },
+              "props": {
+                "url": "inproc://velo-flux-ci-input",
+                "topic": "topic/can"
+              },
+              "decoder": {"type": "json", "props": {}}
+            }'
+
+          curl --fail --silent -X POST http://127.0.0.1:18080/pipelines \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "ffi_nng_inproc",
+              "revision": 1,
+              "sql": "SELECT v FROM ffi_nng_input",
+              "sinks": [
+                {
+                  "id": "nng_output",
+                  "type": "nng_pubsub",
+                  "props": {
+                    "url": "inproc://velo-flux-ci-output",
+                    "topic": "topic/can"
+                  },
+                  "encoder": {"type": "json", "props": {}}
+                }
+              ]
+            }'
+
+          curl --fail --silent -X POST \
+            http://127.0.0.1:18080/pipelines/ffi_nng_inproc/start
+
+          wait "$host_pid"
+          trap - EXIT
+          cat target/ffi-nng-host.log
