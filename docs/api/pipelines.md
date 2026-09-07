@@ -1,5 +1,40 @@
 # Pipeline API
 
+## NNG Pub/Sub Sink
+
+An NNG pub/sub sink uses the same request shape for TCP, IPC, and embedded
+in-process transports. The URL scheme is the transport selector; do not add a
+separate `transport` or `inproc` property.
+
+```json
+{
+  "id": "can_pipeline",
+  "revision": 1,
+  "sql": "SELECT * FROM can_input",
+  "sinks": [
+    {
+      "id": "output",
+      "type": "nng_pubsub",
+      "props": {
+        "url": "inproc://veloflux/output",
+        "topic": "result/can",
+        "topic_delimiter": ":"
+      }
+    }
+  ]
+}
+```
+
+For an embedded deployment, the host process must listen on the corresponding
+NNG endpoint before starting the pipeline. The host should publish or consume
+business data only after the pipeline's NNG source and sink connectors are
+ready. `running` indicates that pipeline tasks have started; it does not by
+itself guarantee that an NNG peer is connected.
+
+See [NNG In-Process Integration](../integrations/ffi/nng_inproc.md) for the
+host startup order, URL-based transport selection, connection-layer design,
+and shared `libnng` requirement.
+
 ## MQTT 5 Sink Properties
 
 An MQTT sink may set `props.protocol_version` to `v5` and provide static User Properties as an

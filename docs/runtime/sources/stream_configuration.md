@@ -205,6 +205,10 @@ Cross-cutting constraints worth preserving in future work:
 - NNG pub/sub streams own a URL, topic prefix, and topic delimiter. They follow the same decode
   boundary as other byte sources and do not support shared-stream promotion in the first
   implementation.
+- NNG pub/sub transport is derived from the URL scheme. `tcp://`, `ipc://`, and `inproc://` are
+  supported; the stream request must not add a second `transport` or `inproc` field. Embedded
+  `inproc` deployment requirements are documented in
+  [NNG In-Process Integration](../../integrations/ffi/nng_inproc.md).
 - shared MQTT client delivery is no-drop and backpressured when used through `connector_key`
 - shared MQTT runtime errors are non-terminal; explicit close/delete is the only terminal path
 - shared MQTT metadata may remain installed while the running shared connection instance is

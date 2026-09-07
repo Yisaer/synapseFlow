@@ -37,3 +37,19 @@ a connector error rather than waiting indefinitely.
 
 NNG pub/sub is best-effort and has no acknowledgements. A successful publish means the local NNG
 operation accepted the message; it does not prove that any subscriber received it.
+
+## Embedded `inproc` deployments
+
+When veloFlux is embedded as a shared library, the sink may publish through an
+`inproc://` URL to an NNG `sub0` socket owned by the host process. The URL
+scheme is the only transport selector. The sink configuration does not add a
+separate `transport` or `inproc` field, and the sink protocol remains
+internally fixed to `pub`.
+
+The host must listen and subscribe before starting the pipeline. The host
+should consume output only after the pipeline reports readiness. The host and
+veloFlux must use the same NNG library runtime; two separately linked static
+NNG instances in one process cannot provide a reliable `inproc` connection.
+
+See [NNG In-Process Integration](../../../integrations/ffi/nng_inproc.md) for
+the complete embedded design.
